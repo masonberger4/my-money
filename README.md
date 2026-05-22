@@ -143,10 +143,19 @@ Everything already built should be ported in with minimal changes. Storage swaps
 
 The dashboard is responsive from the start (carried from artifact code). Additional polish planned:
 
-- **PWA manifest**: lets you "Add to Home Screen" on iOS/Android — runs full-screen like a native app
-- **Touch targets**: larger swatches and buttons for fat fingers
-- **Swipe to navigate months**: swipe left/right on the month header
-- **Pull to refresh**: standard mobile pattern for syncing
+- [x] **PWA manifest**: lets you "Add to Home Screen" on iOS/Android — runs full-screen like a native app
+- [ ] **Touch targets**: larger swatches and buttons for fat fingers
+- [ ] **Swipe to navigate months**: swipe left/right on the month header
+- [ ] **Pull to refresh**: standard mobile pattern for syncing
+
+### Install on iPhone
+
+1. Open the deployed URL in **Safari** (not Chrome — only Safari can install PWAs on iOS).
+2. Tap the **Share** button.
+3. Scroll down and tap **Add to Home Screen**.
+4. Confirm — "my-money" now appears on your home screen and launches full-screen with its own icon, no Safari chrome.
+
+The app shell is cached by a service worker, so the home-screen app opens instantly and still launches when offline (the latest cached data renders; new transactions need a network to sync). Plaid API calls and `/api/*` requests are never cached.
 
 ---
 
