@@ -12,6 +12,7 @@ const DEFAULT_COLORS = {
   "Home maintenance and improvement": "#378ADD", "Utilities": "#378ADD",
   "Education": "#FAC775", "Side hustles and business": "#888780",
   "Cash, checks, and misc": "#888780", "Transfers and card payments": "#888780",
+  "Return": "#1D9E75",
 };
 
 const TX_ICONS = {
@@ -19,6 +20,7 @@ const TX_ICONS = {
   "Childcare":"👶","Pets":"🐾","Health and fitness":"💪","Home maintenance and improvement":"🔧",
   "Entertainment and subscriptions":"🎬","Shopping and gear":"🛍","Travel and vacation":"✈️",
   "Healthcare and pharmacy":"💊","Education":"📚","Side hustles and business":"💼",
+  "Return":"↩️",
 };
 
 function monthLabel(y, m) { return new Date(y,m-1,1).toLocaleString("default",{month:"long",year:"numeric"}); }

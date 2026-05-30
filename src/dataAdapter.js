@@ -1,5 +1,5 @@
 import { db } from './db.js';
-import { isTransferCategory } from './categoryMap.js';
+import { isTransferCategory, isReturnCategory, applyAccountRules } from './categoryMap.js';
 
 function pad2(n) {
   return String(n).padStart(2, '0');
@@ -30,9 +30,27 @@ function shiftMonth(year, month, delta) {
   return { year: d.getFullYear(), month: d.getMonth() + 1 };
 }
 
+async function getAccountTypeMap() {
+  const accounts = await db.accounts.toArray();
+  const map = new Map();
+  for (const a of accounts) map.set(a.plaidAccountId, a.type);
+  return map;
+}
+
 async function getMonthTransactions(year, month) {
   const { start, end } = monthBounds(year, month);
-  return db.transactions.where('date').between(start, end, true, true).toArray();
+  const [txs, accountTypes] = await Promise.all([
+    db.transactions.where('date').between(start, end, true, true).toArray(),
+    getAccountTypeMap(),
+  ]);
+  for (const t of txs) {
+    t.mappedCategory = applyAccountRules(
+      t.mappedCategory,
+      t.amount,
+      accountTypes.get(t.accountId)
+    );
+  }
+  return txs;
 }
 
 function sumSpending(txs) {
@@ -43,10 +61,12 @@ function sumSpending(txs) {
   return total;
 }
 
+// Credit-card refunds (now category "Return") are reversals of past spend, not
+// income — exclude them so cash-flow isn't inflated.
 function sumIncome(txs) {
   let total = 0;
   for (const t of txs) {
-    if (t.amount < 0) total += Math.abs(t.amount);
+    if (t.amount < 0 && !isReturnCategory(t.mappedCategory)) total += Math.abs(t.amount);
   }
   return total;
 }
