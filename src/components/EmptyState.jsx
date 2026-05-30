@@ -1,5 +1,4 @@
 import LinkAccount from './LinkAccount.jsx';
-import { ImportButton } from './DataTransfer.jsx';
 
 export default function EmptyState({ onLinked }) {
   return (
@@ -65,32 +64,6 @@ export default function EmptyState({ onLinked }) {
           Link a bank or card via Plaid to start seeing your spending.
         </div>
         <LinkAccount onLinked={onLinked} />
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 8,
-            margin: '16px 0',
-            color: 'var(--muted)',
-            fontSize: 11,
-          }}
-        >
-          <span style={{ flex: 1, height: 1, background: 'var(--border)' }} />
-          or
-          <span style={{ flex: 1, height: 1, background: 'var(--border)' }} />
-        </div>
-        <div
-          style={{
-            fontSize: 12,
-            color: 'var(--muted)',
-            marginBottom: 12,
-            lineHeight: 1.5,
-          }}
-        >
-          Already set up on another device? Mirror it here — export a backup
-          there and import it below. No new bank connection is used.
-        </div>
-        <ImportButton onImported={onLinked} />
       </div>
     </div>
   );

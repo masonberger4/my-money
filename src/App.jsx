@@ -3,7 +3,6 @@ import { db } from './db.js';
 import Dashboard from './components/Dashboard.jsx';
 import LinkAccount from './components/LinkAccount.jsx';
 import EmptyState from './components/EmptyState.jsx';
-import { ExportButton, ImportButton } from './components/DataTransfer.jsx';
 
 export default function App() {
   const [count, setCount] = useState(null);
@@ -38,14 +37,8 @@ export default function App() {
           bottom: 'calc(16px + env(safe-area-inset-bottom))',
           right: 'calc(16px + env(safe-area-inset-right))',
           zIndex: 50,
-          display: 'flex',
-          flexDirection: 'column',
-          alignItems: 'flex-end',
-          gap: 8,
         }}
       >
-        <ExportButton />
-        <ImportButton onImported={handleLinked} />
         <LinkAccount onLinked={handleLinked} />
       </div>
     </>

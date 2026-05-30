@@ -56,7 +56,7 @@ Era connects to Plaid under the hood and charges a subscription to sit in the mi
 
 - Plaid access tokens are stored in IndexedDB (browser), not on the server. The backend is a thin, stateless Plaid proxy. If you wipe browser data, you re-link accounts — that's the trade for full privacy.
 - Data accumulates locally forever. Plaid sends only new transactions on each sync (cursor-based), so refreshes are fast after the first full pull.
-- Cross-device sync is out of scope for v1. Each device (laptop, phone) maintains its own IndexedDB. To get data onto a second device without re-linking, **export a backup on the first device and import it on the second** (see [Mirroring to another device](#mirroring-to-another-device-export--import)). The export carries the Plaid access token, so the second device reuses the same connection rather than consuming another. A Supabase sync layer can be added in v2 if managing multiple caches becomes annoying.
+- Cross-device sync is out of scope for v1. Each device (laptop, phone) maintains its own IndexedDB and refreshes from Plaid independently. A Supabase sync layer can be added in v2 if managing two caches becomes annoying.
 
 ---
 
@@ -113,23 +113,6 @@ First sync: Plaid returns up to 24 months of history per institution. Subsequent
 6. Vercel exchanges it with Plaid for a permanent `access_token`
 7. `access_token` is returned to browser and stored in `db.institutions`
 8. First sync runs automatically
-
----
-
-## Mirroring to another device (export / import)
-
-Each device keeps its own local cache. To put your data on a second device (e.g. your phone) **without re-linking the bank and without using another Plaid connection**, copy the cache over:
-
-1. On the device that already has your data (e.g. desktop), click **⤓ Export data** (bottom-right controls). This downloads `my-money-backup-YYYY-MM-DD.json`.
-2. Move the file to the other device — AirDrop, a private cloud folder, etc.
-3. On the new device, open the app. On the empty "Connect your first account" screen, tap **⤒ Import data** and pick the file. (You can also re-import later from the bottom-right controls.)
-4. The dashboard renders immediately from the imported data, and a normal **Refresh** will pull anything new from Plaid.
-
-The export includes each institution's Plaid `accessToken` and sync `cursor`, so the importing device reuses the **same** Plaid connection — no extra connection slot is consumed.
-
-> ⚠️ **Security:** the backup file contains live Plaid access tokens. Treat it like a password — transfer it over a private channel and delete it once imported. Don't email it or leave it in shared storage.
->
-> This is a manual, one-way copy, not live sync. Changes made on one device after import don't propagate to the other. Continuous cross-device sync is the optional Phase 8 (Supabase) work.
 
 ---
 
@@ -194,8 +177,6 @@ A **connection** is one bank login (Plaid calls it an *Item*), even if that logi
 - **The same bank linked twice = two connections.** Plaid can't tell it's the same person.
 - **Each device that links independently consumes a connection per bank.** Linking your bank on both laptop and phone = 2 connections for one bank.
 
-To avoid burning connections across devices, use [export/import](#mirroring-to-another-device-export--import) instead of re-linking — the backup carries the access token, so the second device shares the original connection.
-
 ---
 
 ## Build phases
@@ -210,8 +191,7 @@ To avoid burning connections across devices, use [export/import](#mirroring-to-a
 | 5 | Frontend — port Era dashboard, add multi-account views, net worth, investments, liabilities | ⬜ Not started |
 | 6 | Deploy to Vercel, environment variables, live URL | ⬜ Not started |
 | 7 | Mobile polish — PWA, touch targets, swipe nav, pull to refresh | ⬜ Not started |
-| 7.5 | Cross-device mirror via export/import (manual, shares Plaid connection) | ✅ Done |
-| 8 | (Optional) Supabase sync layer for live cross-device consistency | ⬜ Backlog |
+| 8 | (Optional) Supabase sync layer for cross-device consistency | ⬜ Backlog |
 
 ---
 
