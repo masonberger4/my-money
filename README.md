@@ -33,30 +33,35 @@ Era connects to Plaid under the hood and charges a subscription to sit in the mi
 ## Architecture
 
 ```
-[Browser — laptop or phone]
+[Browser — laptop or either phone, signed in with the shared household login]
    │
-   ├── IndexedDB (all financial data, local & private per device)
-   │     ├── institutions   (linked banks, Plaid access tokens)
-   │     ├── accounts       (balances, types, all institutions)
-   │     ├── transactions   (full history, grows forever)
-   │     ├── holdings       (401k, brokerage positions)
-   │     ├── liabilities    (loans, mortgages, credit detail)
-   │     └── settings       (category colors, names, custom categories)
+   ├── reads data directly from Supabase (RLS-scoped to the household)
    │
    └── Vercel serverless functions  (/api/*)
-         │   stateless — never stores your data
-         │   only exists to keep Plaid secret off the client
+         │   verify the caller's Supabase JWT
+         │   hold the Plaid + Supabase service secrets
          │
-         └── Plaid API
+         ├── Supabase Postgres (canonical store)
+         │     ├── households / household_members
+         │     ├── institutions   (which Plaid credential linked each bank)
+         │     ├── plaid_tokens   (access tokens — service-role only, never
+         │     │                   readable from a browser)
+         │     ├── accounts       (balances, types)
+         │     ├── transactions   (full history, upserted by plaid_tx_id)
+         │     └── settings       (category colors, names, custom categories)
+         │
+         └── Plaid API (one or more developer accounts, see below)
                │
                └── Banks: Capital One, Chase, Fidelity, etc.
 ```
 
 **Key decisions:**
 
-- Plaid access tokens are stored in IndexedDB (browser), not on the server. The backend is a thin, stateless Plaid proxy. If you wipe browser data, you re-link accounts — that's the trade for full privacy.
-- Data accumulates locally forever. Plaid sends only new transactions on each sync (cursor-based), so refreshes are fast after the first full pull.
-- Cross-device sync is out of scope for v1. Each device (laptop, phone) maintains its own IndexedDB and refreshes from Plaid independently. A Supabase sync layer can be added in v2 if managing two caches becomes annoying.
+- **Cloud-first**: Supabase Postgres is the single source of truth so the same data shows on the laptop and both phones. IndexedDB/Dexie was dropped.
+- **Plaid access tokens never reach the browser.** They live in `plaid_tokens`, a table with RLS enabled and no client policies — only the serverless functions (service role) can read it.
+- **Sync runs server-side** (`api/sync.js`): cursor-based `transactionsSync` per institution, upserts into Supabase, marks institutions `needs_reauth` when Plaid demands a re-login.
+- **One shared household login** (email + password via Supabase Auth). All data is scoped to the household by row-level security.
+- **Multiple Plaid developer accounts** are supported via the `PLAID_CREDENTIALS` env var — see "Multiple Plaid accounts" below.
 
 ---
 
@@ -66,7 +71,7 @@ Era connects to Plaid under the hood and charges a subscription to sit in the mi
 |---|---|---|
 | Bank connections | Plaid (Development tier) | Industry standard, free for personal use, supports all account types |
 | Backend / hosting | Vercel (Hobby tier) | Free, serverless functions in `/api/`, deploys from GitHub |
-| Local cache | IndexedDB via Dexie | Private, persistent, fast, works offline, no server needed |
+| Database + auth | Supabase (free tier) | Postgres with row-level security, shared household login, multi-device |
 | Frontend | React + Vite | Carries forward the existing dashboard; fast dev experience |
 | Charts | Recharts | Replaces hand-rolled SVG donut chart with something maintainable |
 | Date handling | date-fns | Lightweight, tree-shakeable |
@@ -91,28 +96,59 @@ All accounts feed into a **net worth view**: total assets minus total liabilitie
 ## What a refresh looks like
 
 1. User hits **Refresh** in the dashboard
-2. For each institution in IndexedDB:
-   - Frontend sends that institution's `access_token` to `/api/transactions`
-   - Vercel forwards to Plaid using the stored cursor (only fetches new transactions)
-   - Plaid returns new/modified/removed transactions
-   - Frontend writes them into IndexedDB
-3. Repeat for accounts, investments, liabilities
-4. Dashboard re-renders from updated IndexedDB
+2. Frontend POSTs `/api/sync` with the household JWT
+3. The server, per institution: reads the access token from `plaid_tokens`,
+   calls Plaid `transactionsSync` with the stored cursor, and upserts
+   accounts + transactions into Supabase
+4. Dashboard re-reads from Supabase and re-renders
 
-First sync: Plaid returns up to 24 months of history per institution. Subsequent syncs: delta only.
+First sync: Plaid returns up to 24 months of history per institution (we
+request `days_requested: 730`). Subsequent syncs: delta only.
 
 ---
 
 ## Linking a new account
 
 1. User clicks **+ Add Account**
-2. `react-plaid-link` opens Plaid Link — an iframe served by Plaid on Plaid's domain
-3. User logs into their bank via Plaid (credentials never touch our code), completes 2FA
-4. Plaid returns a short-lived `public_token` to our app
-5. Frontend sends `public_token` to `/api/exchange-token`
-6. Vercel exchanges it with Plaid for a permanent `access_token`
-7. `access_token` is returned to browser and stored in `db.institutions`
+2. `/api/create-link-token` picks the first Plaid credential with a free Item
+   slot and returns a `link_token` + `credential_key`
+3. `react-plaid-link` opens Plaid Link — an iframe served by Plaid on Plaid's domain
+4. User logs into their bank via Plaid (credentials never touch our code), completes 2FA
+5. Plaid returns a short-lived `public_token` to our app
+6. Frontend sends `public_token` + `credential_key` to `/api/exchange-token`
+7. The server exchanges it for a permanent `access_token`, stores it in
+   `plaid_tokens`, and records the institution with its `credential_key`
 8. First sync runs automatically
+
+---
+
+## Multiple Plaid accounts
+
+Plaid's free tier caps how many Items (bank connections) one developer account
+can hold. When you hit the cap, create another Plaid developer account and add
+it to the app — no code changes:
+
+1. Sign up at <https://dashboard.plaid.com> with a new email, request
+   production access, and copy the new `client_id` + `secret`.
+2. Append an entry to the `PLAID_CREDENTIALS` env var (Vercel → Project
+   Settings → Environment Variables, and your local `.env.local`):
+
+   ```json
+   [
+     {"key": "main",       "client_id": "...", "secret": "..."},
+     {"key": "overflow-1", "client_id": "...", "secret": "..."}
+   ]
+   ```
+
+   The `key` is any stable label you choose — it's recorded on each
+   institution so syncs route through the credential that owns the Item.
+   **Don't change a key after institutions are linked under it.**
+3. Redeploy (Vercel) / restart the dev server.
+
+New links automatically go to the first credential with a free slot
+(`PLAID_MAX_ITEMS_PER_CREDENTIAL`, default 10). When every credential is
+full, **+ Add account** shows a message telling you to add the next one.
+Existing institutions keep syncing through whichever credential linked them.
 
 ---
 

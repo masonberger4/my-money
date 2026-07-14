@@ -1,21 +1,23 @@
-import Dexie from 'dexie';
+import { supabase } from './supabaseClient.js';
 
-export const db = new Dexie('MyMoney');
-
-db.version(1).stores({
-  institutions: '++id, name, accessToken, cursor, lastSync',
-  accounts:
-    'plaidAccountId, institutionId, name, officialName, type, subtype, currentBalance, availableBalance, mask, lastUpdated',
-  transactions:
-    'plaidTxId, accountId, date, amount, merchantName, name, plaidCategory, mappedCategory, pending',
-  settings: 'key',
-});
+// Household-scoped key/value settings (dashboard colors, names, custom
+// categories). Same getSetting/setSetting API the app used with Dexie,
+// now backed by the Supabase settings table so preferences follow the
+// household across devices.
 
 export async function getSetting(key) {
-  const row = await db.settings.get(key);
-  return row ? row.value : null;
+  const { data, error } = await supabase
+    .from('settings')
+    .select('value')
+    .eq('key', key)
+    .maybeSingle();
+  if (error) throw error;
+  return data ? data.value : null;
 }
 
 export async function setSetting(key, value) {
-  await db.settings.put({ key, value });
+  const { error } = await supabase
+    .from('settings')
+    .upsert({ key, value }, { onConflict: 'household_id,key' });
+  if (error) throw error;
 }

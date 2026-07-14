@@ -1,0 +1,17 @@
+{
+  "name": "my-money",
+  "short_name": "my-money",
+  "description": "Household spending dashboard",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#F7F6F2",
+  "theme_color": "#7F77DD",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

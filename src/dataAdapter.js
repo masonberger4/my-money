@@ -1,4 +1,4 @@
-import { db } from './db.js';
+import { supabase } from './supabaseClient.js';
 import { isTransferCategory } from './categoryMap.js';
 
 function pad2(n) {
@@ -10,12 +10,6 @@ function monthBounds(year, month) {
   const lastDay = new Date(year, month, 0).getDate();
   const end = `${year}-${pad2(month)}-${pad2(lastDay)}`;
   return { start, end };
-}
-
-function inMonth(dateStr, year, month) {
-  if (!dateStr) return false;
-  const ym = `${year}-${pad2(month)}`;
-  return dateStr.slice(0, 7) === ym;
 }
 
 function monthLabel(year, month) {
@@ -30,15 +24,37 @@ function shiftMonth(year, month, delta) {
   return { year: d.getFullYear(), month: d.getMonth() + 1 };
 }
 
-async function getMonthTransactions(year, month) {
+const TX_COLUMNS =
+  'plaid_tx_id, account_id, date, amount, merchant_name, description, mapped_category, pending';
+
+async function getTransactionsBetween(start, end) {
+  // RLS scopes every query to the signed-in household automatically.
+  const rows = [];
+  const page = 1000;
+  for (let from = 0; ; from += page) {
+    const { data, error } = await supabase
+      .from('transactions')
+      .select(TX_COLUMNS)
+      .gte('date', start)
+      .lte('date', end)
+      .order('date', { ascending: false })
+      .range(from, from + page - 1);
+    if (error) throw error;
+    rows.push(...data);
+    if (data.length < page) break;
+  }
+  return rows;
+}
+
+function getMonthTransactions(year, month) {
   const { start, end } = monthBounds(year, month);
-  return db.transactions.where('date').between(start, end, true, true).toArray();
+  return getTransactionsBetween(start, end);
 }
 
 function sumSpending(txs) {
   let total = 0;
   for (const t of txs) {
-    if (t.amount > 0 && !isTransferCategory(t.mappedCategory)) total += t.amount;
+    if (t.amount > 0 && !isTransferCategory(t.mapped_category)) total += t.amount;
   }
   return total;
 }
@@ -52,7 +68,12 @@ function sumIncome(txs) {
 }
 
 export async function getOverview() {
-  const accounts = await db.accounts.toArray();
+  const { data: accounts, error } = await supabase
+    .from('accounts')
+    .select('name, mask, type, current_balance')
+    .eq('hidden', false);
+  if (error) throw error;
+
   const credit = accounts.filter(a => a.type === 'credit');
   const depository = accounts.filter(a => a.type === 'depository');
   const ordered = [...credit, ...depository];
@@ -63,7 +84,7 @@ export async function getOverview() {
 
   return {
     accounts: ordered.map(a => ({
-      balance: { current: a.currentBalance ?? 0 },
+      balance: { current: a.current_balance ?? 0 },
       name: a.name,
       mask: a.mask,
       type: a.type,
@@ -81,8 +102,8 @@ export async function getSpending({ year, month }) {
 
   for (const t of txs) {
     if (t.amount <= 0) continue;
-    if (isTransferCategory(t.mappedCategory)) continue;
-    const cat = t.mappedCategory || 'Shopping and gear';
+    if (isTransferCategory(t.mapped_category)) continue;
+    const cat = t.mapped_category || 'Shopping and gear';
     if (!buckets.has(cat)) buckets.set(cat, { amount: 0, count: 0 });
     const b = buckets.get(cat);
     b.amount += t.amount;
@@ -110,12 +131,12 @@ export async function getTransactions({ year, month }) {
   });
   return {
     transactions: txs.map(t => ({
-      plaid_tx_id: t.plaidTxId,
-      merchant_name: t.merchantName,
-      description: t.name,
+      plaid_tx_id: t.plaid_tx_id,
+      merchant_name: t.merchant_name,
+      description: t.description,
       transaction_date: t.date,
       amount: t.amount,
-      category: t.mappedCategory || 'Shopping and gear',
+      category: t.mapped_category || 'Shopping and gear',
     })),
   };
 }
@@ -125,13 +146,26 @@ export async function getCashFlow({ num_periods = 6 } = {}) {
   const curY = now.getFullYear();
   const curM = now.getMonth() + 1;
 
+  // One range query covering all periods, bucketed client-side.
+  const oldest = shiftMonth(curY, curM, -(num_periods - 1));
+  const { start: rangeStart } = monthBounds(oldest.year, oldest.month);
+  const { end: rangeEnd } = monthBounds(curY, curM);
+  const allTxs = await getTransactionsBetween(rangeStart, rangeEnd);
+
+  const byMonth = new Map();
+  for (const t of allTxs) {
+    const ym = (t.date || '').slice(0, 7);
+    if (!byMonth.has(ym)) byMonth.set(ym, []);
+    byMonth.get(ym).push(t);
+  }
+
   const periods = [];
   let spendSum = 0;
   let spendCount = 0;
 
   for (let i = num_periods - 1; i >= 0; i--) {
     const { year, month } = shiftMonth(curY, curM, -i);
-    const txs = await getMonthTransactions(year, month);
+    const txs = byMonth.get(`${year}-${pad2(month)}`) || [];
     const spending = sumSpending(txs);
     const income = sumIncome(txs);
     const { start } = monthBounds(year, month);

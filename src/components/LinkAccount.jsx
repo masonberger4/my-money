@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useState } from 'react';
 import { usePlaidLink } from 'react-plaid-link';
-import { db } from '../db.js';
 import { createLinkToken, exchangePublicToken } from '../plaidClient.js';
 import { runSync } from '../sync.js';
 
 export default function LinkAccount({ label = '+ Add account', onLinked }) {
   const [linkToken, setLinkToken] = useState(null);
+  const [credentialKey, setCredentialKey] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
@@ -13,11 +13,18 @@ export default function LinkAccount({ label = '+ Add account', onLinked }) {
     let cancelled = false;
     createLinkToken()
       .then(res => {
-        if (!cancelled) setLinkToken(res.link_token);
+        if (cancelled) return;
+        setLinkToken(res.link_token);
+        setCredentialKey(res.credential_key);
       })
       .catch(err => {
         console.error('link token error', err);
-        if (!cancelled) setError('Could not start Plaid Link');
+        if (cancelled) return;
+        if (err.status === 409 && err.detail?.error === 'plaid_capacity') {
+          setError(err.detail.message);
+        } else {
+          setError('Could not start Plaid Link');
+        }
       });
     return () => {
       cancelled = true;
@@ -28,13 +35,11 @@ export default function LinkAccount({ label = '+ Add account', onLinked }) {
     async (publicToken, metadata) => {
       setLoading(true);
       try {
-        const { access_token } = await exchangePublicToken(publicToken);
-        await db.institutions.add({
-          name: metadata?.institution?.name || 'Bank',
-          accessToken: access_token,
-          cursor: null,
-          lastSync: null,
-        });
+        await exchangePublicToken(
+          publicToken,
+          credentialKey,
+          metadata?.institution?.name || 'Bank'
+        );
         await runSync();
         if (onLinked) onLinked();
       } catch (err) {
@@ -44,7 +49,7 @@ export default function LinkAccount({ label = '+ Add account', onLinked }) {
         setLoading(false);
       }
     },
-    [onLinked]
+    [onLinked, credentialKey]
   );
 
   const { open, ready } = usePlaidLink({

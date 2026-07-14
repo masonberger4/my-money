@@ -1,10 +1,14 @@
--- Drops everything created by the init migration.
+-- Drops everything created by the migrations.
 -- Use during development when you want a clean slate.
 -- Does NOT delete users from auth.users — do that in the Auth UI.
+-- WARNING: this also drops plaid_tokens. You'd need to re-link every
+-- institution through Plaid Link afterwards.
 
 drop publication if exists supabase_realtime;
 create publication supabase_realtime;
 
+drop table if exists settings cascade;
+drop table if exists plaid_tokens cascade;
 drop table if exists mfa_prompts cascade;
 drop table if exists pull_jobs cascade;
 drop table if exists pending_items cascade;

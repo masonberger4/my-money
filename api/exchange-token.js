@@ -1,31 +1,49 @@
-import { Configuration, PlaidApi, PlaidEnvironments } from 'plaid';
-
-const plaidClient = new PlaidApi(
-  new Configuration({
-    basePath: PlaidEnvironments[process.env.PLAID_ENV || 'production'],
-    baseOptions: {
-      headers: {
-        'PLAID-CLIENT-ID': process.env.PLAID_CLIENT_ID,
-        'PLAID-SECRET': process.env.PLAID_SECRET,
-      },
-    },
-  })
-);
+import { getPlaidClient } from './_lib/plaid.js';
+import { getServiceClient, requireUser } from './_lib/supabase.js';
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
-  const { public_token } = req.body || {};
-  if (!public_token) {
-    return res.status(400).json({ error: 'public_token required' });
+  const user = await requireUser(req, res);
+  if (!user) return;
+
+  const { public_token, credential_key, institution_name } = req.body || {};
+  if (!public_token || !credential_key) {
+    return res
+      .status(400)
+      .json({ error: 'public_token and credential_key required' });
   }
+
   try {
-    const response = await plaidClient.itemPublicTokenExchange({ public_token });
-    return res.status(200).json({
-      access_token: response.data.access_token,
-      item_id: response.data.item_id,
-    });
+    const plaid = getPlaidClient(credential_key);
+    const response = await plaid.itemPublicTokenExchange({ public_token });
+    const accessToken = response.data.access_token;
+    const itemId = response.data.item_id;
+
+    const supabase = getServiceClient();
+    const { data: institution, error: instErr } = await supabase
+      .from('institutions')
+      .insert({
+        household_id: user.householdId,
+        name: institution_name || 'Bank',
+        plaid_credential_key: credential_key,
+        plaid_item_id: itemId,
+      })
+      .select('id')
+      .single();
+    if (instErr) throw instErr;
+
+    const { error: tokenErr } = await supabase
+      .from('plaid_tokens')
+      .insert({ institution_id: institution.id, access_token: accessToken });
+    if (tokenErr) {
+      // Don't leave an institution row without a token — it could never sync.
+      await supabase.from('institutions').delete().eq('id', institution.id);
+      throw tokenErr;
+    }
+
+    return res.status(200).json({ institution_id: institution.id });
   } catch (err) {
     console.error('exchange-token error', err?.response?.data || err);
     return res

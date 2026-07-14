@@ -1,7 +1,13 @@
+import { getAccessToken } from './supabaseClient.js';
+
 async function postJson(url, body) {
+  const token = await getAccessToken();
   const res = await fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
     body: JSON.stringify(body || {}),
   });
   if (!res.ok) {
@@ -12,27 +18,28 @@ async function postJson(url, body) {
       detail = await res.text();
     }
     const err = new Error(`POST ${url} → ${res.status}`);
+    err.status = res.status;
     err.detail = detail;
     throw err;
   }
   return res.json();
 }
 
+// Returns { link_token, credential_key, credential_used, credential_capacity }.
+// The server picks whichever Plaid credential still has free Item slots;
+// a 409 with error 'plaid_capacity' means every credential is full.
 export function createLinkToken() {
   return postJson('/api/create-link-token', {});
 }
 
-export function exchangePublicToken(publicToken) {
-  return postJson('/api/exchange-token', { public_token: publicToken });
-}
-
-export function syncTransactions(accessToken, cursor) {
-  return postJson('/api/sync-transactions', {
-    access_token: accessToken,
-    cursor: cursor || null,
+export function exchangePublicToken(publicToken, credentialKey, institutionName) {
+  return postJson('/api/exchange-token', {
+    public_token: publicToken,
+    credential_key: credentialKey,
+    institution_name: institutionName,
   });
 }
 
-export function getBalances(accessToken) {
-  return postJson('/api/get-balances', { access_token: accessToken });
+export function runServerSync() {
+  return postJson('/api/sync', {});
 }

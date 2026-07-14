@@ -1,138 +1,109 @@
 # Supabase setup
 
-Cloud canonical data store for my-money. The local scraper writes here; the
-React app on Vercel + your phones read from here.
+Cloud canonical data store for my-money. The Plaid sync (server-side in
+`api/sync.js`) writes here; the React app on Vercel + your phones read from
+here. Plaid access tokens live in a service-role-only table — browsers never
+see them.
 
 ## Files
 
 | File | Purpose |
 |---|---|
-| `migrations/20260605000001_init.sql` | Tables, indexes, RLS, triggers, Realtime publication. Idempotent only if run on an empty database. |
-| `seed.sql` | Sample household + institution + accounts + transactions for verification. |
-| `reset.sql` | Drops everything from the init migration. For dev resets. |
+| `migrations/20260605000001_init.sql` | Base tables, RLS, Realtime publication. Run first on an empty database. |
+| `migrations/20260606000001_plaid.sql` | Reshapes the schema for Plaid: drops scraper-era tables, adds `plaid_tokens` (service-role only), `plaid_credential_key` for multi-Plaid-account routing, `settings` for dashboard prefs. Run second. |
+| `seed.sql` | Optional sample data. Real data arrives via Plaid on first sync. |
+| `reset.sql` | Drops everything from both migrations. For dev resets. |
 
-## Quick test (one-time, ~15 min)
+## Setup (~15 min)
 
 ### 1. Create a Supabase project
 
-1. Go to <https://supabase.com> → New project.
-2. Region: pick one close to you (free tier is fine).
-3. Save the project URL and `anon` key — you'll need them later when wiring up the React app.
-4. Wait ~2 min for provisioning.
+1. <https://supabase.com> → New project (free tier is fine).
+2. Note down, from Project Settings → API:
+   - **Project URL** (`https://xxxx.supabase.co`)
+   - **anon key** (public, used by the browser)
+   - **service_role key** (secret, used by the api/ routes only)
 
-### 2. Run the init migration
+### 2. Run the migrations
 
-1. Open the project → SQL Editor → New query.
-2. Paste the entire contents of `migrations/20260605000001_init.sql`.
-3. Click **Run**.
-4. Expect: success, no rows returned.
-5. Go to Table Editor — you should see 8 new tables: `households`, `household_members`, `institutions`, `accounts`, `transactions`, `pending_items`, `pull_jobs`, `mfa_prompts`.
+SQL Editor → New query. Paste and run, in order:
+
+1. `migrations/20260605000001_init.sql`
+2. `migrations/20260606000001_plaid.sql`
+
+Table Editor should now show: `households`, `household_members`,
+`institutions`, `accounts`, `transactions`, `plaid_tokens`, `settings`.
 
 ### 3. Create the household user
 
 1. Authentication → Users → **Add user** → **Create new user**.
-2. Email: whatever shared address you want.
-3. Password: pick a strong shared household password (this is what you, your wife, and the scraper will all use).
-4. **Auto Confirm User: ON** (skip email verification).
-5. Click Create. Copy the new user's **UID** (looks like `xxxxxxxx-xxxx-...`).
+2. Email + a strong shared household password (you and your wife both use this).
+3. **Auto Confirm User: ON**. Copy the new user's **UID**.
 
-### 4. Seed sample data
+### 4. Create the household
 
-1. Open `seed.sql`.
-2. Replace `<HOUSEHOLD_USER_UUID>` with the UID from step 3.
-3. Paste into SQL Editor → Run.
-4. Expect: 1 household row, 1 institution, 3 accounts, 4 transactions inserted.
+Replace the UUID and run in the SQL Editor (or run all of `seed.sql` if you
+also want sample data):
 
-### 5. Verify it works
-
-Run each of these in the SQL Editor and check the result.
-
-**(a) Tables populated:**
 ```sql
-select 'institutions' as t, count(*) from institutions
-union all select 'accounts',     count(*) from accounts
-union all select 'transactions', count(*) from transactions;
+with new_household as (
+  insert into households (name) values ('My Household') returning id
+)
+insert into household_members (household_id, user_id, role)
+select id, '<HOUSEHOLD_USER_UUID>'::uuid, 'owner' from new_household;
 ```
-Expect: 1, 3, 4.
 
-**(b) Possible-duplicate detection:**
+### 5. Configure the app
+
+Copy `.env.example` → `.env.local` and fill in:
+
+- `VITE_SUPABASE_URL` + `VITE_SUPABASE_ANON_KEY` (browser)
+- `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` (api/ routes)
+- `PLAID_CREDENTIALS` (see root README section on Plaid accounts)
+
+On Vercel, set the same variables in Project Settings → Environment Variables.
+
+### 6. Verify
+
+Run in the SQL Editor after using the app (sign in → link an account → sync):
+
 ```sql
-select account_id, synthetic_id, count(*) as c
-from transactions
-group by 1, 2
-having count(*) > 1;
+-- Institutions show which Plaid credential linked them
+select name, plaid_credential_key, status, last_successful_pull_at from institutions;
+
+-- Accounts and balances arrived
+select name, mask, type, current_balance from accounts;
+
+-- Transactions arrived
+select count(*) from transactions;
 ```
-Expect: one row (the two intentional Starbucks transactions sharing
-`syn-starbucks-1234-475-today`).
 
-> **Note on the queries below.** The SQL Editor runs as `service_role`, which
-> bypasses RLS and has no `auth.uid()`. That means the `household_id` default
-> (which calls `current_household_id()`) returns NULL, and the `not null`
-> constraint will reject inserts that omit `household_id`. So in the admin
-> inserts below we set `household_id` explicitly. The React app and scraper
-> won't need to — they authenticate as the household user and the default
-> resolves correctly.
+Security spot-checks:
 
-**(c) Rate limit trigger blocks rapid re-pulls:**
 ```sql
--- First insert: queues a job
-insert into pull_jobs (household_id, institution_id)
-select household_id, id from institutions limit 1;
-
--- Mark it done so the rate limit kicks in
-update pull_jobs set status = 'done', completed_at = now()
-where status = 'queued';
-
--- Second insert: should error
-insert into pull_jobs (household_id, institution_id)
-select household_id, id from institutions limit 1;
+-- plaid_tokens has RLS enabled and NO policies → authenticated users get
+-- nothing; only service_role (the API) can read. Should return rows here
+-- (SQL Editor runs as service_role) …
+select institution_id, left(access_token, 12) || '…' as token_prefix from plaid_tokens;
 ```
-Expect: the third statement errors with `rate_limit: institution ... already pulled successfully in the last 24 hours`.
 
-**(d) `manual_override` bypasses the rate limit:**
-```sql
-insert into pull_jobs (household_id, institution_id, manual_override)
-select household_id, id, true from institutions limit 1;
+…but from the **browser console** on your deployed app (signed in!), this must
+return an empty array:
+
+```js
+await window.supabase?.from('plaid_tokens').select('*') // → { data: [] }
 ```
-Expect: success.
 
-**(e) "In-progress" guard blocks parallel pulls:**
-```sql
--- The override row above is still queued; this should error
-insert into pull_jobs (household_id, institution_id, manual_override)
-select household_id, id, true from institutions limit 1;
-```
-Expect: errors with `pull_in_progress: institution ... already has an active pull job`.
-
-**Note on RLS:** the SQL Editor runs as `service_role`, which bypasses RLS by
-design — so you can't observe row-level isolation from there. RLS is fully
-exercised once the React app reads/writes through the Supabase JS client with a
-real JWT (next step). If you want to spot-check it now: run a query from a
-browser console on a different Supabase project, against this project's URL,
-using the anon key without signing in — you should get 0 rows / permission errors.
-
-**(f) Realtime publication includes the right tables:**
-```sql
-select tablename
-from pg_publication_tables
-where pubname = 'supabase_realtime'
-order by tablename;
-```
-Expect: `accounts`, `mfa_prompts`, `pull_jobs`, `transactions`.
-
-### 6. Done
-
-If all of the above passed, the schema is working. Next steps (separate PRs):
-
-1. Migrate the React app off Dexie onto Supabase, still using Plaid.
-2. Build the scraper daemon skeleton with a fake adapter.
-3. Replace Plaid with the scraper for one real bank.
+> Note: the SQL Editor runs as `service_role`, which bypasses RLS and has no
+> `auth.uid()`. Admin inserts must set `household_id` explicitly; the app's
+> inserts resolve it automatically via `current_household_id()`.
 
 ## Resetting during development
 
-If you mess up state and want to start over:
 1. Paste `reset.sql` → Run.
-2. Paste `migrations/20260605000001_init.sql` → Run.
-3. Re-seed.
+2. Re-run both migrations.
+3. Re-create the household (step 4).
 
-The Auth user from step 3 above is preserved across resets (it lives in `auth.users`, not in our tables).
+The Auth user survives resets (it lives in `auth.users`). Re-linking every
+institution through Plaid Link is required after a reset because access tokens
+are dropped with `plaid_tokens`.
