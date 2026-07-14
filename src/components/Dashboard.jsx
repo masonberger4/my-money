@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { getOverview, getSpending, getTransactions, getCashFlow } from "../dataAdapter.js";
+import { getOverview, getSpending, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions } from "../dataAdapter.js";
 import { runSync } from "../sync.js";
 import { getSetting, setSetting } from "../db.js";
 
@@ -20,6 +20,8 @@ const TX_ICONS = {
   "Entertainment and subscriptions":"🎬","Shopping and gear":"🛍","Travel and vacation":"✈️",
   "Healthcare and pharmacy":"💊","Education":"📚","Side hustles and business":"💼",
 };
+
+const ACCOUNT_COLORS = ["#7F77DD","#1D9E75","#D85A30","#378ADD","#FAC775","#D4537E","#639922","#E24B4A"];
 
 function monthLabel(y, m) { return new Date(y,m-1,1).toLocaleString("default",{month:"long",year:"numeric"}); }
 function fmt(n) { return "$"+Number(n).toLocaleString("en-US",{maximumFractionDigits:0}); }
@@ -104,6 +106,11 @@ export default function Dashboard({ refreshTick = 0 }) {
   const [spending,setSpending]=useState(null);
   const [transactions,setTransactions]=useState(null);
   const [cashFlow,setCashFlow]=useState(null);
+  const [accounts,setAccounts]=useState([]);
+  const [selAcct,setSelAcct]=useState(null);
+  const [acctTxs,setAcctTxs]=useState(null);
+  const [acctHasMore,setAcctHasMore]=useState(false);
+  const [acctLoading,setAcctLoading]=useState(false);
   const [customColors,setCustomColors]=useState({});
   const [customNames,setCustomNames]=useState({});
   const [customCats,setCustomCats]=useState([]);
@@ -147,13 +154,15 @@ export default function Dashboard({ refreshTick = 0 }) {
     setError(null);
     const cur=y===now.getFullYear()&&m===now.getMonth()+1;
     try{
-      const[ov,sp,tx,cf]=await Promise.all([
+      const[ov,sp,tx,cf,ac]=await Promise.all([
         cur?getOverview():Promise.resolve(null),
         getSpending({year:y,month:m}),
         getTransactions({year:y,month:m}),
         getCashFlow({num_periods:6}),
+        getAccounts(),
       ]);
       setOverview(ov);setSpending(sp);setTransactions(tx);setCashFlow(cf);
+      setAccounts(ac.accounts||[]);
       setLastUpd(new Date());
     }catch(err){
       console.error(err);
@@ -177,6 +186,35 @@ export default function Dashboard({ refreshTick = 0 }) {
     if(syncFirst)didInitialSync.current=true;
     fetchData(year,month,{sync:syncFirst});
   },[year,month,ready,refreshTick,fetchData]);
+
+  // Drill-in: load all transactions for the selected account
+  useEffect(()=>{
+    if(!selAcct){setAcctTxs(null);setAcctHasMore(false);return;}
+    let cancelled=false;
+    setAcctLoading(true);
+    getAccountTransactions(selAcct.id)
+      .then(res=>{if(!cancelled){setAcctTxs(res.transactions);setAcctHasMore(res.hasMore);}})
+      .catch(err=>{console.error(err);if(!cancelled)setAcctTxs([]);})
+      .finally(()=>{if(!cancelled)setAcctLoading(false);});
+    return ()=>{cancelled=true;};
+  },[selAcct]);
+
+  // Account badge helpers: nickname (or name) + color identify which account
+  // a transaction came from, on every tab.
+  const acctById=useCallback(id=>accounts.find(a=>a.id===id),[accounts]);
+  const acctLabel=useCallback(a=>a?(a.nickname||`${a.name}${a.mask?" ··"+a.mask:""}`):null,[]);
+  const acctColor=useCallback(a=>{
+    if(!a)return "#888780";
+    if(a.color)return a.color;
+    const i=accounts.findIndex(x=>x.id===a.id);
+    return ACCOUNT_COLORS[(i>=0?i:0)%ACCOUNT_COLORS.length];
+  },[accounts]);
+
+  async function saveAccount(id,fields){
+    setAccounts(prev=>prev.map(a=>a.id===id?{...a,...fields}:a));
+    if(selAcct?.id===id)setSelAcct(prev=>({...prev,...fields}));
+    try{await updateAccount(id,fields);}catch(err){console.error("account update failed",err);}
+  }
 
   const cats=spending?.groups||[];
   const txs=transactions?.transactions||[];
@@ -255,9 +293,9 @@ export default function Dashboard({ refreshTick = 0 }) {
         </div>
 
         {/* Tabs */}
-        <div style={{display:"flex",gap:3,background:"var(--bg)",borderRadius:24,padding:4,marginBottom:14,border:"1px solid var(--border)"}}>
-          {["overview","categories","transactions","trends"].map(t=>(
-            <button key={t} className={`tab${tab===t?" active":""}`} onClick={()=>setTab(t)}>
+        <div style={{display:"flex",gap:3,background:"var(--bg)",borderRadius:24,padding:4,marginBottom:14,border:"1px solid var(--border)",overflowX:"auto"}}>
+          {["overview","categories","transactions","accounts","trends"].map(t=>(
+            <button key={t} className={`tab${tab===t?" active":""}`} onClick={()=>{setTab(t);if(t!=="accounts")setSelAcct(null);}}>
               {t[0].toUpperCase()+t.slice(1)}
             </button>
           ))}
@@ -285,16 +323,22 @@ export default function Dashboard({ refreshTick = 0 }) {
             <div className="card">
               <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",marginBottom:12,textTransform:"uppercase",letterSpacing:".05em"}}>Recent transactions</div>
               {loading?[1,2,3].map(i=><div key={i} style={{display:"flex",gap:12,alignItems:"center",marginBottom:10}}><Sk w={34} h={34} r={10}/><div style={{flex:1}}><Sk w="60%" h={13}/></div><Sk w={50} h={13}/></div>):
-                txs.slice(0,6).map((t,i)=>(
+                txs.slice(0,6).map((t,i)=>{
+                  const a=acctById(t.account_id);
+                  return (
                   <div key={i} className="tx">
                     <div style={{width:34,height:34,borderRadius:10,background:"var(--bg)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:15,flexShrink:0}}>{TX_ICONS[t.category]||"🛍"}</div>
                     <div style={{flex:1,minWidth:0}}>
                       <div style={{fontSize:13,fontWeight:500,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{t.merchant_name||t.description}</div>
-                      <div style={{fontSize:11,color:"var(--muted)",marginTop:2}}>{getName(t.category)} · {t.transaction_date}</div>
+                      <div style={{fontSize:11,color:"var(--muted)",marginTop:2,display:"flex",alignItems:"center",gap:5,flexWrap:"wrap"}}>
+                        <span>{getName(t.category)} · {t.transaction_date}</span>
+                        {a&&<Pill label={acctLabel(a)} color={acctColor(a)}/>}
+                      </div>
                     </div>
                     <div style={{fontSize:13,fontFamily:"'DM Mono',monospace",fontWeight:500,flexShrink:0}}>{fmtX(t.amount)}</div>
                   </div>
-                ))}
+                  );
+                })}
             </div>
           </div>
         )}
@@ -359,20 +403,113 @@ export default function Dashboard({ refreshTick = 0 }) {
               </div>
             )):txs.length===0?(
               <div style={{textAlign:"center",padding:"30px 0",color:"var(--muted)",fontSize:14}}>No transactions for this period.</div>
-            ):txs.map((t,i)=>(
+            ):txs.map((t,i)=>{
+              const a=acctById(t.account_id);
+              return (
               <div key={i} className="tx" style={{animationDelay:i*.015+"s"}}>
                 <div style={{width:34,height:34,borderRadius:10,background:"var(--bg)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:15,flexShrink:0}}>{TX_ICONS[t.category]||"🛍"}</div>
                 <div style={{flex:1,minWidth:0}}>
                   <div style={{fontSize:13,fontWeight:500,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{t.merchant_name||t.description}</div>
-                  <div style={{fontSize:11,color:"var(--muted)",marginTop:3,display:"flex",alignItems:"center",gap:6}}>
+                  <div style={{fontSize:11,color:"var(--muted)",marginTop:3,display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
                     <span>{t.transaction_date}</span>
                     <span>·</span>
                     <Pill label={getName(t.category)} color={getColor(t.category)}/>
+                    {a&&<Pill label={acctLabel(a)} color={acctColor(a)}/>}
                   </div>
                 </div>
                 <div style={{fontSize:13,fontFamily:"'DM Mono',monospace",fontWeight:500,flexShrink:0}}>{fmtX(t.amount)}</div>
               </div>
-            ))}
+              );
+            })}
+          </div>
+        )}
+
+        {/* ACCOUNTS */}
+        {tab==="accounts"&&!selAcct&&(
+          <div className="card">
+            <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em",marginBottom:4}}>Accounts</div>
+            <div style={{fontSize:11,color:"var(--muted)",marginBottom:14}}>
+              Give each account a nickname and color — they tag every transaction across the app.
+            </div>
+            {loading&&accounts.length===0?[1,2,3].map(i=><div key={i} style={{marginBottom:12}}><Sk h={40}/></div>):
+              accounts.map((a,i)=>(
+                <div key={a.id} className="tx" style={{cursor:"pointer",animationDelay:i*.03+"s"}}
+                  onClick={()=>setSelAcct(a)}>
+                  <div onClick={e=>e.stopPropagation()} style={{display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
+                    <Swatch color={acctColor(a)} onChange={hex=>saveAccount(a.id,{color:hex})}/>
+                  </div>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div onClick={e=>e.stopPropagation()} style={{display:"flex",alignItems:"center",gap:6}}>
+                      <EditName name={acctLabel(a)} onSave={v=>saveAccount(a.id,{nickname:v})}/>
+                    </div>
+                    <div style={{fontSize:11,color:"var(--muted)",marginTop:2}}>
+                      {a.name}{a.mask?` ··${a.mask}`:""} · {a.subtype||a.type}
+                    </div>
+                  </div>
+                  <div style={{textAlign:"right",flexShrink:0}}>
+                    <div style={{fontSize:13,fontFamily:"'DM Mono',monospace",fontWeight:500}}>{fmtX(a.current_balance??0)}</div>
+                    <div style={{fontSize:10,color:"var(--muted)",marginTop:2}}>tap to view →</div>
+                  </div>
+                </div>
+              ))}
+            {!loading&&accounts.length===0&&(
+              <div style={{textAlign:"center",padding:"30px 0",color:"var(--muted)",fontSize:14}}>No accounts yet. Link one to get started.</div>
+            )}
+            <div style={{marginTop:14,fontSize:11,color:"var(--muted)",background:"var(--bg)",borderRadius:8,padding:"8px 12px"}}>
+              Double-click a name to set a nickname · Click a swatch to change the badge color
+            </div>
+          </div>
+        )}
+
+        {tab==="accounts"&&selAcct&&(
+          <div className="card">
+            <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:4}}>
+              <button className="nbtn" onClick={()=>setSelAcct(null)} title="Back to accounts">‹</button>
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{display:"flex",alignItems:"center",gap:8}}>
+                  <span style={{width:10,height:10,borderRadius:3,background:acctColor(selAcct),flexShrink:0}}/>
+                  <span style={{fontSize:15,fontWeight:600,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{acctLabel(selAcct)}</span>
+                </div>
+                <div style={{fontSize:11,color:"var(--muted)",marginTop:2}}>
+                  {selAcct.name}{selAcct.mask?` ··${selAcct.mask}`:""} · {selAcct.subtype||selAcct.type}
+                </div>
+              </div>
+              <div style={{fontSize:15,fontFamily:"'DM Mono',monospace",fontWeight:600,flexShrink:0}}>{fmtX(selAcct.current_balance??0)}</div>
+            </div>
+            <div style={{borderTop:"1px solid var(--border)",margin:"12px 0"}}/>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+              <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em"}}>All transactions</div>
+              {acctTxs&&<span style={{fontSize:12,color:"var(--muted)"}}>{acctTxs.length}{acctHasMore?"+":""} transaction{acctTxs.length!==1?"s":""}</span>}
+            </div>
+            {acctLoading?[1,2,3,4,5].map(i=>(
+              <div key={i} style={{display:"flex",gap:12,alignItems:"center",marginBottom:12}}>
+                <Sk w={34} h={34} r={10}/><div style={{flex:1}}><Sk w="65%" h={13}/></div><Sk w={55} h={13}/>
+              </div>
+            )):!acctTxs||acctTxs.length===0?(
+              <div style={{textAlign:"center",padding:"30px 0",color:"var(--muted)",fontSize:14}}>No transactions for this account yet.</div>
+            ):(
+              <>
+                {acctTxs.map((t,i)=>(
+                  <div key={t.plaid_tx_id||i} className="tx" style={{animationDelay:Math.min(i,20)*.015+"s"}}>
+                    <div style={{width:34,height:34,borderRadius:10,background:"var(--bg)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:15,flexShrink:0}}>{TX_ICONS[t.category]||"🛍"}</div>
+                    <div style={{flex:1,minWidth:0}}>
+                      <div style={{fontSize:13,fontWeight:500,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{t.merchant_name||t.description}</div>
+                      <div style={{fontSize:11,color:"var(--muted)",marginTop:3,display:"flex",alignItems:"center",gap:6}}>
+                        <span>{t.transaction_date}</span>
+                        <span>·</span>
+                        <Pill label={getName(t.category)} color={getColor(t.category)}/>
+                      </div>
+                    </div>
+                    <div style={{fontSize:13,fontFamily:"'DM Mono',monospace",fontWeight:500,flexShrink:0}}>{fmtX(t.amount)}</div>
+                  </div>
+                ))}
+                {acctHasMore&&(
+                  <div style={{textAlign:"center",marginTop:12,fontSize:11,color:"var(--muted)"}}>
+                    Showing the most recent 500 transactions.
+                  </div>
+                )}
+              </>
+            )}
           </div>
         )}
 

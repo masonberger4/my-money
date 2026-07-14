@@ -11,6 +11,7 @@ see them.
 |---|---|
 | `migrations/20260605000001_init.sql` | Base tables, RLS, Realtime publication. Run first on an empty database. |
 | `migrations/20260606000001_plaid.sql` | Reshapes the schema for Plaid: drops scraper-era tables, adds `plaid_tokens` (service-role only), `plaid_credential_key` for multi-Plaid-account routing, `settings` for dashboard prefs. Run second. |
+| `migrations/20260714000001_account_labels.sql` | Adds `nickname` + `color` to accounts for the per-account badges shown on transactions. Run third. |
 | `seed.sql` | Optional sample data. Real data arrives via Plaid on first sync. |
 | `reset.sql` | Drops everything from both migrations. For dev resets. |
 

@@ -27,6 +27,9 @@ function shiftMonth(year, month, delta) {
 const TX_COLUMNS =
   'plaid_tx_id, account_id, date, amount, merchant_name, description, mapped_category, pending';
 
+const ACCOUNT_COLUMNS =
+  'id, institution_id, name, official_name, nickname, color, mask, type, subtype, current_balance, available_balance, last_balance_at, hidden';
+
 async function getTransactionsBetween(start, end) {
   // RLS scopes every query to the signed-in household automatically.
   const rows = [];
@@ -123,21 +126,60 @@ export async function getSpending({ year, month }) {
   return { groups };
 }
 
+function toTxShape(t) {
+  return {
+    plaid_tx_id: t.plaid_tx_id,
+    account_id: t.account_id,
+    merchant_name: t.merchant_name,
+    description: t.description,
+    transaction_date: t.date,
+    amount: t.amount,
+    category: t.mapped_category || 'Shopping and gear',
+  };
+}
+
 export async function getTransactions({ year, month }) {
   const txs = await getMonthTransactions(year, month);
   txs.sort((a, b) => {
     if (a.date === b.date) return b.amount - a.amount;
     return a.date < b.date ? 1 : -1;
   });
+  return { transactions: txs.map(toTxShape) };
+}
+
+export async function getAccounts() {
+  const { data, error } = await supabase
+    .from('accounts')
+    .select(ACCOUNT_COLUMNS)
+    .order('type', { ascending: true })
+    .order('name', { ascending: true });
+  if (error) throw error;
+  return { accounts: data };
+}
+
+export async function updateAccount(id, fields) {
+  const allowed = {};
+  if ('nickname' in fields) allowed.nickname = fields.nickname;
+  if ('color' in fields) allowed.color = fields.color;
+  if ('hidden' in fields) allowed.hidden = fields.hidden;
+  const { error } = await supabase.from('accounts').update(allowed).eq('id', id);
+  if (error) throw error;
+}
+
+// All transactions for one account, newest first, capped so a huge history
+// can't lock up the phone. Returns { transactions, hasMore }.
+export async function getAccountTransactions(accountId, { limit = 500 } = {}) {
+  const { data, error } = await supabase
+    .from('transactions')
+    .select(TX_COLUMNS)
+    .eq('account_id', accountId)
+    .order('date', { ascending: false })
+    .limit(limit + 1);
+  if (error) throw error;
+  const hasMore = data.length > limit;
   return {
-    transactions: txs.map(t => ({
-      plaid_tx_id: t.plaid_tx_id,
-      merchant_name: t.merchant_name,
-      description: t.description,
-      transaction_date: t.date,
-      amount: t.amount,
-      category: t.mapped_category || 'Shopping and gear',
-    })),
+    transactions: data.slice(0, limit).map(toTxShape),
+    hasMore,
   };
 }
 
