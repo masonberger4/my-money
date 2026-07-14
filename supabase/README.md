@@ -15,15 +15,39 @@ see them.
 | `seed.sql` | Optional sample data. Real data arrives via Plaid on first sync. |
 | `reset.sql` | Drops everything from both migrations. For dev resets. |
 
+## The secrets involved, and where each one goes
+
+| Secret | Created | Goes in `.env.local` / Vercel? | Notes |
+|---|---|---|---|
+| Database password | Project creation form | **No — goes nowhere** | Direct-Postgres access only. Save in password manager, then forget about it. |
+| anon / public key | Automatic | Yes — `VITE_SUPABASE_ANON_KEY` | Public by design; RLS + login gate all access. |
+| service_role key | Automatic | Yes — `SUPABASE_SERVICE_ROLE_KEY` (server-side only) | Bypasses RLS. Never in client code, never committed. |
+| Household email + password | You, in step 3 | **No** | Typed into the app's login screen on each device. Share with your wife. |
+| Plaid client_id + secret | plaid.com dashboard | Yes — `PLAID_CREDENTIALS` (server-side only) | See root README for the multi-account format. |
+
 ## Setup (~15 min)
 
 ### 1. Create a Supabase project
 
 1. <https://supabase.com> → New project (free tier is fine).
-2. Note down, from Project Settings → API:
+2. The creation form asks for:
+   - **Project name** — anything you like (e.g. `my-money`). It's a cosmetic
+     dashboard label; nothing in the app references it. The app connects via
+     the project URL, which is a random ref regardless of name.
+   - **Database password** — click **Generate a password** and save it in
+     your password manager. **The app never uses this password.** It is the
+     direct-Postgres password, only needed if you ever connect with `psql`
+     or a database GUI. It does NOT go in `.env.local`, NOT in Vercel, and
+     it is NOT the household login password (that's created in step 3).
+   - **Region** — pick the one closest to you.
+3. After the project provisions (~2 min), note down from **Project
+   Settings → API** (or "Data API" / "API Keys" depending on dashboard
+   version):
    - **Project URL** (`https://xxxx.supabase.co`)
-   - **anon key** (public, used by the browser)
-   - **service_role key** (secret, used by the api/ routes only)
+   - **anon / public key** (safe to expose; the browser uses it — access is
+     still gated by login + RLS)
+   - **service_role key** (secret; server-side api/ routes only — this key
+     bypasses RLS, so it must never be in client code or committed to git)
 
 ### 2. Run the migrations
 
@@ -31,9 +55,18 @@ SQL Editor → New query. Paste and run, in order:
 
 1. `migrations/20260605000001_init.sql`
 2. `migrations/20260606000001_plaid.sql`
+3. `migrations/20260714000001_account_labels.sql`
 
 Table Editor should now show: `households`, `household_members`,
 `institutions`, `accounts`, `transactions`, `plaid_tokens`, `settings`.
+
+**About RLS:** the migrations explicitly enable row-level security on every
+table — there is no dashboard toggle you need to set, and any "enable RLS by
+default for new tables" setting is fine but redundant (tables are only ever
+created by these migrations). Just never *disable* RLS on any of these
+tables. After running the migrations, Dashboard → **Advisors** should show
+no RLS warnings (`plaid_tokens` intentionally has RLS on with zero
+policies — that's what keeps access tokens server-only).
 
 ### 3. Create the household user
 
