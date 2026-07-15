@@ -9,6 +9,7 @@ see them.
 
 | File | Purpose |
 |---|---|
+| **`setup_all.sql`** | **Start here.** One paste: wipes partial state, applies all migrations, auto-creates the household. |
 | `migrations/20260605000001_init.sql` | Base tables, RLS, Realtime publication. Run first on an empty database. |
 | `migrations/20260606000001_plaid.sql` | Reshapes the schema for Plaid: drops scraper-era tables, adds `plaid_tokens` (service-role only), `plaid_credential_key` for multi-Plaid-account routing, `settings` for dashboard prefs. Run second. |
 | `migrations/20260714000001_account_labels.sql` | Adds `nickname` + `color` to accounts for the per-account badges shown on transactions. Run third. |
@@ -49,16 +50,43 @@ see them.
    - **service_role key** (secret; server-side api/ routes only — this key
      bypasses RLS, so it must never be in client code or committed to git)
 
-### 2. Run the migrations
+### 2. Create the household user (do this BEFORE the SQL)
 
-SQL Editor → New query. Paste and run, in order:
+1. Authentication → Users → **Add user** → **Create new user**.
+2. Email + a strong shared household password.
+3. **Auto Confirm User: ON** → Create.
+
+### 3. Run the SQL — one paste
+
+1. SQL Editor (left sidebar, `>_` icon) → **New query**.
+2. Open **`setup_all.sql`** (in this folder), select ALL of it, copy.
+3. Paste into the editor → **Run** (or Cmd/Ctrl+Enter).
+4. The result at the bottom should show:
+   `tables_created_of_7 = 7` and `household_linked = true`.
+
+That one file wipes any partial state, applies all three migrations in
+order, and automatically creates the household linked to the auth user you
+made in step 2 — no UUID copy-pasting. It's safe to re-run any time before
+you have real data in the project. If you forgot step 2, it still creates
+the tables, prints "No auth user found", and you just re-run it after
+creating the user.
+
+Table Editor should now show: `households`, `household_members`,
+`institutions`, `accounts`, `transactions`, `plaid_tokens`, `settings`.
+
+<details>
+<summary>Alternative: run migrations individually</summary>
+
+Paste and run, in order:
 
 1. `migrations/20260605000001_init.sql`
 2. `migrations/20260606000001_plaid.sql`
 3. `migrations/20260714000001_account_labels.sql`
 
-Table Editor should now show: `households`, `household_members`,
-`institutions`, `accounts`, `transactions`, `plaid_tokens`, `settings`.
+Then create the household manually (step 4 below). Use this path only for
+applying a NEW migration to a project that already has real data —
+`setup_all.sql` would wipe it.
+</details>
 
 **About RLS:** the migrations explicitly enable row-level security on every
 table — there is no dashboard toggle you need to set, and any "enable RLS by
@@ -68,26 +96,7 @@ tables. After running the migrations, Dashboard → **Advisors** should show
 no RLS warnings (`plaid_tokens` intentionally has RLS on with zero
 policies — that's what keeps access tokens server-only).
 
-### 3. Create the household user
-
-1. Authentication → Users → **Add user** → **Create new user**.
-2. Email + a strong shared household password (you and your wife both use this).
-3. **Auto Confirm User: ON**. Copy the new user's **UID**.
-
-### 4. Create the household
-
-Replace the UUID and run in the SQL Editor (or run all of `seed.sql` if you
-also want sample data):
-
-```sql
-with new_household as (
-  insert into households (name) values ('My Household') returning id
-)
-insert into household_members (household_id, user_id, role)
-select id, '<HOUSEHOLD_USER_UUID>'::uuid, 'owner' from new_household;
-```
-
-### 5. Configure the app
+### 4. Configure the app
 
 Copy `.env.example` → `.env.local` and fill in:
 
@@ -97,7 +106,7 @@ Copy `.env.example` → `.env.local` and fill in:
 
 On Vercel, set the same variables in Project Settings → Environment Variables.
 
-### 6. Verify
+### 5. Verify
 
 Run in the SQL Editor after using the app (sign in → link an account → sync):
 
@@ -134,9 +143,8 @@ await window.supabase?.from('plaid_tokens').select('*') // → { data: [] }
 
 ## Resetting during development
 
-1. Paste `reset.sql` → Run.
-2. Re-run both migrations.
-3. Re-create the household (step 4).
+Just re-run `setup_all.sql` — it wipes and rebuilds everything, including the
+household link.
 
 The Auth user survives resets (it lives in `auth.users`). Re-linking every
 institution through Plaid Link is required after a reset because access tokens
