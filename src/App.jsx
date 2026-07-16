@@ -62,12 +62,39 @@ export default function App() {
       .from('institutions')
       .select('id', { count: 'exact', head: true })
       .then(({ count: n, error }) => {
-        if (!cancelled) setCount(error ? 0 : n ?? 0);
+        if (cancelled) return;
+        if (error) {
+          // Don't fall back to the "add your first account" screen on a
+          // transient query failure — keep whatever we knew before.
+          console.error('institution count failed', error);
+          setCount(prev => prev ?? 0);
+        } else {
+          setCount(n ?? 0);
+        }
       });
     return () => {
       cancelled = true;
     };
   }, [session, refreshTick]);
+
+  // Re-check when the app returns to the foreground (e.g. the iOS PWA was
+  // frozen showing a stale screen while accounts were linked on another
+  // device). Throttled so ordinary tab-switching doesn't flash reloads.
+  useEffect(() => {
+    let lastRefresh = Date.now();
+    const onVisible = () => {
+      if (document.visibilityState !== 'visible') return;
+      if (Date.now() - lastRefresh < 60_000) return;
+      lastRefresh = Date.now();
+      setRefreshTick(t => t + 1);
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('focus', onVisible);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('focus', onVisible);
+    };
+  }, []);
 
   const handleLinked = useCallback(() => {
     setRefreshTick(t => t + 1);
