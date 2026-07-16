@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { getOverview, getSpending, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions } from "../dataAdapter.js";
+import { unlinkInstitution } from "../plaidClient.js";
 import { runSync } from "../sync.js";
 import { getSetting, setSetting } from "../db.js";
 
@@ -216,6 +217,31 @@ export default function Dashboard({ refreshTick = 0 }) {
     setAccounts(prev=>prev.map(a=>a.id===id?{...a,...fields}:a));
     if(selAcct?.id===id)setSelAcct(prev=>({...prev,...fields}));
     try{await updateAccount(id,fields);}catch(err){console.error("account update failed",err);}
+  }
+
+  const [unlinking,setUnlinking]=useState(false);
+
+  async function handleUnlink(){
+    if(!selAcct)return;
+    const siblings=accounts.filter(a=>a.institution_id===selAcct.institution_id);
+    const instName=acctInst(selAcct)||"this bank";
+    const list=siblings.map(a=>`  • ${acctLabel(a)}`).join("\n");
+    const ok=window.confirm(
+      `Unlink ${instName}?\n\nThis removes ${siblings.length} account${siblings.length!==1?"s":""} and all their transactions from the app:\n${list}\n\nThe bank connection is also removed from Plaid (freeing a slot). This cannot be undone — re-linking later re-imports history from Plaid.`
+    );
+    if(!ok)return;
+    setUnlinking(true);
+    try{
+      await unlinkInstitution(selAcct.institution_id);
+      setSelAcct(null);
+      setTxAcctFilter(null);
+      await reloadData(year,month);
+    }catch(err){
+      console.error("unlink failed",err);
+      window.alert(`Unlink failed: ${err.detail?.error||err.message}`);
+    }finally{
+      setUnlinking(false);
+    }
   }
 
   const cats=spending?.groups||[];
@@ -532,6 +558,15 @@ export default function Dashboard({ refreshTick = 0 }) {
                 )}
               </>
             )}
+            <div style={{borderTop:"1px solid var(--border)",margin:"16px 0 12px"}}/>
+            <button onClick={handleUnlink} disabled={unlinking}
+              style={{width:"100%",padding:"9px 0",borderRadius:8,border:"1px solid #F09595",background:"none",
+                color:"#A32D2D",fontFamily:"inherit",fontSize:12,fontWeight:500,cursor:unlinking?"default":"pointer",opacity:unlinking?.6:1}}>
+              {unlinking?"Unlinking…":`Unlink ${acctInst(selAcct)||"this bank"}…`}
+            </button>
+            <div style={{marginTop:8,fontSize:10,color:"var(--muted)",textAlign:"center"}}>
+              Removes this bank connection, all its accounts, and their transactions.
+            </div>
           </div>
         )}
 

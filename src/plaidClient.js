@@ -43,3 +43,9 @@ export function exchangePublicToken(publicToken, credentialKey, institutionName)
 export function runServerSync() {
   return postJson('/api/sync', {});
 }
+
+// Removes the Plaid Item (freeing its slot) and deletes the institution's
+// accounts and transactions from the database.
+export function unlinkInstitution(institutionId) {
+  return postJson('/api/unlink-institution', { institution_id: institutionId });
+}
