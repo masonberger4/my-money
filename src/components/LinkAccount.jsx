@@ -3,6 +3,21 @@ import { usePlaidLink } from 'react-plaid-link';
 import { createLinkToken, exchangePublicToken } from '../plaidClient.js';
 import { runSync } from '../sync.js';
 
+// Turn a failed API call into something a human can act on. err.detail is
+// whatever the server route returned — Plaid errors carry error_code /
+// error_message inside it.
+function describeError(err, fallback) {
+  const d = err?.detail;
+  if (typeof d === 'string' && d) return `${fallback}: ${d}`;
+  if (d?.message) return d.message;
+  if (d?.error?.error_code) {
+    return `${fallback}: Plaid ${d.error.error_code} — ${d.error.error_message || ''}`;
+  }
+  if (typeof d?.error === 'string' && d.error) return `${fallback}: ${d.error}`;
+  if (err?.status) return `${fallback} (HTTP ${err.status})`;
+  return fallback;
+}
+
 export default function LinkAccount({ label = '+ Add account', onLinked }) {
   const [linkToken, setLinkToken] = useState(null);
   const [credentialKey, setCredentialKey] = useState(null);
@@ -23,7 +38,7 @@ export default function LinkAccount({ label = '+ Add account', onLinked }) {
         if (err.status === 409 && err.detail?.error === 'plaid_capacity') {
           setError(err.detail.message);
         } else {
-          setError('Could not start Plaid Link');
+          setError(describeError(err, 'Could not start Plaid Link'));
         }
       });
     return () => {
@@ -44,7 +59,7 @@ export default function LinkAccount({ label = '+ Add account', onLinked }) {
         if (onLinked) onLinked();
       } catch (err) {
         console.error('exchange/sync failed', err);
-        setError('Linking failed. Try again.');
+        setError(describeError(err, 'Linking failed'));
       } finally {
         setLoading(false);
       }
@@ -57,14 +72,36 @@ export default function LinkAccount({ label = '+ Add account', onLinked }) {
     onSuccess,
   });
 
+  const waiting = !linkToken && !error;
+
   return (
-    <button
-      className="ibtn"
-      onClick={() => open()}
-      disabled={!ready || loading || !!error}
-      title={error || ''}
-    >
-      {loading ? 'Linking…' : label}
-    </button>
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8 }}>
+      <button
+        className="ibtn"
+        onClick={() => open()}
+        disabled={!ready || loading || !!error}
+        title={error || ''}
+      >
+        {loading ? 'Linking…' : waiting ? 'Preparing Plaid…' : label}
+      </button>
+      {error && (
+        <div
+          style={{
+            maxWidth: 300,
+            fontSize: 11,
+            lineHeight: 1.5,
+            color: '#A32D2D',
+            background: '#FCEBEB',
+            border: '1px solid #F09595',
+            borderRadius: 8,
+            padding: '8px 10px',
+            textAlign: 'left',
+            wordBreak: 'break-word',
+          }}
+        >
+          {error}
+        </div>
+      )}
+    </div>
   );
 }
