@@ -220,6 +220,18 @@ export default function Dashboard({ refreshTick = 0 }) {
   }
 
   const [unlinking,setUnlinking]=useState(false);
+  const [togglingHide,setTogglingHide]=useState(false);
+
+  async function handleToggleHide(){
+    if(!selAcct)return;
+    setTogglingHide(true);
+    try{
+      await saveAccount(selAcct.id,{hidden:!selAcct.hidden});
+      await reloadData(year,month);
+    }finally{
+      setTogglingHide(false);
+    }
+  }
 
   async function handleUnlink(){
     if(!selAcct)return;
@@ -426,9 +438,9 @@ export default function Dashboard({ refreshTick = 0 }) {
               <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em"}}>{monthLabel(year,month)}</div>
               <span style={{fontSize:12,color:"var(--muted)"}}>{shownTxs.length} transaction{shownTxs.length!==1?"s":""}</span>
             </div>
-            {accounts.length>1&&(
+            {accounts.filter(a=>!a.hidden).length>1&&(
               <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:12}}>
-                {[{id:null,label:"All accounts",color:"var(--muted)"},...accounts.map(a=>({id:a.id,label:acctLabel(a),color:acctColor(a)}))].map(c=>{
+                {[{id:null,label:"All accounts",color:"var(--muted)"},...accounts.filter(a=>!a.hidden).map(a=>({id:a.id,label:acctLabel(a),color:acctColor(a)}))].map(c=>{
                   const active=txAcctFilter===c.id;
                   return (
                     <button key={c.id||"all"} onClick={()=>setTxAcctFilter(c.id)}
@@ -480,8 +492,8 @@ export default function Dashboard({ refreshTick = 0 }) {
               Give each account a nickname and color — they tag every transaction across the app.
             </div>
             {loading&&accounts.length===0?[1,2,3].map(i=><div key={i} style={{marginBottom:12}}><Sk h={40}/></div>):
-              accounts.map((a,i)=>(
-                <div key={a.id} className="tx" style={{cursor:"pointer",animationDelay:i*.03+"s"}}
+              [...accounts].sort((a,b)=>(a.hidden?1:0)-(b.hidden?1:0)).map((a,i)=>(
+                <div key={a.id} className="tx" style={{cursor:"pointer",animationDelay:i*.03+"s",opacity:a.hidden?.5:1}}
                   onClick={()=>setSelAcct(a)}>
                   <div onClick={e=>e.stopPropagation()} style={{display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
                     <Swatch color={acctColor(a)} onChange={hex=>saveAccount(a.id,{color:hex})}/>
@@ -489,6 +501,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                   <div style={{flex:1,minWidth:0}}>
                     <div onClick={e=>e.stopPropagation()} style={{display:"flex",alignItems:"center",gap:6}}>
                       <EditName name={acctLabel(a)} onSave={v=>saveAccount(a.id,{nickname:v})}/>
+                      {a.hidden&&<Pill label="Hidden" color="#888780"/>}
                     </div>
                     <div style={{fontSize:11,color:"var(--muted)",marginTop:2}}>
                       {[acctInst(a),`${a.name}${a.mask?` ··${a.mask}`:""}`,a.subtype||a.type].filter(Boolean).join(" · ")}
@@ -559,6 +572,16 @@ export default function Dashboard({ refreshTick = 0 }) {
               </>
             )}
             <div style={{borderTop:"1px solid var(--border)",margin:"16px 0 12px"}}/>
+            <button onClick={handleToggleHide} disabled={togglingHide}
+              style={{width:"100%",padding:"9px 0",borderRadius:8,border:"1px solid var(--border)",background:"none",
+                color:"var(--text)",fontFamily:"inherit",fontSize:12,fontWeight:500,cursor:togglingHide?"default":"pointer",opacity:togglingHide?.6:1,marginBottom:8}}>
+              {togglingHide?"Saving…":selAcct.hidden?"Unhide — include in dashboard again":"Hide from dashboard"}
+            </button>
+            <div style={{marginBottom:12,fontSize:10,color:"var(--muted)",textAlign:"center"}}>
+              {selAcct.hidden
+                ?"This account is excluded from balances, spending, and transaction lists. It still syncs."
+                :"Keeps syncing, stays on this tab — but drops out of balances, spending, and transaction lists."}
+            </div>
             <button onClick={handleUnlink} disabled={unlinking}
               style={{width:"100%",padding:"9px 0",borderRadius:8,border:"1px solid #F09595",background:"none",
                 color:"#A32D2D",fontFamily:"inherit",fontSize:12,fontWeight:500,cursor:unlinking?"default":"pointer",opacity:unlinking?.6:1}}>

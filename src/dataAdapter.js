@@ -32,12 +32,15 @@ const ACCOUNT_COLUMNS =
 
 async function getTransactionsBetween(start, end) {
   // RLS scopes every query to the signed-in household automatically.
+  // The inner join on accounts drops transactions belonging to hidden
+  // accounts from every dashboard view (spending, lists, trends).
   const rows = [];
   const page = 1000;
   for (let from = 0; ; from += page) {
     const { data, error } = await supabase
       .from('transactions')
-      .select(TX_COLUMNS)
+      .select(`${TX_COLUMNS}, accounts!inner(hidden)`)
+      .eq('accounts.hidden', false)
       .gte('date', start)
       .lte('date', end)
       .order('date', { ascending: false })
