@@ -537,6 +537,21 @@ export default function Dashboard({ refreshTick = 0 }) {
               </div>
               <div style={{fontSize:15,fontFamily:"'DM Mono',monospace",fontWeight:600,flexShrink:0}}>{fmtX(selAcct.current_balance??0)}</div>
             </div>
+            <div style={{display:"flex",gap:8,marginTop:12}}>
+              <button onClick={handleToggleHide} disabled={togglingHide}
+                style={{flex:1,padding:"8px 0",borderRadius:8,border:"1px solid var(--border)",background:"none",
+                  color:"var(--text)",fontFamily:"inherit",fontSize:12,fontWeight:500,cursor:togglingHide?"default":"pointer",opacity:togglingHide?.6:1}}>
+                {togglingHide?"Saving…":selAcct.hidden?"Unhide":"Hide from dashboard"}
+              </button>
+              <button onClick={handleUnlink} disabled={unlinking}
+                style={{flex:1,padding:"8px 0",borderRadius:8,border:"1px solid #F09595",background:"none",
+                  color:"#A32D2D",fontFamily:"inherit",fontSize:12,fontWeight:500,cursor:unlinking?"default":"pointer",opacity:unlinking?.6:1}}>
+                {unlinking?"Unlinking…":`Unlink ${acctInst(selAcct)||"bank"}…`}
+              </button>
+            </div>
+            <div style={{marginTop:6,fontSize:10,color:"var(--muted)",textAlign:"center"}}>
+              Hide keeps syncing but drops it from totals · Unlink removes the connection and its data
+            </div>
             <div style={{borderTop:"1px solid var(--border)",margin:"12px 0"}}/>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
               <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em"}}>All transactions</div>
@@ -571,25 +586,6 @@ export default function Dashboard({ refreshTick = 0 }) {
                 )}
               </>
             )}
-            <div style={{borderTop:"1px solid var(--border)",margin:"16px 0 12px"}}/>
-            <button onClick={handleToggleHide} disabled={togglingHide}
-              style={{width:"100%",padding:"9px 0",borderRadius:8,border:"1px solid var(--border)",background:"none",
-                color:"var(--text)",fontFamily:"inherit",fontSize:12,fontWeight:500,cursor:togglingHide?"default":"pointer",opacity:togglingHide?.6:1,marginBottom:8}}>
-              {togglingHide?"Saving…":selAcct.hidden?"Unhide — include in dashboard again":"Hide from dashboard"}
-            </button>
-            <div style={{marginBottom:12,fontSize:10,color:"var(--muted)",textAlign:"center"}}>
-              {selAcct.hidden
-                ?"This account is excluded from balances, spending, and transaction lists. It still syncs."
-                :"Keeps syncing, stays on this tab — but drops out of balances, spending, and transaction lists."}
-            </div>
-            <button onClick={handleUnlink} disabled={unlinking}
-              style={{width:"100%",padding:"9px 0",borderRadius:8,border:"1px solid #F09595",background:"none",
-                color:"#A32D2D",fontFamily:"inherit",fontSize:12,fontWeight:500,cursor:unlinking?"default":"pointer",opacity:unlinking?.6:1}}>
-              {unlinking?"Unlinking…":`Unlink ${acctInst(selAcct)||"this bank"}…`}
-            </button>
-            <div style={{marginTop:8,fontSize:10,color:"var(--muted)",textAlign:"center"}}>
-              Removes this bank connection, all its accounts, and their transactions.
-            </div>
           </div>
         )}
 
