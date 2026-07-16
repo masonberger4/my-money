@@ -107,6 +107,7 @@ export default function Dashboard({ refreshTick = 0 }) {
   const [transactions,setTransactions]=useState(null);
   const [cashFlow,setCashFlow]=useState(null);
   const [accounts,setAccounts]=useState([]);
+  const [txAcctFilter,setTxAcctFilter]=useState(null);
   const [selAcct,setSelAcct]=useState(null);
   const [acctTxs,setAcctTxs]=useState(null);
   const [acctHasMore,setAcctHasMore]=useState(false);
@@ -203,6 +204,7 @@ export default function Dashboard({ refreshTick = 0 }) {
   // a transaction came from, on every tab.
   const acctById=useCallback(id=>accounts.find(a=>a.id===id),[accounts]);
   const acctLabel=useCallback(a=>a?(a.nickname||`${a.name}${a.mask?" ··"+a.mask:""}`):null,[]);
+  const acctInst=useCallback(a=>a?.institutions?.display_name||a?.institutions?.name||"",[]);
   const acctColor=useCallback(a=>{
     if(!a)return "#888780";
     if(a.color)return a.color;
@@ -218,6 +220,7 @@ export default function Dashboard({ refreshTick = 0 }) {
 
   const cats=spending?.groups||[];
   const txs=transactions?.transactions||[];
+  const shownTxs=txAcctFilter?txs.filter(t=>t.account_id===txAcctFilter):txs;
   const cfPs=cashFlow?.periods||[];
   const maxCat=cats[0]?.amount||1;
   const maxSpend=Math.max(...cfPs.map(p=>p.spending?.amount||0),1);
@@ -393,17 +396,36 @@ export default function Dashboard({ refreshTick = 0 }) {
         {/* TRANSACTIONS */}
         {tab==="transactions"&&(
           <div className="card">
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
               <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em"}}>{monthLabel(year,month)}</div>
-              <span style={{fontSize:12,color:"var(--muted)"}}>{txs.length} transactions</span>
+              <span style={{fontSize:12,color:"var(--muted)"}}>{shownTxs.length} transaction{shownTxs.length!==1?"s":""}</span>
             </div>
+            {accounts.length>1&&(
+              <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:12}}>
+                {[{id:null,label:"All accounts",color:"var(--muted)"},...accounts.map(a=>({id:a.id,label:acctLabel(a),color:acctColor(a)}))].map(c=>{
+                  const active=txAcctFilter===c.id;
+                  return (
+                    <button key={c.id||"all"} onClick={()=>setTxAcctFilter(c.id)}
+                      style={{display:"inline-flex",alignItems:"center",gap:5,fontSize:11,fontWeight:600,
+                        background:active?c.color+"22":"var(--bg)",color:active?c.color:"var(--muted)",
+                        border:`1px solid ${active?c.color:"var(--border)"}`,borderRadius:20,padding:"4px 10px",
+                        cursor:"pointer",fontFamily:"inherit",transition:"all .15s"}}>
+                      {c.id&&<span style={{width:6,height:6,borderRadius:"50%",background:c.color,display:"inline-block"}}/>}
+                      {c.label}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
             {loading?[1,2,3,4,5].map(i=>(
               <div key={i} style={{display:"flex",gap:12,alignItems:"center",marginBottom:12}}>
                 <Sk w={34} h={34} r={10}/><div style={{flex:1}}><Sk w="65%" h={13}/></div><Sk w={55} h={13}/>
               </div>
-            )):txs.length===0?(
-              <div style={{textAlign:"center",padding:"30px 0",color:"var(--muted)",fontSize:14}}>No transactions for this period.</div>
-            ):txs.map((t,i)=>{
+            )):shownTxs.length===0?(
+              <div style={{textAlign:"center",padding:"30px 0",color:"var(--muted)",fontSize:14}}>
+                {txAcctFilter?"No transactions for this account this month.":"No transactions for this period."}
+              </div>
+            ):shownTxs.map((t,i)=>{
               const a=acctById(t.account_id);
               return (
               <div key={i} className="tx" style={{animationDelay:i*.015+"s"}}>
@@ -443,7 +465,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                       <EditName name={acctLabel(a)} onSave={v=>saveAccount(a.id,{nickname:v})}/>
                     </div>
                     <div style={{fontSize:11,color:"var(--muted)",marginTop:2}}>
-                      {a.name}{a.mask?` ··${a.mask}`:""} · {a.subtype||a.type}
+                      {[acctInst(a),`${a.name}${a.mask?` ··${a.mask}`:""}`,a.subtype||a.type].filter(Boolean).join(" · ")}
                     </div>
                   </div>
                   <div style={{textAlign:"right",flexShrink:0}}>
@@ -471,7 +493,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                   <span style={{fontSize:15,fontWeight:600,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{acctLabel(selAcct)}</span>
                 </div>
                 <div style={{fontSize:11,color:"var(--muted)",marginTop:2}}>
-                  {selAcct.name}{selAcct.mask?` ··${selAcct.mask}`:""} · {selAcct.subtype||selAcct.type}
+                  {[acctInst(selAcct),`${selAcct.name}${selAcct.mask?` ··${selAcct.mask}`:""}`,selAcct.subtype||selAcct.type].filter(Boolean).join(" · ")}
                 </div>
               </div>
               <div style={{fontSize:15,fontFamily:"'DM Mono',monospace",fontWeight:600,flexShrink:0}}>{fmtX(selAcct.current_balance??0)}</div>

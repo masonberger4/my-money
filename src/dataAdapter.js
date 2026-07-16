@@ -28,7 +28,7 @@ const TX_COLUMNS =
   'plaid_tx_id, account_id, date, amount, merchant_name, description, mapped_category, pending';
 
 const ACCOUNT_COLUMNS =
-  'id, institution_id, name, official_name, nickname, color, mask, type, subtype, current_balance, available_balance, last_balance_at, hidden';
+  'id, institution_id, name, official_name, nickname, color, mask, type, subtype, current_balance, available_balance, last_balance_at, hidden, institutions(name, display_name)';
 
 async function getTransactionsBetween(start, end) {
   // RLS scopes every query to the signed-in household automatically.
