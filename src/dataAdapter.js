@@ -1,5 +1,5 @@
 import { supabase } from './supabaseClient.js';
-import { isTransferCategory } from './categoryMap.js';
+import { isTransferCategory, isReturnCategory, applyAccountRules } from './categoryMap.js';
 
 function pad2(n) {
   return String(n).padStart(2, '0');
@@ -44,7 +44,7 @@ async function getTransactionsBetween(start, end) {
   for (let from = 0; ; from += page) {
     const { data, error } = await supabase
       .from('transactions')
-      .select(`${TX_COLUMNS}, accounts!inner(hidden)`)
+      .select(`${TX_COLUMNS}, accounts!inner(hidden, type)`)
       .eq('accounts.hidden', false)
       .gte('date', start)
       .lte('date', end)
@@ -53,6 +53,10 @@ async function getTransactionsBetween(start, end) {
     if (error) throw error;
     rows.push(...data);
     if (data.length < page) break;
+  }
+  // Credit-card refunds become "Return" — not income, not spending.
+  for (const t of rows) {
+    t.mapped_category = applyAccountRules(t.mapped_category, t.amount, t.accounts?.type);
   }
   return rows;
 }
@@ -71,11 +75,13 @@ function sumSpending(txs) {
   return total;
 }
 
+// Credit-card refunds (category "Return") are reversals of past spend, not
+// income — exclude them so cash-flow isn't inflated.
 function sumIncome(txs) {
   let total = 0;
   for (const t of txs) {
     if (t.excluded) continue;
-    if (t.amount < 0) total += Math.abs(t.amount);
+    if (t.amount < 0 && !isReturnCategory(effectiveCategory(t))) total += Math.abs(t.amount);
   }
   return total;
 }
@@ -196,11 +202,14 @@ export async function updateAccount(id, fields) {
 export async function getAccountTransactions(accountId, { limit = 500 } = {}) {
   const { data, error } = await supabase
     .from('transactions')
-    .select(TX_COLUMNS)
+    .select(`${TX_COLUMNS}, accounts(type)`)
     .eq('account_id', accountId)
     .order('date', { ascending: false })
     .limit(limit + 1);
   if (error) throw error;
+  for (const t of data) {
+    t.mapped_category = applyAccountRules(t.mapped_category, t.amount, t.accounts?.type);
+  }
   const hasMore = data.length > limit;
   return {
     transactions: data.slice(0, limit).map(toTxShape),

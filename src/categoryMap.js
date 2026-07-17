@@ -18,9 +18,11 @@ export const ERA_CATEGORIES = [
   'Side hustles and business',
   'Cash, checks, and misc',
   'Transfers and card payments',
+  'Return',
 ];
 
 const TRANSFER_CATEGORY = 'Transfers and card payments';
+const RETURN_CATEGORY = 'Return';
 
 const unmappedWarned = new Set();
 
@@ -95,4 +97,16 @@ export function mapPlaidCategory(primary, detailed) {
 
 export function isTransferCategory(category) {
   return category === TRANSFER_CATEGORY;
+}
+
+export function isReturnCategory(category) {
+  return category === RETURN_CATEGORY;
+}
+
+// A negative amount on a credit-card account is a refund / statement credit /
+// cashback — not income, not spending. Surface it as its own "Return" line.
+// Depository negatives stay as-is (those are real deposits).
+export function applyAccountRules(category, amount, accountType) {
+  if (accountType === 'credit' && amount < 0) return RETURN_CATEGORY;
+  return category;
 }
