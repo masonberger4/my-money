@@ -690,13 +690,22 @@ export default function Dashboard({ refreshTick = 0 }) {
         <div className="overlay" onClick={()=>setSelTx(null)}>
           <div className="modal" onClick={e=>e.stopPropagation()} style={{maxHeight:"80vh",overflowY:"auto"}}>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",gap:10,marginBottom:4}}>
-              <div style={{fontSize:16,fontWeight:600,color:"var(--text)",minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{selTx.merchant_name||selTx.description}</div>
+              <div style={{fontSize:16,fontWeight:600,color:"var(--text)",minWidth:0,flex:1}}>
+                <EditName name={selTx.merchant_name||selTx.description} onSave={v=>saveTx({user_description:v||null})}/>
+              </div>
               <div style={{fontSize:16,fontFamily:"'DM Mono',monospace",fontWeight:600,flexShrink:0}}>{fmtX(selTx.amount)}</div>
             </div>
             <div style={{fontSize:11,color:"var(--muted)",marginBottom:14,display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
               <span>{selTx.transaction_date}</span>
               {a&&<Pill label={acctLabel(a)} color={acctColor(a)}/>}
+              {selTx.user_description&&(
+                <button onClick={()=>saveTx({user_description:null})}
+                  style={{background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",fontSize:10,color:"var(--muted)",textDecoration:"underline",padding:0}}>
+                  reset name
+                </button>
+              )}
             </div>
+            <div style={{fontSize:10,color:"var(--muted)",marginTop:-10,marginBottom:12}}>Double-click the name to rename this transaction.</div>
 
             <div style={{fontSize:12,color:"var(--muted)",marginBottom:8}}>Category</div>
             <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:6}}>
