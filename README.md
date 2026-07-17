@@ -69,7 +69,7 @@ Era connects to Plaid under the hood and charges a subscription to sit in the mi
 
 | Layer | Tool | Why |
 |---|---|---|
-| Bank connections | Plaid (Development tier) | Industry standard, free for personal use, supports all account types |
+| Bank connections | Plaid (free trial → Production) | Industry standard, supports all account types. See [Cost](#cost) for the connection-based pricing. |
 | Backend / hosting | Vercel (Hobby tier) | Free, serverless functions in `/api/`, deploys from GitHub |
 | Database + auth | Supabase (free tier) | Postgres with row-level security, shared household login, multi-device |
 | Frontend | React + Vite | Carries forward the existing dashboard; fast dev experience |
@@ -179,10 +179,19 @@ Everything already built should be ported in with minimal changes. Storage swaps
 
 The dashboard is responsive from the start (carried from artifact code). Additional polish planned:
 
-- **PWA manifest**: lets you "Add to Home Screen" on iOS/Android — runs full-screen like a native app
-- **Touch targets**: larger swatches and buttons for fat fingers
-- **Swipe to navigate months**: swipe left/right on the month header
-- **Pull to refresh**: standard mobile pattern for syncing
+- [x] **PWA manifest**: lets you "Add to Home Screen" on iOS/Android — runs full-screen like a native app
+- [ ] **Touch targets**: larger swatches and buttons for fat fingers
+- [ ] **Swipe to navigate months**: swipe left/right on the month header
+- [ ] **Pull to refresh**: standard mobile pattern for syncing
+
+### Install on iPhone
+
+1. Open the deployed URL in **Safari** (not Chrome — only Safari can install PWAs on iOS).
+2. Tap the **Share** button.
+3. Scroll down and tap **Add to Home Screen**.
+4. Confirm — "my-money" now appears on your home screen and launches full-screen with its own icon, no Safari chrome.
+
+The app shell is cached by a service worker, so the home-screen app opens instantly and still launches when offline (the latest cached data renders; new transactions need a network to sync). Plaid API calls and `/api/*` requests are never cached.
 
 ---
 
@@ -190,10 +199,19 @@ The dashboard is responsive from the start (carried from artifact code). Additio
 
 | Service | Tier | Monthly cost |
 |---|---|---|
-| Plaid | Development (≤100 institutions) | $0 |
+| Plaid | Free trial (10 connections) → Production | $0 during trial; paid after |
 | Vercel | Hobby | $0 |
 | Domain (optional) | — | ~$0.85/mo |
 | Supabase (optional, v2 cross-device sync) | Free tier | $0 |
+
+### Plaid connections
+
+Plaid retired the old free "Development" tier. The current model is a **free trial capped at 10 connections**, then a paid Production plan. API calls against those connections are unlimited.
+
+A **connection** is one bank login (Plaid calls it an *Item*), even if that login exposes several accounts. Two things to know:
+
+- **The same bank linked twice = two connections.** Plaid can't tell it's the same person.
+- **Each device that links independently consumes a connection per bank.** Linking your bank on both laptop and phone = 2 connections for one bank.
 
 ---
 

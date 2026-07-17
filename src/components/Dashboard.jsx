@@ -13,6 +13,7 @@ const DEFAULT_COLORS = {
   "Home maintenance and improvement": "#378ADD", "Utilities": "#378ADD",
   "Education": "#FAC775", "Side hustles and business": "#888780",
   "Cash, checks, and misc": "#888780", "Transfers and card payments": "#888780",
+  "Return": "#1D9E75",
 };
 
 const TX_ICONS = {
@@ -20,6 +21,7 @@ const TX_ICONS = {
   "Childcare":"👶","Pets":"🐾","Health and fitness":"💪","Home maintenance and improvement":"🔧",
   "Entertainment and subscriptions":"🎬","Shopping and gear":"🛍","Travel and vacation":"✈️",
   "Healthcare and pharmacy":"💊","Education":"📚","Side hustles and business":"💼",
+  "Return":"↩️",
 };
 
 const ACCOUNT_COLORS = ["#7F77DD","#1D9E75","#D85A30","#378ADD","#FAC775","#D4537E","#639922","#E24B4A"];
