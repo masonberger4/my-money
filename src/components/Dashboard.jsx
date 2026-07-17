@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { getOverview, getSpending, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions } from "../dataAdapter.js";
-import { unlinkInstitution } from "../plaidClient.js";
+import { unlinkInstitution, askAssistant } from "../plaidClient.js";
 import { runSync } from "../sync.js";
 import { getSetting, setSetting } from "../db.js";
 
@@ -122,7 +122,33 @@ export default function Dashboard({ refreshTick = 0 }) {
   const [addingCat,setAddingCat]=useState(false);
   const [newName,setNewName]=useState("");
   const [newColor,setNewColor]=useState("#7F77DD");
+  const [chatMsgs,setChatMsgs]=useState([]);
+  const [chatInput,setChatInput]=useState("");
+  const [chatBusy,setChatBusy]=useState(false);
+  const [chatError,setChatError]=useState(null);
+  const chatEndRef=useRef(null);
   const didInitialSync=useRef(false);
+
+  useEffect(()=>{chatEndRef.current?.scrollIntoView({behavior:"smooth"});},[chatMsgs,chatBusy]);
+
+  async function sendChat(text){
+    const q=(text??chatInput).trim();
+    if(!q||chatBusy)return;
+    setChatError(null);
+    setChatInput("");
+    const next=[...chatMsgs,{role:"user",content:q}];
+    setChatMsgs(next);
+    setChatBusy(true);
+    try{
+      const res=await askAssistant(next);
+      setChatMsgs(prev=>[...prev,{role:"assistant",content:res.reply}]);
+    }catch(err){
+      console.error("assistant failed",err);
+      setChatError(err.detail?.message||err.detail?.error||"The assistant couldn't answer — try again.");
+    }finally{
+      setChatBusy(false);
+    }
+  }
 
   useEffect(()=>{
     async function load(){
@@ -337,7 +363,7 @@ export default function Dashboard({ refreshTick = 0 }) {
 
         {/* Tabs */}
         <div style={{display:"flex",gap:3,background:"var(--bg)",borderRadius:24,padding:4,marginBottom:14,border:"1px solid var(--border)",overflowX:"auto"}}>
-          {["overview","categories","transactions","accounts","trends"].map(t=>(
+          {["overview","categories","transactions","accounts","trends","ask"].map(t=>(
             <button key={t} className={`tab${tab===t?" active":""}`} onClick={()=>{setTab(t);if(t!=="accounts")setSelAcct(null);}}>
               {t[0].toUpperCase()+t.slice(1)}
             </button>
@@ -588,6 +614,70 @@ export default function Dashboard({ refreshTick = 0 }) {
                 )}
               </>
             )}
+          </div>
+        )}
+
+        {/* ASK */}
+        {tab==="ask"&&(
+          <div className="card" style={{display:"flex",flexDirection:"column",minHeight:420}}>
+            <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em",marginBottom:10}}>Ask about your spending</div>
+            <div style={{flex:1,overflowY:"auto",marginBottom:12}}>
+              {chatMsgs.length===0&&!chatBusy&&(
+                <div>
+                  <div style={{fontSize:13,color:"var(--muted)",marginBottom:12,lineHeight:1.5}}>
+                    Claude can see your accounts and the last 90 days of transactions, and answers questions with your real numbers. Try:
+                  </div>
+                  {["How much did I spend on dining out this month vs last?",
+                    "What subscriptions am I paying for?",
+                    "Where could I realistically cut $200/month?",
+                    "Any unusual charges recently?"].map(q=>(
+                    <button key={q} onClick={()=>sendChat(q)}
+                      style={{display:"block",width:"100%",textAlign:"left",fontSize:12,fontFamily:"inherit",color:"var(--text)",
+                        background:"var(--bg)",border:"1px solid var(--border)",borderRadius:10,padding:"9px 12px",marginBottom:6,cursor:"pointer"}}>
+                      {q}
+                    </button>
+                  ))}
+                </div>
+              )}
+              {chatMsgs.map((m,i)=>(
+                <div key={i} style={{display:"flex",justifyContent:m.role==="user"?"flex-end":"flex-start",marginBottom:8}}>
+                  <div style={{maxWidth:"85%",fontSize:13,lineHeight:1.5,whiteSpace:"pre-wrap",borderRadius:12,padding:"8px 12px",
+                    background:m.role==="user"?"#7F77DD":"var(--bg)",
+                    color:m.role==="user"?"#fff":"var(--text)",
+                    border:m.role==="user"?"none":"1px solid var(--border)"}}>
+                    {m.content}
+                  </div>
+                </div>
+              ))}
+              {chatBusy&&(
+                <div style={{display:"flex",justifyContent:"flex-start",marginBottom:8}}>
+                  <div style={{fontSize:13,color:"var(--muted)",borderRadius:12,padding:"8px 12px",background:"var(--bg)",border:"1px solid var(--border)"}}>
+                    <span style={{display:"inline-block",animation:"pulse 1.2s ease-in-out infinite"}}>Thinking…</span>
+                  </div>
+                </div>
+              )}
+              {chatError&&(
+                <div style={{fontSize:12,color:"#A32D2D",background:"#FCEBEB",border:"1px solid #F09595",borderRadius:8,padding:"8px 12px",marginBottom:8}}>
+                  {chatError}
+                </div>
+              )}
+              <div ref={chatEndRef}/>
+            </div>
+            <div style={{display:"flex",gap:8}}>
+              <input value={chatInput} onChange={e=>setChatInput(e.target.value)}
+                onKeyDown={e=>{if(e.key==="Enter")sendChat();}}
+                placeholder="Ask about your spending…" disabled={chatBusy}
+                style={{flex:1,padding:"10px 12px",borderRadius:10,border:"1px solid var(--border)",background:"var(--bg)",
+                  color:"var(--text)",fontSize:13,fontFamily:"inherit",outline:"none"}}/>
+              <button onClick={()=>sendChat()} disabled={chatBusy||!chatInput.trim()}
+                style={{padding:"0 16px",borderRadius:10,border:"none",background:"#7F77DD",color:"#fff",fontFamily:"inherit",
+                  fontSize:13,fontWeight:500,cursor:chatBusy||!chatInput.trim()?"default":"pointer",opacity:chatBusy||!chatInput.trim()?.5:1}}>
+                Send
+              </button>
+            </div>
+            <div style={{marginTop:8,fontSize:10,color:"var(--muted)",textAlign:"center"}}>
+              Read-only: the assistant sees your data but can't change anything. Conversations aren't saved.
+            </div>
           </div>
         )}
 
