@@ -3,6 +3,13 @@
 Household spending dashboard for two users (Mason + wife), shared login,
 viewed on laptop + iPhones (PWA). Personal project; pragmatic > enterprise.
 
+**Maintain this file.** Whenever a session settles an architecture decision,
+changes the workflow, adds/merges a feature branch, learns a new gotcha, or
+reverses anything written here, update this file in the same commit or PR as
+the change — don't leave decisions stranded in conversation. Keep the
+"Pending branches" and "Roadmap" sections current as branches merge. Mason
+shouldn't have to ask.
+
 ## Architecture (decided, don't relitigate)
 
 - **Cloud-first**: Supabase Postgres is the single source of truth. No local
