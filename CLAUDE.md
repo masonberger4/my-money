@@ -107,6 +107,13 @@ shouldn't have to ask.
   `api/assistant.js` (claude-opus-4-8, adaptive thinking, prompt-cached
   context block) + `api/_lib/spendingContext.js` (deterministic 90-day
   snapshot). Needs `ANTHROPIC_API_KEY` in Vercel. Read-only by design.
+- `claude/feature-search`: cross-month transaction search. Search box atop
+  the Transactions tab (debounced 300ms, min 2 chars, stale-response guard);
+  `searchTransactions()` does a Supabase `ilike` over description +
+  merchant_name (escaped; `.or()`-unsafe chars stripped), newest-first,
+  200-match cap. Account chips filter results client-side. No schema
+  changes; user_description search activates automatically once
+  transaction-editing's migration lands (try-then-fallback flag).
 
 ## Roadmap (agreed order + design notes)
 
@@ -123,7 +130,8 @@ shouldn't have to ask.
 2. **Recurring/subscription detection** — client-side: group by normalized
    merchant, detect ~monthly cadence (±4 days) with similar amounts (±20%);
    surface as a list with monthly total. No schema.
-3. **Transaction search** — search box over description/merchant/
+3. **Transaction search** — **branched** (`claude/feature-search`), see
+   Pending branches — search box over description/merchant/
    user_description via Supabase `ilike`, cross-month. No schema.
 4. Later ideas (discussed, not committed): CSV export, net worth (needs
    Plaid Investments/Liabilities products — check per-call cost first),

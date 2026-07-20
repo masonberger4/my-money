@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { getOverview, getSpending, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions } from "../dataAdapter.js";
+import { getOverview, getSpending, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, searchTransactions } from "../dataAdapter.js";
 import { unlinkInstitution } from "../plaidClient.js";
 import { runSync } from "../sync.js";
 import { getSetting, setSetting } from "../db.js";
@@ -111,6 +111,10 @@ export default function Dashboard({ refreshTick = 0 }) {
   const [cashFlow,setCashFlow]=useState(null);
   const [accounts,setAccounts]=useState([]);
   const [txAcctFilter,setTxAcctFilter]=useState(null);
+  const [searchQ,setSearchQ]=useState("");
+  const [searchRes,setSearchRes]=useState(null);
+  const [searching,setSearching]=useState(false);
+  const searchSeq=useRef(0);
   const [selAcct,setSelAcct]=useState(null);
   const [acctTxs,setAcctTxs]=useState(null);
   const [acctHasMore,setAcctHasMore]=useState(false);
@@ -191,6 +195,21 @@ export default function Dashboard({ refreshTick = 0 }) {
     fetchData(year,month,{sync:syncFirst});
   },[year,month,ready,refreshTick,fetchData]);
 
+  // Cross-month search: debounced 300ms, min 2 chars; the sequence id drops
+  // stale responses so fast typing can't render out-of-order results.
+  useEffect(()=>{
+    const q=searchQ.trim();
+    const id=++searchSeq.current;
+    if(q.length<2){setSearchRes(null);setSearching(false);return;}
+    setSearching(true);
+    const h=setTimeout(()=>{
+      searchTransactions(q)
+        .then(res=>{if(searchSeq.current===id){setSearchRes(res);setSearching(false);}})
+        .catch(err=>{console.error("search failed",err);if(searchSeq.current===id){setSearchRes({transactions:[],hasMore:false});setSearching(false);}});
+    },300);
+    return ()=>clearTimeout(h);
+  },[searchQ]);
+
   // Drill-in: load all transactions for the selected account
   useEffect(()=>{
     if(!selAcct){setAcctTxs(null);setAcctHasMore(false);return;}
@@ -261,6 +280,12 @@ export default function Dashboard({ refreshTick = 0 }) {
   const cats=spending?.groups||[];
   const txs=transactions?.transactions||[];
   const shownTxs=txAcctFilter?txs.filter(t=>t.account_id===txAcctFilter):txs;
+  // While a search is active the Transactions tab renders results across all
+  // months instead of the selected month; account chips still filter them.
+  const searchActive=searchQ.trim().length>=2;
+  const searchTxs=searchRes?.transactions||[];
+  const shownSearch=txAcctFilter?searchTxs.filter(t=>t.account_id===txAcctFilter):searchTxs;
+  const listTxs=searchActive?shownSearch:shownTxs;
   const cfPs=cashFlow?.periods||[];
   const maxCat=cats[0]?.amount||1;
   const maxSpend=Math.max(...cfPs.map(p=>p.spending?.amount||0),1);
@@ -436,9 +461,25 @@ export default function Dashboard({ refreshTick = 0 }) {
         {/* TRANSACTIONS */}
         {tab==="transactions"&&(
           <div className="card">
+            <div style={{position:"relative",marginBottom:12}}>
+              <input value={searchQ} onChange={e=>setSearchQ(e.target.value)} placeholder="Search all transactions…"
+                style={{width:"100%",padding:"9px 34px 9px 12px",borderRadius:8,border:"1px solid var(--border)",
+                  background:"var(--bg)",color:"var(--text)",fontSize:16,fontFamily:"inherit",outline:"none"}}/>
+              {searchQ&&(
+                <button onClick={()=>setSearchQ("")} title="Clear search"
+                  style={{position:"absolute",right:6,top:"50%",transform:"translateY(-50%)",background:"none",border:"none",
+                    cursor:"pointer",color:"var(--muted)",fontSize:18,lineHeight:1,padding:"2px 6px"}}>×</button>
+              )}
+            </div>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
-              <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em"}}>{monthLabel(year,month)}</div>
-              <span style={{fontSize:12,color:"var(--muted)"}}>{shownTxs.length} transaction{shownTxs.length!==1?"s":""}</span>
+              <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em"}}>
+                {searchActive?"Search results · all months":monthLabel(year,month)}
+              </div>
+              <span style={{fontSize:12,color:"var(--muted)"}}>
+                {searchActive
+                  ?(searching?"searching…":`${shownSearch.length} match${shownSearch.length!==1?"es":""}`)
+                  :`${shownTxs.length} transaction${shownTxs.length!==1?"s":""}`}
+              </span>
             </div>
             {accounts.filter(a=>!a.hidden).length>1&&(
               <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:12}}>
@@ -457,18 +498,19 @@ export default function Dashboard({ refreshTick = 0 }) {
                 })}
               </div>
             )}
-            {loading?[1,2,3,4,5].map(i=>(
+            {(searchActive?searching:loading)?[1,2,3,4,5].map(i=>(
               <div key={i} style={{display:"flex",gap:12,alignItems:"center",marginBottom:12}}>
                 <Sk w={34} h={34} r={10}/><div style={{flex:1}}><Sk w="65%" h={13}/></div><Sk w={55} h={13}/>
               </div>
-            )):shownTxs.length===0?(
+            )):listTxs.length===0?(
               <div style={{textAlign:"center",padding:"30px 0",color:"var(--muted)",fontSize:14}}>
-                {txAcctFilter?"No transactions for this account this month.":"No transactions for this period."}
+                {searchActive?`No transactions match "${searchQ.trim()}".`
+                  :txAcctFilter?"No transactions for this account this month.":"No transactions for this period."}
               </div>
-            ):shownTxs.map((t,i)=>{
+            ):listTxs.map((t,i)=>{
               const a=acctById(t.account_id);
               return (
-              <div key={i} className="tx" style={{animationDelay:i*.015+"s"}}>
+              <div key={t.plaid_tx_id||i} className="tx" style={{animationDelay:i*.015+"s"}}>
                 <div style={{width:34,height:34,borderRadius:10,background:"var(--bg)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:15,flexShrink:0}}>{TX_ICONS[t.category]||"🛍"}</div>
                 <div style={{flex:1,minWidth:0}}>
                   <div style={{fontSize:13,fontWeight:500,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{t.merchant_name||t.description}</div>
@@ -483,6 +525,11 @@ export default function Dashboard({ refreshTick = 0 }) {
               </div>
               );
             })}
+            {searchActive&&!searching&&searchRes?.hasMore&&(
+              <div style={{textAlign:"center",marginTop:12,fontSize:11,color:"var(--muted)"}}>
+                Showing the first 200 matches — narrow your search.
+              </div>
+            )}
           </div>
         )}
 
