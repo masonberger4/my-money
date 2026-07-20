@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { getOverview, getSpending, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions } from "../dataAdapter.js";
+import { getOverview, getSpending, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, getRecurringCandidates } from "../dataAdapter.js";
+import { detectRecurring } from "../recurring.js";
 import { unlinkInstitution } from "../plaidClient.js";
 import { runSync } from "../sync.js";
 import { getSetting, setSetting } from "../db.js";
@@ -27,6 +28,7 @@ const TX_ICONS = {
 const ACCOUNT_COLORS = ["#7F77DD","#1D9E75","#D85A30","#378ADD","#FAC775","#D4537E","#639922","#E24B4A"];
 
 function monthLabel(y, m) { return new Date(y,m-1,1).toLocaleString("default",{month:"long",year:"numeric"}); }
+function shortDate(iso) { const [y,m,d]=iso.split("-").map(Number); return new Date(y,m-1,d).toLocaleDateString("default",{month:"short",day:"numeric"}); }
 function fmt(n) { return "$"+Number(n).toLocaleString("en-US",{maximumFractionDigits:0}); }
 function fmtX(n) { return "$"+Number(n).toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2}); }
 
@@ -115,6 +117,8 @@ export default function Dashboard({ refreshTick = 0 }) {
   const [acctTxs,setAcctTxs]=useState(null);
   const [acctHasMore,setAcctHasMore]=useState(false);
   const [acctLoading,setAcctLoading]=useState(false);
+  const [recurring,setRecurring]=useState(null);
+  const [recLoading,setRecLoading]=useState(false);
   const [customColors,setCustomColors]=useState({});
   const [customNames,setCustomNames]=useState({});
   const [customCats,setCustomCats]=useState([]);
@@ -167,6 +171,7 @@ export default function Dashboard({ refreshTick = 0 }) {
       ]);
       setOverview(ov);setSpending(sp);setTransactions(tx);setCashFlow(cf);
       setAccounts(ac.accounts||[]);
+      setRecurring(null); // recompute lazily on next Recurring-tab visit
       setLastUpd(new Date());
     }catch(err){
       console.error(err);
@@ -190,6 +195,17 @@ export default function Dashboard({ refreshTick = 0 }) {
     if(syncFirst)didInitialSync.current=true;
     fetchData(year,month,{sync:syncFirst});
   },[year,month,ready,refreshTick,fetchData]);
+
+  // Recurring detection is lazy: fetched + computed the first time the tab
+  // opens (6-month query), cached until the next data reload.
+  useEffect(()=>{
+    if(tab!=="recurring"||recurring||recLoading)return;
+    setRecLoading(true);
+    getRecurringCandidates()
+      .then(res=>setRecurring(detectRecurring(res.transactions)))
+      .catch(err=>{console.error(err);setRecurring([]);})
+      .finally(()=>setRecLoading(false));
+  },[tab,recurring,recLoading]);
 
   // Drill-in: load all transactions for the selected account
   useEffect(()=>{
@@ -337,7 +353,7 @@ export default function Dashboard({ refreshTick = 0 }) {
 
         {/* Tabs */}
         <div style={{display:"flex",gap:3,background:"var(--bg)",borderRadius:24,padding:4,marginBottom:14,border:"1px solid var(--border)",overflowX:"auto"}}>
-          {["overview","categories","transactions","accounts","trends"].map(t=>(
+          {["overview","categories","transactions","accounts","trends","recurring"].map(t=>(
             <button key={t} className={`tab${tab===t?" active":""}`} onClick={()=>{setTab(t);if(t!=="accounts")setSelAcct(null);}}>
               {t[0].toUpperCase()+t.slice(1)}
             </button>
@@ -648,6 +664,61 @@ export default function Dashboard({ refreshTick = 0 }) {
                   </div>
                 );
               })}
+            </div>
+          </div>
+        )}
+
+        {/* RECURRING */}
+        {tab==="recurring"&&(
+          <div style={{display:"flex",flexDirection:"column",gap:12}}>
+            <div className="card">
+              <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em",marginBottom:8}}>Recurring charges</div>
+              {recLoading||!recurring?(
+                <><Sk w="40%" h={24}/><div style={{marginTop:8}}><Sk w="60%" h={11}/></div></>
+              ):(
+                <>
+                  <div style={{fontSize:22,fontWeight:600,letterSpacing:"-.02em"}}>
+                    {fmt(recurring.reduce((s,r)=>s+r.monthlyAmount,0))}<span style={{fontSize:13,color:"var(--muted)",fontWeight:500}}>/mo</span>
+                  </div>
+                  <div style={{fontSize:11,color:"var(--muted)",marginTop:3}}>
+                    {recurring.length} recurring charge{recurring.length!==1?"s":""} · detected from the last 6 months
+                  </div>
+                </>
+              )}
+            </div>
+            <div className="card">
+              {recLoading||!recurring?[1,2,3,4,5].map(i=>(
+                <div key={i} style={{display:"flex",gap:12,alignItems:"center",marginBottom:12}}>
+                  <Sk w={34} h={34} r={10}/><div style={{flex:1}}><Sk w="60%" h={13}/></div><Sk w={60} h={13}/>
+                </div>
+              )):recurring.length===0?(
+                <div style={{textAlign:"center",padding:"30px 0",color:"var(--muted)",fontSize:14}}>
+                  No recurring charges detected yet — they show up after a few months of history.
+                </div>
+              ):recurring.map((r,i)=>{
+                const a=acctById(r.account_id);
+                return (
+                <div key={r.key} className="tx" style={{animationDelay:i*.02+"s"}}>
+                  <div style={{width:34,height:34,borderRadius:10,background:"var(--bg)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:15,flexShrink:0}}>{TX_ICONS[r.category]||"🔁"}</div>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{fontSize:13,fontWeight:500,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{r.name}</div>
+                    <div style={{fontSize:11,color:"var(--muted)",marginTop:3}}>
+                      ~every {r.avgGapDays} days · last {shortDate(r.lastDate)} · next ~{shortDate(r.nextDate)}
+                    </div>
+                    <div style={{marginTop:4,display:"flex",gap:5,flexWrap:"wrap"}}>
+                      <Pill label={getName(r.category)} color={getColor(r.category)}/>
+                      {a&&<Pill label={acctLabel(a)} color={acctColor(a)}/>}
+                    </div>
+                  </div>
+                  <div style={{fontSize:13,fontFamily:"'DM Mono',monospace",fontWeight:500,flexShrink:0}}>
+                    {fmtX(r.monthlyAmount)}<span style={{fontSize:10,color:"var(--muted)"}}>/mo</span>
+                  </div>
+                </div>
+                );
+              })}
+            </div>
+            <div style={{fontSize:11,color:"var(--muted)",background:"var(--bg)",borderRadius:8,padding:"8px 12px"}}>
+              Detected heuristically: same merchant at a ~monthly cadence (±4 days) with similar amounts (±20%). Card payments and transfers never count.
             </div>
           </div>
         )}

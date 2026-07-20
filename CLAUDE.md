@@ -107,6 +107,12 @@ shouldn't have to ask.
   `api/assistant.js` (claude-opus-4-8, adaptive thinking, prompt-cached
   context block) + `api/_lib/spendingContext.js` (deterministic 90-day
   snapshot). Needs `ANTHROPIC_API_KEY` in Vercel. Read-only by design.
+- `claude/feature-recurring`: "Recurring" tab — client-side subscription
+  detection (`src/recurring.js`, pure; `getRecurringCandidates()` fetches
+  6 months). Groups by normalized merchant, requires >= 3 charges, median
+  gap 28±4 days with most gaps within ±4 of it, amounts within ±20% of
+  median. Lazy-loads on first tab open, recomputes after sync. No schema
+  changes.
 
 ## Roadmap (agreed order + design notes)
 
@@ -120,7 +126,8 @@ shouldn't have to ask.
      its absence.
    - dataAdapter: `getBudgets()`, `setBudget(category, limit)` (upsert,
      onConflict household_id,category), null limit = no budget.
-2. **Recurring/subscription detection** — client-side: group by normalized
+2. **Recurring/subscription detection** — **branched**
+   (`claude/feature-recurring`), see Pending branches — client-side: group by normalized
    merchant, detect ~monthly cadence (±4 days) with similar amounts (±20%);
    surface as a list with monthly total. No schema.
 3. **Transaction search** — search box over description/merchant/
