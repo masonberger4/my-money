@@ -107,10 +107,20 @@ shouldn't have to ask.
   `api/assistant.js` (claude-opus-4-8, adaptive thinking, prompt-cached
   context block) + `api/_lib/spendingContext.js` (deterministic 90-day
   snapshot). Needs `ANTHROPIC_API_KEY` in Vercel. Read-only by design.
+- `claude/feature-budgets`: per-category monthly budgets. Categories tab
+  gets budget progress bars (category color / #FAC775 / #D85A30 at
+  <80 / 80–100 / >100% of limit), an inline "＋ budget" editor per row
+  (empty = clear), zero-spend budgeted categories still listed, and a
+  budgeted-vs-spent summary strip. Adapter: `getBudgets()`,
+  `setBudget(category, limit)`. Progress reads `getSpending()` groups, so
+  effective-category changes flow through when transaction-editing merges.
+  Migration needed at merge: `supabase/migrations/20260720000001_budgets.sql`
+  (new `budgets` table + RLS; additive, safe on live data). Client tolerates
+  the table not existing yet (budget load falls back to empty).
 
 ## Roadmap (agreed order + design notes)
 
-1. **Budgets** (`claude/feature-budgets`) — next up.
+1. **Budgets** (`claude/feature-budgets`) — **branched**, see Pending branches.
    - Schema: `budgets (household_id default current_household_id(), category
      text, monthly_limit numeric(12,2), pk (household_id, category))`, RLS
      like `settings`.

@@ -195,6 +195,30 @@ export async function getAccountTransactions(accountId, { limit = 500 } = {}) {
   };
 }
 
+// Budgets: one monthly dollar limit per category. No row = no budget.
+// RLS scopes reads to the household; household_id fills in server-side via
+// its column default (same as settings) — never send it from the client.
+export async function getBudgets() {
+  const { data, error } = await supabase.from('budgets').select('category, monthly_limit');
+  if (error) throw error;
+  const budgets = {};
+  for (const row of data) budgets[row.category] = Number(row.monthly_limit);
+  return { budgets };
+}
+
+export async function setBudget(category, limit) {
+  const n = limit == null || limit === '' ? NaN : Number(limit);
+  if (!Number.isFinite(n) || n <= 0) {
+    const { error } = await supabase.from('budgets').delete().eq('category', category);
+    if (error) throw error;
+    return;
+  }
+  const { error } = await supabase
+    .from('budgets')
+    .upsert({ category, monthly_limit: n }, { onConflict: 'household_id,category' });
+  if (error) throw error;
+}
+
 export async function getCashFlow({ num_periods = 6 } = {}) {
   const now = new Date();
   const curY = now.getFullYear();

@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { getOverview, getSpending, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions } from "../dataAdapter.js";
+import { getOverview, getSpending, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, getBudgets, setBudget } from "../dataAdapter.js";
 import { unlinkInstitution } from "../plaidClient.js";
 import { runSync } from "../sync.js";
 import { getSetting, setSetting } from "../db.js";
@@ -89,6 +89,32 @@ function EditName({name,onSave}) {
   );
 }
 
+// Inline budget editor for a Categories row: shows "/ $400" (or "＋ budget"
+// when unset); tap to edit. Enter/blur saves, empty clears, Escape cancels.
+function BudgetEdit({limit,onSave}) {
+  const [ed,setEd]=useState(false);
+  const [val,setVal]=useState(limit!=null?String(limit):"");
+  const ref=useRef();
+  useEffect(()=>{setVal(limit!=null?String(limit):"");},[limit]);
+  useEffect(()=>{if(ed)ref.current?.select();},[ed]);
+  function commit(){setEd(false);const t=val.trim();onSave(t===""?null:t);}
+  if(ed) return (
+    <input ref={ref} value={val} inputMode="decimal" placeholder="$/mo"
+      onChange={e=>setVal(e.target.value.replace(/[^0-9.]/g,""))}
+      onBlur={commit}
+      onKeyDown={e=>{if(e.key==="Enter")commit();if(e.key==="Escape"){setEd(false);setVal(limit!=null?String(limit):"");}}}
+      style={{font:"inherit",fontSize:16,width:76,color:"var(--text)",background:"var(--bg)",
+        border:"1px solid var(--border)",borderRadius:6,padding:"1px 6px",outline:"none",textAlign:"right"}}/>
+  );
+  return (
+    <button onClick={()=>setEd(true)} title={limit!=null?"Tap to change the monthly budget":"Set a monthly budget"}
+      style={{background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",padding:0,
+        fontSize:11,color:"var(--muted)",flexShrink:0}}>
+      {limit!=null?`/ ${fmt(limit)}`:"＋ budget"}
+    </button>
+  );
+}
+
 function Pill({label,color}) {
   return <span style={{display:"inline-flex",alignItems:"center",gap:4,fontSize:10,background:color+"22",color,
     borderRadius:20,padding:"2px 8px",fontWeight:600}}>
@@ -110,6 +136,7 @@ export default function Dashboard({ refreshTick = 0 }) {
   const [transactions,setTransactions]=useState(null);
   const [cashFlow,setCashFlow]=useState(null);
   const [accounts,setAccounts]=useState([]);
+  const [budgets,setBudgets]=useState({});
   const [txAcctFilter,setTxAcctFilter]=useState(null);
   const [selAcct,setSelAcct]=useState(null);
   const [acctTxs,setAcctTxs]=useState(null);
@@ -158,15 +185,18 @@ export default function Dashboard({ refreshTick = 0 }) {
     setError(null);
     const cur=y===now.getFullYear()&&m===now.getMonth()+1;
     try{
-      const[ov,sp,tx,cf,ac]=await Promise.all([
+      const[ov,sp,tx,cf,ac,bu]=await Promise.all([
         cur?getOverview():Promise.resolve(null),
         getSpending({year:y,month:m}),
         getTransactions({year:y,month:m}),
         getCashFlow({num_periods:6}),
         getAccounts(),
+        // Tolerate the budgets table not existing yet (migration lands at merge).
+        getBudgets().catch(()=>({budgets:{}})),
       ]);
       setOverview(ov);setSpending(sp);setTransactions(tx);setCashFlow(cf);
       setAccounts(ac.accounts||[]);
+      setBudgets(bu.budgets||{});
       setLastUpd(new Date());
     }catch(err){
       console.error(err);
@@ -269,6 +299,25 @@ export default function Dashboard({ refreshTick = 0 }) {
   const lastSpent=overview?.last_month?.spending?.amount;
   const delta=lastSpent!=null?totalSpent-lastSpent:null;
   const donutData=cats.slice(0,7).map(c=>({label:getName(c.label),value:c.amount,color:getColor(c.label)}));
+
+  // Budgets read the getSpending() groups (not raw transactions), so when the
+  // adapter's effective-category logic changes (transaction-editing branch),
+  // budget progress follows automatically. Keys are raw category labels.
+  const budgetCount=Object.keys(budgets).length;
+  const catRows=[...cats,
+    ...Object.keys(budgets).filter(k=>!cats.some(c=>c.label===k))
+      .map(k=>({label:k,amount:0,transaction_count:0,percent_of_total:0}))];
+  const budgetedSpent=cats.reduce((s,c)=>budgets[c.label]!=null?s+c.amount:s,0);
+  const budgetedTotal=Object.values(budgets).reduce((s,v)=>s+v,0);
+  const budgetLeft=budgetedTotal-budgetedSpent;
+
+  async function saveBudget(category,val){
+    const n=val==null||val===""?NaN:Number(val);
+    const next={...budgets};
+    if(!Number.isFinite(n)||n<=0)delete next[category];else next[category]=n;
+    setBudgets(next);
+    try{await setBudget(category,val);}catch(err){console.error("budget save failed",err);}
+  }
 
   return (
     <div style={{fontFamily:"'DM Sans','Helvetica Neue',sans-serif",background:"var(--bg,#F7F6F2)",minHeight:"100vh",
@@ -395,23 +444,46 @@ export default function Dashboard({ refreshTick = 0 }) {
               </div>
               <button className="ibtn" style={{fontSize:11}} onClick={()=>setAddingCat(true)}>+ Add category</button>
             </div>
+            {budgetCount>0&&!loading&&(
+              <div style={{display:"flex",alignItems:"center",gap:8,background:"var(--bg)",borderRadius:10,padding:"10px 14px",marginBottom:16,fontSize:12,flexWrap:"wrap"}}>
+                <span style={{color:"var(--muted)"}}>Budgeted <strong style={{color:"var(--text)",fontFamily:"'DM Mono',monospace"}}>{fmt(budgetedTotal)}</strong></span>
+                <span style={{color:"var(--muted)"}}>·</span>
+                <span style={{color:"var(--muted)"}}>Spent <strong style={{color:"var(--text)",fontFamily:"'DM Mono',monospace"}}>{fmt(budgetedSpent)}</strong></span>
+                <span style={{flex:1}}/>
+                <span style={{fontWeight:600,color:budgetLeft>=0?"#1D9E75":"#D85A30"}}>
+                  {budgetLeft>=0?`${fmt(budgetLeft)} left`:`${fmt(-budgetLeft)} over`}
+                </span>
+              </div>
+            )}
             {loading?[1,2,3,4,5].map(i=><div key={i} style={{marginBottom:14}}><Sk h={14}/></div>):
-              cats.map((c,i)=>(
-                <div key={i} style={{marginBottom:14,animationDelay:i*.03+"s"}}>
+              catRows.map((c,i)=>{
+                const lim=budgets[c.label];
+                const hasB=lim!=null;
+                const ratio=hasB&&lim>0?c.amount/lim:0;
+                const barColor=hasB?(ratio>=1?"#D85A30":ratio>=0.8?"#FAC775":getColor(c.label)):getColor(c.label);
+                const barW=hasB?Math.min(ratio,1)*100:(c.amount/maxCat)*100;
+                return (
+                <div key={c.label} style={{marginBottom:14,animationDelay:i*.03+"s"}}>
                   <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:5}}>
                     <div style={{display:"flex",alignItems:"center",gap:8,flex:1,minWidth:0}}>
                       <Swatch color={getColor(c.label)} onChange={hex=>saveColors({...customColors,[c.label]:hex})}/>
                       <EditName name={getName(c.label)} onSave={v=>saveNames({...customNames,[c.label]:v})}/>
                       <span style={{fontSize:11,color:"var(--muted)",flexShrink:0,marginLeft:4}}>{c.transaction_count} txn{c.transaction_count!==1?"s":""}</span>
                     </div>
-                    <span style={{fontSize:13,fontFamily:"'DM Mono',monospace",marginLeft:12,flexShrink:0}}>{fmt(c.amount)}</span>
+                    <div style={{display:"flex",alignItems:"baseline",gap:5,marginLeft:12,flexShrink:0}}>
+                      <span style={{fontSize:13,fontFamily:"'DM Mono',monospace"}}>{fmt(c.amount)}</span>
+                      <BudgetEdit limit={lim} onSave={v=>saveBudget(c.label,v)}/>
+                    </div>
                   </div>
                   <div style={{display:"flex",alignItems:"center",gap:8}}>
-                    <div className="bar-bg"><div className="bar-fill" style={{width:((c.amount/maxCat)*100)+"%",background:getColor(c.label)}}/></div>
-                    <span style={{fontSize:11,color:"var(--muted)",width:30,textAlign:"right",flexShrink:0}}>{c.percent_of_total?.toFixed(0)}%</span>
+                    <div className="bar-bg"><div className="bar-fill" style={{width:barW+"%",background:barColor}}/></div>
+                    <span style={{fontSize:11,color:hasB&&ratio>=1?"#D85A30":"var(--muted)",width:38,textAlign:"right",flexShrink:0}}>
+                      {hasB?(lim>0?Math.round(ratio*100)+"%":"—"):`${c.percent_of_total?.toFixed(0)}%`}
+                    </span>
                   </div>
                 </div>
-              ))}
+                );
+              })}
 
             {customCats.length>0&&(
               <>
@@ -428,7 +500,7 @@ export default function Dashboard({ refreshTick = 0 }) {
               </>
             )}
             <div style={{marginTop:16,fontSize:11,color:"var(--muted)",background:"var(--bg)",borderRadius:8,padding:"8px 12px"}}>
-              Click a color swatch to change it · Double-click a name to rename it
+              Click a color swatch to change it · Double-click a name to rename it · Tap ＋ budget to set a monthly limit
             </div>
           </div>
         )}
