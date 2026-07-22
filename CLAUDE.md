@@ -1,209 +1,222 @@
 # my-money — project memory
 
 Household spending dashboard for two users (Mason + wife), shared login,
-viewed on laptop + iPhones (PWA). Personal project; pragmatic > enterprise.
+laptop + iPhone PWA. Personal project; pragmatic > enterprise.
 
-**Maintain this file.** Whenever a session settles an architecture decision,
-changes the workflow, adds/merges a feature branch, learns a new gotcha, or
-reverses anything written here, update this file in the same commit or PR as
-the change — don't leave decisions stranded in conversation. Keep the
-"Pending branches" and "Roadmap" sections current as branches merge. Mason
-shouldn't have to ask.
+**Maintain this file** in the same PR as any change that settles an
+architecture decision, changes the workflow, merges a branch, or adds a gotcha.
+Keep Pending/Roadmap current. Deep history lives in git log, GitHub PRs, and the
+Vercel dashboard — don't duplicate it here; keep this file lean and
+load-bearing. Build specs in Roadmap collapse to a one-line "Merged features"
+entry once shipped.
 
 ## Architecture (decided, don't relitigate)
 
 - **Cloud-first**: Supabase Postgres is the single source of truth. No local
-  cache, no IndexedDB (Dexie was removed — don't reintroduce it).
-- **React + Vite SPA** deployed on **Vercel**; thin serverless functions in
-  `api/` hold all secrets. Client talks to Supabase directly for reads/writes
-  (RLS-scoped) and to `api/` for anything involving Plaid or service secrets.
-- **Plaid** is the bank-data source (a custom scraper was designed and
-  explicitly abandoned — see git history if curious).
-- **Multi-Plaid-credential support**: `PLAID_CREDENTIALS` env var is a JSON
-  list of {key, client_id, secret}. Link-token creation picks the first
-  credential with < 10 Items; each institution row records its
-  `plaid_credential_key`. Legacy `PLAID_CLIENT_ID`/`PLAID_SECRET` fall back as
-  key "main".
-- **Auth**: one shared Supabase Auth user (email+password) for the household.
-  `household_members` maps user → household; `current_household_id()` +
-  RLS policies scope every table. `api/` routes verify the JWT via
-  `requireUser()` (`api/_lib/supabase.js`).
-- **Plaid access tokens** live in `plaid_tokens` — RLS enabled, ZERO client
-  policies; only service_role (the api/ routes) can read. Never expose them.
+  cache / IndexedDB (Dexie was removed — don't reintroduce).
+- **React + Vite SPA** on **Vercel**; secrets live in serverless `api/`
+  functions. Client reads/writes Supabase directly (RLS-scoped) and calls `api/`
+  only for Plaid or service-secret work.
+- **Plaid** is the bank-data source (a custom scraper was designed then
+  abandoned — hence scraper-era names like the original `synthetic_id` column,
+  now `plaid_tx_id`).
+- **Multi-Plaid-credential**: `PLAID_CREDENTIALS` env = JSON list of
+  `{key, client_id, secret}`; link-token creation picks the first credential
+  with < 10 Items; each institution stores its `plaid_credential_key`. Legacy
+  `PLAID_CLIENT_ID`/`PLAID_SECRET` fall back as key "main".
+- **Auth**: one shared Supabase Auth user for the household.
+  `household_members` maps user → household; `current_household_id()` + RLS
+  policies scope every table. `api/` routes verify the JWT via `requireUser()`
+  (`api/_lib/supabase.js`).
+- **RLS shape**: `accounts` / `transactions` / `institutions` each have a single
+  `for all to authenticated using (household_id = current_household_id())`
+  policy — so the **client can INSERT/update/delete its own rows directly**
+  (`household_id` defaults to `current_household_id()`). `plaid_tokens` has ZERO
+  client policies — only service_role (api/) reads them. Never expose them.
 - **Sync is server-side** (`api/sync.js`): cursor-based transactionsSync per
-  institution, upserts accounts/transactions, `needs_reauth` on
-  ITEM_LOGIN_REQUIRED.
+  institution; upserts accounts (onConflict `institution_id,plaid_account_id`)
+  and transactions (onConflict `account_id,plaid_tx_id`); `needs_reauth` on
+  ITEM_LOGIN_REQUIRED. Only `depository`+`credit` account types are synced.
 
 ## Key files
 
 | File | Role |
 |---|---|
-| `src/components/Dashboard.jsx` | Almost the entire UI — single file, inline styles, tabs: overview/categories/transactions/accounts/trends. Shared mini-components: `Pill`, `Swatch`, `EditName`, `Sk` (skeleton), `Donut`. |
-| `src/dataAdapter.js` | All Supabase reads + shapes consumed by Dashboard. Keep return shapes stable. |
+| `src/components/Dashboard.jsx` | Almost the entire UI — single file, inline styles, tabs: overview/categories/transactions/accounts/trends/recurring/ask. Shared mini-components: `Pill`, `Swatch`, `EditName`, `Sk` (skeleton), `Donut`. |
+| `src/dataAdapter.js` | All Supabase reads + shapes consumed by Dashboard; the Trends cash-flow model lives here (see Conventions). Keep return shapes stable. |
 | `src/categoryMap.js` | Plaid category → app category mapping; `applyAccountRules` (credit-card negatives → "Return", excluded from income); pure JS, imported by server code too. |
 | `src/plaidClient.js` | Client → api/ fetch wrappers (JWT attached). |
 | `src/sync.js` | Single-flight wrapper triggering server sync. |
-| `src/db.js` | getSetting/setSetting on the Supabase `settings` table (dashboard prefs: colors, names, custom categories). |
+| `src/db.js` | getSetting/setSetting on the Supabase `settings` table (dashboard prefs: colors, names, custom categories, `asst:model`/`asst:effort`). |
+| `src/assistantModels.js` | Shared client+server allowlist of assistant models + cost estimator. |
 | `api/_lib/plaid.js` | Credential list parsing + capacity picker. |
-| `api/_lib/supabase.js` | Service-role client + requireUser (JWT → householdId). |
-| `supabase/migrations/` | Ordered SQL migrations. |
-| `supabase/setup_all.sql` | One-paste fresh install — **DESTRUCTIVE, wipes all tables. Never run on live data. Never re-generate it to include new migrations without that warning.** |
+| `api/_lib/supabase.js` | Service-role client + `requireUser` (JWT → householdId). |
+| `supabase/migrations/` | Ordered SQL migrations (additive-only on live data). |
+| `supabase/setup_all.sql` | One-paste fresh install — **DESTRUCTIVE, wipes all tables. Never run on live data. Never re-generate to include new migrations without that warning.** |
 
-## Development workflow (agreed with Mason)
+## Development workflow
 
-1. `main` is the trunk and **Vercel's production branch** — pushes to main
-   auto-deploy to production (`my-money-smoky.vercel.app`).
-2. Features go on `claude/feature-<name>` branches cut from main. Pushes get
-   Vercel Preview deployments (preview URLs require Mason's Vercel login).
-3. Mason reviews the preview, then says "merge <feature>" → merge to main.
-4. **Migrations are additive-only** on live data (`alter table ... add
-   column`). Hand Mason the exact SQL to paste in the Supabase SQL Editor at
-   merge time. Test migrations locally first (see below).
-5. Don't create PRs unless asked. Delete branches after merge (GitHub
-   auto-delete may be enabled).
+1. `main` is the trunk and **Vercel's production branch** — pushes auto-deploy
+   to production (`my-money-smoky.vercel.app`).
+2. Features on `claude/feature-<name>` branches cut from main → Vercel Preview
+   deploys (preview URLs need Mason's Vercel login; **previews share the PROD
+   Supabase database** — schema-dependent branches need their migration landed
+   first, and preview edits are real).
+3. Mason reviews the preview → says "merge <feature>" → merge to main. Don't
+   merge without that. Don't open PRs unless asked. Delete branches after merge
+   (this sandbox can't delete remote branches — Mason clicks it in the UI).
+4. **Migrations are additive-only** on live data (`alter table … add column`).
+   Hand Mason the exact SQL to paste in the Supabase SQL Editor at merge time.
 
-### Local verification patterns (used throughout; recreate as needed)
-
-- **SQL**: local Postgres 16 is available (`sudo -u postgres pg_ctlcluster 16
-  main start`). Stub Supabase: create `auth` schema + `auth.users` +
-  `auth.uid()` reading `request.jwt.claims.sub`, roles
-  authenticated/anon/service_role, publication supabase_realtime. Then run
-  migrations in order and test triggers/RLS.
-- **UI**: mock harness at `.claude/mockapp/` (gitignored) — a tiny Vite app
-  that renders `Dashboard.jsx` with `resolve.alias` regex entries replacing
-  `dataAdapter.js`, `sync.js`, `db.js`, `plaidClient.js` with mocks. Serve on
-  :5199, screenshot with playwright-core (`executablePath:
-  '/opt/pw-browsers/chromium'`, viewport 390×844). Always screenshot new UI
-  before pushing.
-- **Build check**: `VITE_SUPABASE_URL=https://placeholder.supabase.co
-  VITE_SUPABASE_ANON_KEY=placeholder npm run build`.
+**Local checks** (gitignored; recreate as needed): SQL — local Postgres 16 stub
+(create `auth` schema + `auth.users` + `auth.uid()` reading
+`request.jwt.claims.sub`, the three roles, publication `supabase_realtime`; run
+migrations in order, test triggers/RLS). UI — mock harness: a tiny Vite app
+rendering `Dashboard.jsx` with `resolve.alias` **full-match** regexes
+(`/^.*\/dataAdapter\.js$/`) swapping dataAdapter/sync/db/plaidClient for mocks;
+playwright-core screenshot (`executablePath:'/opt/pw-browsers/chromium'`,
+390×844). Screenshot new UI before pushing. Build:
+`VITE_SUPABASE_URL=https://placeholder.supabase.co VITE_SUPABASE_ANON_KEY=placeholder npm run build`.
 
 ## Conventions
 
 - Dashboard style: compact inline-styled JSX, CSS vars (--bg, --card, --text,
-  --muted, --border), dark mode via prefers-color-scheme. Accent #7F77DD.
+  --muted, --border), dark mode via prefers-color-scheme, accent #7F77DD.
+  Mobile-first: verify at 390px; tab bar scrolls horizontally.
 - Amounts follow Plaid: **positive = money out, negative = money in**.
-- Effective category = `user_category || mapped_category` (user override
-  wins; `user_category`/`excluded`/`user_description` exist only on the
-  transaction-editing branch until merged).
-- "Transfers and card payments" and "Return" are never counted as spending;
-  "Return" (credit-card negatives) never counted as income.
-- **Two spending/income models (deliberate — don't "unify" without asking):**
-  - **Categories tab + Overview headline + budgets** = *purchase-based*:
-    `sumSpending` counts what was bought (card + debit purchases) by category,
-    excluding "Transfers and card payments"/"Return". Also drives the Overview
-    "vs last month" delta. `getSpending` / `getOverview`.
-  - **Trends "income vs spending" + 6-mo bars** = *joint-budget cash-flow*
-    (`getCashFlow`). The household's connected accounts are two **joint** BECU
-    accounts (checking + savings); real paychecks land in three **personal**
-    accounts that are NOT connected to Plaid. Chosen model (Mason, joint-budget
-    view):
-    - **Income** (`cashIncome`) = money *into* either joint account, checking
-      **or** savings — `isHouseholdDepository` = `type === 'depository'` (savings
-      included so income arriving via savings isn't missed). Includes money moved
-      in from the personal accounts: with only the joint accounts synced there's
-      no leg to wash those against, and funding the joint budget from a personal
-      account is the closest measurable proxy for income (so income runs high —
-      it is NOT just paychecks). Incl. paychecks/benefits Plaid tags
-      `TRANSFER_IN_DEPOSIT`, not only `INCOME`.
-    - **Spending** (`cashSpending`) = money *out of* joint **checking** only
-      (`isCheckingAccount` = depository & `subtype !== 'savings'`). Savings
-      outflows are never spending (expenses are paid from checking). Incl.
-      credit-card *payments* (card *purchases* are NOT counted here — the payment
-      that leaves checking is).
-    - So Trends spending can legitimately differ from the Overview headline —
-      different questions. **Limitation:** true household income is unmeasurable
-      until the personal accounts are connected (paychecks land there); the
-      alternatives (connect personal accounts / filter personal transfers out of
-      income) were discussed and set aside in favor of this view.
-  - **Trends "Cash flow" section** = net per month (`income − spending`,
-    computed client-side from the `getCashFlow` periods): diverging green/red
-    bars. A wildly negative month flags where the cash-flow model diverges from
-    reality (debugging aid).
-  - **Internal transfers** (BECU checking ↔ savings) are washed from the cash-
-    flow view by `markInternalTransfers`: a depository `TRANSFER_OUT` leg pairs
-    with a depository `TRANSFER_IN` of equal amount on a *different* account
-    within 4 days (legs can post on different days); both get `_internal` and
-    are skipped. Restricted to TRANSFER_IN/OUT + depository↔depository so real
-    income (an unmatched deposit) and card payments (checking→credit) still
-    count. Needs `raw_category` + `subtype` in the query (both fetched). Only the
-    two joint accounts are synced, so the *only* pairs that can match are joint
-    checking ↔ joint savings — transfers in from the un-synced personal accounts
-    have no matching leg and (by design) count as income (see joint-budget model
-    above).
-  - History: a same-day/same-amount "wash" and a blanket `raw_category` income
-    filter were both tried and abandoned (over-matched real purchases; dropped
-    real income arriving as `TRANSFER_IN`). See git log if curious.
-- Account labels: `nickname || "name ··mask"`; account badge colors from
-  `ACCOUNT_COLORS` palette by index when `color` is null.
-- Plaid sync upserts deliberately omit user-owned columns (nickname, color,
+- Effective category = `user_category || mapped_category` (user override wins).
+- "Transfers and card payments" and "Return" (credit-card negatives) are never
+  counted as spending; "Return" is never counted as income.
+- Plaid sync upserts deliberately OMIT user-owned columns (nickname, color,
   hidden, user_category, user_description, excluded) so edits survive syncs.
-- Mobile first: verify at 390px width; tab bar scrolls horizontally.
+- Account labels: `nickname || "name ··mask"`; badge color from `ACCOUNT_COLORS`
+  by index when `color` is null.
 
-## Merged features (live on main)
+### Two spending/income models (deliberate — don't "unify" without asking)
+- **Purchase-based** (Categories tab, Overview headline, budgets, "vs last
+  month" delta): `sumSpending` / `getSpending` count what was *bought* by
+  category, excluding Transfers/Return.
+- **Joint-budget cash-flow** (Trends income-vs-spending, 6-mo bars, Cash flow
+  section): `getCashFlow`. The connected accounts are two **joint** BECU
+  accounts (checking + savings); real paychecks land in three **personal**
+  accounts that are NOT connected to Plaid — so true household income is
+  unmeasurable until those are added (see CSV import in Roadmap). Model chosen
+  by Mason ("joint-budget view"):
+  - **Income** (`cashIncome`) = money *into* either joint account, checking OR
+    savings — `isHouseholdDepository` = `type === 'depository'`. Includes money
+    moved in from the personal accounts (no synced counter-leg to wash against),
+    so income runs high — it is NOT just paychecks.
+  - **Spending** (`cashSpending`) = money *out of* joint **checking** only
+    (`isCheckingAccount` = depository & `subtype !== 'savings'`). Savings
+    outflows are never spending. Incl. credit-card *payments*; card *purchases*
+    are not counted here.
+  - **Internal transfers** washed by `markInternalTransfers`: a depository
+    `TRANSFER_OUT` pairs with a depository `TRANSFER_IN` of equal amount on a
+    *different* account within 4 days → both `_internal`, skipped. Only the two
+    joint accounts are synced, so the only pairs that can match are joint
+    checking ↔ savings; transfers in from the un-synced personal accounts stay
+    counted as income (by design). Needs `raw_category` + `subtype` (both
+    queried).
+  - **Cash flow section** = net per month (income − spending), diverging bars.
+  - Trends spending can legitimately differ from the Overview headline —
+    different questions. Abandoned attempts (same-day/same-amount wash; blanket
+    `raw_category` income filter) are in git log — don't retry them.
+- **Assistant model/effort** is user-selectable; `src/assistantModels.js` is the
+  shared allowlist (Haiku 4.5 / Sonnet 5 / Opus 4.8) + `estimateCostRange`. The
+  server validates the choice and only sends `thinking`/`effort` to models that
+  support them (Haiku 4.5 predates both — sending them 400s). Requires
+  `ANTHROPIC_API_KEY` in Vercel (else the Ask tab shows "not configured").
 
-- **Transaction editing** — tap transaction → detail sheet: recategorize
-  (`user_category`), exclude from totals (`excluded`), rename
-  (`user_description`), masked-descriptor fallback ("****" → "Card
-  transaction"). Columns live on `transactions`.
-- **Budgets** — per-category monthly limits on the Categories tab: progress
-  bars (category color / #FAC775 / #D85A30 at <80 / 80–100 / >100%), inline
-  "＋ budget" editor per row (empty = clear), zero-spend budgeted categories
-  still listed, budgeted-vs-spent summary strip. `budgets` table + RLS;
-  `getBudgets()` / `setBudget(category, limit)`.
-- **Recurring** — "Recurring" tab: client-side subscription detection.
-  `src/recurring.js` (pure: normalized-merchant grouping, ≥3 charges,
-  median gap 28±4 days, amounts within ±20%); `getRecurringCandidates()`
-  fetches 6 months. Lazy-computed on first tab open, recomputed after sync.
-  No schema.
-- **Search** — cross-month search box atop the Transactions tab (debounced
-  300ms, min 2 chars, stale-response guard). `searchTransactions()` runs a
-  Supabase `ilike` over description/merchant/user_description (wildcards
-  escaped, `.or()`-unsafe chars stripped), newest-first, 200-match cap.
-  No schema.
-- **Assistant** — "Ask" tab: Claude-powered spending Q&A. `api/assistant.js`
-  (prompt-cached context block) + `api/_lib/spendingContext.js` (deterministic
-  90-day snapshot). Read-only by design; conversations not persisted.
-  **Requires `ANTHROPIC_API_KEY` in Vercel** — without it the tab shows an
-  "assistant not configured" message. **Model + effort are user-selectable**
-  (dropdowns in the Ask tab, persisted as `asst:model`/`asst:effort` settings):
-  `src/assistantModels.js` is the shared allowlist (Haiku 4.5 / Sonnet 5 /
-  Opus 4.8) + `estimateCostRange` for the "~¢/question" hint. The server
-  validates the choice against that allowlist and only sends `thinking`/`effort`
-  for models that support them (Haiku predates both — sending them 400s).
+## Merged features (live on main; details in code + PRs)
 
-## Pending branches (awaiting Mason's review)
+- **Transaction editing** — detail sheet: recategorize (`user_category`),
+  exclude (`excluded`), rename (`user_description`); columns on `transactions`.
+- **Budgets** — per-category monthly limits + progress bars; `budgets` table.
+- **Recurring** — client-side subscription detection (`src/recurring.js`, pure).
+- **Search** — cross-month `ilike` search (`searchTransactions`).
+- **Assistant** — "Ask" tab, Claude spending Q&A (`api/assistant.js` +
+  `api/_lib/spendingContext.js`), read-only, model/effort selectable.
+- **Trends joint-budget cash-flow + Cash flow section** (see Conventions).
 
-_(none — all roadmap features merged)_
-## Roadmap (agreed order + design notes)
+## Pending branches
+_(none)_
 
-1. **Budgets** — ✅ merged (see Merged features above).
-2. **Recurring/subscription detection** — ✅ merged (see Merged features above).
-3. **Transaction search** — ✅ merged (see Merged features above).
-4. Later ideas (discussed, not committed): CSV export, net worth (needs
-   Plaid Investments/Liabilities products — check per-call cost first),
-   savings rate stat, notes/tags on transactions, sign-out button.
+## Roadmap
 
-## Gotchas (learned the hard way)
+**Next: CSV import** — make the un-synced personal-account income visible (spec
+below). Later (discussed, not committed): net worth / debt-payoff tracker,
+auto-categorization rules, cash-flow forecast, savings goals, CSV/PDF export,
+sign-out button.
+
+### CSV import — build spec
+Goal: upload a bank CSV (BECU format first) → create real `transactions` rows on
+a **manual account** so they flow into Trends/Categories/Search/Assistant with
+no downstream special-casing (the transactions table is adapter-agnostic — the
+whole reason the old `synthetic_id` existed).
+
+Feasibility (verified against schema + api/):
+- **Client-side is sufficient.** The `*_all` RLS policies let the authenticated
+  client INSERT into `institutions`/`accounts`/`transactions`; `household_id`
+  defaults to `current_household_id()` (resolves from the client — NOT in the
+  SQL Editor, where `auth.uid()` is NULL). No new api/ endpoint or RLS policy
+  required. A service-role `api/import-csv.js` is optional (only for server-side
+  validation).
+- **Sync won't clobber manual data.** `api/sync.js` only processes institutions
+  that have a `plaid_token`; a manual institution has none → skipped.
+
+Data model:
+- One **manual institution** per household (`adapter_id` 'manual',
+  name "Imported").
+- One **manual account** per imported account: `type` 'depository', `subtype`
+  'checking'|'savings', synthetic `plaid_account_id = 'manual:'+uuid` (satisfies
+  the unique `institution_id,plaid_account_id`).
+- Each CSV row → transaction: `account_id`, `date`, `amount` (see sign),
+  `description`, `merchant_name` (guessed), `mapped_category` + `raw_category`
+  (see categorize), `plaid_tx_id = 'csv:'+hash(date,amount,desc,rowIndex)`.
+  Upsert onConflict `account_id,plaid_tx_id` → re-importing overlapping date
+  ranges is idempotent.
+- **Sign flip**: bank CSV is positive=money in (Credit) / negative=out (Debit);
+  the app uses Plaid's opposite convention, so `amount = -(csvSignedValue)`.
+- **Categorize from description** (CSV has no Plaid category): keyword map — e.g.
+  NEWREZ→Housing, WA ST EMPLOY SEC→Income, CAPITAL ONE/DISCOVER/WELLS FARGO→card
+  payment, VENMO→Transfers. **Crucially** set
+  `raw_category = 'TRANSFER_IN'|'TRANSFER_OUT'` for "Online Banking Transfer
+  To/from" lines so `markInternalTransfers` can wash them.
+
+Flow (UI): Import screen → pick/create the target manual account → auto-detect
+BECU columns (`Date,No.,Description,Debit,Credit`) or map manually → preview
+(duplicates greyed via the plaid_tx_id hash, guessed category, detected internal
+transfers) → confirm → insert. Trends recompute on next read (dataAdapter reads
+all non-hidden depository transactions).
+
+Recommended schema adds (optional but clean; additive):
+- `accounts.is_manual boolean default false` (UI badge + belt-and-suspenders
+  skip in sync).
+- `transactions.source text default 'plaid'` ('csv' on imports — undo/filter).
+
+**Open decision — ask Mason before wiring into Trends.** Importing a personal
+**checking** account upgrades Trends from joint-budget → whole-household:
+personal→joint transfers then wash on both legs, real paychecks become income,
+and personal-checking *outflows* would also become spending. Decide: personal
+accounts income-only, or full in/out?
+
+Caveats: per-bank CSV formats differ (ship the BECU preset first); no stable
+bank transaction IDs (hash dedup; prompt on genuinely identical same-day,
+same-amount rows); don't import an account Plaid already syncs (double-count) —
+warn on overlap; CSV is a manual periodic export (goes stale vs Plaid's live
+sync).
+
+## Gotchas
 
 - Supabase SQL Editor runs as service_role: `auth.uid()` is NULL, so
-  `household_id` defaults DON'T resolve — admin inserts must set it
-  explicitly.
-- Vercel env vars: `VITE_*` are baked at BUILD time; adding/changing them
-  requires a redeploy. Check Production AND Preview checkboxes. Missing
-  client config renders the ConfigErrorScreen (App.jsx) instead of white.
-- Preview deployments share the production Supabase database — migrations
-  must land before previewing schema-dependent branches; edits made in
-  previews are real.
-- The empty-institution count query error must NOT fall back to the
-  "connect your first account" screen (see App.jsx count handling).
-- iOS PWA: apple-touch-icon must be PNG; service worker (`public/sw.js`)
-  never caches `/api/*`; bump its CACHE_VERSION when changing it.
-- One Claude session per line of work, branched from current main — two
-  sessions once forked the app from different bases and production regressed
-  (the "iphone-app branch" incident, since merged).
-- GitHub outages happen: if pushes stop deploying and API calls 503,
-  check githubstatus.com before debugging webhooks.
-- This sandbox's git relay can push to branches but CANNOT delete remote
-  branches; GitHub MCP tools may disconnect/reconnect — retry or fall back
-  to asking Mason to click it in the UI.
+  `household_id` defaults DON'T resolve — admin inserts there must set it
+  explicitly. (Client inserts are fine — `auth.uid()` resolves.)
+- Vercel `VITE_*` vars are baked at BUILD time — changing them needs a redeploy
+  (check Production AND Preview). Missing client config renders the
+  ConfigErrorScreen (App.jsx), not white.
+- The empty-institution count-query error must NOT fall back to the "connect
+  your first account" screen (see App.jsx count handling).
+- iOS PWA: apple-touch-icon must be PNG; service worker (`public/sw.js`) never
+  caches `/api/*`; bump its CACHE_VERSION when changing it.
+- One Claude session per line of work, branched from current main — two sessions
+  off different bases once regressed production (the "iphone-app" incident).
