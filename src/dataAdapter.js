@@ -139,22 +139,35 @@ function sumSpending(txs) {
   return total;
 }
 
-// --- Trends cash flow (checking-account view) --------------------------------
+// --- Trends cash flow (joint-budget view) ------------------------------------
 // The Trends "income vs spending" chart measures cash moving through the
-// household's checking account(s): income = money arriving in checking,
-// spending = money leaving checking. Internal transfers to/from the household's
-// own savings are washed out (markInternalTransfers) so moving money to savings
-// isn't "spending" and moving it back isn't "income". Credit-card *purchases*
-// are not counted here — the card *payment* that leaves checking is (that's the
-// cash actually spent). This is deliberately different from the Categories tab
-// / Overview headline (sumSpending above), which break spending down by what
-// was purchased so per-category budgets work.
+// household's *joint* accounts, treated as one budget:
+//   income   = money arriving in the joint checking OR savings accounts
+//   spending = money leaving the joint checking account (expenses are paid from
+//              checking; money leaving savings is never an expense)
+// Transfers between the joint checking and joint savings wash out
+// (markInternalTransfers), so moving money to savings isn't "spending" and
+// moving it back isn't "income". Money the household moves in from its own
+// *personal* accounts (not connected to Plaid) has no matching leg to wash
+// against, so it counts as income — deliberate: with only the joint accounts
+// synced, funding the joint budget from a personal account is the closest thing
+// to measurable income (real paychecks land in the un-connected personal
+// accounts). Credit-card *purchases* are not counted here — the card *payment*
+// that leaves checking is (that's the cash actually spent). This is deliberately
+// different from the Categories tab / Overview headline (sumSpending above),
+// which break spending down by what was purchased so per-category budgets work.
+function isHouseholdDepository(t) {
+  // Any connected depository account (checking or savings) — the joint budget.
+  return t.accounts?.type === 'depository';
+}
+
 function isCheckingAccount(t) {
   // Depository and not the savings pot. Lenient on subtype so a null/oddly
   // typed primary account still counts; only "savings" is treated as separate.
   return t.accounts?.type === 'depository' && t.accounts?.subtype !== 'savings';
 }
 
+// Expenses are paid from checking only; savings outflows are not spending.
 function cashSpending(txs) {
   let total = 0;
   for (const t of txs) {
@@ -164,11 +177,14 @@ function cashSpending(txs) {
   return total;
 }
 
+// Income is money into either joint account (checking or savings). Savings is
+// included so income that arrives via savings — money moved in from a personal
+// account — is not missed.
 function cashIncome(txs) {
   let total = 0;
   for (const t of txs) {
     if (t.excluded || t._internal) continue;
-    if (isCheckingAccount(t) && t.amount < 0) total += Math.abs(t.amount);
+    if (isHouseholdDepository(t) && t.amount < 0) total += Math.abs(t.amount);
   }
   return total;
 }

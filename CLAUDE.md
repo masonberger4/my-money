@@ -93,14 +93,29 @@ shouldn't have to ask.
     `sumSpending` counts what was bought (card + debit purchases) by category,
     excluding "Transfers and card payments"/"Return". Also drives the Overview
     "vs last month" delta. `getSpending` / `getOverview`.
-  - **Trends "income vs spending" + 6-mo bars** = *checking cash-flow*:
-    `cashIncome` / `cashSpending` count money in/out of the household's checking
-    account(s) — `isCheckingAccount` = depository & `subtype !== 'savings'`.
-    Income = deposits into checking (incl. paychecks Plaid tags
-    `TRANSFER_IN_DEPOSIT`, not just `INCOME`); spending = money out of checking,
-    incl. credit-card *payments* (card *purchases* are NOT counted here — the
-    payment that leaves checking is). `getCashFlow`. So Trends spending can
-    legitimately differ from the Overview headline — different questions.
+  - **Trends "income vs spending" + 6-mo bars** = *joint-budget cash-flow*
+    (`getCashFlow`). The household's connected accounts are two **joint** BECU
+    accounts (checking + savings); real paychecks land in three **personal**
+    accounts that are NOT connected to Plaid. Chosen model (Mason, joint-budget
+    view):
+    - **Income** (`cashIncome`) = money *into* either joint account, checking
+      **or** savings — `isHouseholdDepository` = `type === 'depository'` (savings
+      included so income arriving via savings isn't missed). Includes money moved
+      in from the personal accounts: with only the joint accounts synced there's
+      no leg to wash those against, and funding the joint budget from a personal
+      account is the closest measurable proxy for income (so income runs high —
+      it is NOT just paychecks). Incl. paychecks/benefits Plaid tags
+      `TRANSFER_IN_DEPOSIT`, not only `INCOME`.
+    - **Spending** (`cashSpending`) = money *out of* joint **checking** only
+      (`isCheckingAccount` = depository & `subtype !== 'savings'`). Savings
+      outflows are never spending (expenses are paid from checking). Incl.
+      credit-card *payments* (card *purchases* are NOT counted here — the payment
+      that leaves checking is).
+    - So Trends spending can legitimately differ from the Overview headline —
+      different questions. **Limitation:** true household income is unmeasurable
+      until the personal accounts are connected (paychecks land there); the
+      alternatives (connect personal accounts / filter personal transfers out of
+      income) were discussed and set aside in favor of this view.
   - **Trends "Cash flow" section** = net per month (`income − spending`,
     computed client-side from the `getCashFlow` periods): diverging green/red
     bars. A wildly negative month flags where the cash-flow model diverges from
@@ -111,7 +126,11 @@ shouldn't have to ask.
     within 4 days (legs can post on different days); both get `_internal` and
     are skipped. Restricted to TRANSFER_IN/OUT + depository↔depository so real
     income (an unmatched deposit) and card payments (checking→credit) still
-    count. Needs `raw_category` + `subtype` in the query (both fetched).
+    count. Needs `raw_category` + `subtype` in the query (both fetched). Only the
+    two joint accounts are synced, so the *only* pairs that can match are joint
+    checking ↔ joint savings — transfers in from the un-synced personal accounts
+    have no matching leg and (by design) count as income (see joint-budget model
+    above).
   - History: a same-day/same-amount "wash" and a blanket `raw_category` income
     filter were both tried and abandoned (over-matched real purchases; dropped
     real income arriving as `TRANSFER_IN`). See git log if curious.
