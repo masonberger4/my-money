@@ -5,6 +5,7 @@ import { unlinkInstitution, askAssistant } from "../plaidClient.js";
 import { ERA_CATEGORIES } from "../categoryMap.js";
 import { runSync } from "../sync.js";
 import { getSetting, setSetting } from "../db.js";
+import { ASSISTANT_MODELS, EFFORT_LEVELS, DEFAULT_MODEL, DEFAULT_EFFORT, estimateCostRange, formatCents } from "../assistantModels.js";
 
 const DEFAULT_COLORS = {
   "Shopping and gear": "#7F77DD", "Health and fitness": "#7F77DD",
@@ -162,6 +163,8 @@ export default function Dashboard({ refreshTick = 0 }) {
   const [chatInput,setChatInput]=useState("");
   const [chatBusy,setChatBusy]=useState(false);
   const [chatError,setChatError]=useState(null);
+  const [asstModel,setAsstModel]=useState(DEFAULT_MODEL);
+  const [asstEffort,setAsstEffort]=useState(DEFAULT_EFFORT);
   const chatEndRef=useRef(null);
   const didInitialSync=useRef(false);
 
@@ -176,7 +179,7 @@ export default function Dashboard({ refreshTick = 0 }) {
     setChatMsgs(next);
     setChatBusy(true);
     try{
-      const res=await askAssistant(next);
+      const res=await askAssistant(next,{model:asstModel,effort:asstEffort});
       setChatMsgs(prev=>[...prev,{role:"assistant",content:res.reply}]);
     }catch(err){
       console.error("assistant failed",err);
@@ -189,14 +192,18 @@ export default function Dashboard({ refreshTick = 0 }) {
   useEffect(()=>{
     async function load(){
       try {
-        const [c,n,cc]=await Promise.all([
+        const [c,n,cc,am,ae]=await Promise.all([
           getSetting("dash:colors").catch(()=>null),
           getSetting("dash:names").catch(()=>null),
           getSetting("dash:cats").catch(()=>null),
+          getSetting("asst:model").catch(()=>null),
+          getSetting("asst:effort").catch(()=>null),
         ]);
         if(c)setCustomColors(JSON.parse(c));
         if(n)setCustomNames(JSON.parse(n));
         if(cc)setCustomCats(JSON.parse(cc));
+        if(am&&ASSISTANT_MODELS[am])setAsstModel(am);
+        if(ae&&EFFORT_LEVELS.includes(ae))setAsstEffort(ae);
       } catch{}
       setReady(true);
     }
@@ -209,6 +216,8 @@ export default function Dashboard({ refreshTick = 0 }) {
   async function saveColors(next){setCustomColors(next);try{await setSetting("dash:colors",JSON.stringify(next));}catch{}}
   async function saveNames(next){setCustomNames(next);try{await setSetting("dash:names",JSON.stringify(next));}catch{}}
   async function saveCats(next){setCustomCats(next);try{await setSetting("dash:cats",JSON.stringify(next));}catch{}}
+  function saveAsstModel(m){setAsstModel(m);setSetting("asst:model",m).catch(()=>{});}
+  function saveAsstEffort(e){setAsstEffort(e);setSetting("asst:effort",e).catch(()=>{});}
 
   const isCurrent = year===now.getFullYear()&&month===now.getMonth()+1;
   const canNext = !(year===now.getFullYear()&&month>=now.getMonth()+1);
@@ -784,6 +793,31 @@ export default function Dashboard({ refreshTick = 0 }) {
         {tab==="ask"&&(
           <div className="card" style={{display:"flex",flexDirection:"column",minHeight:420}}>
             <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em",marginBottom:10}}>Ask about your spending</div>
+            {(()=>{
+              const m=ASSISTANT_MODELS[asstModel]||ASSISTANT_MODELS[DEFAULT_MODEL];
+              const est=estimateCostRange(asstModel,asstEffort);
+              const selStyle={fontSize:12,fontFamily:"inherit",color:"var(--text)",background:"var(--bg)",border:"1px solid var(--border)",borderRadius:8,padding:"6px 8px",cursor:"pointer",outline:"none"};
+              return (
+                <div style={{display:"flex",flexWrap:"wrap",alignItems:"center",gap:8,marginBottom:12,paddingBottom:12,borderBottom:"1px solid var(--border)"}}>
+                  <select value={asstModel} onChange={e=>saveAsstModel(e.target.value)} style={selStyle}>
+                    {Object.entries(ASSISTANT_MODELS).map(([id,cfg])=>(
+                      <option key={id} value={id}>{cfg.label} · {cfg.blurb}</option>
+                    ))}
+                  </select>
+                  {m.effort&&(
+                    <select value={asstEffort} onChange={e=>saveAsstEffort(e.target.value)} style={selStyle}>
+                      {EFFORT_LEVELS.map(l=>(<option key={l} value={l}>{l} effort</option>))}
+                    </select>
+                  )}
+                  {est&&(
+                    <span title="Rough estimate. Low = a follow-up in an ongoing chat (context served from cache); high = the first question of a chat. Actual cost depends on answer length."
+                      style={{fontSize:11,color:"var(--muted)",fontFamily:"'DM Mono',monospace",marginLeft:"auto"}}>
+                      ~{formatCents(est.low)}–{formatCents(est.high)}/question
+                    </span>
+                  )}
+                </div>
+              );
+            })()}
             <div style={{flex:1,overflowY:"auto",marginBottom:12}}>
               {chatMsgs.length===0&&!chatBusy&&(
                 <div>
@@ -901,6 +935,28 @@ export default function Dashboard({ refreshTick = 0 }) {
                   </div>
                 );
               })}
+            </div>
+            <div className="card">
+              <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em",marginBottom:4}}>Cash flow</div>
+              <div style={{fontSize:11,color:"var(--muted)",marginBottom:14}}>Net cash into your checking account(s) each month — money in minus money out. Internal savings transfers are excluded.</div>
+              {loading?<Sk h={100}/>:(()=>{
+                const nets=cfPs.map(p=>({label:p.label,net:(p.income?.amount||0)-(p.spending?.amount||0)}));
+                const maxAbs=Math.max(...nets.map(n=>Math.abs(n.net)),1);
+                return nets.map((n,i)=>{
+                  const pos=n.net>=0;
+                  const w=(Math.abs(n.net)/maxAbs)*50;
+                  return (
+                    <div key={i} style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
+                      <span style={{fontSize:12,fontWeight:500,width:44,flexShrink:0}}>{n.label.split(" ")[0]}</span>
+                      <div style={{flex:1,position:"relative",height:14,background:"var(--bg)",borderRadius:7}}>
+                        <div style={{position:"absolute",left:"50%",top:0,bottom:0,width:1,background:"var(--border)"}}/>
+                        <div style={{position:"absolute",top:2,height:10,borderRadius:5,background:pos?"#1D9E75":"#D85A30",width:w+"%",left:pos?"50%":"auto",right:pos?"auto":"50%"}}/>
+                      </div>
+                      <span style={{fontSize:11,fontFamily:"'DM Mono',monospace",fontWeight:500,color:pos?"#1D9E75":"#D85A30",width:64,textAlign:"right",flexShrink:0}}>{pos?"+":"−"}{fmt(Math.abs(n.net))}</span>
+                    </div>
+                  );
+                });
+              })()}
             </div>
           </div>
         )}

@@ -88,6 +88,52 @@ shouldn't have to ask.
   transaction-editing branch until merged).
 - "Transfers and card payments" and "Return" are never counted as spending;
   "Return" (credit-card negatives) never counted as income.
+- **Two spending/income models (deliberate — don't "unify" without asking):**
+  - **Categories tab + Overview headline + budgets** = *purchase-based*:
+    `sumSpending` counts what was bought (card + debit purchases) by category,
+    excluding "Transfers and card payments"/"Return". Also drives the Overview
+    "vs last month" delta. `getSpending` / `getOverview`.
+  - **Trends "income vs spending" + 6-mo bars** = *joint-budget cash-flow*
+    (`getCashFlow`). The household's connected accounts are two **joint** BECU
+    accounts (checking + savings); real paychecks land in three **personal**
+    accounts that are NOT connected to Plaid. Chosen model (Mason, joint-budget
+    view):
+    - **Income** (`cashIncome`) = money *into* either joint account, checking
+      **or** savings — `isHouseholdDepository` = `type === 'depository'` (savings
+      included so income arriving via savings isn't missed). Includes money moved
+      in from the personal accounts: with only the joint accounts synced there's
+      no leg to wash those against, and funding the joint budget from a personal
+      account is the closest measurable proxy for income (so income runs high —
+      it is NOT just paychecks). Incl. paychecks/benefits Plaid tags
+      `TRANSFER_IN_DEPOSIT`, not only `INCOME`.
+    - **Spending** (`cashSpending`) = money *out of* joint **checking** only
+      (`isCheckingAccount` = depository & `subtype !== 'savings'`). Savings
+      outflows are never spending (expenses are paid from checking). Incl.
+      credit-card *payments* (card *purchases* are NOT counted here — the payment
+      that leaves checking is).
+    - So Trends spending can legitimately differ from the Overview headline —
+      different questions. **Limitation:** true household income is unmeasurable
+      until the personal accounts are connected (paychecks land there); the
+      alternatives (connect personal accounts / filter personal transfers out of
+      income) were discussed and set aside in favor of this view.
+  - **Trends "Cash flow" section** = net per month (`income − spending`,
+    computed client-side from the `getCashFlow` periods): diverging green/red
+    bars. A wildly negative month flags where the cash-flow model diverges from
+    reality (debugging aid).
+  - **Internal transfers** (BECU checking ↔ savings) are washed from the cash-
+    flow view by `markInternalTransfers`: a depository `TRANSFER_OUT` leg pairs
+    with a depository `TRANSFER_IN` of equal amount on a *different* account
+    within 4 days (legs can post on different days); both get `_internal` and
+    are skipped. Restricted to TRANSFER_IN/OUT + depository↔depository so real
+    income (an unmatched deposit) and card payments (checking→credit) still
+    count. Needs `raw_category` + `subtype` in the query (both fetched). Only the
+    two joint accounts are synced, so the *only* pairs that can match are joint
+    checking ↔ joint savings — transfers in from the un-synced personal accounts
+    have no matching leg and (by design) count as income (see joint-budget model
+    above).
+  - History: a same-day/same-amount "wash" and a blanket `raw_category` income
+    filter were both tried and abandoned (over-matched real purchases; dropped
+    real income arriving as `TRANSFER_IN`). See git log if curious.
 - Account labels: `nickname || "name ··mask"`; account badge colors from
   `ACCOUNT_COLORS` palette by index when `color` is null.
 - Plaid sync upserts deliberately omit user-owned columns (nickname, color,
@@ -116,10 +162,15 @@ shouldn't have to ask.
   escaped, `.or()`-unsafe chars stripped), newest-first, 200-match cap.
   No schema.
 - **Assistant** — "Ask" tab: Claude-powered spending Q&A. `api/assistant.js`
-  (claude-opus-4-8, adaptive thinking, prompt-cached context block) +
-  `api/_lib/spendingContext.js` (deterministic 90-day snapshot). Read-only
-  by design; conversations not persisted. **Requires `ANTHROPIC_API_KEY` in
-  Vercel** — without it the tab shows an "assistant not configured" message.
+  (prompt-cached context block) + `api/_lib/spendingContext.js` (deterministic
+  90-day snapshot). Read-only by design; conversations not persisted.
+  **Requires `ANTHROPIC_API_KEY` in Vercel** — without it the tab shows an
+  "assistant not configured" message. **Model + effort are user-selectable**
+  (dropdowns in the Ask tab, persisted as `asst:model`/`asst:effort` settings):
+  `src/assistantModels.js` is the shared allowlist (Haiku 4.5 / Sonnet 5 /
+  Opus 4.8) + `estimateCostRange` for the "~¢/question" hint. The server
+  validates the choice against that allowlist and only sends `thinking`/`effort`
+  for models that support them (Haiku predates both — sending them 400s).
 
 ## Pending branches (awaiting Mason's review)
 
