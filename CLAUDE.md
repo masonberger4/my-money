@@ -115,13 +115,15 @@ shouldn't have to ask.
   Supabase `ilike` over description/merchant/user_description (wildcards
   escaped, `.or()`-unsafe chars stripped), newest-first, 200-match cap.
   No schema.
+- **Assistant** — "Ask" tab: Claude-powered spending Q&A. `api/assistant.js`
+  (claude-opus-4-8, adaptive thinking, prompt-cached context block) +
+  `api/_lib/spendingContext.js` (deterministic 90-day snapshot). Read-only
+  by design; conversations not persisted. **Requires `ANTHROPIC_API_KEY` in
+  Vercel** — without it the tab shows an "assistant not configured" message.
 
 ## Pending branches (awaiting Mason's review)
 
-- `claude/feature-assistant`: "Ask" tab — Claude-powered spending Q&A.
-  `api/assistant.js` (claude-opus-4-8, adaptive thinking, prompt-cached
-  context block) + `api/_lib/spendingContext.js` (deterministic 90-day
-  snapshot). Needs `ANTHROPIC_API_KEY` in Vercel. Read-only by design.
+_(none — all roadmap features merged)_
 ## Roadmap (agreed order + design notes)
 
 1. **Budgets** — ✅ merged (see Merged features above).

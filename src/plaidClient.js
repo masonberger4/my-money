@@ -49,3 +49,9 @@ export function runServerSync() {
 export function unlinkInstitution(institutionId) {
   return postJson('/api/unlink-institution', { institution_id: institutionId });
 }
+
+// messages: [{role: 'user'|'assistant', content: string}, ...]
+// Returns { reply, stop_reason, usage }.
+export function askAssistant(messages) {
+  return postJson('/api/assistant', { messages });
+}
