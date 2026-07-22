@@ -153,13 +153,23 @@ auto-categorization rules, cash-flow forecast, savings goals, CSV/PDF export,
 sign-out button.
 
 ### CSV import — build spec
-Goal: upload a bank CSV (BECU first) → create real `transactions` rows on a
-**manual account** so they flow into Transactions/Categories/Search/Assistant
-with no downstream special-casing (the transactions table is adapter-agnostic —
-the whole reason the old `synthetic_id` existed). Ship in two phases: **(1) data
-visibility** (rows land, show in lists/search/categories) — no Trends decision
-needed; **(2) Trends wiring** — needs the cash-flow-role field + Mason's call
-below.
+Goal: upload a bank CSV → reconcile against the household's real accounts. Two
+**modes**, auto-selected by whether the target account is Plaid-linked:
+- **Standalone** (target NOT linked — the personal accounts: Mason's checking,
+  wife's checking + savings): create a manual account + real `transactions` so
+  they flow into Transactions/Categories/Search/Assistant/Trends with no
+  downstream special-casing (the transactions table is adapter-agnostic — the
+  whole reason the old `synthetic_id` existed). **Primary value** — makes the
+  un-synced personal-account paychecks visible. Build FIRST.
+- **Comparison** (target IS Plaid-linked — the joint accounts): reconcile the
+  CSV against what Plaid already synced; insert NOTHING (that's the double-count
+  trap). Emit an audit — rows in CSV but not Plaid (sync gaps), rows in Plaid
+  but not CSV (pending/timing), amount/date/category mismatches on matched
+  pairs. Auto-detecting linkage is what makes this safe (turns the old "don't
+  import a synced account" footgun into a feature). Lower value (joint Plaid
+  sync is solid) + needs a fuzzy matcher (exact amount, ±few days, description
+  optional — Plaid rewrites descriptions and posted/pending dates drift) → build
+  SECOND.
 
 Feasibility (verified against schema + api/):
 - **Client-side is sufficient.** The `*_all` RLS policies (`for all … with
@@ -173,7 +183,7 @@ Feasibility (verified against schema + api/):
   that have a `plaid_tokens` row; a manual institution has none → skipped. This
   (not any flag) is what keeps manual data safe.
 
-Data model:
+Data model (standalone mode — comparison mode inserts nothing):
 - **Manual institution**, one per household. NOTE `institutions.adapter_id` was
   DROPPED in migration 2 — do NOT set it. Create with just `name='Imported'`
   (`plaid_credential_key` defaults to 'main'); find-or-create by `name` (or the
@@ -208,31 +218,37 @@ Data model:
     on the next export → same txn re-hashes → breaks the idempotent re-import).
     Upsert onConflict `account_id,plaid_tx_id`.
 
-Trends wiring (phase 2) — **key gotcha**: `getCashFlow` classifies purely by
-`type`/`subtype`, so ANY imported depository account is auto-counted as income
-and any imported `checking` auto-counts its outflows as spending —
-"income-only" is NOT expressible without a new field. Add
-`accounts.cash_flow_role text default 'full'` and have the cash-flow fns read
-it: 'full' = today's behavior (in→income, checking out→spending);
-'income_only' = inflows→income, outflows never spending. **Open decision (ask
-Mason):** import personal accounts as `income_only` (preserves the joint-budget
-view he chose) or `full` (whole-household — also washes personal↔joint transfers
-on both legs and makes real paychecks the income). Importing history
-retroactively recomputes past Trends months.
+Trends impact — **no new field, `full` whole-household** (decided). Import a
+personal account as an ordinary `depository` account (checking/savings) and
+`getCashFlow` handles it automatically: inflows count as income, checking
+outflows as spending, and personal↔joint transfers now WASH because both legs
+exist (the CSV personal leg + the Plaid joint leg — `markInternalTransfers`
+matches across sources, since it only cares about account type/amount/date).
+Net: Trends becomes the true **whole-household** view — income = real paychecks
++ UI benefits, spending = all real bills, the personal→joint funding shuffle
+cancels out. (Why `full` not income-only: income-only double-counts paychecks
+unless you wash the transfers, and once washed you're already at full — so the
+role field is unnecessary.) Two consequences: it **retroactively recomputes past
+Trends months** (personal→joint transfers that currently inflate income get
+replaced by real paychecks — the correction, not a regression), and import
+**all** the personal accounts for a consistent picture, not just one.
 
-Schema adds (additive): `accounts.is_manual boolean default false` (badge +
-find-or-create + sync-skip belt-and-suspenders); `transactions.source text
-default 'plaid'` ('csv' for undo/filter); `accounts.cash_flow_role` (phase 2).
+Schema adds (additive, both recommended): `accounts.is_manual boolean default
+false` (UI badge + find-or-create + sync-skip belt-and-suspenders);
+`transactions.source text default 'plaid'` ('csv' for undo/filter). No
+`cash_flow_role` — `full` is just the default type/subtype behavior.
 
 UI: an action on the **Accounts tab** (file picker; don't add a bottom tab) →
-pick/create target manual account → auto-detect the BECU header (may follow a
-preamble) or map columns → preview (dupes greyed via the plaid_tx_id hash,
-guessed category, detected internal transfers) → confirm → insert.
+pick the target account (**existing Plaid-linked → comparison mode; new/existing
+manual → standalone mode**) → auto-detect the BECU header (may follow a
+preamble; dates M/D/YYYY → ISO) or map columns → preview (standalone: dupes
+greyed via the plaid_tx_id hash, guessed category, detected internal transfers;
+comparison: the match/gap/mismatch audit) → confirm.
 
 Caveats: per-bank formats differ (BECU preset first); no stable bank IDs (hash
-dedup; prompt on identical rows); don't import an account Plaid already syncs
-(double-count) — warn on overlap; CSV is a manual periodic export (stale vs live
-sync).
+dedup; prompt on identical rows); CSV is a manual periodic export (stale vs live
+sync). The old double-count risk is handled by comparison mode auto-detecting a
+linked target.
 
 ## Gotchas
 
