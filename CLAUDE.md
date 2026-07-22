@@ -94,35 +94,38 @@ shouldn't have to ask.
   hidden, user_category, user_description, excluded) so edits survive syncs.
 - Mobile first: verify at 390px width; tab bar scrolls horizontally.
 
+## Merged features (live on main)
+
+- **Transaction editing** — tap transaction → detail sheet: recategorize
+  (`user_category`), exclude from totals (`excluded`), rename
+  (`user_description`), masked-descriptor fallback ("****" → "Card
+  transaction"). Columns live on `transactions`.
+- **Budgets** — per-category monthly limits on the Categories tab: progress
+  bars (category color / #FAC775 / #D85A30 at <80 / 80–100 / >100%), inline
+  "＋ budget" editor per row (empty = clear), zero-spend budgeted categories
+  still listed, budgeted-vs-spent summary strip. `budgets` table + RLS;
+  `getBudgets()` / `setBudget(category, limit)`.
+
 ## Pending branches (awaiting Mason's review)
 
-- `claude/feature-transaction-editing`: tap transaction → detail sheet:
-  recategorize (user_category), exclude from totals, rename
-  (user_description), masked-descriptor fallback ("****" → "Card
-  transaction"). Migrations needed at merge:
-  `user_category text`, `excluded boolean not null default false`,
-  `user_description text` on transactions (see
-  `supabase/migrations/20260715000001_*` and `20260717000001_*`).
 - `claude/feature-assistant`: "Ask" tab — Claude-powered spending Q&A.
   `api/assistant.js` (claude-opus-4-8, adaptive thinking, prompt-cached
   context block) + `api/_lib/spendingContext.js` (deterministic 90-day
   snapshot). Needs `ANTHROPIC_API_KEY` in Vercel. Read-only by design.
+- `claude/feature-recurring`: "Recurring" tab — client-side subscription
+  detection (`src/recurring.js`, pure; `getRecurringCandidates()` fetches
+  6 months). No schema.
+- `claude/feature-search`: cross-month search box on the Transactions tab
+  (`searchTransactions()`, ilike over description/merchant/user_description,
+  escaped). No schema.
 
 ## Roadmap (agreed order + design notes)
 
-1. **Budgets** (`claude/feature-budgets`) — next up.
-   - Schema: `budgets (household_id default current_household_id(), category
-     text, monthly_limit numeric(12,2), pk (household_id, category))`, RLS
-     like `settings`.
-   - UI: Categories tab gets per-category progress vs limit (bar colors:
-     ok/near/over), a "Set budget" edit affordance, and an over/under summary.
-   - Uses effective category — **merge transaction-editing first** or handle
-     its absence.
-   - dataAdapter: `getBudgets()`, `setBudget(category, limit)` (upsert,
-     onConflict household_id,category), null limit = no budget.
-2. **Recurring/subscription detection** — client-side: group by normalized
-   merchant, detect ~monthly cadence (±4 days) with similar amounts (±20%);
-   surface as a list with monthly total. No schema.
+1. **Budgets** — ✅ merged (see Merged features above).
+2. **Recurring/subscription detection** — branched (`claude/feature-recurring`),
+   awaiting review — client-side: group by normalized merchant, detect
+   ~monthly cadence (±4 days) with similar amounts (±20%); surface as a list
+   with monthly total. No schema.
 3. **Transaction search** — search box over description/merchant/
    user_description via Supabase `ilike`, cross-month. No schema.
 4. Later ideas (discussed, not committed): CSV export, net worth (needs
