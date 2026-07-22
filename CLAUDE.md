@@ -29,9 +29,10 @@ entry once shipped.
   policies scope every table. `api/` routes verify the JWT via `requireUser()`
   (`api/_lib/supabase.js`).
 - **RLS shape**: `accounts` / `transactions` / `institutions` each have a single
-  `for all to authenticated using (household_id = current_household_id())`
-  policy — so the **client can INSERT/update/delete its own rows directly**
-  (`household_id` defaults to `current_household_id()`). `plaid_tokens` has ZERO
+  `for all to authenticated using (…) with check (household_id =
+  current_household_id())` policy — INSERT is gated by the WITH CHECK, satisfied
+  because `household_id` defaults to `current_household_id()`, so the **client
+  can INSERT/update/delete its own rows directly**. `plaid_tokens` has ZERO
   client policies — only service_role (api/) reads them. Never expose them.
 - **Sync is server-side** (`api/sync.js`): cursor-based transactionsSync per
   institution; upserts accounts (onConflict `institution_id,plaid_account_id`)
@@ -64,7 +65,8 @@ entry once shipped.
    first, and preview edits are real).
 3. Mason reviews the preview → says "merge <feature>" → merge to main. Don't
    merge without that. Don't open PRs unless asked. Delete branches after merge
-   (this sandbox can't delete remote branches — Mason clicks it in the UI).
+   (this sandbox can't delete remote branches — Mason clicks it in the UI;
+   GitHub MCP tools may transiently disconnect — retry before treating as fatal).
 4. **Migrations are additive-only** on live data (`alter table … add column`).
    Hand Mason the exact SQL to paste in the Supabase SQL Editor at merge time.
 
@@ -115,8 +117,10 @@ playwright-core screenshot (`executablePath:'/opt/pw-browsers/chromium'`,
     *different* account within 4 days → both `_internal`, skipped. Only the two
     joint accounts are synced, so the only pairs that can match are joint
     checking ↔ savings; transfers in from the un-synced personal accounts stay
-    counted as income (by design). Needs `raw_category` + `subtype` (both
-    queried).
+    counted as income (by design). Keep the depository↔depository restriction
+    tight — matching a depository→credit leg would wrongly wash out card
+    payments (which `cashSpending` must count) and unmatched real-income
+    deposits. Needs `raw_category` + `subtype` (both queried).
   - **Cash flow section** = net per month (income − spending), diverging bars.
   - Trends spending can legitimately differ from the Overview headline —
     different questions. Abandoned attempts (same-day/same-amount wash; blanket
@@ -149,61 +153,85 @@ auto-categorization rules, cash-flow forecast, savings goals, CSV/PDF export,
 sign-out button.
 
 ### CSV import — build spec
-Goal: upload a bank CSV (BECU format first) → create real `transactions` rows on
-a **manual account** so they flow into Trends/Categories/Search/Assistant with
-no downstream special-casing (the transactions table is adapter-agnostic — the
-whole reason the old `synthetic_id` existed).
+Goal: upload a bank CSV (BECU first) → create real `transactions` rows on a
+**manual account** so they flow into Transactions/Categories/Search/Assistant
+with no downstream special-casing (the transactions table is adapter-agnostic —
+the whole reason the old `synthetic_id` existed). Ship in two phases: **(1) data
+visibility** (rows land, show in lists/search/categories) — no Trends decision
+needed; **(2) Trends wiring** — needs the cash-flow-role field + Mason's call
+below.
 
 Feasibility (verified against schema + api/):
-- **Client-side is sufficient.** The `*_all` RLS policies let the authenticated
-  client INSERT into `institutions`/`accounts`/`transactions`; `household_id`
-  defaults to `current_household_id()` (resolves from the client — NOT in the
-  SQL Editor, where `auth.uid()` is NULL). No new api/ endpoint or RLS policy
-  required. A service-role `api/import-csv.js` is optional (only for server-side
-  validation).
+- **Client-side is sufficient.** The `*_all` RLS policies (`for all … with
+  check (household_id = current_household_id())`) let the authenticated client
+  INSERT into `institutions`/`accounts`/`transactions`; the WITH CHECK passes
+  because `household_id` defaults to `current_household_id()` (resolves from the
+  client — NOT in the SQL Editor, where `auth.uid()` is NULL). No new api/
+  endpoint or policy required. A service-role `api/import-csv.js` is optional
+  (only for server-side validation).
 - **Sync won't clobber manual data.** `api/sync.js` only processes institutions
-  that have a `plaid_token`; a manual institution has none → skipped.
+  that have a `plaid_tokens` row; a manual institution has none → skipped. This
+  (not any flag) is what keeps manual data safe.
 
 Data model:
-- One **manual institution** per household (`adapter_id` 'manual',
-  name "Imported").
-- One **manual account** per imported account: `type` 'depository', `subtype`
-  'checking'|'savings', synthetic `plaid_account_id = 'manual:'+uuid` (satisfies
-  the unique `institution_id,plaid_account_id`).
-- Each CSV row → transaction: `account_id`, `date`, `amount` (see sign),
-  `description`, `merchant_name` (guessed), `mapped_category` + `raw_category`
-  (see categorize), `plaid_tx_id = 'csv:'+hash(date,amount,desc,rowIndex)`.
-  Upsert onConflict `account_id,plaid_tx_id` → re-importing overlapping date
-  ranges is idempotent.
-- **Sign flip**: bank CSV is positive=money in (Credit) / negative=out (Debit);
-  the app uses Plaid's opposite convention, so `amount = -(csvSignedValue)`.
-- **Categorize from description** (CSV has no Plaid category): keyword map — e.g.
-  NEWREZ→Housing, WA ST EMPLOY SEC→Income, CAPITAL ONE/DISCOVER/WELLS FARGO→card
-  payment, VENMO→Transfers. **Crucially** set
-  `raw_category = 'TRANSFER_IN'|'TRANSFER_OUT'` for "Online Banking Transfer
-  To/from" lines so `markInternalTransfers` can wash them.
+- **Manual institution**, one per household. NOTE `institutions.adapter_id` was
+  DROPPED in migration 2 — do NOT set it. Create with just `name='Imported'`
+  (`plaid_credential_key` defaults to 'main'); find-or-create by `name` (or the
+  `is_manual` flag below) so repeat imports don't spawn duplicates.
+- **Manual account** per imported account: `type='depository'`,
+  `subtype='checking'|'savings'`, synthetic `plaid_account_id='manual:'+uuid`
+  (satisfies unique `institution_id,plaid_account_id`). `name` user-supplied;
+  `mask`/balances nullable.
+- **Transaction rows** — mirror `api/sync.js` `mapTransactionRow` for the exact
+  insert contract (NOT NULL: `description` — the descriptor, Plaid's `name` maps
+  here — plus `date`, `amount`, `account_id`, `plaid_tx_id`; `merchant_name`/
+  `raw_category`/`pending` optional). Set:
+  - `amount` — **sign flip.** BECU has separate Debit/Credit columns (positive
+    magnitudes; strip $/commas; dates M/D/YYYY → ISO). Build
+    `csvSignedValue = Credit − Debit` (positive = money in), then
+    `amount = −csvSignedValue` (= Debit − Credit), matching the app's
+    positive = out convention.
+  - `mapped_category` — the FINAL app-category string. dataAdapter reads the
+    stored `mapped_category` (`effectiveCategory = user_category ||
+    mapped_category`); mapping happens at WRITE time, so set the resolved string
+    here, NOT a raw Plaid code. Valid strings + the exact "Transfers and card
+    payments" label are in `src/categoryMap.js` (source of truth); unmatched
+    rows → "Shopping and gear" (the effectiveCategory fallback). Start a small
+    keyword map (NEWREZ→Housing, WA ST EMPLOY SEC→Income, card issuers→"Transfers
+    and card payments", …), editable later.
+  - `raw_category` — set `'TRANSFER_IN'|'TRANSFER_OUT'` for "Online Banking
+    Transfer To/from" lines so `markInternalTransfers` washes them; `''`
+    otherwise (nothing requires it non-null).
+  - `plaid_tx_id` — `'csv:'+hash(date, amount, normalized_desc)` plus a per-day
+    occurrence ordinal ONLY to disambiguate genuinely identical
+    date/amount/desc rows. Do NOT include the absolute file row-index (it shifts
+    on the next export → same txn re-hashes → breaks the idempotent re-import).
+    Upsert onConflict `account_id,plaid_tx_id`.
 
-Flow (UI): Import screen → pick/create the target manual account → auto-detect
-BECU columns (`Date,No.,Description,Debit,Credit`) or map manually → preview
-(duplicates greyed via the plaid_tx_id hash, guessed category, detected internal
-transfers) → confirm → insert. Trends recompute on next read (dataAdapter reads
-all non-hidden depository transactions).
+Trends wiring (phase 2) — **key gotcha**: `getCashFlow` classifies purely by
+`type`/`subtype`, so ANY imported depository account is auto-counted as income
+and any imported `checking` auto-counts its outflows as spending —
+"income-only" is NOT expressible without a new field. Add
+`accounts.cash_flow_role text default 'full'` and have the cash-flow fns read
+it: 'full' = today's behavior (in→income, checking out→spending);
+'income_only' = inflows→income, outflows never spending. **Open decision (ask
+Mason):** import personal accounts as `income_only` (preserves the joint-budget
+view he chose) or `full` (whole-household — also washes personal↔joint transfers
+on both legs and makes real paychecks the income). Importing history
+retroactively recomputes past Trends months.
 
-Recommended schema adds (optional but clean; additive):
-- `accounts.is_manual boolean default false` (UI badge + belt-and-suspenders
-  skip in sync).
-- `transactions.source text default 'plaid'` ('csv' on imports — undo/filter).
+Schema adds (additive): `accounts.is_manual boolean default false` (badge +
+find-or-create + sync-skip belt-and-suspenders); `transactions.source text
+default 'plaid'` ('csv' for undo/filter); `accounts.cash_flow_role` (phase 2).
 
-**Open decision — ask Mason before wiring into Trends.** Importing a personal
-**checking** account upgrades Trends from joint-budget → whole-household:
-personal→joint transfers then wash on both legs, real paychecks become income,
-and personal-checking *outflows* would also become spending. Decide: personal
-accounts income-only, or full in/out?
+UI: an action on the **Accounts tab** (file picker; don't add a bottom tab) →
+pick/create target manual account → auto-detect the BECU header (may follow a
+preamble) or map columns → preview (dupes greyed via the plaid_tx_id hash,
+guessed category, detected internal transfers) → confirm → insert.
 
-Caveats: per-bank CSV formats differ (ship the BECU preset first); no stable
-bank transaction IDs (hash dedup; prompt on genuinely identical same-day,
-same-amount rows); don't import an account Plaid already syncs (double-count) —
-warn on overlap; CSV is a manual periodic export (goes stale vs Plaid's live
+Caveats: per-bank formats differ (BECU preset first); no stable bank IDs (hash
+dedup; prompt on identical rows); don't import an account Plaid already syncs
+(double-count) — warn on overlap; CSV is a manual periodic export (stale vs live
 sync).
 
 ## Gotchas
@@ -220,3 +248,5 @@ sync).
   caches `/api/*`; bump its CACHE_VERSION when changing it.
 - One Claude session per line of work, branched from current main — two sessions
   off different bases once regressed production (the "iphone-app" incident).
+- If pushes stop deploying and GitHub API calls 503, check githubstatus.com
+  before debugging webhooks/Vercel — GitHub-side outages happen.
