@@ -1,10 +1,5 @@
 import { supabase } from './supabaseClient.js';
-import {
-  isTransferCategory,
-  isReturnCategory,
-  isInternalMovement,
-  applyAccountRules,
-} from './categoryMap.js';
+import { isTransferCategory, applyAccountRules } from './categoryMap.js';
 
 function pad2(n) {
   return String(n).padStart(2, '0');
@@ -62,7 +57,7 @@ async function getTransactionsBetween(start, end) {
   for (let from = 0; ; from += page) {
     const { data, error } = await supabase
       .from('transactions')
-      .select(`${TX_COLUMNS}, accounts!inner(hidden, type)`)
+      .select(`${TX_COLUMNS}, accounts!inner(hidden, type, subtype)`)
       .eq('accounts.hidden', false)
       .gte('date', start)
       .lte('date', end)
@@ -76,7 +71,58 @@ async function getTransactionsBetween(start, end) {
   for (const t of rows) {
     t.mapped_category = applyAccountRules(t.mapped_category, t.amount, t.accounts?.type);
   }
+  markInternalTransfers(rows);
   return rows;
+}
+
+// Mark both legs of a transfer between the household's own deposit accounts
+// (BECU checking ↔ savings) as `_internal` so cash-flow totals skip them.
+// A Plaid TRANSFER_OUT on one depository account pairs with a TRANSFER_IN on a
+// *different* depository account of the same amount within a few days (legs
+// often post on different days). Restricting to TRANSFER_IN/OUT legs and to
+// depository↔depository leaves real income (an unmatched deposit that merely
+// arrives tagged TRANSFER_IN) and credit-card payments (checking → credit,
+// which IS cash leaving checking) counted.
+const INTERNAL_MATCH_WINDOW_DAYS = 4;
+
+function dayNumber(iso) {
+  const [y, m, d] = (iso || '').split('-').map(Number);
+  return Date.UTC(y, (m || 1) - 1, d || 1) / 86400000;
+}
+
+function markInternalTransfers(rows) {
+  const outs = [];
+  const insByAmount = new Map();
+  for (const t of rows) {
+    if (t.excluded || t.accounts?.type !== 'depository') continue;
+    const raw = (t.raw_category || '').toUpperCase();
+    if (t.amount > 0 && raw.startsWith('TRANSFER_OUT')) {
+      outs.push(t);
+    } else if (t.amount < 0 && raw.startsWith('TRANSFER_IN')) {
+      const key = (-t.amount).toFixed(2);
+      if (!insByAmount.has(key)) insByAmount.set(key, []);
+      insByAmount.get(key).push(t);
+    }
+  }
+  outs.sort((a, b) => (a.date < b.date ? -1 : 1));
+  for (const out of outs) {
+    const candidates = insByAmount.get(out.amount.toFixed(2));
+    if (!candidates) continue;
+    let best = null;
+    let bestGap = Infinity;
+    for (const cand of candidates) {
+      if (cand._internal || cand.account_id === out.account_id) continue;
+      const gap = Math.abs(dayNumber(cand.date) - dayNumber(out.date));
+      if (gap <= INTERNAL_MATCH_WINDOW_DAYS && gap < bestGap) {
+        best = cand;
+        bestGap = gap;
+      }
+    }
+    if (best) {
+      best._internal = true;
+      out._internal = true;
+    }
+  }
 }
 
 function getMonthTransactions(year, month) {
@@ -93,20 +139,36 @@ function sumSpending(txs) {
   return total;
 }
 
-// Credit-card refunds (category "Return") are reversals of past spend, not
-// income. Internal transfers between the household's own accounts and
-// credit-card/loan payments (identified by Plaid's raw_category) also aren't
-// income — the mapped bucket lumps them with real INCOME, so filter on
-// raw_category here to keep paychecks while dropping the transfers. A user
-// override (user_category) wins, as everywhere else. The transfer's outflow
-// leg is already excluded from spending (mapped to "Transfers and card
-// payments"), so dropping the inflow leg here nets the whole transfer to zero.
-function sumIncome(txs) {
+// --- Trends cash flow (checking-account view) --------------------------------
+// The Trends "income vs spending" chart measures cash moving through the
+// household's checking account(s): income = money arriving in checking,
+// spending = money leaving checking. Internal transfers to/from the household's
+// own savings are washed out (markInternalTransfers) so moving money to savings
+// isn't "spending" and moving it back isn't "income". Credit-card *purchases*
+// are not counted here — the card *payment* that leaves checking is (that's the
+// cash actually spent). This is deliberately different from the Categories tab
+// / Overview headline (sumSpending above), which break spending down by what
+// was purchased so per-category budgets work.
+function isCheckingAccount(t) {
+  // Depository and not the savings pot. Lenient on subtype so a null/oddly
+  // typed primary account still counts; only "savings" is treated as separate.
+  return t.accounts?.type === 'depository' && t.accounts?.subtype !== 'savings';
+}
+
+function cashSpending(txs) {
   let total = 0;
   for (const t of txs) {
-    if (t.excluded) continue;
-    if (isInternalMovement(t.raw_category) && !t.user_category) continue;
-    if (t.amount < 0 && !isReturnCategory(effectiveCategory(t))) total += Math.abs(t.amount);
+    if (t.excluded || t._internal) continue;
+    if (isCheckingAccount(t) && t.amount > 0) total += t.amount;
+  }
+  return total;
+}
+
+function cashIncome(txs) {
+  let total = 0;
+  for (const t of txs) {
+    if (t.excluded || t._internal) continue;
+    if (isCheckingAccount(t) && t.amount < 0) total += Math.abs(t.amount);
   }
   return total;
 }
@@ -308,7 +370,7 @@ export async function searchTransactions(query, { limit = 200 } = {}) {
     if (withUserDesc) ors.push(`user_description.ilike.${pat}`);
     return supabase
       .from('transactions')
-      .select(`${TX_COLUMNS}, accounts!inner(hidden, type)`)
+      .select(`${TX_COLUMNS}, accounts!inner(hidden, type, subtype)`)
       .eq('accounts.hidden', false)
       .or(ors.join(','))
       .order('date', { ascending: false })
@@ -355,8 +417,8 @@ export async function getCashFlow({ num_periods = 6 } = {}) {
   for (let i = num_periods - 1; i >= 0; i--) {
     const { year, month } = shiftMonth(curY, curM, -i);
     const txs = byMonth.get(`${year}-${pad2(month)}`) || [];
-    const spending = sumSpending(txs);
-    const income = sumIncome(txs);
+    const spending = cashSpending(txs);
+    const income = cashIncome(txs);
     const { start } = monthBounds(year, month);
     periods.push({
       label: monthLabel(year, month),

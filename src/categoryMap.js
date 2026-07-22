@@ -103,23 +103,6 @@ export function isReturnCategory(category) {
   return category === RETURN_CATEGORY;
 }
 
-// Moving money between the household's own accounts (BECU checking ↔ savings)
-// or paying down a card/loan — never real spending or income. Checked against
-// the stored `raw_category` (Plaid's `detailed` value, which is prefixed by its
-// primary, e.g. TRANSFER_IN_ACCOUNT_TRANSFER, TRANSFER_OUT_SAVINGS,
-// LOAN_PAYMENTS_CREDIT_CARD_PAYMENT). INCOME is deliberately NOT included: it
-// lands in the same mapped "Transfers and card payments" bucket but is genuine
-// income and must still count. Timing-independent, so a transfer whose two legs
-// post on different days is still handled (unlike amount/date matching).
-export function isInternalMovement(rawCategory) {
-  const c = (rawCategory || '').toUpperCase();
-  return (
-    c.startsWith('TRANSFER_IN') ||
-    c.startsWith('TRANSFER_OUT') ||
-    c.startsWith('LOAN_PAYMENTS')
-  );
-}
-
 // A negative amount on a credit-card account is a refund / statement credit /
 // cashback — not income, not spending. Surface it as its own "Return" line.
 // Depository negatives stay as-is (those are real deposits).

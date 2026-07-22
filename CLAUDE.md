@@ -88,16 +88,29 @@ shouldn't have to ask.
   transaction-editing branch until merged).
 - "Transfers and card payments" and "Return" are never counted as spending;
   "Return" (credit-card negatives) never counted as income.
-- **Internal transfers / card payments** (BECU checking ↔ savings, credit-card
-  payments) must net to zero. The outflow leg maps to "Transfers and card
-  payments" so it's already out of spending; the *inflow* leg was leaking into
-  income because that bucket also holds real INCOME (paychecks). `sumIncome`
-  filters on `isInternalMovement(raw_category)` (Plaid `TRANSFER_IN/OUT/
-  LOAN_PAYMENTS` prefixes — **not** INCOME) to drop the inflow leg while keeping
-  paychecks. Timing-independent (legs can post on different days); a
-  `user_category` override wins. `raw_category` is stored on every tx by
-  `sync.js`. (An earlier same-day/same-amount "wash" heuristic was tried and
-  abandoned — it over-matched real purchases and missed different-day legs.)
+- **Two spending/income models (deliberate — don't "unify" without asking):**
+  - **Categories tab + Overview headline + budgets** = *purchase-based*:
+    `sumSpending` counts what was bought (card + debit purchases) by category,
+    excluding "Transfers and card payments"/"Return". Also drives the Overview
+    "vs last month" delta. `getSpending` / `getOverview`.
+  - **Trends "income vs spending" + 6-mo bars** = *checking cash-flow*:
+    `cashIncome` / `cashSpending` count money in/out of the household's checking
+    account(s) — `isCheckingAccount` = depository & `subtype !== 'savings'`.
+    Income = deposits into checking (incl. paychecks Plaid tags
+    `TRANSFER_IN_DEPOSIT`, not just `INCOME`); spending = money out of checking,
+    incl. credit-card *payments* (card *purchases* are NOT counted here — the
+    payment that leaves checking is). `getCashFlow`. So Trends spending can
+    legitimately differ from the Overview headline — different questions.
+  - **Internal transfers** (BECU checking ↔ savings) are washed from the cash-
+    flow view by `markInternalTransfers`: a depository `TRANSFER_OUT` leg pairs
+    with a depository `TRANSFER_IN` of equal amount on a *different* account
+    within 4 days (legs can post on different days); both get `_internal` and
+    are skipped. Restricted to TRANSFER_IN/OUT + depository↔depository so real
+    income (an unmatched deposit) and card payments (checking→credit) still
+    count. Needs `raw_category` + `subtype` in the query (both fetched).
+  - History: a same-day/same-amount "wash" and a blanket `raw_category` income
+    filter were both tried and abandoned (over-matched real purchases; dropped
+    real income arriving as `TRANSFER_IN`). See git log if curious.
 - Account labels: `nickname || "name ··mask"`; account badge colors from
   `ACCOUNT_COLORS` palette by index when `color` is null.
 - Plaid sync upserts deliberately omit user-owned columns (nickname, color,
