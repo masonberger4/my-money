@@ -51,7 +51,12 @@ export function unlinkInstitution(institutionId) {
 }
 
 // messages: [{role: 'user'|'assistant', content: string}, ...]
+// opts: { model, effort } — validated server-side against the allowlist.
 // Returns { reply, stop_reason, usage }.
-export function askAssistant(messages) {
-  return postJson('/api/assistant', { messages });
+export function askAssistant(messages, opts = {}) {
+  return postJson('/api/assistant', {
+    messages,
+    model: opts.model,
+    effort: opts.effort,
+  });
 }

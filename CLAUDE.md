@@ -101,6 +101,10 @@ shouldn't have to ask.
     incl. credit-card *payments* (card *purchases* are NOT counted here — the
     payment that leaves checking is). `getCashFlow`. So Trends spending can
     legitimately differ from the Overview headline — different questions.
+  - **Trends "Cash flow" section** = net per month (`income − spending`,
+    computed client-side from the `getCashFlow` periods): diverging green/red
+    bars. A wildly negative month flags where the cash-flow model diverges from
+    reality (debugging aid).
   - **Internal transfers** (BECU checking ↔ savings) are washed from the cash-
     flow view by `markInternalTransfers`: a depository `TRANSFER_OUT` leg pairs
     with a depository `TRANSFER_IN` of equal amount on a *different* account
@@ -139,11 +143,15 @@ shouldn't have to ask.
   escaped, `.or()`-unsafe chars stripped), newest-first, 200-match cap.
   No schema.
 - **Assistant** — "Ask" tab: Claude-powered spending Q&A. `api/assistant.js`
-  (claude-haiku-4-5, no extended thinking — Haiku predates adaptive;
-  prompt-cached context block) +
-  `api/_lib/spendingContext.js` (deterministic 90-day snapshot). Read-only
-  by design; conversations not persisted. **Requires `ANTHROPIC_API_KEY` in
-  Vercel** — without it the tab shows an "assistant not configured" message.
+  (prompt-cached context block) + `api/_lib/spendingContext.js` (deterministic
+  90-day snapshot). Read-only by design; conversations not persisted.
+  **Requires `ANTHROPIC_API_KEY` in Vercel** — without it the tab shows an
+  "assistant not configured" message. **Model + effort are user-selectable**
+  (dropdowns in the Ask tab, persisted as `asst:model`/`asst:effort` settings):
+  `src/assistantModels.js` is the shared allowlist (Haiku 4.5 / Sonnet 5 /
+  Opus 4.8) + `estimateCostRange` for the "~¢/question" hint. The server
+  validates the choice against that allowlist and only sends `thinking`/`effort`
+  for models that support them (Haiku predates both — sending them 400s).
 
 ## Pending branches (awaiting Mason's review)
 

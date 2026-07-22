@@ -1,6 +1,12 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { requireUser } from './_lib/supabase.js';
 import { buildSpendingContext } from './_lib/spendingContext.js';
+import {
+  ASSISTANT_MODELS,
+  EFFORT_LEVELS,
+  DEFAULT_MODEL,
+  DEFAULT_EFFORT,
+} from '../src/assistantModels.js';
 
 const SYSTEM_PROMPT = `You are the household finance assistant inside "my-money", a private personal-finance dashboard used by one household. You see their real accounts and their last 90 days of transactions in the context below.
 
@@ -28,10 +34,16 @@ export default async function handler(req, res) {
     });
   }
 
-  const { messages } = req.body || {};
+  const { messages, model: reqModel, effort: reqEffort } = req.body || {};
   if (!Array.isArray(messages) || messages.length === 0) {
     return res.status(400).json({ error: 'messages array required' });
   }
+
+  // Resolve the caller's model/effort choice against the allowlist (never trust
+  // the client to hand us an arbitrary model string).
+  const modelId = ASSISTANT_MODELS[reqModel] ? reqModel : DEFAULT_MODEL;
+  const modelCfg = ASSISTANT_MODELS[modelId];
+  const effort = EFFORT_LEVELS.includes(reqEffort) ? reqEffort : DEFAULT_EFFORT;
 
   // Only accept plain user/assistant text turns from the client.
   const history = messages
@@ -48,13 +60,9 @@ export default async function handler(req, res) {
 
     const anthropic = new Anthropic();
 
-    const response = await anthropic.messages.create({
-      // Haiku 4.5: fast and cheap for household finance Q&A. It predates
-      // adaptive thinking (a 4.6+ feature), so no `thinking` param — it would
-      // 400. Bump back to an Opus/Sonnet model + adaptive thinking if answers
-      // need more depth.
-      model: 'claude-haiku-4-5',
-      max_tokens: 2048,
+    const params = {
+      model: modelId,
+      max_tokens: modelCfg.maxTokens,
       system: [
         { type: 'text', text: SYSTEM_PROMPT },
         {
@@ -66,7 +74,13 @@ export default async function handler(req, res) {
         },
       ],
       messages: history,
-    });
+    };
+    // Haiku predates adaptive thinking / effort (sending them 400s); Sonnet 5
+    // and Opus 4.8 support both.
+    if (modelCfg.thinking) params.thinking = { type: 'adaptive' };
+    if (modelCfg.effort) params.output_config = { effort };
+
+    const response = await anthropic.messages.create(params);
 
     if (response.stop_reason === 'refusal') {
       return res.status(200).json({
