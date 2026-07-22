@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { getOverview, getSpending, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions } from "../dataAdapter.js";
+import { getOverview, getSpending, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction } from "../dataAdapter.js";
 import { unlinkInstitution } from "../plaidClient.js";
+import { ERA_CATEGORIES } from "../categoryMap.js";
 import { runSync } from "../sync.js";
 import { getSetting, setSetting } from "../db.js";
 
@@ -223,6 +224,29 @@ export default function Dashboard({ refreshTick = 0 }) {
 
   const [unlinking,setUnlinking]=useState(false);
   const [togglingHide,setTogglingHide]=useState(false);
+  const [selTx,setSelTx]=useState(null);
+
+  // Optimistic transaction edit: update every local copy immediately,
+  // persist, then refresh totals in the background.
+  async function saveTx(fields){
+    if(!selTx)return;
+    const id=selTx.id;
+    const apply=t=>{
+      if(t.id!==id)return t;
+      const next={...t,...fields};
+      if("user_category" in fields)next.category=fields.user_category||t.auto_category;
+      return next;
+    };
+    setTransactions(prev=>prev?{...prev,transactions:prev.transactions.map(apply)}:prev);
+    setAcctTxs(prev=>prev?prev.map(apply):prev);
+    setSelTx(prev=>prev?apply(prev):prev);
+    try{
+      await updateTransaction(id,fields);
+    }catch(err){
+      console.error("transaction update failed",err);
+    }
+    reloadData(year,month);
+  }
 
   async function handleToggleHide(){
     if(!selAcct)return;
@@ -369,13 +393,14 @@ export default function Dashboard({ refreshTick = 0 }) {
                 txs.slice(0,6).map((t,i)=>{
                   const a=acctById(t.account_id);
                   return (
-                  <div key={i} className="tx">
+                  <div key={i} className="tx" onClick={()=>setSelTx(t)} style={{cursor:"pointer",opacity:t.excluded?.5:1}}>
                     <div style={{width:34,height:34,borderRadius:10,background:"var(--bg)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:15,flexShrink:0}}>{TX_ICONS[t.category]||"🛍"}</div>
                     <div style={{flex:1,minWidth:0}}>
                       <div style={{fontSize:13,fontWeight:500,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{t.merchant_name||t.description}</div>
                       <div style={{fontSize:11,color:"var(--muted)",marginTop:2,display:"flex",alignItems:"center",gap:5,flexWrap:"wrap"}}>
                         <span>{getName(t.category)} · {t.transaction_date}</span>
                         {a&&<Pill label={acctLabel(a)} color={acctColor(a)}/>}
+                        {t.excluded&&<Pill label="Excluded" color="#888780"/>}
                       </div>
                     </div>
                     <div style={{fontSize:13,fontFamily:"'DM Mono',monospace",fontWeight:500,flexShrink:0}}>{fmtX(t.amount)}</div>
@@ -468,7 +493,7 @@ export default function Dashboard({ refreshTick = 0 }) {
             ):shownTxs.map((t,i)=>{
               const a=acctById(t.account_id);
               return (
-              <div key={i} className="tx" style={{animationDelay:i*.015+"s"}}>
+              <div key={i} className="tx" onClick={()=>setSelTx(t)} style={{animationDelay:i*.015+"s",cursor:"pointer",opacity:t.excluded?.5:1}}>
                 <div style={{width:34,height:34,borderRadius:10,background:"var(--bg)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:15,flexShrink:0}}>{TX_ICONS[t.category]||"🛍"}</div>
                 <div style={{flex:1,minWidth:0}}>
                   <div style={{fontSize:13,fontWeight:500,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{t.merchant_name||t.description}</div>
@@ -477,6 +502,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                     <span>·</span>
                     <Pill label={getName(t.category)} color={getColor(t.category)}/>
                     {a&&<Pill label={acctLabel(a)} color={acctColor(a)}/>}
+                    {t.excluded&&<Pill label="Excluded" color="#888780"/>}
                   </div>
                 </div>
                 <div style={{fontSize:13,fontFamily:"'DM Mono',monospace",fontWeight:500,flexShrink:0}}>{fmtX(t.amount)}</div>
@@ -568,14 +594,15 @@ export default function Dashboard({ refreshTick = 0 }) {
             ):(
               <>
                 {acctTxs.map((t,i)=>(
-                  <div key={t.plaid_tx_id||i} className="tx" style={{animationDelay:Math.min(i,20)*.015+"s"}}>
+                  <div key={t.plaid_tx_id||i} className="tx" onClick={()=>setSelTx(t)} style={{animationDelay:Math.min(i,20)*.015+"s",cursor:"pointer",opacity:t.excluded?.5:1}}>
                     <div style={{width:34,height:34,borderRadius:10,background:"var(--bg)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:15,flexShrink:0}}>{TX_ICONS[t.category]||"🛍"}</div>
                     <div style={{flex:1,minWidth:0}}>
                       <div style={{fontSize:13,fontWeight:500,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{t.merchant_name||t.description}</div>
-                      <div style={{fontSize:11,color:"var(--muted)",marginTop:3,display:"flex",alignItems:"center",gap:6}}>
+                      <div style={{fontSize:11,color:"var(--muted)",marginTop:3,display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
                         <span>{t.transaction_date}</span>
                         <span>·</span>
                         <Pill label={getName(t.category)} color={getColor(t.category)}/>
+                        {t.excluded&&<Pill label="Excluded" color="#888780"/>}
                       </div>
                     </div>
                     <div style={{fontSize:13,fontFamily:"'DM Mono',monospace",fontWeight:500,flexShrink:0}}>{fmtX(t.amount)}</div>
@@ -654,6 +681,67 @@ export default function Dashboard({ refreshTick = 0 }) {
 
         <div style={{textAlign:"center",marginTop:18,fontSize:11,color:"var(--muted)"}}>my-money</div>
       </div>
+
+      {/* Transaction detail modal */}
+      {selTx&&(()=>{
+        const a=acctById(selTx.account_id);
+        const allCats=[...ERA_CATEGORIES,...customCats.map(c=>c.name).filter(n=>!ERA_CATEGORIES.includes(n))];
+        return (
+        <div className="overlay" onClick={()=>setSelTx(null)}>
+          <div className="modal" onClick={e=>e.stopPropagation()} style={{maxHeight:"80vh",overflowY:"auto"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",gap:10,marginBottom:4}}>
+              <div style={{fontSize:16,fontWeight:600,color:"var(--text)",minWidth:0,flex:1}}>
+                <EditName name={selTx.merchant_name||selTx.description} onSave={v=>saveTx({user_description:v||null})}/>
+              </div>
+              <div style={{fontSize:16,fontFamily:"'DM Mono',monospace",fontWeight:600,flexShrink:0}}>{fmtX(selTx.amount)}</div>
+            </div>
+            <div style={{fontSize:11,color:"var(--muted)",marginBottom:14,display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
+              <span>{selTx.transaction_date}</span>
+              {a&&<Pill label={acctLabel(a)} color={acctColor(a)}/>}
+              {selTx.user_description&&(
+                <button onClick={()=>saveTx({user_description:null})}
+                  style={{background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",fontSize:10,color:"var(--muted)",textDecoration:"underline",padding:0}}>
+                  reset name
+                </button>
+              )}
+            </div>
+            <div style={{fontSize:10,color:"var(--muted)",marginTop:-10,marginBottom:12}}>Double-click the name to rename this transaction.</div>
+
+            <div style={{fontSize:12,color:"var(--muted)",marginBottom:8}}>Category</div>
+            <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:6}}>
+              {allCats.map(cat=>{
+                const active=selTx.category===cat;
+                return (
+                  <button key={cat} onClick={()=>saveTx({user_category:cat===selTx.auto_category?null:cat})}
+                    style={{fontSize:11,fontWeight:600,padding:"5px 10px",borderRadius:20,fontFamily:"inherit",cursor:"pointer",
+                      background:active?getColor(cat)+"22":"var(--bg)",color:active?getColor(cat):"var(--muted)",
+                      border:`1px solid ${active?getColor(cat):"var(--border)"}`,transition:"all .15s"}}>
+                    {getName(cat)}
+                  </button>
+                );
+              })}
+            </div>
+            {selTx.user_category&&(
+              <button onClick={()=>saveTx({user_category:null})}
+                style={{background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",fontSize:11,color:"var(--muted)",textDecoration:"underline",padding:0,marginBottom:6}}>
+                Reset to automatic ({getName(selTx.auto_category)})
+              </button>
+            )}
+
+            <div style={{borderTop:"1px solid var(--border)",margin:"12px 0"}}/>
+            <button onClick={()=>saveTx({excluded:!selTx.excluded})}
+              style={{width:"100%",padding:"9px 0",borderRadius:8,border:"1px solid var(--border)",background:"none",
+                color:"var(--text)",fontFamily:"inherit",fontSize:12,fontWeight:500,cursor:"pointer"}}>
+              {selTx.excluded?"Include in spending again":"Exclude from spending"}
+            </button>
+            <div style={{marginTop:6,marginBottom:12,fontSize:10,color:"var(--muted)",textAlign:"center"}}>
+              Excluded transactions stay visible but don't count toward totals or charts.
+            </div>
+            <button onClick={()=>setSelTx(null)} className="ibtn" style={{width:"100%",justifyContent:"center"}}>Done</button>
+          </div>
+        </div>
+        );
+      })()}
 
       {/* Add category modal */}
       {addingCat&&(

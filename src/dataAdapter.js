@@ -25,7 +25,25 @@ function shiftMonth(year, month, delta) {
 }
 
 const TX_COLUMNS =
-  'plaid_tx_id, account_id, date, amount, merchant_name, description, mapped_category, pending';
+  'id, plaid_tx_id, account_id, date, amount, merchant_name, description, mapped_category, user_category, user_description, excluded, pending';
+
+// User override wins over the Plaid-derived category.
+function effectiveCategory(t) {
+  return t.user_category || t.mapped_category || 'Shopping and gear';
+}
+
+// Some banks send masked descriptors ("****** *********"). Treat those as
+// empty so the UI falls through to something readable.
+function looksMasked(s) {
+  return !!s && /^[\s*·.xX_-]+$/.test(s);
+}
+
+function displayName(t) {
+  if (t.user_description) return t.user_description;
+  const merchant = looksMasked(t.merchant_name) ? '' : t.merchant_name;
+  const desc = looksMasked(t.description) ? '' : t.description;
+  return merchant || desc || 'Card transaction';
+}
 
 const ACCOUNT_COLUMNS =
   'id, institution_id, name, official_name, nickname, color, mask, type, subtype, current_balance, available_balance, last_balance_at, hidden, institutions(name, display_name)';
@@ -64,7 +82,8 @@ function getMonthTransactions(year, month) {
 function sumSpending(txs) {
   let total = 0;
   for (const t of txs) {
-    if (t.amount > 0 && !isTransferCategory(t.mapped_category)) total += t.amount;
+    if (t.excluded) continue;
+    if (t.amount > 0 && !isTransferCategory(effectiveCategory(t))) total += t.amount;
   }
   return total;
 }
@@ -74,7 +93,8 @@ function sumSpending(txs) {
 function sumIncome(txs) {
   let total = 0;
   for (const t of txs) {
-    if (t.amount < 0 && !isReturnCategory(t.mapped_category)) total += Math.abs(t.amount);
+    if (t.excluded) continue;
+    if (t.amount < 0 && !isReturnCategory(effectiveCategory(t))) total += Math.abs(t.amount);
   }
   return total;
 }
@@ -113,9 +133,10 @@ export async function getSpending({ year, month }) {
   let total = 0;
 
   for (const t of txs) {
+    if (t.excluded) continue;
     if (t.amount <= 0) continue;
-    if (isTransferCategory(t.mapped_category)) continue;
-    const cat = t.mapped_category || 'Shopping and gear';
+    const cat = effectiveCategory(t);
+    if (isTransferCategory(cat)) continue;
     if (!buckets.has(cat)) buckets.set(cat, { amount: 0, count: 0 });
     const b = buckets.get(cat);
     b.amount += t.amount;
@@ -137,14 +158,30 @@ export async function getSpending({ year, month }) {
 
 function toTxShape(t) {
   return {
+    id: t.id,
     plaid_tx_id: t.plaid_tx_id,
     account_id: t.account_id,
-    merchant_name: t.merchant_name,
+    merchant_name: displayName(t),
     description: t.description,
     transaction_date: t.date,
     amount: t.amount,
-    category: t.mapped_category || 'Shopping and gear',
+    category: effectiveCategory(t),
+    auto_category: t.mapped_category || 'Shopping and gear',
+    user_category: t.user_category || null,
+    user_description: t.user_description || null,
+    excluded: !!t.excluded,
   };
+}
+
+// fields: { user_category } (null reverts to the automatic category),
+// { user_description } (null reverts to the bank's name), and/or { excluded }.
+export async function updateTransaction(id, fields) {
+  const allowed = {};
+  if ('user_category' in fields) allowed.user_category = fields.user_category;
+  if ('user_description' in fields) allowed.user_description = fields.user_description;
+  if ('excluded' in fields) allowed.excluded = fields.excluded;
+  const { error } = await supabase.from('transactions').update(allowed).eq('id', id);
+  if (error) throw error;
 }
 
 export async function getTransactions({ year, month }) {
