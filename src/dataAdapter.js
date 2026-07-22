@@ -271,6 +271,53 @@ export async function getRecurringCandidates({ months = 6 } = {}) {
   return { transactions: rows.map(toTxShape) };
 }
 
+// Cross-month search over description/merchant via ilike. The
+// transaction-editing branch adds a user_description column; until its
+// migration lands, querying that column errors, so we try with it once and
+// fall back (and remember) if the database doesn't have it yet.
+let searchHasUserDescription = true;
+
+function ilikePattern(q) {
+  // PostgREST's .or() parser treats commas/parens/quotes as syntax — strip
+  // them rather than quote-juggle (household searches don't need them).
+  // Escape the ilike wildcards so "100%" doesn't match everything.
+  const cleaned = q.replace(/[,()"]/g, ' ');
+  const escaped = cleaned.replace(/([\\%_])/g, '\\$1');
+  return `%${escaped}%`;
+}
+
+export async function searchTransactions(query, { limit = 200 } = {}) {
+  const q = (query || '').trim();
+  if (q.length < 2) return { transactions: [], hasMore: false };
+  const pat = ilikePattern(q);
+
+  const run = withUserDesc => {
+    const ors = [`description.ilike.${pat}`, `merchant_name.ilike.${pat}`];
+    if (withUserDesc) ors.push(`user_description.ilike.${pat}`);
+    return supabase
+      .from('transactions')
+      .select(`${TX_COLUMNS}, accounts!inner(hidden, type)`)
+      .eq('accounts.hidden', false)
+      .or(ors.join(','))
+      .order('date', { ascending: false })
+      .limit(limit + 1);
+  };
+
+  let { data, error } = await run(searchHasUserDescription);
+  if (error && searchHasUserDescription) {
+    // Column not there yet (pre-transaction-editing schema): retry without.
+    searchHasUserDescription = false;
+    ({ data, error } = await run(false));
+  }
+  if (error) throw error;
+
+  for (const t of data) {
+    t.mapped_category = applyAccountRules(t.mapped_category, t.amount, t.accounts?.type);
+  }
+  const hasMore = data.length > limit;
+  return { transactions: data.slice(0, limit).map(toTxShape), hasMore };
+}
+
 export async function getCashFlow({ num_periods = 6 } = {}) {
   const now = new Date();
   const curY = now.getFullYear();

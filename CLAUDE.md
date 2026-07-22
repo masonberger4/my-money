@@ -110,6 +110,11 @@ shouldn't have to ask.
   median gap 28±4 days, amounts within ±20%); `getRecurringCandidates()`
   fetches 6 months. Lazy-computed on first tab open, recomputed after sync.
   No schema.
+- **Search** — cross-month search box atop the Transactions tab (debounced
+  300ms, min 2 chars, stale-response guard). `searchTransactions()` runs a
+  Supabase `ilike` over description/merchant/user_description (wildcards
+  escaped, `.or()`-unsafe chars stripped), newest-first, 200-match cap.
+  No schema.
 
 ## Pending branches (awaiting Mason's review)
 
@@ -117,17 +122,11 @@ shouldn't have to ask.
   `api/assistant.js` (claude-opus-4-8, adaptive thinking, prompt-cached
   context block) + `api/_lib/spendingContext.js` (deterministic 90-day
   snapshot). Needs `ANTHROPIC_API_KEY` in Vercel. Read-only by design.
-- `claude/feature-search`: cross-month search box on the Transactions tab
-  (`searchTransactions()`, ilike over description/merchant/user_description,
-  escaped). No schema.
-
 ## Roadmap (agreed order + design notes)
 
 1. **Budgets** — ✅ merged (see Merged features above).
 2. **Recurring/subscription detection** — ✅ merged (see Merged features above).
-3. **Transaction search** — branched (`claude/feature-search`), awaiting
-   review — search box over description/merchant/user_description via
-   Supabase `ilike`, cross-month. No schema.
+3. **Transaction search** — ✅ merged (see Merged features above).
 4. Later ideas (discussed, not committed): CSV export, net worth (needs
    Plaid Investments/Liabilities products — check per-call cost first),
    savings rate stat, notes/tags on transactions, sign-out button.
