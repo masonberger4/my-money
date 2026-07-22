@@ -256,6 +256,21 @@ export async function setBudget(category, limit) {
   if (error) throw error;
 }
 
+// Last N months of transactions (oldest full month through the current
+// partial one) for client-side recurring detection (src/recurring.js).
+// Goes through getTransactionsBetween so hidden-account filtering and
+// account rules ("Return") apply. Detection itself stays out of the adapter.
+export async function getRecurringCandidates({ months = 6 } = {}) {
+  const now = new Date();
+  const curY = now.getFullYear();
+  const curM = now.getMonth() + 1;
+  const oldest = shiftMonth(curY, curM, -(months - 1));
+  const { start } = monthBounds(oldest.year, oldest.month);
+  const { end } = monthBounds(curY, curM);
+  const rows = await getTransactionsBetween(start, end);
+  return { transactions: rows.map(toTxShape) };
+}
+
 export async function getCashFlow({ num_periods = 6 } = {}) {
   const now = new Date();
   const curY = now.getFullYear();
