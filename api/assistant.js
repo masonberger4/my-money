@@ -49,9 +49,12 @@ export default async function handler(req, res) {
     const anthropic = new Anthropic();
 
     const response = await anthropic.messages.create({
-      model: 'claude-opus-4-8',
+      // Haiku 4.5: fast and cheap for household finance Q&A. It predates
+      // adaptive thinking (a 4.6+ feature), so no `thinking` param — it would
+      // 400. Bump back to an Opus/Sonnet model + adaptive thinking if answers
+      // need more depth.
+      model: 'claude-haiku-4-5',
       max_tokens: 2048,
-      thinking: { type: 'adaptive' },
       system: [
         { type: 'text', text: SYSTEM_PROMPT },
         {

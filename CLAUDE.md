@@ -88,6 +88,16 @@ shouldn't have to ask.
   transaction-editing branch until merged).
 - "Transfers and card payments" and "Return" are never counted as spending;
   "Return" (credit-card negatives) never counted as income.
+- **Internal transfers / card payments** (BECU checking ↔ savings, credit-card
+  payments) must net to zero. The outflow leg maps to "Transfers and card
+  payments" so it's already out of spending; the *inflow* leg was leaking into
+  income because that bucket also holds real INCOME (paychecks). `sumIncome`
+  filters on `isInternalMovement(raw_category)` (Plaid `TRANSFER_IN/OUT/
+  LOAN_PAYMENTS` prefixes — **not** INCOME) to drop the inflow leg while keeping
+  paychecks. Timing-independent (legs can post on different days); a
+  `user_category` override wins. `raw_category` is stored on every tx by
+  `sync.js`. (An earlier same-day/same-amount "wash" heuristic was tried and
+  abandoned — it over-matched real purchases and missed different-day legs.)
 - Account labels: `nickname || "name ··mask"`; account badge colors from
   `ACCOUNT_COLORS` palette by index when `color` is null.
 - Plaid sync upserts deliberately omit user-owned columns (nickname, color,
@@ -116,7 +126,8 @@ shouldn't have to ask.
   escaped, `.or()`-unsafe chars stripped), newest-first, 200-match cap.
   No schema.
 - **Assistant** — "Ask" tab: Claude-powered spending Q&A. `api/assistant.js`
-  (claude-opus-4-8, adaptive thinking, prompt-cached context block) +
+  (claude-haiku-4-5, no extended thinking — Haiku predates adaptive;
+  prompt-cached context block) +
   `api/_lib/spendingContext.js` (deterministic 90-day snapshot). Read-only
   by design; conversations not persisted. **Requires `ANTHROPIC_API_KEY` in
   Vercel** — without it the tab shows an "assistant not configured" message.

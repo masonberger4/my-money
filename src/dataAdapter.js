@@ -1,5 +1,10 @@
 import { supabase } from './supabaseClient.js';
-import { isTransferCategory, isReturnCategory, applyAccountRules } from './categoryMap.js';
+import {
+  isTransferCategory,
+  isReturnCategory,
+  isInternalMovement,
+  applyAccountRules,
+} from './categoryMap.js';
 
 function pad2(n) {
   return String(n).padStart(2, '0');
@@ -25,7 +30,7 @@ function shiftMonth(year, month, delta) {
 }
 
 const TX_COLUMNS =
-  'id, plaid_tx_id, account_id, date, amount, merchant_name, description, mapped_category, user_category, user_description, excluded, pending';
+  'id, plaid_tx_id, account_id, date, amount, merchant_name, description, mapped_category, raw_category, user_category, user_description, excluded, pending';
 
 // User override wins over the Plaid-derived category.
 function effectiveCategory(t) {
@@ -89,11 +94,18 @@ function sumSpending(txs) {
 }
 
 // Credit-card refunds (category "Return") are reversals of past spend, not
-// income — exclude them so cash-flow isn't inflated.
+// income. Internal transfers between the household's own accounts and
+// credit-card/loan payments (identified by Plaid's raw_category) also aren't
+// income — the mapped bucket lumps them with real INCOME, so filter on
+// raw_category here to keep paychecks while dropping the transfers. A user
+// override (user_category) wins, as everywhere else. The transfer's outflow
+// leg is already excluded from spending (mapped to "Transfers and card
+// payments"), so dropping the inflow leg here nets the whole transfer to zero.
 function sumIncome(txs) {
   let total = 0;
   for (const t of txs) {
     if (t.excluded) continue;
+    if (isInternalMovement(t.raw_category) && !t.user_category) continue;
     if (t.amount < 0 && !isReturnCategory(effectiveCategory(t))) total += Math.abs(t.amount);
   }
   return total;
