@@ -613,6 +613,8 @@ const DESC_STOPWORDS = new Set([
   'POS', 'PURCHASE', 'PAYMENT', 'PAYMENTS', 'DEBIT', 'CREDIT', 'CARD', 'ACH',
   'PENDING', 'RECURRING', 'ONLINE', 'MOBILE', 'TRANSACTION', 'TRANSFER', 'THE',
   'AND', 'FROM', 'WWW', 'COM', 'HTTP', 'HTTPS', 'INC', 'LLC', 'USA', 'US',
+  'ATM', 'WITHDRAWAL', 'WITHDRAWALS', 'DEPOSIT', 'DEPOSITS', 'CHECK', 'CHECKS',
+  'BILL', 'BILLPAY', 'AUTOPAY', 'WITHDRAW',
 ]);
 
 // Token set for fuzzy description similarity — Plaid rewrites bank descriptors,
