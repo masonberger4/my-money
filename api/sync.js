@@ -2,7 +2,11 @@ import { getPlaidClient } from './_lib/plaid.js';
 import { getServiceClient, requireUser } from './_lib/supabase.js';
 import { mapPlaidCategory } from '../src/categoryMap.js';
 
-const ALLOWED_TYPES = new Set(['depository', 'credit']);
+// depository + credit fund the spending/cash-flow views; loan lets Plaid-linked
+// debts (mortgage, student/personal loans) sync their balances for the debt
+// tracker. Loan accounts carry sparse/no /transactions rows — their real data
+// (APR, minimum payment, due date) comes from the Liabilities product.
+const ALLOWED_TYPES = new Set(['depository', 'credit', 'loan']);
 
 function mapAccountRow(account, institutionId, householdId) {
   return {

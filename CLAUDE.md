@@ -37,7 +37,9 @@ entry once shipped.
 - **Sync is server-side** (`api/sync.js`): cursor-based transactionsSync per
   institution; upserts accounts (onConflict `institution_id,plaid_account_id`)
   and transactions (onConflict `account_id,plaid_tx_id`); `needs_reauth` on
-  ITEM_LOGIN_REQUIRED. Only `depository`+`credit` account types are synced.
+  ITEM_LOGIN_REQUIRED. Syncs `depository`+`credit`+`loan` account types
+  (`ALLOWED_TYPES`); loans carry sparse/no transactions — their debt data comes
+  from the Liabilities product (see Debt tracker in Roadmap).
 
 ## Key files
 
@@ -148,9 +150,10 @@ _(none)_
 ## Roadmap
 
 **Next: CSV import** — make the un-synced personal-account income visible (spec
-below). Later (discussed, not committed): net worth / debt-payoff tracker,
-auto-categorization rules, cash-flow forecast, savings goals, CSV/PDF export,
-sign-out button.
+below). **Then: Debt tracker** — Plaid-linked debts + payoff projections (spec
+below; the `loan` sync fix that unblocks it is already on main). Later
+(discussed, not committed): net worth over time, auto-categorization rules,
+cash-flow forecast, savings goals, CSV/PDF export, sign-out button.
 
 ### CSV import — build spec
 Goal: upload a bank CSV → reconcile against the household's real accounts. Two
@@ -249,6 +252,77 @@ Caveats: per-bank formats differ (BECU preset first); no stable bank IDs (hash
 dedup; prompt on identical rows); CSV is a manual periodic export (stale vs live
 sync). The old double-count risk is handled by comparison mode auto-detecting a
 linked target.
+
+### Debt tracker — build spec
+Goal: track the household's debts (mortgage, credit cards, personal/student
+loans) with balances, APR, minimum payments, and payoff projections — driven by
+**Plaid-connected accounts** (the household decided a debt tracker only makes
+sense if it's automatic, not hand-maintained). The debts are NOT yet linked (the
+app only ever saw the *payments* leaving checking); connecting them is the point.
+
+Foundation already shipped: `api/sync.js` `ALLOWED_TYPES` now includes `'loan'`,
+so a Plaid-linked mortgage/loan account syncs its balance and appears in the
+Accounts tab (`getAccounts` has no type filter; `getOverview`'s header list is
+still credit+depository by design — the Debt view owns debts).
+
+What Plaid gives beyond payments — the **Liabilities** product (`/liabilities/get`):
+- Credit cards: per-APR breakdown, `last_statement_balance`, `minimum_payment_amount`,
+  `next_payment_due_date`, last payment amount/date, overdue flag.
+- Mortgages: `interest_rate`, current `principal`, next monthly payment + due date,
+  `maturity_date`, YTD interest vs principal, origination amount.
+- Student/personal loans: interest rate, minimum payment, next due date,
+  `expected_payoff_date`, outstanding interest, servicer/status.
+- Plain balance product already gives outstanding balance + `credit_limit`
+  (→ utilization). Verify exact field names against current Plaid docs at build.
+
+Build steps:
+1. **Enable Liabilities at link time.** `api/create-link-token.js` currently
+   `products: ['transactions']`. Add liabilities as **`optional_products:
+   ['liabilities']`** (NOT required `products` — a required product BLOCKS
+   linking institutions that don't support it; optional lets them link and just
+   return no liabilities). **Existing Items (transactions-only) need a re-link /
+   update mode to gain liabilities** — surface a "reconnect for debt details"
+   action; new links get both up front.
+2. **Pull liabilities in sync.** After `transactionsSync`, call
+   `liabilitiesGet({ access_token })`; map `credit[]`/`mortgage[]`/`student[]`
+   by `account_id` onto the account row. **Handle absence gracefully** —
+   institutions without Liabilities throw (`PRODUCTS_NOT_SUPPORTED` /
+   `PRODUCT_NOT_READY`); catch per-institution, don't fail the whole sync.
+3. **Schema (additive on `accounts`):** `apr`, `minimum_payment`, `credit_limit`,
+   `statement_balance`, `next_payment_due_date`, `interest_rate`,
+   `original_balance` (all nullable numeric/date). These are **Plaid-owned**
+   (refreshed each sync) for linked debts; for a MANUAL debt (`is_manual`, no
+   token → never synced) the user hand-enters them and sync never clobbers.
+   Optional `liabilities_raw jsonb` to stash the rest without column sprawl.
+4. **Balance history:** `balance_snapshots (account_id, captured_on date,
+   balance numeric)` appended by sync when an account's balance changes → powers
+   the debt-over-time chart AND seeds the future net-worth feature.
+5. **`src/debtPayoff.js`** (pure, like `recurring.js`): month-by-month
+   amortization from `current_balance` + `apr` + `minimum_payment`; **snowball**
+   (smallest balance first) vs **avalanche** (highest APR first) vs extra-$/mo
+   what-if → debt-free date, total interest, interest saved.
+6. **`getDebts()` in dataAdapter:** accounts where `type in ('credit','loan')`
+   with the liability fields + computed totals (total debt, total minimums).
+7. **Debt view** (new tab, or an Accounts-tab section — decide): per-debt cards
+   (balance, APR, min, due date, card utilization), totals, payoff projection
+   (snowball/avalanche toggle + extra-payment slider → debt-free date + interest
+   saved), progress vs `original_balance`.
+
+Keep out of spending/cash-flow: loan/credit accounts are debts, not spend —
+`isCheckingAccount`/`isHouseholdDepository` already exclude them, but confirm no
+loan-account transactions leak into `sumSpending`/`getSpending` (guard by type
+if any appear). Credit-card *purchases* still count as spending (unchanged);
+card *payments* from checking stay transfers.
+
+Manual fallback: debts on institutions Plaid can't do Liabilities for → add a
+manual debt account (reuse the CSV-import manual-account machinery: `is_manual`,
+`type='credit'|'loan'`, hand-entered balance/apr/min). Plaid-linked is primary.
+
+Caveats: Liabilities is a separate Plaid product (billing) with uneven
+institution coverage; existing Items need re-linking to gain it; connecting many
+debts eats Plaid Item slots (the multi-credential picker handles it). Debt
+tracker is the liability half of the future net-worth feature — the
+`balance_snapshots` table is shared groundwork.
 
 ## Gotchas
 
