@@ -44,10 +44,10 @@ entry once shipped.
 | File | Role |
 |---|---|
 | `src/components/Dashboard.jsx` | Almost the entire UI — single file, inline styles, tabs: overview/categories/transactions/accounts/trends/recurring/ask. Shared mini-components: `Pill`, `Swatch`, `EditName`, `Sk` (skeleton), `Donut`. |
-| `src/dataAdapter.js` | All Supabase reads + shapes consumed by Dashboard; the Trends cash-flow model lives here (see Conventions). Keep return shapes stable. Also holds the CSV-import writes (`findOrCreateManualInstitution`, `createManualAccount`, `getExistingTxIds`, `importCsvTransactions`, `isManualAccount`) and exports the cash-flow helpers (`markInternalTransfers`/`cashIncome`/`cashSpending`) for the dry-run harness. |
+| `src/dataAdapter.js` | All Supabase reads + shapes consumed by Dashboard; the Trends cash-flow model lives here (see Conventions). Keep return shapes stable. Also holds the CSV-import writes (`findOrCreateManualInstitution`, `createManualAccount`, `getExistingTxIds`, `importCsvTransactions`, `isManualAccount`), the comparison-mode read `getAccountTransactionsInRange`, and exports the cash-flow helpers (`markInternalTransfers`/`cashIncome`/`cashSpending`) for the dry-run harness. |
 | `src/categoryMap.js` | Plaid category → app category mapping; `applyAccountRules` (credit-card negatives → "Return", excluded from income); pure JS, imported by server code too. `ERA_CATEGORIES` is the taxonomy source of truth (no "Housing"/"Income" member). |
-| `src/csvImport.js` | Pure CSV-import core (no React/Supabase): `parseCsv`, `detectHeader`, `parseMoney`/`parseDate`, `guessCategory` (validated against `ERA_CATEGORIES`), transfer flagging, dedup `plaid_tx_id` hashing, `buildRows`/`analyzeCsv`. Testable in isolation. |
-| `src/components/CsvImport.jsx` | Accounts-tab import modal: file → target account → preview (greyed dupes) → confirm. Writes via dataAdapter's `createManualAccount`/`importCsvTransactions`. |
+| `src/csvImport.js` | Pure CSV-import core (no React/Supabase): `parseCsv`, `detectHeader`, `parseMoney`/`parseDate`, `guessCategory` (validated against `ERA_CATEGORIES`), transfer flagging, dedup `plaid_tx_id` hashing, `buildRows`/`analyzeCsv`. Also the comparison-mode core: `reconcileCsv` (max-matching audit), `descSimilarity`, `csvDateRange`. Testable in isolation. |
+| `src/components/CsvImport.jsx` | Accounts-tab import modal, two modes by target: **standalone** (manual target) file → preview (greyed dupes) → confirm; **comparison** (Plaid-linked target) read-only reconciliation audit, inserts nothing. Writes via dataAdapter's `createManualAccount`/`importCsvTransactions`; reads Plaid rows via `getAccountTransactionsInRange`. |
 | `src/plaidClient.js` | Client → api/ fetch wrappers (JWT attached). |
 | `src/sync.js` | Single-flight wrapper triggering server sync. |
 | `src/db.js` | getSetting/setSetting on the Supabase `settings` table (dashboard prefs: colors, names, custom categories, `asst:model`/`asst:effort`). |
@@ -146,22 +146,28 @@ playwright-core screenshot (`executablePath:'/opt/pw-browsers/chromium'`,
 
 ## Pending branches
 
-- **`claude/csv-import-phase-1-ntq19j`** — CSV import **Phase 1 (standalone)**: upload a
-  bank CSV (BECU preset) on the Accounts tab → real transactions on a manual
-  (non-Plaid) account. Adds migration `20260722000001_csv_import.sql`
-  (`accounts.is_manual`, `transactions.source` — both additive, `not null
-  default`; the importer degrades gracefully if they're absent so previews work
-  before the SQL lands). New `src/csvImport.js` (pure core) +
+- **`claude/csv-import-phase-1-ntq19j`** — CSV import, **both modes built**
+  (branch name predates Phase 2). Accounts-tab action → pick a bank CSV (BECU
+  preset) → pick a target account:
+  - **Standalone** (new/existing manual target) → real transactions on a manual
+    (non-Plaid) account.
+  - **Comparison** (Plaid-linked target) → read-only reconciliation audit,
+    inserts NOTHING (sync gaps / pending-timing / amount·date·category
+    mismatches).
+  Adds migration `20260722000001_csv_import.sql` (`accounts.is_manual`,
+  `transactions.source` — both additive `not null default`; the importer
+  degrades gracefully if they're absent so previews work before the SQL lands).
+  New `src/csvImport.js` (pure core, incl. `reconcileCsv` max-matching) +
   `src/components/CsvImport.jsx` (modal). No cash-flow code change — imported
-  depository rows flow through `getCashFlow` automatically (verified). Comparison
-  mode still deferred (see Roadmap). Awaiting Mason's preview review + "merge
-  csv-import". **Migration must be pasted before preview DB writes work.**
+  depository rows flow through `getCashFlow` automatically (verified). Awaiting
+  Mason's preview review + "merge csv-import". **Migration must be pasted before
+  preview DB writes work.**
 
 ## Roadmap
 
-**CSV import** — Phase 1 (standalone) is **built on
-`claude/csv-import-phase-1-ntq19j`** (see Pending; awaiting merge). Phase 2
-(comparison mode) is the remaining work below. Later (discussed, not committed):
+**CSV import** — **both modes (standalone + comparison) built on
+`claude/csv-import-phase-1-ntq19j`** (see Pending; awaiting merge). The build
+spec below is retained as the as-built contract. Later (discussed, not committed):
 net worth / debt-payoff tracker, auto-categorization rules, cash-flow forecast,
 savings goals, CSV/PDF export, sign-out button. **`markInternalTransfers`
 max-matching** — the current greedy nearest-gap matcher can strand one of two
@@ -182,19 +188,24 @@ Goal: upload a bank CSV → reconcile against the household's real accounts. Two
   they flow into Transactions/Categories/Search/Assistant/Trends with no
   downstream special-casing (the transactions table is adapter-agnostic — the
   whole reason the old `synthetic_id` existed). **Primary value** — makes the
-  un-synced personal-account paychecks visible. **BUILT (Phase 1)** — see
+  un-synced personal-account paychecks visible. **BUILT** — see
   `src/csvImport.js` + `src/components/CsvImport.jsx`; the notes below record the
-  as-built contract. Selecting a Plaid-linked target shows an overlap warning and
-  blocks insert (comparison mode not built yet).
+  as-built contract. Selecting a Plaid-linked target switches to comparison mode.
 - **Comparison** (target IS Plaid-linked — the joint accounts): reconcile the
   CSV against what Plaid already synced; insert NOTHING (that's the double-count
   trap). Emit an audit — rows in CSV but not Plaid (sync gaps), rows in Plaid
   but not CSV (pending/timing), amount/date/category mismatches on matched
   pairs. Auto-detecting linkage is what makes this safe (turns the old "don't
-  import a synced account" footgun into a feature). Lower value (joint Plaid
-  sync is solid) + needs a fuzzy matcher (exact amount, ±few days, description
-  optional — Plaid rewrites descriptions and posted/pending dates drift) → build
-  SECOND.
+  import a synced account" footgun into a feature). **BUILT** — `reconcileCsv`
+  in `src/csvImport.js`: match on **exact amount + date within ±4 days**
+  (description optional — Plaid rewrites it), a **maximum bipartite matching**
+  (Kuhn's) so equal-amount clusters pair up fully with no greedy stranding
+  (closest-date then description-similarity tie-breakers); a conservative 2nd
+  pass pairs leftovers by strong description similarity (Jaccard ≥ 0.6) + window
+  to surface likely same-txn **amount** discrepancies (misses are OK, false
+  pairings that hide a gap are not). Plaid rows are fetched over the CSV's date
+  span ± 7 days (`getAccountTransactionsInRange`). UI: four buckets + per-match
+  date/category flags; `Close (nothing imported)`.
 
 Feasibility (verified against schema + api/):
 - **Client-side is sufficient.** The `*_all` RLS policies (`for all … with

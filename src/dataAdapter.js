@@ -574,6 +574,30 @@ export async function getExistingTxIds(accountId) {
   return ids;
 }
 
+// Raw transactions on one account within a date range, for CSV reconciliation
+// (comparison mode, Phase 2). Returns the columns reconcileCsv compares — not
+// the shaped toTxShape form — scoped to the CSV's period so a one-month CSV
+// isn't compared against years of Plaid history.
+export async function getAccountTransactionsInRange(accountId, start, end) {
+  const rows = [];
+  if (!accountId || !start || !end) return rows;
+  const page = 1000;
+  for (let from = 0; ; from += page) {
+    const { data, error } = await supabase
+      .from('transactions')
+      .select('plaid_tx_id, date, amount, description, merchant_name, mapped_category, user_category, pending')
+      .eq('account_id', accountId)
+      .gte('date', start)
+      .lte('date', end)
+      .order('date', { ascending: true })
+      .range(from, from + page - 1);
+    if (error) throw error;
+    for (const r of data) rows.push({ ...r, amount: Number(r.amount) });
+    if (data.length < page) break;
+  }
+  return rows;
+}
+
 // Idempotent upsert of built CSV rows onto a manual account. onConflict
 // (account_id, plaid_tx_id) means a re-import of overlapping rows updates in
 // place instead of duplicating; user-owned columns (user_category, excluded,

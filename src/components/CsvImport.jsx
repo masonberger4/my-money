@@ -1,12 +1,26 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { analyzeCsv, toInsertRow, parseCsv } from "../csvImport.js";
-import { createManualAccount, importCsvTransactions, getExistingTxIds, isManualAccount } from "../dataAdapter.js";
+import { analyzeCsv, toInsertRow, parseCsv, reconcileCsv, csvDateRange } from "../csvImport.js";
+import { createManualAccount, importCsvTransactions, getExistingTxIds, getAccountTransactionsInRange, isManualAccount } from "../dataAdapter.js";
 
-// Standalone CSV import (Phase 1). A file-picker action on the Accounts tab:
-// pick a bank CSV → choose/create a manual account → preview the exact rows →
-// confirm → real transactions land on a non-Plaid account and flow into every
-// tab. No DB write happens before Confirm; the preview greys out rows a prior
-// import already inserted (via the stable csv:… id) so re-imports are safe.
+// CSV import — a file-picker action on the Accounts tab, in two modes chosen by
+// the target account:
+//  • STANDALONE (Phase 1) — target is a new/existing MANUAL account: pick a
+//    bank CSV → preview the exact rows → confirm → real transactions land on a
+//    non-Plaid account. No DB write before Confirm; the preview greys out rows a
+//    prior import already inserted (stable csv:… id) so re-imports are safe.
+//  • COMPARISON (Phase 2) — target is a PLAID-LINKED account: insert NOTHING
+//    (that's the double-count trap). Reconcile the CSV against what Plaid
+//    already synced and show a read-only audit — sync gaps, pending/timing, and
+//    amount/date/category mismatches on matched pairs.
+
+// Pad an ISO date by ±days so the Plaid fetch covers the CSV's period plus the
+// date-drift window on both ends. Explicit UTC math — never new Date(string).
+function padIso(iso, days) {
+  const [y, m, d] = String(iso).split("-").map(Number);
+  const t = Date.UTC(y, m - 1, d) + days * 86400000;
+  const dt = new Date(t);
+  return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, "0")}-${String(dt.getUTCDate()).padStart(2, "0")}`;
+}
 
 function money(n) {
   const v = Number(n);
@@ -29,6 +43,8 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [result, setResult] = useState(null);
+  const [recon, setRecon] = useState(null);
+  const [reconLoading, setReconLoading] = useState(false);
   const fileRef = useRef(null);
 
   const manual = accounts.filter(isManualAccount);
@@ -46,9 +62,10 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
     }
   }, [fileText, existingIds, manualCols, amountSign]);
 
-  // Load the target account's existing ids so dupes grey out. New account → none.
+  // Load the target account's existing ids so dupes grey out. New account or a
+  // Plaid target (comparison mode, no insert) → none.
   useEffect(() => {
-    if (target === "new") { setExistingIds(new Set()); return; }
+    if (target === "new" || targetIsPlaid) { setExistingIds(new Set()); return; }
     let cancelled = false;
     setLoadingIds(true);
     getExistingTxIds(target)
@@ -56,7 +73,24 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
       .catch(() => { if (!cancelled) setExistingIds(new Set()); })
       .finally(() => { if (!cancelled) setLoadingIds(false); });
     return () => { cancelled = true; };
-  }, [target]);
+  }, [target, targetIsPlaid]);
+
+  // Comparison mode: when the target is Plaid-linked, reconcile the CSV against
+  // what Plaid already synced over the CSV's date range (± the drift window).
+  // Inserts nothing — this only reads and audits.
+  const csvRows = analysis && !analysis.needsManualMapping && !analysis.error ? analysis.rows : null;
+  useEffect(() => {
+    if (!targetIsPlaid || !csvRows) { setRecon(null); return; }
+    const { min, max } = csvDateRange(csvRows);
+    if (!min || !max) { setRecon({ counts: { matched: 0, csvOnly: 0, plaidOnly: 0, amountMismatches: 0 }, matched: [], amountMismatches: [], csvOnly: [], plaidOnly: [] }); return; }
+    let cancelled = false;
+    setReconLoading(true);
+    getAccountTransactionsInRange(target, padIso(min, -7), padIso(max, 7))
+      .then(plaidRows => { if (!cancelled) setRecon(reconcileCsv(csvRows, plaidRows)); })
+      .catch(e => { if (!cancelled) { console.error("reconcile failed", e); setError(e.message || "Couldn't load Plaid transactions to compare."); setRecon(null); } })
+      .finally(() => { if (!cancelled) setReconLoading(false); });
+    return () => { cancelled = true; };
+  }, [target, targetIsPlaid, csvRows]);
 
   async function onFile(e) {
     const f = e.target.files?.[0];
@@ -180,7 +214,7 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                         </optgroup>
                       )}
                       {plaid.length > 0 && (
-                        <optgroup label="Plaid-linked — comparison mode (not available yet)">
+                        <optgroup label="Plaid-linked — compare (reconcile, nothing imported)">
                           {plaid.map(a => <option key={a.id} value={a.id}>{a.nickname || a.name}{a.mask ? ` ··${a.mask}` : ""}</option>)}
                         </optgroup>
                       )}
@@ -207,14 +241,20 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                     )}
 
                     {targetIsPlaid && (
-                      <div style={{ marginTop: 10, fontSize: 12, color: "#A32D2D", background: "#FCEBEB", border: "1px solid #F09595", borderRadius: 8, padding: "10px 12px", lineHeight: 1.5 }}>
-                        This account is linked to Plaid and already syncs automatically. Importing a CSV here would double-count those
-                        transactions. Comparison / reconciliation mode isn't built yet — pick or create an imported account instead.
+                      <div style={{ marginTop: 10, fontSize: 12, color: "var(--muted)", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8, padding: "10px 12px", lineHeight: 1.5 }}>
+                        This account already syncs via Plaid. Nothing will be imported — the CSV is compared against what Plaid synced
+                        to surface sync gaps, pending/timing differences, and amount mismatches.
                       </div>
                     )}
                   </div>
 
-                  {/* 3 — Preview */}
+                  {/* 3 — Comparison audit (Plaid target) */}
+                  {targetIsPlaid && (
+                    <Reconciliation recon={recon} loading={reconLoading} sectionLabel={sectionLabel} />
+                  )}
+
+                  {/* 3 — Preview (standalone: new/manual target) */}
+                  {!targetIsPlaid && (
                   <div style={{ marginBottom: 10 }}>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
                       <div style={sectionLabel}>3 · Preview</div>
@@ -266,6 +306,7 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                       figures — that's the intended whole-household correction, not a bug.
                     </div>
                   </div>
+                  )}
                 </>
               )}
 
@@ -280,6 +321,9 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
         <div style={{ display: "flex", gap: 8, padding: "14px 20px", borderTop: "1px solid var(--border)" }}>
           {result ? (
             <button onClick={onClose} style={{ flex: 1, padding: "10px 0", borderRadius: 8, border: "none", background: "#7F77DD", color: "#fff", fontFamily: "inherit", fontSize: 14, fontWeight: 500, cursor: "pointer" }}>Done</button>
+          ) : targetIsPlaid ? (
+            // Comparison mode inserts nothing — only a close action.
+            <button onClick={onClose} style={{ flex: 1, padding: "10px 0", borderRadius: 8, border: "none", background: "#7F77DD", color: "#fff", fontFamily: "inherit", fontSize: 14, fontWeight: 500, cursor: "pointer" }}>Close (nothing imported)</button>
           ) : (
             <>
               <button onClick={onClose} disabled={busy} className="ibtn" style={{ flex: 1, justifyContent: "center", opacity: busy ? .5 : 1 }}>Cancel</button>
@@ -362,6 +406,111 @@ function ManualMapper({ fileText, onApply, amountSign, setAmountSign, selStyle, 
         ))}
       </div>
       <button className="ibtn" onClick={apply} disabled={!ready} style={{ marginTop: 10, fontSize: 12, opacity: ready ? 1 : .5 }}>Apply mapping</button>
+    </div>
+  );
+}
+
+// Comparison-mode audit. Reconciles the CSV against Plaid-synced rows and shows
+// four buckets. Inserts nothing. Kept compact + mobile-first; each list caps at
+// 50 rows with a "+N more" line so a big month doesn't blow up the modal.
+const RECON_CAP = 50;
+
+function ReconRow({ left, sub, amount, amountNote }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "7px 12px", borderTop: "1px solid var(--border)" }}>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontSize: 12, fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{left}</div>
+        {sub && <div style={{ fontSize: 10, color: "var(--muted)", marginTop: 2 }}>{sub}</div>}
+      </div>
+      <div style={{ textAlign: "right", flexShrink: 0 }}>
+        <div style={{ fontSize: 12, fontFamily: "'DM Mono',monospace", fontWeight: 500 }}>{amount}</div>
+        {amountNote && <div style={{ fontSize: 10, color: "var(--muted)", marginTop: 1 }}>{amountNote}</div>}
+      </div>
+    </div>
+  );
+}
+
+function ReconSection({ title, hint, color, count, children }) {
+  if (!count) return null;
+  return (
+    <div style={{ marginBottom: 12, border: "1px solid var(--border)", borderRadius: 10, overflow: "hidden" }}>
+      <div style={{ padding: "9px 12px", background: "var(--bg)" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <span style={{ width: 7, height: 7, borderRadius: "50%", background: color, flexShrink: 0 }} />
+          <span style={{ fontSize: 12, fontWeight: 600 }}>{title}</span>
+          <span style={{ fontSize: 11, color: "var(--muted)" }}>· {count}</span>
+        </div>
+        {hint && <div style={{ fontSize: 10, color: "var(--muted)", marginTop: 3 }}>{hint}</div>}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function Reconciliation({ recon, loading, sectionLabel }) {
+  if (loading) {
+    return <div style={{ marginBottom: 10 }}><div style={sectionLabel}>Comparing against Plaid…</div>
+      <div style={{ fontSize: 12, color: "var(--muted)" }}>Reconciling the CSV against what's already synced — nothing will be imported.</div></div>;
+  }
+  if (!recon) return null;
+  const c = recon.counts;
+  const cleanMatched = recon.matched.filter(m => !m.dateMismatch && !m.categoryMismatch).length;
+  const flaggedMatched = recon.matched.filter(m => m.dateMismatch || m.categoryMismatch);
+
+  const chip = (label, n, color) => (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 11, fontWeight: 600, background: color + "22", color, borderRadius: 20, padding: "3px 9px" }}>
+      <span style={{ width: 5, height: 5, borderRadius: "50%", background: color }} />{n} {label}
+    </span>
+  );
+
+  return (
+    <div style={{ marginBottom: 10 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+        <div style={sectionLabel}>3 · Comparison audit</div>
+        <div style={{ fontSize: 11, color: "var(--muted)" }}>{c.csvTotal} CSV · {c.plaidTotal} synced</div>
+      </div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 12 }}>
+        {chip("matched", c.matched, "#1D9E75")}
+        {chip("sync gap" + (c.csvOnly !== 1 ? "s" : ""), c.csvOnly, "#D85A30")}
+        {chip("amount diff" + (c.amountMismatches !== 1 ? "s" : ""), c.amountMismatches, "#B7791F")}
+        {chip("Plaid-only", c.plaidOnly, "#888780")}
+      </div>
+
+      <ReconSection title="In your CSV, missing from Plaid" hint="Possible sync gaps — Plaid may not have picked these up." color="#D85A30" count={recon.csvOnly.length}>
+        {recon.csvOnly.slice(0, RECON_CAP).map((r, i) => (
+          <ReconRow key={i} left={r.description} sub={r.date} amount={money(r.amount)} />
+        ))}
+        {recon.csvOnly.length > RECON_CAP && <div style={{ fontSize: 11, color: "var(--muted)", textAlign: "center", padding: "6px 0" }}>+{recon.csvOnly.length - RECON_CAP} more</div>}
+      </ReconSection>
+
+      <ReconSection title="Amount differs" hint="Same merchant a few days apart, different amount — likely the same transaction (a tip, a pending vs posted change)." color="#B7791F" count={recon.amountMismatches.length}>
+        {recon.amountMismatches.slice(0, RECON_CAP).map((m, i) => (
+          <ReconRow key={i} left={m.csv.description}
+            sub={`CSV ${m.csv.date} · Plaid ${m.plaid.date}`}
+            amount={`${money(m.csv.amount)} → ${money(m.plaid.amount)}`}
+            amountNote={`${m.amountDiff > 0 ? "+" : ""}${money(m.amountDiff)}`} />
+        ))}
+      </ReconSection>
+
+      <ReconSection title="Synced by Plaid, not in your CSV" hint="Pending, timing, or simply not in this export yet." color="#888780" count={recon.plaidOnly.length}>
+        {recon.plaidOnly.slice(0, RECON_CAP).map((r, i) => (
+          <ReconRow key={i} left={r.description || r.merchant_name || "Transaction"} sub={`${r.date}${r.pending ? " · pending" : ""}`} amount={money(r.amount)} />
+        ))}
+        {recon.plaidOnly.length > RECON_CAP && <div style={{ fontSize: 11, color: "var(--muted)", textAlign: "center", padding: "6px 0" }}>+{recon.plaidOnly.length - RECON_CAP} more</div>}
+      </ReconSection>
+
+      <ReconSection title="Matched, with differences" hint="Paired by amount + date, but the date or category disagrees." color="#378ADD" count={flaggedMatched.length}>
+        {flaggedMatched.slice(0, RECON_CAP).map((m, i) => (
+          <ReconRow key={i} left={m.csv.description}
+            sub={[m.dateMismatch ? `date ${m.csv.date}→${m.plaid.date}` : null,
+                  m.categoryMismatch ? `category CSV "${m.csv.mapped_category}" vs Plaid "${m.plaid.user_category || m.plaid.mapped_category}"` : null].filter(Boolean).join(" · ")}
+            amount={money(m.csv.amount)} />
+        ))}
+      </ReconSection>
+
+      <div style={{ fontSize: 11, color: "var(--muted)", background: "var(--bg)", borderRadius: 8, padding: "8px 10px", lineHeight: 1.5 }}>
+        {cleanMatched} of {c.csvTotal} CSV rows matched cleanly. Nothing was imported — this account stays Plaid-synced.
+      </div>
     </div>
   );
 }

@@ -542,3 +542,250 @@ export function analyzeCsv(text, { existingIds = new Set(), manualColumns = null
 
 export const MANUAL_INSTITUTION_NAME = 'Imported';
 export const CSV_TX_ID_PREFIX = 'csv:';
+
+// ===========================================================================
+// Reconciliation (Comparison mode — Phase 2). When the import target is a
+// Plaid-LINKED account, we insert NOTHING (that's the double-count trap).
+// Instead we reconcile the CSV rows against what Plaid already synced and emit
+// a read-only audit:
+//   • matched            — same amount, dates within a few days (Plaid's
+//                          posted/pending dates drift); the pair may still
+//                          differ on date or category (flagged).
+//   • amountMismatches    — no exact-amount match, but a leftover pair whose
+//                          descriptions are clearly the same merchant a few
+//                          days apart → likely the same txn at a different
+//                          amount (a real discrepancy worth surfacing).
+//   • csvOnly            — in the CSV, no Plaid counterpart → a sync GAP
+//                          (Plaid missed it) worth investigating.
+//   • plaidOnly          — synced by Plaid, absent from the CSV → pending /
+//                          timing / not-yet-exported.
+// Matching is exact-amount + date-window with a maximum bipartite matching so
+// a cluster of equal-amount transactions pairs up as fully as possible (no
+// greedy stranding), preferring the closest date then the most similar
+// description as tie-breakers.
+// ===========================================================================
+const RECONCILE_WINDOW_DAYS = 4;
+const AMOUNT_MISMATCH_MIN_SIMILARITY = 0.6;
+// A same-transaction amount discrepancy (tip, pending→posted) is small; a large
+// gap means two DIFFERENT purchases at the same merchant. Only surface an
+// amount mismatch when the amounts are close, so the 2nd pass can't swallow a
+// real sync gap by pairing two unrelated same-merchant transactions.
+const AMOUNT_MISMATCH_MAX_ABS = 15; // dollars — covers small tips on small bills
+const AMOUNT_MISMATCH_MAX_RATIO = 0.3; // …or within 30% for larger bills
+
+function isoDayNumber(iso) {
+  const [y, m, d] = String(iso || '').split('-').map(Number);
+  if (!y || !m || !d) return NaN;
+  return Date.UTC(y, m - 1, d) / 86400000;
+}
+
+// Are two amounts close enough to plausibly be the same transaction?
+function amountsAreClose(a, b) {
+  const diff = Math.abs(Number(a) - Number(b));
+  if (diff <= AMOUNT_MISMATCH_MAX_ABS) return true;
+  const scale = Math.max(Math.abs(Number(a)), Math.abs(Number(b)), 0.01);
+  return diff / scale <= AMOUNT_MISMATCH_MAX_RATIO;
+}
+
+// Deterministic ordering so reconcile is order-invariant: two callers passing
+// the same rows in a different order get the same buckets (matters when an
+// equal-amount cluster is count-imbalanced and only some rows can match).
+function reconCmp(a, b) {
+  const ad = String(a.date || '');
+  const bd = String(b.date || '');
+  if (ad !== bd) return ad < bd ? -1 : 1;
+  const adesc = String(a.description || a.merchant_name || '');
+  const bdesc = String(b.description || b.merchant_name || '');
+  if (adesc !== bdesc) return adesc < bdesc ? -1 : 1;
+  const aa = Number(a.amount);
+  const ba = Number(b.amount);
+  if (aa !== ba) return aa - ba;
+  const aid = String(a.plaid_tx_id || '');
+  const bid = String(b.plaid_tx_id || '');
+  return aid < bid ? -1 : aid > bid ? 1 : 0;
+}
+
+// Generic bank-descriptor filler that says nothing about the merchant — kept
+// out of the token set so two unrelated rows can't look "similar" merely by
+// sharing "POS PURCHASE" etc. (which would let the amount-mismatch pass hide a
+// real sync gap).
+const DESC_STOPWORDS = new Set([
+  'POS', 'PURCHASE', 'PAYMENT', 'PAYMENTS', 'DEBIT', 'CREDIT', 'CARD', 'ACH',
+  'PENDING', 'RECURRING', 'ONLINE', 'MOBILE', 'TRANSACTION', 'TRANSFER', 'THE',
+  'AND', 'FROM', 'WWW', 'COM', 'HTTP', 'HTTPS', 'INC', 'LLC', 'USA', 'US',
+]);
+
+// Token set for fuzzy description similarity — Plaid rewrites bank descriptors,
+// so exact string equality is useless. Drop short, pure-numeric (store numbers,
+// ref ids) and generic-filler tokens that add noise.
+function descTokens(s) {
+  const out = new Set();
+  for (const t of normalizeDescription(s).replace(/[^A-Z0-9 ]/g, ' ').split(/\s+/)) {
+    if (t.length >= 3 && !/^\d+$/.test(t) && !DESC_STOPWORDS.has(t)) out.add(t);
+  }
+  return out;
+}
+
+// Jaccard overlap of description tokens, 0..1.
+export function descSimilarity(a, b) {
+  const ta = descTokens(a);
+  const tb = descTokens(b);
+  if (ta.size === 0 || tb.size === 0) return 0;
+  let inter = 0;
+  for (const t of ta) if (tb.has(t)) inter++;
+  return inter / (ta.size + tb.size - inter);
+}
+
+// Effective category for a Plaid row (user override wins), for the mismatch
+// flag. Kept here so reconcile stays pure; dataAdapter passes the raw columns.
+function plaidEffectiveCategory(p) {
+  return p.user_category || p.mapped_category || 'Shopping and gear';
+}
+
+function plaidDescriptor(p) {
+  return p.description || p.merchant_name || '';
+}
+
+// csvRows: built rows from analyzeCsv (amount positive = money out).
+// plaidRows: existing synced rows on the target account, same sign convention,
+//   each { plaid_tx_id, date, amount, description, merchant_name,
+//          mapped_category, user_category, pending }.
+export function reconcileCsv(inputCsvRows, inputPlaidRows, { windowDays = RECONCILE_WINDOW_DAYS } = {}) {
+  // Sort copies deterministically so the result doesn't depend on input order
+  // (never mutates the caller's arrays; also yields date-ordered buckets).
+  const csvRows = [...inputCsvRows].sort(reconCmp);
+  const plaidRows = [...inputPlaidRows].sort(reconCmp);
+  const amtKey = x => (Number(x.amount) + 0).toFixed(2);
+
+  // Bucket Plaid rows by exact amount so candidate lookup is cheap.
+  const plaidByAmt = new Map();
+  plaidRows.forEach((p, j) => {
+    const k = amtKey(p);
+    if (!plaidByAmt.has(k)) plaidByAmt.set(k, []);
+    plaidByAmt.get(k).push(j);
+  });
+
+  // Adjacency: csv i → candidate plaid j (equal amount, within window),
+  // ordered by closest date then most-similar description (best first).
+  const adj = csvRows.map(c => {
+    const cd = isoDayNumber(c.date);
+    return (plaidByAmt.get(amtKey(c)) || [])
+      .map(j => {
+        const p = plaidRows[j];
+        return {
+          j,
+          gap: Math.abs(cd - isoDayNumber(p.date)),
+          sim: descSimilarity(c.description, plaidDescriptor(p)),
+        };
+      })
+      .filter(e => Number.isFinite(e.gap) && e.gap <= windowDays)
+      .sort((a, b) => a.gap - b.gap || b.sim - a.sim)
+      .map(e => e.j);
+  });
+
+  // Maximum bipartite matching (Kuhn's augmenting paths). csv = left side.
+  const matchOfPlaid = new Array(plaidRows.length).fill(-1); // plaid j → csv i
+  const matchOfCsv = new Array(csvRows.length).fill(-1); // csv i → plaid j
+  const tryMatch = (i, seen) => {
+    for (const j of adj[i]) {
+      if (seen[j]) continue;
+      seen[j] = true;
+      if (matchOfPlaid[j] === -1 || tryMatch(matchOfPlaid[j], seen)) {
+        matchOfPlaid[j] = i;
+        matchOfCsv[i] = j;
+        return true;
+      }
+    }
+    return false;
+  };
+  // Fewest-candidates-first tends to yield a larger matching.
+  const order = csvRows.map((_, i) => i).sort((a, b) => adj[a].length - adj[b].length);
+  for (const i of order) {
+    if (adj[i].length) tryMatch(i, new Array(plaidRows.length).fill(false));
+  }
+
+  const matched = [];
+  for (let i = 0; i < csvRows.length; i++) {
+    const j = matchOfCsv[i];
+    if (j < 0) continue;
+    const c = csvRows[i];
+    const p = plaidRows[j];
+    matched.push({
+      csv: c,
+      plaid: p,
+      dateGapDays: Math.abs(isoDayNumber(c.date) - isoDayNumber(p.date)),
+      dateMismatch: c.date !== p.date,
+      categoryMismatch: (c.mapped_category || '') !== plaidEffectiveCategory(p),
+    });
+  }
+
+  let csvLeft = csvRows.filter((_, i) => matchOfCsv[i] < 0);
+  const plaidLeftIdx = plaidRows.map((_, j) => j).filter(j => matchOfPlaid[j] < 0);
+
+  // Second pass over the leftovers: pair by strong description similarity +
+  // close date to surface likely same-txn AMOUNT discrepancies (each plaid row
+  // used at most once, best similarity wins).
+  const amountMismatches = [];
+  const usedPlaid = new Set();
+  const stillCsvOnly = [];
+  for (const c of csvLeft) {
+    const cd = isoDayNumber(c.date);
+    let bestJ = -1;
+    let bestSim = -1;
+    for (const j of plaidLeftIdx) {
+      if (usedPlaid.has(j)) continue;
+      const p = plaidRows[j];
+      if (!(Math.abs(cd - isoDayNumber(p.date)) <= windowDays)) continue;
+      // Only a CLOSE amount can be the same txn; a large gap is a different
+      // purchase (keep it as a real sync gap / timing row, don't pair it).
+      if (!amountsAreClose(c.amount, p.amount)) continue;
+      const sim = descSimilarity(c.description, plaidDescriptor(p));
+      if (sim >= AMOUNT_MISMATCH_MIN_SIMILARITY && sim > bestSim) {
+        bestSim = sim;
+        bestJ = j;
+      }
+    }
+    if (bestJ >= 0) {
+      usedPlaid.add(bestJ);
+      const p = plaidRows[bestJ];
+      amountMismatches.push({
+        csv: c,
+        plaid: p,
+        amountDiff: Number((Number(c.amount) - Number(p.amount)).toFixed(2)),
+        dateGapDays: Math.abs(cd - isoDayNumber(p.date)),
+        descSimilarity: Number(bestSim.toFixed(2)),
+      });
+    } else {
+      stillCsvOnly.push(c);
+    }
+  }
+  const plaidOnly = plaidLeftIdx.filter(j => !usedPlaid.has(j)).map(j => plaidRows[j]);
+
+  return {
+    matched,
+    amountMismatches,
+    csvOnly: stillCsvOnly,
+    plaidOnly,
+    counts: {
+      csvTotal: csvRows.length,
+      plaidTotal: plaidRows.length,
+      matched: matched.length,
+      amountMismatches: amountMismatches.length,
+      csvOnly: stillCsvOnly.length,
+      plaidOnly: plaidOnly.length,
+    },
+  };
+}
+
+// Min/max ISO date across built rows, for scoping the Plaid fetch to the CSV's
+// period (± padding) so a 1-month CSV isn't compared against years of history.
+export function csvDateRange(rows) {
+  let min = null;
+  let max = null;
+  for (const r of rows) {
+    if (!r.date) continue;
+    if (min === null || r.date < min) min = r.date;
+    if (max === null || r.date > max) max = r.date;
+  }
+  return { min, max };
+}
