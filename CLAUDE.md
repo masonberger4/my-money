@@ -276,47 +276,66 @@ What Plaid gives beyond payments — the **Liabilities** product (`/liabilities/
   (→ utilization). Verify exact field names against current Plaid docs at build.
 
 Build steps:
-1. **Enable Liabilities at link time.** `api/create-link-token.js` currently
-   `products: ['transactions']`. Add liabilities as **`optional_products:
-   ['liabilities']`** (NOT required `products` — a required product BLOCKS
-   linking institutions that don't support it; optional lets them link and just
-   return no liabilities). **Existing Items (transactions-only) need a re-link /
-   update mode to gain liabilities** — surface a "reconnect for debt details"
-   action; new links get both up front.
+1. **Consent to Liabilities at link time.** `api/create-link-token.js` currently
+   `products: ['transactions']`. Add liabilities via
+   **`additional_consented_products: ['liabilities']`** (keep `products:
+   ['transactions']`) — Plaid's PFM pattern: doesn't block institutions lacking
+   Liabilities and, unlike `products`/`optional_products`, is NOT billed at Item
+   creation, only when you first call `/liabilities/get`. **Existing
+   transactions-only Items need Link update mode** (a link token minted with the
+   Item's `access_token` + liabilities in `additional_consented_products`) to
+   gain the consent — preserves the Item + transactionsSync cursor;
+   unlink→relink is the fallback. Surface a "reconnect for debt details" action;
+   detect Items needing it by credit/loan accounts whose liability fields are
+   still null.
 2. **Pull liabilities in sync.** After `transactionsSync`, call
    `liabilitiesGet({ access_token })`; map `credit[]`/`mortgage[]`/`student[]`
-   by `account_id` onto the account row. **Handle absence gracefully** —
-   institutions without Liabilities throw (`PRODUCTS_NOT_SUPPORTED` /
-   `PRODUCT_NOT_READY`); catch per-institution, don't fail the whole sync.
+   by `account_id` onto the account row. Outstanding balance stays the account
+   `current_balance` (`balances.current`), not a liability field. Card `apr` =
+   the `aprs[]` entry where `apr_type === 'purchase_apr'` (array can be empty →
+   null). **Handle absence gracefully** — institutions without Liabilities throw
+   (`PRODUCTS_NOT_SUPPORTED` / `PRODUCT_NOT_READY`); catch per-institution, don't
+   fail the whole sync.
 3. **Schema (additive on `accounts`):** `apr`, `minimum_payment`, `credit_limit`,
    `statement_balance`, `next_payment_due_date`, `interest_rate`,
-   `original_balance` (all nullable numeric/date). These are **Plaid-owned**
-   (refreshed each sync) for linked debts; for a MANUAL debt (`is_manual`, no
-   token → never synced) the user hand-enters them and sync never clobbers.
-   Optional `liabilities_raw jsonb` to stash the rest without column sprawl.
-4. **Balance history:** `balance_snapshots (account_id, captured_on date,
-   balance numeric)` appended by sync when an account's balance changes → powers
-   the debt-over-time chart AND seeds the future net-worth feature.
+   `original_balance` (all nullable numeric/date). Plaid returns rates as
+   **percent**; payoff/getDebts read one normalized `debtRate = apr ??
+   interest_rate` and divide by 100 for monthly math. `current_balance` is the
+   outstanding balance (positive = owed). These are **Plaid-owned** (refreshed
+   each sync). Optional `liabilities_raw jsonb` to keep overdue/last-payment/YTD
+   fields without column sprawl (recommended).
+4. **Balance history:** `balance_snapshots (id, account_id, household_id,
+   captured_on date, balance numeric, unique(account_id, captured_on))` — same
+   RLS shape as other tables. Sync appends a row only when the balance changed
+   (≤ one/day; upsert on the unique key) and — running as **service_role** —
+   must set `household_id` explicitly (the `current_household_id()` default is
+   NULL there; see Gotchas). Powers the debt-over-time chart AND seeds net worth.
 5. **`src/debtPayoff.js`** (pure, like `recurring.js`): month-by-month
    amortization from `current_balance` + `apr` + `minimum_payment`; **snowball**
    (smallest balance first) vs **avalanche** (highest APR first) vs extra-$/mo
    what-if → debt-free date, total interest, interest saved.
 6. **`getDebts()` in dataAdapter:** accounts where `type in ('credit','loan')`
    with the liability fields + computed totals (total debt, total minimums).
-7. **Debt view** (new tab, or an Accounts-tab section — decide): per-debt cards
-   (balance, APR, min, due date, card utilization), totals, payoff projection
-   (snowball/avalanche toggle + extra-payment slider → debt-free date + interest
-   saved), progress vs `original_balance`.
+7. **Debt view** (new "Debt" tab): per-debt cards (balance, APR, min, due date,
+   card utilization = `current_balance/credit_limit`), totals (exclude hidden
+   accounts), payoff projection (snowball/avalanche toggle + extra-payment slider
+   → debt-free date + interest saved). **Mortgages dominate a snowball/avalanche
+   and make "debt-free date" meaningless — exclude mortgages from the payoff
+   projection by default** (still list them; keep out of the debt-free calc or
+   behind an opt-in toggle). Card progress uses utilization (cards have no
+   `original_balance`).
 
 Keep out of spending/cash-flow: loan/credit accounts are debts, not spend —
-`isCheckingAccount`/`isHouseholdDepository` already exclude them, but confirm no
-loan-account transactions leak into `sumSpending`/`getSpending` (guard by type
-if any appear). Credit-card *purchases* still count as spending (unchanged);
-card *payments* from checking stay transfers.
+`isCheckingAccount`/`isHouseholdDepository` already exclude them from cash-flow,
+but `sumSpending`/`getSpending` have NO type filter, so guard `type === 'loan'`
+specifically if any loan-account transactions appear — never guard out `credit`,
+whose *purchases* must still count. Card *payments* from checking stay transfers.
 
-Manual fallback: debts on institutions Plaid can't do Liabilities for → add a
-manual debt account (reuse the CSV-import manual-account machinery: `is_manual`,
-`type='credit'|'loan'`, hand-entered balance/apr/min). Plaid-linked is primary.
+Manual fallback (FOLLOW-UP, not v1): the CSV-import manual-account machinery
+(`is_manual`, manual institution) is NOT built yet — CSV import ships first. Once
+it lands, a manual debt reuses it (`is_manual`, `type='credit'|'loan'`,
+hand-entered balance/apr/min). **v1 is Plaid-linked debts only** — which is the
+point (the household wants it automatic).
 
 Caveats: Liabilities is a separate Plaid product (billing) with uneven
 institution coverage; existing Items need re-linking to gain it; connecting many
