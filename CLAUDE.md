@@ -44,8 +44,10 @@ entry once shipped.
 | File | Role |
 |---|---|
 | `src/components/Dashboard.jsx` | Almost the entire UI — single file, inline styles, tabs: overview/categories/transactions/accounts/trends/recurring/ask. Shared mini-components: `Pill`, `Swatch`, `EditName`, `Sk` (skeleton), `Donut`. |
-| `src/dataAdapter.js` | All Supabase reads + shapes consumed by Dashboard; the Trends cash-flow model lives here (see Conventions). Keep return shapes stable. |
-| `src/categoryMap.js` | Plaid category → app category mapping; `applyAccountRules` (credit-card negatives → "Return", excluded from income); pure JS, imported by server code too. |
+| `src/dataAdapter.js` | All Supabase reads + shapes consumed by Dashboard; the Trends cash-flow model lives here (see Conventions). Keep return shapes stable. Also holds the CSV-import writes (`findOrCreateManualInstitution`, `createManualAccount`, `getExistingTxIds`, `importCsvTransactions`, `isManualAccount`) and exports the cash-flow helpers (`markInternalTransfers`/`cashIncome`/`cashSpending`) for the dry-run harness. |
+| `src/categoryMap.js` | Plaid category → app category mapping; `applyAccountRules` (credit-card negatives → "Return", excluded from income); pure JS, imported by server code too. `ERA_CATEGORIES` is the taxonomy source of truth (no "Housing"/"Income" member). |
+| `src/csvImport.js` | Pure CSV-import core (no React/Supabase): `parseCsv`, `detectHeader`, `parseMoney`/`parseDate`, `guessCategory` (validated against `ERA_CATEGORIES`), transfer flagging, dedup `plaid_tx_id` hashing, `buildRows`/`analyzeCsv`. Testable in isolation. |
+| `src/components/CsvImport.jsx` | Accounts-tab import modal: file → target account → preview (greyed dupes) → confirm. Writes via dataAdapter's `createManualAccount`/`importCsvTransactions`. |
 | `src/plaidClient.js` | Client → api/ fetch wrappers (JWT attached). |
 | `src/sync.js` | Single-flight wrapper triggering server sync. |
 | `src/db.js` | getSetting/setSetting on the Supabase `settings` table (dashboard prefs: colors, names, custom categories, `asst:model`/`asst:effort`). |
@@ -143,14 +145,34 @@ playwright-core screenshot (`executablePath:'/opt/pw-browsers/chromium'`,
 - **Trends joint-budget cash-flow + Cash flow section** (see Conventions).
 
 ## Pending branches
-_(none)_
+
+- **`claude/csv-import-phase-1-ntq19j`** — CSV import **Phase 1 (standalone)**: upload a
+  bank CSV (BECU preset) on the Accounts tab → real transactions on a manual
+  (non-Plaid) account. Adds migration `20260722000001_csv_import.sql`
+  (`accounts.is_manual`, `transactions.source` — both additive, `not null
+  default`; the importer degrades gracefully if they're absent so previews work
+  before the SQL lands). New `src/csvImport.js` (pure core) +
+  `src/components/CsvImport.jsx` (modal). No cash-flow code change — imported
+  depository rows flow through `getCashFlow` automatically (verified). Comparison
+  mode still deferred (see Roadmap). Awaiting Mason's preview review + "merge
+  csv-import". **Migration must be pasted before preview DB writes work.**
 
 ## Roadmap
 
-**Next: CSV import** — make the un-synced personal-account income visible (spec
-below). Later (discussed, not committed): net worth / debt-payoff tracker,
-auto-categorization rules, cash-flow forecast, savings goals, CSV/PDF export,
-sign-out button.
+**CSV import** — Phase 1 (standalone) is **built on
+`claude/csv-import-phase-1-ntq19j`** (see Pending; awaiting merge). Phase 2
+(comparison mode) is the remaining work below. Later (discussed, not committed):
+net worth / debt-payoff tracker, auto-categorization rules, cash-flow forecast,
+savings goals, CSV/PDF export, sign-out button. **`markInternalTransfers`
+max-matching** — the current greedy nearest-gap matcher can strand one of two
+interleaved equal-amount transfer pairs whose legs drift across the 4-day
+window, leaving a genuine internal transfer counted (inflates Trends
+`cashIncome` AND `cashSpending` by the same amount, so monthly **net** is
+unaffected). Pre-existing, but CSV import's cross-bank personal↔joint legs (which
+drift 1–3 days) make it more reachable — replace with earliest-unused-in
+ordering or a small bipartite max-matching. (Surfaced by the Phase-1 adversarial
+pass; deliberately NOT changed there — cash-flow model changes are out of that
+scope.)
 
 ### CSV import — build spec
 Goal: upload a bank CSV → reconcile against the household's real accounts. Two
@@ -160,7 +182,10 @@ Goal: upload a bank CSV → reconcile against the household's real accounts. Two
   they flow into Transactions/Categories/Search/Assistant/Trends with no
   downstream special-casing (the transactions table is adapter-agnostic — the
   whole reason the old `synthetic_id` existed). **Primary value** — makes the
-  un-synced personal-account paychecks visible. Build FIRST.
+  un-synced personal-account paychecks visible. **BUILT (Phase 1)** — see
+  `src/csvImport.js` + `src/components/CsvImport.jsx`; the notes below record the
+  as-built contract. Selecting a Plaid-linked target shows an overlap warning and
+  blocks insert (comparison mode not built yet).
 - **Comparison** (target IS Plaid-linked — the joint accounts): reconcile the
   CSV against what Plaid already synced; insert NOTHING (that's the double-count
   trap). Emit an audit — rows in CSV but not Plaid (sync gaps), rows in Plaid
@@ -205,10 +230,16 @@ Data model (standalone mode — comparison mode inserts nothing):
     stored `mapped_category` (`effectiveCategory = user_category ||
     mapped_category`); mapping happens at WRITE time, so set the resolved string
     here, NOT a raw Plaid code. Valid strings + the exact "Transfers and card
-    payments" label are in `src/categoryMap.js` (source of truth); unmatched
-    rows → "Shopping and gear" (the effectiveCategory fallback). Start a small
-    keyword map (NEWREZ→Housing, WA ST EMPLOY SEC→Income, card issuers→"Transfers
-    and card payments", …), editable later.
+    payments" label are in `src/categoryMap.js` `ERA_CATEGORIES` (source of
+    truth); unmatched rows → "Shopping and gear" (the effectiveCategory
+    fallback). `guessCategory` is a small keyword map, **validated against
+    `ERA_CATEGORIES` at module load** so it can't emit an invalid label, editable
+    later. NOTE the taxonomy has **no** "Housing"/"Income" member: a mortgage
+    (NEWREZ/SHELLPOINT) maps to **"Utilities"** (consistent with how Plaid's
+    RENT_AND_UTILITIES already resolves); income/benefit lines (WA ST EMPLOY SEC,
+    PAYROLL) are money-in so their category is cosmetic → **"Cash, checks, and
+    misc"**; card issuers → "Transfers and card payments". Never emits "Return"
+    (that's `applyAccountRules`, credit-only).
   - `raw_category` — set `'TRANSFER_IN'|'TRANSFER_OUT'` for "Online Banking
     Transfer To/from" lines so `markInternalTransfers` washes them; `''`
     otherwise (nothing requires it non-null).
@@ -233,9 +264,15 @@ Trends months** (personal→joint transfers that currently inflate income get
 replaced by real paychecks — the correction, not a regression), and import
 **all** the personal accounts for a consistent picture, not just one.
 
-Schema adds (additive, both recommended): `accounts.is_manual boolean default
-false` (UI badge + find-or-create + sync-skip belt-and-suspenders);
-`transactions.source text default 'plaid'` ('csv' for undo/filter). No
+Schema adds — **shipped** in `migration 20260722000001_csv_import.sql`:
+`accounts.is_manual boolean not null default false` (UI "Imported" badge +
+belt-and-suspenders sync-skip) and `transactions.source text not null default
+'plaid'` (`'csv'` for a future undo/filter — nothing reads it yet). Both are
+additive metadata-only adds (constant defaults → no table rewrite). The importer
+**degrades gracefully** if they're absent (tries the column, drops it on a
+"column not found" error and remembers) so previews work before the SQL is
+pasted; the real sync-skip protection is the manual institution having no
+`plaid_tokens` **and** `status='disabled'` (api/sync.js filters both). No
 `cash_flow_role` — `full` is just the default type/subtype behavior.
 
 UI: an action on the **Accounts tab** (file picker; don't add a bottom tab) →
