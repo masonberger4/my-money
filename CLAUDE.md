@@ -17,9 +17,10 @@ entry once shipped.
 - **React + Vite SPA** on **Vercel**; secrets live in serverless `api/`
   functions. Client reads/writes Supabase directly (RLS-scoped) and calls `api/`
   only for Plaid or service-secret work.
-- **Plaid** is the bank-data source (a custom scraper was designed then
+- **Plaid** is the *current* bank-data source (a custom scraper was designed then
   abandoned — hence scraper-era names like the original `synthetic_id` column,
-  now `plaid_tx_id`).
+  now `plaid_tx_id`). **Decided: migrating off Plaid to SimpleFIN** (cost — see
+  the SimpleFIN migration spec in Roadmap); Plaid stays live until that ships.
 - **Multi-Plaid-credential**: `PLAID_CREDENTIALS` env = JSON list of
   `{key, client_id, secret}`; link-token creation picks the first credential
   with < 10 Items; each institution stores its `plaid_credential_key`. Legacy
@@ -150,8 +151,10 @@ _(none)_
 ## Roadmap
 
 **Next: CSV import** — make the un-synced personal-account income visible (spec
-below). **Then: Debt tracker** — Plaid-linked debts + payoff projections (spec
-below; the `loan` sync fix that unblocks it is already on main). Later
+below; also the permanent coverage floor for the off-Plaid plan). **Then:
+SimpleFIN migration** — replace Plaid as the bank feed (spec below; decided).
+**Then: Debt tracker** — now **balance-only + hand-entered APR** under SimpleFIN
+(spec below; the `loan` sync fix that unblocks it is already on main). Later
 (discussed, not committed): net worth over time, auto-categorization rules,
 cash-flow forecast, savings goals, CSV/PDF export, sign-out button.
 
@@ -253,12 +256,104 @@ dedup; prompt on identical rows); CSV is a manual periodic export (stale vs live
 sync). The old double-count risk is handled by comparison mode auto-detecting a
 linked target.
 
+### Off-Plaid: SimpleFIN migration — build spec
+Decision (settled): replace Plaid with **SimpleFIN Bridge** as the primary bank
+feed — ~$15/yr flat (no per-product / Item-slot billing), read-only, daily
+refresh, **serverless-friendly (no daemon)**. Coverage verified for all
+household institutions incl. NewRez / Launch / Jenius. Plan is capped at
+**SimpleFIN + CSV import + (optional) email-alert cron**; a home-IP scraper
+(Channel C) is a possible LATER build-out, not in scope. Migrate incrementally
+alongside Plaid, then retire Plaid.
+
+How SimpleFIN works (**verify against simplefin.org/protocol.md + SimpleFIN
+Bridge docs at build** — the details below are the plan, not gospel):
+- One-time link: user links banks at SimpleFIN Bridge's hosted page (SimpleFIN /
+  MX handle login + MFA — so the dormant `mfa_prompts` back-channel stays unused
+  here) → gets a base64 **setup token**. Server decodes it to a claim URL and
+  **POSTs once** to exchange it for a durable **access URL** (embeds HTTP Basic
+  creds, e.g. `https://user:pass@…/simplefin`).
+- Pull: a single authenticated **GET `{access_url}/accounts?start-date=<epoch>`**
+  returns ALL linked accounts + transactions as flat JSON — no cursor, no
+  pagination, no per-product calls. Refreshes ~once/day; keep ≤24 pulls/day
+  (fits the existing 24h rate-limit intent).
+
+Key model change — **one access URL spans ALL institutions** (keyed off SimpleFIN
+org + account id), inverting Plaid's one-token-per-institution model:
+- Store the single access URL like `plaid_tokens` — **service-role only, ZERO
+  client policies** (it contains bank creds). New `simplefin_access` table
+  (household_id, access_url) or reuse the tokens table; never expose to client.
+- Per SimpleFIN **org** → find-or-create an `institutions` row (by org
+  domain/name). Per SimpleFIN **account** → an `accounts` row with
+  `plaid_account_id = 'sfin:'+account.id` (reuse the column — adapter-agnostic
+  external id; satisfies unique `institution_id,plaid_account_id`).
+- Per SimpleFIN **transaction** → `plaid_tx_id = transaction.id` (SimpleFIN ids
+  are stable → the dedup key; upsert onConflict `account_id,plaid_tx_id`).
+
+Sync rewrite (`api/sync.js`, stays serverless):
+- Replace the `transactionsSync` cursor loop with one GET to the stored access
+  URL; drop cursor bookkeeping from `sync_state`. Map the JSON onto the existing
+  row shapes (mirror `mapAccountRow` / `mapTransactionRow`).
+- **Sign flip (verify).** SimpleFIN `amount` is a signed string where **positive
+  = money INTO the account**; the app uses Plaid's opposite (positive = money
+  out), so `amount = −simplefinAmount` (same flip as CSV import). Confirm against
+  the protocol doc.
+- **Balance sign for debts.** Normalize so `current_balance` is positive = owed
+  for credit/loan (SimpleFIN may report a card balance negative). `balance-date`
+  epoch → ISO.
+- **Categorization:** SimpleFIN emits little/no category → set `mapped_category`
+  at WRITE time via the keyword→category map (the same one CSV import builds; do
+  NOT call `mapPlaidCategory`). Unmatched → "Shopping and gear".
+
+Link flow (`api/`): replace `create-link-token` / `exchange-token` with a
+SimpleFIN connect flow — UI sends the user to SimpleFIN Bridge to link banks +
+copy the setup token, posts it to an `api/simplefin-claim` route that claims the
+access URL (service-role) and stores it. Adding banks later reuses the same
+access URL (verify: re-claim vs portal-add).
+
+Debt tracker under SimpleFIN — **balance-only + hand-entered APR** (decided):
+SimpleFIN has no Liabilities equivalent, so the Plaid `/liabilities/get` steps in
+the Debt-tracker spec are **superseded**. `current_balance` comes from the feed;
+`apr` / `minimum_payment` are **hand-entered** (user-owned columns — keep them
+OUT of the sync upsert payload so the feed never clobbers them, like
+nickname/color). Payoff math runs on the hand-entered rate.
+
+Phased migration (no big-bang):
+1. **CSV import first** (already specced) — permanent coverage floor for the
+   personal BECU accounts + anything a feed misses.
+2. **SimpleFIN alongside Plaid** — diff SimpleFIN vs Plaid on the joint BECU
+   accounts to validate the mapping before trusting it.
+3. **Migrate institutions to SimpleFIN + retire Plaid Items** incrementally —
+   `api/sync.js` already skips institutions with no `plaid_tokens` row, so
+   SimpleFIN-fed and Plaid-fed institutions coexist with no flag.
+4. Remove Plaid code paths + `PLAID_*` env once nothing depends on them; then
+   rewrite the Architecture "Plaid" bullet → SimpleFIN.
+
+OUT (not now): **email-alert cron** (Vercel Cron → `api/` route polling Gmail,
+parsing alerts, inserting service-role for minutes-fresh top-ups, reconciled
+against the ledger). **Channel C home-IP scraper** — possible later build-out for
+any servicer a feed can't cover: runs on a home Pi/NAS (residential IP,
+outbound-only to Supabase, `household_id` set explicitly under service_role),
+reusing the dormant `pull_jobs` / `mfa_prompts` / `pending_items` schema + the
+24h `check_pull_job_constraints` rate limiter; real ToS/lockout risk → scoped
+surgically, never the foundation.
+
+Caveats: verify the SimpleFIN protocol (claim flow, JSON shape, sign convention)
+against current docs at build; weaker categorization than Plaid (lean on the
+keyword map); daily freshness (not real-time — same as Plaid today); $15/yr flat.
+
 ### Debt tracker — build spec
+**NOTE (data source, decided):** with the off-Plaid → SimpleFIN move, debt data
+is **balance-only + hand-entered APR/min** — SimpleFIN has no Liabilities feed.
+The Plaid `additional_consented_products` / `/liabilities/get` build steps below
+apply ONLY while Plaid is retained; under SimpleFIN, `current_balance` comes from
+the feed and `apr`/`minimum_payment` are user-entered (kept out of the sync
+upsert). Balances + `getDebts` + `debtPayoff` + the Debt view are unchanged.
+
 Goal: track the household's debts (mortgage, credit cards, personal/student
-loans) with balances, APR, minimum payments, and payoff projections — driven by
-**Plaid-connected accounts** (the household decided a debt tracker only makes
-sense if it's automatic, not hand-maintained). The debts are NOT yet linked (the
-app only ever saw the *payments* leaving checking); connecting them is the point.
+loans) with balances, APR, minimum payments, and payoff projections. Balances
+come from connected accounts (Plaid now, SimpleFIN after migration); the app only
+ever saw the *payments* leaving checking, so connecting the debt accounts is the
+point.
 
 Foundation already shipped: `api/sync.js` `ALLOWED_TYPES` now includes `'loan'`,
 so a Plaid-linked mortgage/loan account syncs its balance and appears in the
