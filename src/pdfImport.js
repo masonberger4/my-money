@@ -1,0 +1,633 @@
+// PDF statement import — pure parsing core (no pdf.js, no React, no Supabase).
+//
+// Takes the positioned text runs produced by src/pdfExtract.js and turns them
+// into the SAME 2-D cell grid + column mapping that src/csvImport.js's
+// buildRows() already consumes. That is the whole design: a PDF becomes a
+// CSV-shaped grid, so every downstream behavior — sign handling, category
+// mapping, transfer flags, the stable dedup id, the preview, the standalone
+// insert and the comparison/reconciliation audit — is reused unchanged.
+//
+// There is NO per-bank code. A layout is described by a TEMPLATE the user
+// confirms once in the visual editor (see PdfTemplateEditor.jsx) and which is
+// then saved per account and re-applied to later statements — always through
+// the existing preview/confirm gate.
+
+import { parseDate as parseNumericDate, parseMoney } from './csvImport.js';
+
+export const TEMPLATE_VERSION = 1;
+
+// Roles a column can carry. 'date2' is a second date column (card statements
+// have Trans Date + Post Date); only the one marked 'date' is used, the other
+// is kept so the user can switch which one drives the transaction date.
+export const COLUMN_ROLES = ['date', 'date2', 'description', 'debit', 'credit', 'amount', 'ignore'];
+
+const MONTHS = {
+  jan: 1, january: 1, feb: 2, february: 2, mar: 3, march: 3, apr: 4, april: 4,
+  may: 5, jun: 6, june: 6, jul: 7, july: 7, aug: 8, august: 8, sep: 9, sept: 9,
+  september: 9, oct: 10, october: 10, nov: 11, november: 11, dec: 12, december: 12,
+};
+
+// ---------------------------------------------------------------------------
+// Cheap shape tests. These decide which lines are transaction rows, so they are
+// deliberately strict: a false positive invents a transaction.
+// ---------------------------------------------------------------------------
+
+// "May 23" | "May 23, 2026" | "5/23/2026" | "2026-05-23" | "23 May"
+const MONTH_NAME_RE = new RegExp(`^(${Object.keys(MONTHS).join('|')})\\.?\\s+(\\d{1,2})(?:\\s*,?\\s*(\\d{4}))?$`, 'i');
+const DAY_MONTH_RE = new RegExp(`^(\\d{1,2})\\s+(${Object.keys(MONTHS).join('|')})\\.?(?:\\s*,?\\s*(\\d{4}))?$`, 'i');
+
+export function looksLikeDate(s) {
+  const v = String(s ?? '').trim();
+  if (!v) return false;
+  if (MONTH_NAME_RE.test(v) || DAY_MONTH_RE.test(v)) return true;
+  return parseNumericDate(v) !== null;
+}
+
+// A money cell: optional sign/parens, optional $, digits with optional
+// thousands separators and cents. Requires a digit. "- $69.31" and "$1,234.56"
+// and "(45.00)" all qualify; a bare "2026" does not (no separator/decimal and
+// four digits is far more likely a year — statements always show cents).
+const MONEY_RE = /^[-+−–—(]?\s*\$?\s*\d{1,3}(?:,\d{3})*(?:\.\d{2})?\s*\)?$|^[-+−–—(]?\s*\$?\s*\d+\.\d{2}\s*\)?$/;
+
+export function looksLikeMoney(s) {
+  const v = String(s ?? '').trim();
+  if (!v) return false;
+  if (!/\d/.test(v)) return false;
+  if (!MONEY_RE.test(v)) return false;
+  // Reject a bare integer with no cents and no currency marker (e.g. a year or
+  // a count) unless it carries $ / , / sign — statements print cents.
+  if (/^\d+$/.test(v)) return false;
+  return Number.isFinite(parseMoney(v));
+}
+
+// Normalize the unicode minus / en-dash some statements use so parseMoney's
+// ASCII '-' handling applies.
+export function normalizeMoneyText(s) {
+  return String(s ?? '').replace(/[−–—]/g, '-');
+}
+
+// ---------------------------------------------------------------------------
+// Dates. Month-name dates ("May 23") carry no year, so the year is inferred
+// from the dates that DO have one elsewhere in the document (statement period,
+// due date…). Resolved to ISO here so csvImport's parseDate just passes it
+// through — the shipped CSV path is left untouched.
+// ---------------------------------------------------------------------------
+
+function isoFrom(y, m, d) {
+  if (!(m >= 1 && m <= 12) || !(d >= 1 && d <= 31)) return null;
+  const dim = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  if (d > dim) return null;
+  return `${String(y).padStart(4, '0')}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+}
+
+function dayNum(iso) {
+  const [y, m, d] = iso.split('-').map(Number);
+  return Date.UTC(y, m - 1, d) / 86400000;
+}
+
+// A dated range like "May 25, 2026 - Jun 23, 2026" or "(06/17/2026 -
+// 07/16/2026)" — i.e. the statement period. Bank-agnostic: it matches the
+// shape, not any particular label.
+const D = '(?:[A-Za-z]{3,9}\\.?\\s+\\d{1,2},?\\s+\\d{4}|\\d{1,2}[/-]\\d{1,2}[/-]\\d{4}|\\d{4}-\\d{2}-\\d{2})';
+const RANGE_RE = new RegExp(`(${D})\\s*(?:-|–|—|to|through|thru)\\s*(${D})`, 'i');
+
+function parseAnyDated(s) {
+  const v = String(s).trim();
+  let m = v.match(/^([A-Za-z]{3,9})\.?\s+(\d{1,2}),?\s+(\d{4})$/);
+  if (m) {
+    const mo = MONTHS[m[1].toLowerCase()];
+    return mo ? isoFrom(Number(m[3]), mo, Number(m[2])) : null;
+  }
+  return parseNumericDate(v);
+}
+
+// Locate the statement period. This is what anchors year inference for the
+// month-name dates in the table ("May 23" has no year of its own). Using the
+// period — rather than every date in the document — matters: fine print carries
+// stale revision dates (a 2023 copyright line) that would otherwise widen the
+// window enough to make several years equally plausible.
+export function findStatementPeriod(pages) {
+  for (const pg of pages || []) {
+    for (const line of groupIntoLines(pg.runs)) {
+      const m = line.text.match(RANGE_RE);
+      if (!m) continue;
+      const a = parseAnyDated(m[1]);
+      const b = parseAnyDated(m[2]);
+      if (!a || !b) continue;
+      const span = dayNum(b) - dayNum(a);
+      // A billing cycle, not an arbitrary pair of dates.
+      if (span < 0 || span > 200) continue;
+      return { start: a, end: b };
+    }
+  }
+  return null;
+}
+
+// Every date with an explicit year found anywhere in the document. Their span
+// is the year context; it covers the statement period, due dates, etc. without
+// having to locate any one specific label (bank-agnostic).
+export function collectYearContext(pages) {
+  const years = new Set();
+  const isoDates = [];
+  const push = iso => { if (iso) { isoDates.push(iso); years.add(Number(iso.slice(0, 4))); } };
+  for (const pg of pages || []) {
+    for (const run of pg.runs || []) {
+      const text = String(run.str || '');
+      let m;
+      const withYear = /\b([A-Za-z]{3,9})\.?\s+(\d{1,2}),?\s+(\d{4})\b/g;
+      while ((m = withYear.exec(text))) {
+        const mo = MONTHS[m[1].toLowerCase()];
+        if (mo) push(isoFrom(Number(m[3]), mo, Number(m[2])));
+      }
+      const numeric = /\b(\d{1,2})[/-](\d{1,2})[/-](\d{4})\b/g;
+      while ((m = numeric.exec(text))) push(isoFrom(Number(m[3]), Number(m[1]), Number(m[2])));
+      const iso = /\b(\d{4})-(\d{2})-(\d{2})\b/g;
+      while ((m = iso.exec(text))) push(isoFrom(Number(m[1]), Number(m[2]), Number(m[3])));
+    }
+  }
+  if (!isoDates.length) return null;
+  isoDates.sort();
+  return { min: isoDates[0], max: isoDates[isoDates.length - 1], years: [...years].sort() };
+}
+
+// The window used to resolve year-less dates. Preference order:
+//  1. the statement period, padded — transaction dates sit inside it (a card's
+//     "Trans Date" can fall a few days before the cycle start, hence the pad);
+//  2. failing that, the dates on page 1 (the statement header), looking back
+//     one cycle from the latest of them.
+// Either way the window stays under ~half a year, so a given month/day resolves
+// to exactly one year — including across a December→January cycle.
+const PERIOD_PAD_DAYS = 45;
+
+export function resolveYearWindow(pages) {
+  const period = findStatementPeriod(pages);
+  if (period) {
+    const min = shiftIso(period.start, -PERIOD_PAD_DAYS);
+    const max = shiftIso(period.end, PERIOD_PAD_DAYS);
+    return { min, max, years: yearsBetween(min, max), source: 'period' };
+  }
+  const firstPage = (pages || []).slice(0, 1);
+  const ctx = collectYearContext(firstPage) || collectYearContext(pages);
+  if (!ctx) return null;
+  const max = shiftIso(ctx.max, 10);
+  const min = shiftIso(ctx.max, -120);
+  return { min, max, years: yearsBetween(min, max), source: 'header' };
+}
+
+function shiftIso(iso, days) {
+  const d = new Date((dayNum(iso) + days) * 86400000);
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+}
+
+function yearsBetween(minIso, maxIso) {
+  const a = Number(minIso.slice(0, 4));
+  const b = Number(maxIso.slice(0, 4));
+  const out = [];
+  for (let y = a; y <= b; y++) out.push(y);
+  return out;
+}
+
+// Pick the year that places month/day closest to the document's date span.
+// Handles the December→January wrap (a "Dec 28" row on a Dec-25→Jan-23
+// statement resolves to the earlier year, "Jan 5" to the later one).
+export function inferYear(month, day, ctx) {
+  if (!ctx) return null;
+  const lo = dayNum(ctx.min);
+  const hi = dayNum(ctx.max);
+  const candidates = new Set();
+  for (const y of ctx.years) { candidates.add(y - 1); candidates.add(y); candidates.add(y + 1); }
+  let best = null;
+  for (const y of [...candidates].sort((a, b) => a - b)) {
+    const iso = isoFrom(y, month, day);
+    if (!iso) continue;
+    const n = dayNum(iso);
+    const dist = n < lo ? lo - n : n > hi ? n - hi : 0;
+    if (best === null || dist < best.dist) best = { y, dist, iso };
+  }
+  return best ? best.iso : null;
+}
+
+// Any supported date string → ISO, using the year context when the string has
+// no year of its own. Returns null when it isn't a date at all.
+export function parseFlexibleDate(s, ctx) {
+  const v = String(s ?? '').trim();
+  if (!v) return null;
+  let m = v.match(MONTH_NAME_RE);
+  if (m) {
+    const mo = MONTHS[m[1].toLowerCase()];
+    const day = Number(m[2]);
+    if (m[3]) return isoFrom(Number(m[3]), mo, day);
+    return inferYear(mo, day, ctx);
+  }
+  m = v.match(DAY_MONTH_RE);
+  if (m) {
+    const mo = MONTHS[m[2].toLowerCase()];
+    const day = Number(m[1]);
+    if (m[3]) return isoFrom(Number(m[3]), mo, day);
+    return inferYear(mo, day, ctx);
+  }
+  return parseNumericDate(v);
+}
+
+// ---------------------------------------------------------------------------
+// Runs → visual lines. Runs on (roughly) the same baseline form one line.
+// ---------------------------------------------------------------------------
+export function groupIntoLines(runs, { yTolerance = 3 } = {}) {
+  const sorted = [...(runs || [])].sort((a, b) => a.y - b.y || a.x - b.x);
+  const lines = [];
+  for (const run of sorted) {
+    const last = lines[lines.length - 1];
+    if (last && Math.abs(run.y - last.y) <= yTolerance) {
+      last.runs.push(run);
+      last.y = (last.y * (last.runs.length - 1) + run.y) / last.runs.length;
+    } else {
+      lines.push({ y: run.y, runs: [run] });
+    }
+  }
+  for (const line of lines) {
+    line.runs.sort((a, b) => a.x - b.x);
+    line.text = line.runs.map(r => r.str).join(' ').replace(/\s+/g, ' ').trim();
+    line.height = Math.max(...line.runs.map(r => r.h || 10));
+  }
+  return lines;
+}
+
+// Split a line into cells using fractional x-boundaries (0..1 of page width).
+// Fractions rather than absolute points so a template survives a statement
+// rendered at a different page size/scale. A run is assigned by its MIDPOINT,
+// which keeps right-aligned amounts (whose x-start drifts with digit count) in
+// their own column.
+export function splitLineIntoCells(line, boundaries, pageWidth) {
+  const cuts = boundaries.map(b => b * pageWidth);
+  const cells = new Array(cuts.length + 1).fill(null).map(() => []);
+  for (const run of line.runs) {
+    const mid = run.x + (run.w || 0) / 2;
+    let col = 0;
+    while (col < cuts.length && mid >= cuts[col]) col++;
+    cells[col].push(run.str);
+  }
+  return cells.map(parts => parts.join(' ').replace(/\s+/g, ' ').trim());
+}
+
+// ---------------------------------------------------------------------------
+// Auto-detection: propose a template from the document so the user usually only
+// has to confirm rather than build one from scratch.
+// ---------------------------------------------------------------------------
+
+const HEADER_WORDS = [
+  [/\btrans(action)?\s*date\b|\bpost(ing|ed)?\s*date\b|\bdate\b/i, 'date'],
+  [/\bdescription\b|\bmerchant\b|\bpayee\b|\bdetails?\b|\btransaction\b/i, 'description'],
+  [/\bdebit\b|\bcharges?\b|\bwithdrawals?\b/i, 'debit'],
+  [/\bcredit\b|\bpayments?\b|\bdeposits?\b/i, 'credit'],
+  [/\bamount\b/i, 'amount'],
+];
+
+// A line is a column-header candidate if it mentions a date-ish word plus at
+// least one money-ish word, and contains no actual VALUES of its own — no money
+// and no dates. That last test matters: a line like
+// "Payment Due Date: Jul 18, 2026 | Account ending in 7885" mentions both
+// "Date" and "Payment" but is a summary field, not a table header.
+export function findHeaderLines(lines) {
+  const out = [];
+  for (let i = 0; i < lines.length; i++) {
+    const t = lines[i].text;
+    if (!t || t.length > 120) continue;
+    if (!/\bdate\b/i.test(t)) continue;
+    const moneyish = /\bamount\b|\bdebit\b|\bcredit\b|\bcharges?\b|\bpayments?\b|\bdeposits?\b|\bwithdrawals?\b/i.test(t);
+    if (!moneyish) continue;
+    if (lines[i].runs.some(r => looksLikeMoney(r.str) || looksLikeDate(r.str))) continue;
+    out.push(i);
+  }
+  return out;
+}
+
+// How many transaction-shaped lines (a date-looking run AND a money-looking
+// run) directly follow a candidate header. The real table header is the one
+// with rows under it, so this is what picks between candidates.
+function countBodyAfter(flat, headerIdx, limit = 60) {
+  let n = 0;
+  for (let i = headerIdx + 1; i < flat.length && i <= headerIdx + limit; i++) {
+    const line = flat[i];
+    if (line.runs.some(r => looksLikeDate(r.str)) && line.runs.some(r => looksLikeMoney(r.str))) n++;
+  }
+  return n;
+}
+
+// Column boundaries from vertical whitespace: mark every x covered by a run on
+// the candidate lines, then cut in the middle of each sufficiently wide gap.
+export function suggestBoundaries(lines, pageWidth, { minGap = 8, bins = 1 } = {}) {
+  const width = Math.ceil(pageWidth / bins);
+  const covered = new Uint8Array(width + 2);
+  for (const line of lines) {
+    for (const run of line.runs) {
+      const a = Math.max(0, Math.floor(run.x / bins));
+      const b = Math.min(width, Math.ceil((run.x + (run.w || 0)) / bins));
+      for (let i = a; i <= b; i++) covered[i] = 1;
+    }
+  }
+  // Trim leading/trailing empty margins so they don't become columns.
+  let first = 0;
+  while (first <= width && !covered[first]) first++;
+  let last = width;
+  while (last > first && !covered[last]) last--;
+  const cuts = [];
+  let gapStart = null;
+  for (let i = first; i <= last; i++) {
+    if (!covered[i]) {
+      if (gapStart === null) gapStart = i;
+    } else if (gapStart !== null) {
+      if ((i - gapStart) * bins >= minGap) cuts.push(((gapStart + i) / 2) * bins);
+      gapStart = null;
+    }
+  }
+  return cuts.map(c => Math.round((c / pageWidth) * 10000) / 10000);
+}
+
+// Assign a role to each column from what its cells actually contain, using the
+// header line's wording as a tie-breaker.
+export function suggestRoles(sampleRows, headerCells) {
+  const nCols = Math.max(sampleRows[0]?.length || 0, headerCells?.length || 0);
+  const stats = [];
+  for (let c = 0; c < nCols; c++) {
+    let dates = 0, money = 0, text = 0, nonEmpty = 0, totalLen = 0;
+    for (const row of sampleRows) {
+      const v = (row[c] || '').trim();
+      if (!v) continue;
+      nonEmpty++;
+      totalLen += v.length;
+      if (looksLikeDate(v)) dates++;
+      else if (looksLikeMoney(v)) money++;
+      else text++;
+    }
+    stats.push({ c, dates, money, text, nonEmpty, avgLen: nonEmpty ? totalLen / nonEmpty : 0 });
+  }
+  const roles = new Array(nCols).fill('ignore');
+  const headerRole = c => {
+    const h = (headerCells && headerCells[c]) || '';
+    for (const [re, role] of HEADER_WORDS) if (re.test(h)) return role;
+    return null;
+  };
+
+  // Dates: columns where most non-empty cells parse as dates. First = 'date'.
+  const dateCols = stats.filter(s => s.nonEmpty && s.dates / s.nonEmpty >= 0.6).map(s => s.c);
+  dateCols.forEach((c, i) => { roles[c] = i === 0 ? 'date' : 'date2'; });
+
+  // Money columns.
+  const moneyCols = stats.filter(s => s.nonEmpty && s.money / s.nonEmpty >= 0.6 && roles[s.c] === 'ignore').map(s => s.c);
+  if (moneyCols.length >= 2) {
+    // Two money columns → debit/credit pair; use the header wording when it
+    // disambiguates, else assume left = debit (out), right = credit (in).
+    const named = moneyCols.map(c => headerRole(c));
+    const debitIdx = named.indexOf('debit');
+    const creditIdx = named.indexOf('credit');
+    if (debitIdx >= 0 && creditIdx >= 0) {
+      roles[moneyCols[debitIdx]] = 'debit';
+      roles[moneyCols[creditIdx]] = 'credit';
+    } else {
+      roles[moneyCols[0]] = 'debit';
+      roles[moneyCols[1]] = 'credit';
+    }
+    for (let i = 2; i < moneyCols.length; i++) roles[moneyCols[i]] = 'ignore';
+  } else if (moneyCols.length === 1) {
+    roles[moneyCols[0]] = 'amount';
+  }
+
+  // Description: the widest remaining text column.
+  const textCols = stats.filter(s => roles[s.c] === 'ignore' && s.text > 0).sort((a, b) => b.avgLen - a.avgLen);
+  if (textCols.length) roles[textCols[0].c] = 'description';
+  return roles;
+}
+
+// Full auto-detect: find a header, derive boundaries from the rows beneath it,
+// and propose roles + the anchor that bounds the table.
+export function autoDetectTemplate(pages) {
+  const perPage = (pages || []).map(pg => ({ ...pg, lines: groupIntoLines(pg.runs) }));
+  const flat = [];
+  for (const pg of perPage) for (const line of pg.lines) flat.push({ ...line, page: pg.page, pageWidth: pg.width });
+
+  const headerIdxs = findHeaderLines(flat);
+  if (!headerIdxs.length) return null;
+  // Pick the candidate with the most transaction-shaped rows beneath it — the
+  // real table header — rather than merely the first match in the document.
+  let headerIdx = headerIdxs[0];
+  let bestBody = -1;
+  for (const idx of headerIdxs) {
+    const n = countBodyAfter(flat, idx);
+    if (n > bestBody) { bestBody = n; headerIdx = idx; }
+  }
+  if (bestBody <= 0) return null;
+  const header = flat[headerIdx];
+  const pageWidth = header.pageWidth;
+
+  // Candidate body lines: the lines after the header that carry both a
+  // date-looking and a money-looking run — i.e. plausible transaction rows.
+  const body = [];
+  for (let i = headerIdx + 1; i < flat.length && body.length < 40; i++) {
+    const line = flat[i];
+    const hasDate = line.runs.some(r => looksLikeDate(r.str));
+    const hasMoney = line.runs.some(r => looksLikeMoney(r.str));
+    if (hasDate && hasMoney) body.push(line);
+  }
+  if (!body.length) return null;
+
+  const boundaries = suggestBoundaries([header, ...body], pageWidth);
+  if (!boundaries.length) return null;
+
+  const sampleRows = body.map(l => splitLineIntoCells(l, boundaries, pageWidth));
+  const headerCells = splitLineIntoCells(header, boundaries, pageWidth);
+  const roles = suggestRoles(sampleRows, headerCells);
+
+  const hasDebitCredit = roles.includes('debit') && roles.includes('credit');
+  return {
+    version: TEMPLATE_VERSION,
+    boundaries,
+    roles,
+    // Card statements print both a transaction date and a posted date. Plaid
+    // reports the POSTED date, and the whole app follows Plaid's conventions —
+    // so default to the second date column when there is one. Using the
+    // transaction date instead makes almost every reconciled pair look like a
+    // date mismatch. The editor lets the user switch.
+    dateColumn: roles.includes('date2') ? 'date2' : 'date',
+    amountMode: hasDebitCredit ? 'debitcredit' : 'signed',
+    // Statements print money leaving the account as a positive charge, so a
+    // single signed column is "positive = money out" — matching the app.
+    amountSign: 'out_positive',
+    startAnchor: header.text.slice(0, 60),
+    stopAnchor: '',
+    pages: null,
+    fingerprint: layoutFingerprint(pages),
+  };
+}
+
+// A cheap signature of the document's layout. Stored with the template so a
+// later statement whose layout changed is FLAGGED for re-confirmation instead
+// of being silently mis-parsed.
+export function layoutFingerprint(pages) {
+  const first = (pages || [])[0];
+  if (!first) return '';
+  const lines = groupIntoLines(first.runs).slice(0, 12);
+  const shape = lines.map(l => `${Math.round(l.y / 10)}:${l.runs.length}`).join('|');
+  return `${Math.round(first.width)}x${Math.round(first.height)}#${shape}`;
+}
+
+// ---------------------------------------------------------------------------
+// Applying a template → the cell grid buildRows() consumes.
+//
+// Row selection is deliberately SHAPE-BASED rather than an absolute y-region:
+// statements have a different number of rows every month, so a saved y-window
+// would break on the next statement. A line is a transaction row only if its
+// date column parses as a date AND a money column parses as money — and only
+// while inside the anchored region (which excludes the summary blocks that also
+// contain dates and dollar amounts, e.g. a mortgage statement's payment tables).
+// ---------------------------------------------------------------------------
+const CANONICAL_COLUMNS = { date: 0, description: 1, debit: 2, credit: 3, amount: 4 };
+
+export function applyTemplate(pages, template) {
+  const t = template || {};
+  const boundaries = t.boundaries || [];
+  const roles = t.roles || [];
+  const ctx = resolveYearWindow(pages);
+  const wantPages = Array.isArray(t.pages) && t.pages.length ? new Set(t.pages) : null;
+
+  const roleCol = role => roles.indexOf(role);
+  const dateCol = roleCol(t.dateColumn === 'date2' && roles.includes('date2') ? 'date2' : 'date');
+  const descCol = roleCol('description');
+  const debitCol = roleCol('debit');
+  const creditCol = roleCol('credit');
+  const amountCol = roleCol('amount');
+
+  const grid = [];
+  const rowMeta = [];
+  const skipped = [];
+  let inside = !t.startAnchor;
+  const startRe = t.startAnchor ? new RegExp(escapeRe(t.startAnchor).replace(/\\\s+/g, '\\s+'), 'i') : null;
+  const stopRe = t.stopAnchor ? new RegExp(escapeRe(t.stopAnchor).replace(/\\\s+/g, '\\s+'), 'i') : null;
+  let lastRowIndex = -1;
+  let lastY = null;
+  let lastPage = null;
+
+  for (const pg of pages || []) {
+    if (wantPages && !wantPages.has(pg.page)) continue;
+    const lines = groupIntoLines(pg.runs);
+    for (const line of lines) {
+      if (startRe && startRe.test(line.text)) { inside = true; lastRowIndex = -1; continue; }
+      if (stopRe && stopRe.test(line.text)) { inside = false; lastRowIndex = -1; continue; }
+      if (!inside) continue;
+
+      const cells = splitLineIntoCells(line, boundaries, pg.width);
+      const rawDate = dateCol >= 0 ? cells[dateCol] || '' : '';
+      const iso = parseFlexibleDate(rawDate, ctx);
+      const moneyCells = [debitCol, creditCol, amountCol].filter(c => c >= 0).map(c => cells[c] || '');
+      const hasMoney = moneyCells.some(v => looksLikeMoney(v));
+
+      if (iso && hasMoney) {
+        const row = ['', '', '', '', ''];
+        row[CANONICAL_COLUMNS.date] = iso;
+        row[CANONICAL_COLUMNS.description] = descCol >= 0 ? cells[descCol] || '' : '';
+        if (t.amountMode === 'debitcredit') {
+          const pair = normalizeDebitCredit(
+            normalizeMoneyText(debitCol >= 0 ? cells[debitCol] || '' : ''),
+            normalizeMoneyText(creditCol >= 0 ? cells[creditCol] || '' : '')
+          );
+          row[CANONICAL_COLUMNS.debit] = pair.debit;
+          row[CANONICAL_COLUMNS.credit] = pair.credit;
+        } else {
+          row[CANONICAL_COLUMNS.amount] = normalizeMoneyText(amountCol >= 0 ? cells[amountCol] || '' : '');
+        }
+        grid.push(row);
+        rowMeta.push({ page: pg.page, y: line.y, text: line.text, rawDate });
+        lastRowIndex = grid.length - 1;
+        lastY = line.y;
+        lastPage = pg.page;
+        continue;
+      }
+
+      // Continuation of the previous row's description: same page, immediately
+      // below it, text only in the description column (no date, no money).
+      // Conservative on purpose — marketing copy must never be appended.
+      const descOnly =
+        lastRowIndex >= 0 &&
+        pg.page === lastPage &&
+        lastY !== null &&
+        line.y - lastY > 0 &&
+        line.y - lastY < (line.height || 10) * 2.2 &&
+        !iso &&
+        !hasMoney &&
+        descCol >= 0 &&
+        (cells[descCol] || '').trim() !== '' &&
+        cells.every((v, i) => i === descCol || !String(v).trim());
+      if (descOnly) {
+        grid[lastRowIndex][CANONICAL_COLUMNS.description] =
+          `${grid[lastRowIndex][CANONICAL_COLUMNS.description]} ${cells[descCol].trim()}`.replace(/\s+/g, ' ').trim();
+        lastY = line.y;
+        continue;
+      }
+
+      if (line.text) skipped.push({ page: pg.page, y: Math.round(line.y), text: line.text.slice(0, 90) });
+      lastRowIndex = -1;
+    }
+  }
+
+  const columns =
+    t.amountMode === 'debitcredit'
+      ? { date: 0, description: 1, debit: 2, credit: 3, amount: -1 }
+      : { date: 0, description: 1, debit: -1, credit: -1, amount: 4 };
+
+  return {
+    grid,
+    columns,
+    // buildRows(): headerIndex -1 makes it read from row 0 (the grid has no
+    // header row); dates are already ISO so parseDate passes them through.
+    buildOpts: { headerIndex: -1, columns, amountSign: t.amountSign || 'out_positive' },
+    rowMeta,
+    skipped,
+    yearContext: ctx,
+    fingerprintNow: layoutFingerprint(pages),
+    fingerprintChanged: !!(t.fingerprint && t.fingerprint !== layoutFingerprint(pages)),
+  };
+}
+
+function escapeRe(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// Statements sometimes print a NEGATIVE value inside a Debit/Credit pair to
+// mean a reversal (a mortgage statement shows "-$3,520.95" in Payments to back
+// out an unapplied partial payment). buildRows() treats those two columns as
+// positive magnitudes (Math.abs — deliberately, so a stray sign in a bank CSV
+// can't flip a purchase into a deposit), which would collapse a reversal and
+// the payment it reverses into the same direction.
+//
+// Resolve it here instead of loosening the shipped CSV rule: a negative in one
+// column is exactly a positive in the other, so swap it across. The signed math
+// (debit − credit) then comes out right and the CSV path is untouched.
+export function normalizeDebitCredit(debitRaw, creditRaw) {
+  const d = String(debitRaw ?? '').trim();
+  const c = String(creditRaw ?? '').trim();
+  const dv = d ? parseMoney(d) : 0;
+  const cv = c ? parseMoney(c) : 0;
+  if (!Number.isFinite(dv) || !Number.isFinite(cv)) return { debit: d, credit: c };
+  // Net the pair, then place the magnitude in the column its sign implies.
+  const net = dv - cv; // positive = money out
+  if (net > 0) return { debit: net.toFixed(2), credit: '' };
+  if (net < 0) return { debit: '', credit: (-net).toFixed(2) };
+  return { debit: '', credit: '' };
+}
+
+// Sum of the parsed rows, for the "does this match the statement's stated
+// total?" sanity check surfaced in the UI.
+export function gridTotals(grid, columns) {
+  let out = 0;
+  let inn = 0;
+  for (const row of grid) {
+    let amt;
+    if (columns.debit >= 0 || columns.credit >= 0) {
+      amt = Math.abs(parseMoney(row[columns.debit]) || 0) - Math.abs(parseMoney(row[columns.credit]) || 0);
+    } else {
+      amt = parseMoney(row[columns.amount]) || 0;
+    }
+    if (amt > 0) out += amt;
+    else inn += -amt;
+  }
+  return { out: Number(out.toFixed(2)), in: Number(inn.toFixed(2)) };
+}

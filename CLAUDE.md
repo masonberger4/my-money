@@ -50,7 +50,10 @@ entry once shipped.
 | `src/dataAdapter.js` | All Supabase reads + shapes consumed by Dashboard; the Trends cash-flow model lives here (see Conventions). Keep return shapes stable. Also holds the CSV-import writes (`findOrCreateManualInstitution`, `createManualAccount`, `getExistingTxIds`, `importCsvTransactions`, `isManualAccount`), the comparison-mode read `getAccountTransactionsInRange`, and exports the cash-flow helpers (`markInternalTransfers`/`cashIncome`/`cashSpending`) for the dry-run harness. |
 | `src/categoryMap.js` | Plaid category → app category mapping; `applyAccountRules` (credit-card negatives → "Return", excluded from income); pure JS, imported by server code too. `ERA_CATEGORIES` is the taxonomy source of truth (no "Housing"/"Income" member). |
 | `src/csvImport.js` | Pure CSV-import core (no React/Supabase): `parseCsv`, `detectHeader`, `parseMoney`/`parseDate`, `guessCategory` (validated against `ERA_CATEGORIES`), transfer flagging, dedup `plaid_tx_id` hashing, `buildRows`/`analyzeCsv`. Also the comparison-mode core: `reconcileCsv` (max-matching audit), `descSimilarity`, `csvDateRange`. Testable in isolation. |
-| `src/components/CsvImport.jsx` | Accounts-tab import modal, two modes by target: **standalone** (manual target) file → preview (greyed dupes) → confirm; **comparison** (Plaid-linked target) read-only reconciliation audit, inserts nothing. Writes via dataAdapter's `createManualAccount`/`importCsvTransactions`; reads Plaid rows via `getAccountTransactionsInRange`. |
+| `src/components/CsvImport.jsx` | Accounts-tab import modal for **CSV *and* PDF**, two modes by target: **standalone** (manual target) file → preview (greyed dupes) → confirm; **comparison** (Plaid-linked target) read-only reconciliation audit, inserts nothing. Writes via dataAdapter's `createManualAccount`/`importCsvTransactions`; reads Plaid rows via `getAccountTransactionsInRange`. |
+| `src/pdfImport.js` | Pure PDF-statement parsing core (no pdf.js/React/Supabase): text runs → lines → columns → **the same cell grid `buildRows` consumes**. Template auto-detect (`autoDetectTemplate`), `applyTemplate`, month-name dates + year inference from the statement period, `normalizeDebitCredit`, `layoutFingerprint`. Testable in Node. |
+| `src/pdfExtract.js` | The only file that touches pdf.js. Lazy `import()` (keeps ~1.7MB out of the main bundle) of the **legacy** build; worker bundled by Vite via `?url` (no CDN, CSP/offline-safe). |
+| `src/components/PdfTemplateEditor.jsx` | Visual "teach it once" editor: renders the statement from its own text runs, draggable column boundaries, per-column role selectors, live parsed-row count. Saved per account as `pdftpl:<accountId>` in `settings`. |
 | `src/plaidClient.js` | Client → api/ fetch wrappers (JWT attached). |
 | `src/sync.js` | Single-flight wrapper triggering server sync. |
 | `src/db.js` | getSetting/setSetting on the Supabase `settings` table (dashboard prefs: colors, names, custom categories, `asst:model`/`asst:effort`). |
@@ -162,7 +165,19 @@ playwright-core screenshot (`executablePath:'/opt/pw-browsers/chromium'`,
   CSV+Plaid legs). The importer degrades gracefully if the two columns are absent.
 
 ## Pending branches
-_(none)_
+
+- **`claude/pdf-import`** — **PDF statement import**, for accounts whose statements
+  are only downloadable as PDFs. No per-bank code: pdf.js extracts positioned
+  text, a **template** the user confirms once in a visual editor (drag column
+  edges, label each column) is saved per account (`pdftpl:<accountId>` in
+  `settings`) and re-applied to later statements. A PDF becomes the same cell
+  grid a CSV yields, so `buildRows` and everything downstream (dedup, categories,
+  preview, standalone insert, comparison audit) are reused **unchanged**.
+  Also adds a manual **credit-card** account type (for a genuinely PDF-only card)
+  and tags imported rows `source='csv'|'pdf'` to warn on mixing formats.
+  No migration. Verified against two real statements (Capital One card: 112 rows,
+  totals match the statement exactly; NewRez mortgage: table split across pages
+  with negative reversal rows). Awaiting Mason's preview review + "merge pdf-import".
 
 ## Roadmap
 
@@ -374,6 +389,19 @@ tracker is the liability half of the future net-worth feature — the
   your first account" screen (see App.jsx count handling).
 - iOS PWA: apple-touch-icon must be PNG; service worker (`public/sw.js`) never
   caches `/api/*`; bump its CACHE_VERSION when changing it.
+- **pdf.js must be the LEGACY build** (`pdfjs-dist/legacy/build/…`). The modern
+  bundle calls `Map.prototype.getOrInsertComputed`, which current Chromium and
+  iOS Safari don't have — it throws "getOrInsertComputed is not a function" on a
+  real device (caught only because the harness drives a real browser). Load it
+  with a dynamic `import()` so it stays out of the main bundle.
+- A bank words the same transaction differently in its CSV and its PDF, so the
+  dedup hash differs: importing both formats into ONE manual account
+  double-inserts. `transactions.source` records `'csv'|'pdf'` and the importer
+  warns on a mix — one format per account.
+- A mortgage/loan statement's rows are loan accounting (suspense-account
+  postings, reversals), not household spending, and the real payment is already
+  in cash flow via the checking feed. Those belong to the future Debt tracker —
+  don't import them onto a depository account.
 - One Claude session per line of work, branched from current main — two sessions
   off different bases once regressed production (the "iphone-app" incident).
 - If pushes stop deploying and GitHub API calls 503, check githubstatus.com
