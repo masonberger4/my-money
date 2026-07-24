@@ -50,7 +50,11 @@ export function looksLikeDate(s) {
 const MONEY_RE = /^[-+−–—(]?\s*\$?\s*\d{1,3}(?:,\d{3})*(?:\.\d{2})?\s*\)?$|^[-+−–—(]?\s*\$?\s*\d+\.\d{2}\s*\)?$/;
 
 export function looksLikeMoney(s) {
-  const v = String(s ?? '').trim();
+  // Normalize FIRST: some statement generators print a Unicode minus (U+2212)
+  // or en-dash instead of a hyphen, and parseMoney only understands ASCII '-'.
+  // Testing the raw string would make such a row fail the shape filter and be
+  // silently dropped instead of imported as a negative amount.
+  const v = normalizeMoneyText(s).trim();
   if (!v) return false;
   if (!/\d/.test(v)) return false;
   if (!MONEY_RE.test(v)) return false;
