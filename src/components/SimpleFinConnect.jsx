@@ -65,23 +65,38 @@ export default function SimpleFinConnect({ onClose, onConnected }) {
     setBusy(true);
     setError(null);
     setStep("claiming");
+
+    let claimed;
     try {
-      const claimed = await claimSimpleFinToken(value);
-      // Pull immediately so the user sees accounts land instead of an empty
-      // "connected" screen; `force` bypasses the once-an-hour pull throttle.
-      setStep("syncing");
-      await runSync({ force: true });
-      setToken("");
-      setResult({ accounts: claimed.accounts ?? 0 });
-      await load();
-      if (onConnected) onConnected();
+      claimed = await claimSimpleFinToken(value);
     } catch (err) {
-      console.error("simplefin connect failed", err);
+      console.error("simplefin claim failed", err);
       setError(describeError(err, "Could not connect to SimpleFIN"));
-    } finally {
       setStep(null);
       setBusy(false);
+      return;
     }
+
+    // Past this point the connection EXISTS and the setup token is spent, so a
+    // failure here is never "could not connect" — saying so would send the user
+    // back to Bridge for a second, redundant token. Pull immediately so
+    // accounts land right away (`force` skips the once-an-hour throttle), but
+    // treat a failed first pull as a note on a connection that succeeded.
+    setStep("syncing");
+    let warning = claimed.warning || null;
+    try {
+      await runSync({ force: true });
+    } catch (err) {
+      console.error("simplefin first sync failed", err);
+      warning = describeError(err, "Connected, but the first sync didn't finish");
+    }
+
+    setToken("");
+    setResult({ accounts: claimed.accounts, warning });
+    await load();
+    if (onConnected) onConnected();
+    setStep(null);
+    setBusy(false);
   }
 
   async function disconnect() {
@@ -168,13 +183,22 @@ export default function SimpleFinConnect({ onClose, onConnected }) {
                     SimpleFIN connected
                   </div>
                   <div style={{ ...note, maxWidth: 380, margin: "0 auto" }}>
-                    The feed can see {result.accounts} account{result.accounts === 1 ? "" : "s"}. They've been added
+                    {result.accounts == null
+                      ? <>Your banks are linked.</>
+                      : <>The feed can see {result.accounts} account{result.accounts === 1 ? "" : "s"}.</>}
+                    {" "}New accounts are added
                     <strong style={{ color: "var(--text)" }}> hidden</strong>, so they don't touch any totals yet.
                     <br /><br />
                     On the Accounts tab: open each one, check its <strong style={{ color: "var(--text)" }}>type</strong> is
                     right (SimpleFIN doesn't send one — it's guessed from the name, and the checking/savings split drives
                     Trends), compare its transactions against the Plaid copy, then unhide it.
                   </div>
+                  {result.warning && (
+                    <div style={{ fontSize: 11, color: "#8A6A16", background: "#FDF4E0", border: "1px solid #E9CE8A", borderRadius: 8, padding: "10px 12px", marginTop: 14, lineHeight: 1.5, textAlign: "left" }}>
+                      {result.warning} — the connection is saved and retries on its own, so the
+                      accounts will appear on the next sync.
+                    </div>
+                  )}
                 </div>
               ) : (
                 <>

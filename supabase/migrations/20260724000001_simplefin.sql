@@ -30,10 +30,16 @@ create table if not exists simplefin_access (
   id uuid primary key default gen_random_uuid(),
   household_id uuid not null references households(id) on delete cascade,
   access_url text not null,
-  -- Watermark for the incremental pull's start-date, and the input to the
-  -- pull throttle (SimpleFIN refreshes bank data about once a day; hammering
-  -- the Bridge gains nothing).
+  -- Watermark for the incremental pull's start-date. Advanced ONLY after a
+  -- successful pull: moving it after a failure would skip past transactions
+  -- that were never read.
   last_pulled_at timestamptz,
+  -- When a pull was last ATTEMPTED, successfully or not. Deliberately separate
+  -- from last_pulled_at, because it drives the throttle: sharing one column
+  -- would force a choice between skipping transactions after a failure and
+  -- re-hitting the Bridge on every single dashboard load while a connection is
+  -- broken. Stamped before the request so even a timeout counts as an attempt.
+  last_attempt_at timestamptz,
   -- Last non-fatal problem reported by the feed: SimpleFIN returns per-bank
   -- trouble as free-text strings in the response's "errors" array rather than
   -- as an HTTP error, so it is recorded here instead of on institutions.

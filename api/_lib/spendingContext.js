@@ -27,17 +27,30 @@ export async function buildSpendingContext(householdId) {
   since.setDate(since.getDate() - 90);
   const sinceStr = since.toISOString().slice(0, 10);
 
-  const { data: txs, error: txErr } = await supabase
-    .from('transactions')
-    .select('account_id, date, amount, merchant_name, description, mapped_category')
-    .eq('household_id', householdId)
-    .gte('date', sinceStr)
-    .order('date', { ascending: false })
-    .limit(1500);
-  if (txErr) throw txErr;
+  // Filter to visible accounts in the QUERY, not after: the 1500-row cap is
+  // applied by the database, so post-filtering would let hidden rows eat the
+  // budget. That became a real problem when SimpleFIN started landing a second,
+  // hidden copy of the household's ledger alongside the Plaid one — half the
+  // assistant's context would have been rows it then threw away.
+  const visibleIds = visible.map(a => a.id);
+  let txs = [];
+  if (visibleIds.length) {
+    const { data, error: txErr } = await supabase
+      .from('transactions')
+      .select('account_id, date, amount, merchant_name, description, mapped_category')
+      .eq('household_id', householdId)
+      .in('account_id', visibleIds)
+      .gte('date', sinceStr)
+      .order('date', { ascending: false })
+      .limit(1500);
+    if (txErr) throw txErr;
+    txs = data || [];
+  }
 
-  const visibleIds = new Set(visible.map(a => a.id));
-  const usable = txs.filter(t => visibleIds.has(t.account_id));
+  // Loan-account debits are loan payments, not purchases — the cash that paid
+  // them already counts on its way out of checking (mirrors sumSpending).
+  const loanIds = new Set(visible.filter(a => a.type === 'loan').map(a => a.id));
+  const usable = txs.filter(t => !loanIds.has(t.account_id));
   for (const t of usable) {
     t.mapped_category = applyAccountRules(
       t.mapped_category,

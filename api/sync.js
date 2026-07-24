@@ -33,10 +33,13 @@ let txHaveSource = true;
 // branch deploying and Mason pasting its migration.
 function isMissingSchemaError(error, name) {
   if (!error) return false;
-  if (error.code === 'PGRST204' || error.code === 'PGRST205') return true;
-  if (error.code === '42703' || error.code === '42P01') return true;
   const blob = `${error.message || ''} ${error.details || ''} ${error.hint || ''}`.toLowerCase();
-  return blob.includes(String(name).toLowerCase()) && /column|table|schema cache/.test(blob);
+  // The name must appear: PostgREST names the missing column/table in the
+  // message, and matching on the code alone would let a DIFFERENT missing
+  // column be mistaken for the optional one and silently dropped.
+  if (!blob.includes(String(name).toLowerCase())) return false;
+  if (['PGRST204', 'PGRST205', '42703', '42P01'].includes(error.code)) return true;
+  return /column|table|schema cache/.test(blob);
 }
 
 // =============================================================================
@@ -172,7 +175,7 @@ async function syncOneInstitution(supabase, inst, accessToken, householdId) {
 async function loadAccessRows(supabase, householdId) {
   const { data, error } = await supabase
     .from('simplefin_access')
-    .select('id, access_url, last_pulled_at')
+    .select('id, access_url, last_pulled_at, last_attempt_at')
     .eq('household_id', householdId);
   if (error) {
     if (isMissingSchemaError(error, 'simplefin_access')) return null;
@@ -223,21 +226,33 @@ async function resolveOrgInstitutions(supabase, householdId, orgs) {
 async function pullOneAccessUrl(supabase, householdId, accessRow, { force }) {
   const now = new Date();
   const lastPulled = accessRow.last_pulled_at ? new Date(accessRow.last_pulled_at) : null;
+  // Throttle on the last ATTEMPT, not the last success — otherwise a broken
+  // connection would be retried on every dashboard load forever.
+  const lastAttempt = accessRow.last_attempt_at ? new Date(accessRow.last_attempt_at) : null;
 
-  if (!force && lastPulled && now.getTime() - lastPulled.getTime() < MIN_PULL_MINUTES * 60_000) {
+  if (!force && lastAttempt && now.getTime() - lastAttempt.getTime() < MIN_PULL_MINUTES * 60_000) {
     return {
       institution: 'SimpleFIN',
       skipped: 'throttled',
-      last_pulled_at: lastPulled.toISOString(),
+      last_pulled_at: lastPulled ? lastPulled.toISOString() : null,
     };
   }
 
   // Incremental: re-request an overlap window because a bank can amend or
   // late-post a transaction inside a date we already pulled. Re-seeing a row is
   // free — the upsert lands on the same (account_id, plaid_tx_id).
-  const startDate = lastPulled
-    ? new Date(lastPulled.getTime() - OVERLAP_DAYS * DAY_MS)
-    : new Date(now.getTime() - FIRST_PULL_DAYS * DAY_MS);
+  const floor = now.getTime() - FIRST_PULL_DAYS * DAY_MS;
+  const startDate = new Date(
+    lastPulled ? Math.max(lastPulled.getTime() - OVERLAP_DAYS * DAY_MS, floor) : floor
+  );
+
+  // Stamped before the request, so a timeout or a crashed invocation still
+  // counts as an attempt and the throttle holds.
+  const { error: attemptErr } = await supabase
+    .from('simplefin_access')
+    .update({ last_attempt_at: now.toISOString() })
+    .eq('id', accessRow.id);
+  if (attemptErr) throw attemptErr;
 
   const json = await fetchAccountSet(accessRow.access_url, {
     startDate,
@@ -396,35 +411,68 @@ async function pullOneAccessUrl(supabase, householdId, accessRow, { force }) {
   // Same duplicate hazard as accounts, one level down: a repeated transaction
   // id inside one account would make the upsert touch a row twice and abort.
   const seenTx = new Set();
-  for (const { acct, externalId } of usable) {
-    const accountUuid = uuidByExternal.get(externalId);
-    if (!accountUuid) continue;
-    for (const tx of acct.transactions) {
-      const dedupKey = `${accountUuid}|${tx.externalId}`;
-      if (seenTx.has(dedupKey)) continue;
-      seenTx.add(dedupKey);
-      // SimpleFIN ships no category, so it is derived from the descriptor at
-      // write time — the same keyword table the CSV importer uses. `payee` is
-      // the cleaner merchant string when the server sends one; memo is left out
-      // because freeform text ("transfer for rent") would mislabel real bills.
-      const descriptor =
-        tx.payee && tx.payee !== tx.description
-          ? `${tx.payee} ${tx.description}`
-          : tx.description;
-      const { raw_category, mapped_category } = classifyDescription(descriptor, tx.amount);
-      txRows.push({
-        household_id: householdId,
-        account_id: accountUuid,
-        plaid_tx_id: SFIN_PREFIX + tx.externalId,
-        date: tx.date,
-        amount: tx.amount,
-        merchant_name: tx.payee || '',
-        description: tx.description,
-        raw_category,
-        mapped_category,
-        pending: tx.pending,
-        pulled_at: now.toISOString(),
+  const collect = normalizedAccounts => {
+    for (const acct of normalizedAccounts) {
+      const accountUuid = uuidByExternal.get(SFIN_PREFIX + acct.externalId);
+      if (!accountUuid) continue;
+      for (const tx of acct.transactions) {
+        const dedupKey = `${accountUuid}|${tx.externalId}`;
+        if (seenTx.has(dedupKey)) continue;
+        seenTx.add(dedupKey);
+        // SimpleFIN ships no category, so it is derived from the descriptor at
+        // write time — the same keyword table the CSV importer uses. `payee` is
+        // the cleaner merchant string when the server sends one; memo is left
+        // out because freeform text ("transfer for rent") would mislabel bills.
+        const descriptor =
+          tx.payee && tx.payee !== tx.description
+            ? `${tx.payee} ${tx.description}`
+            : tx.description;
+        const { raw_category, mapped_category } = classifyDescription(descriptor, tx.amount);
+        txRows.push({
+          household_id: householdId,
+          account_id: accountUuid,
+          plaid_tx_id: SFIN_PREFIX + tx.externalId,
+          date: tx.date,
+          amount: tx.amount,
+          merchant_name: tx.payee || '',
+          description: tx.description,
+          raw_category,
+          mapped_category,
+          pending: tx.pending,
+          pulled_at: now.toISOString(),
+        });
+      }
+    }
+  };
+  collect(usable.map(u => u.acct));
+
+  // Backfill accounts we're seeing for the first time. One access URL covers
+  // every bank linked at the Bridge, so a bank added there later just shows up
+  // in a later pull — and that pull's start-date came from the shared
+  // watermark, which would cap the newcomer at the 30-day overlap. Re-request
+  // full history, scoped to only the new accounts (`account` is a repeatable
+  // param) so this costs one extra call the first time a bank appears.
+  const backfillIds = toInsert
+    .map(r => String(r.plaid_account_id).slice(SFIN_PREFIX.length))
+    .filter(Boolean);
+  if (backfillIds.length && lastPulled) {
+    try {
+      const history = await fetchAccountSet(accessRow.access_url, {
+        startDate: new Date(floor),
+        pending: INCLUDE_PENDING,
+        accountIds: backfillIds,
       });
+      const before = txRows.length;
+      collect(normalizeAccountSet(history).accounts);
+      console.log(
+        '[sync:simplefin] backfilled %d row(s) of history for %d new account(s)',
+        txRows.length - before,
+        backfillIds.length
+      );
+    } catch (err) {
+      // Not fatal: the accounts and their recent transactions are already
+      // written, and the next pull can be forced to try the backfill again.
+      console.warn('[sync:simplefin] history backfill failed', err?.message || err);
     }
   }
 
@@ -465,11 +513,19 @@ async function pullOneAccessUrl(supabase, householdId, accessRow, { force }) {
     if (error) throw error;
   }
 
+  // Advance the data watermark ONLY on a completely clean pull. A partial
+  // failure comes back as HTTP 200 with the reachable banks plus an error
+  // string for the broken one — moving the watermark then would leave the
+  // broken bank's outage window behind forever once it exceeded the 30-day
+  // overlap. Leaving it put means the next pull re-requests from where the
+  // last good one ended; startDate is floored at FIRST_PULL_DAYS so a bank the
+  // user never fixes can't grow the window without bound.
+  const clean = errors.length === 0;
   const { error: accessErr } = await supabase
     .from('simplefin_access')
     .update({
-      last_pulled_at: now.toISOString(),
-      last_error: errors.length ? errors.join('; ').slice(0, 1000) : null,
+      ...(clean ? { last_pulled_at: now.toISOString() } : {}),
+      last_error: clean ? null : errors.join('; ').slice(0, 1000),
     })
     .eq('id', accessRow.id);
   if (accessErr) throw accessErr;

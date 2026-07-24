@@ -18,6 +18,10 @@ export default async function handler(req, res) {
   const user = await requireUser(req, res);
   if (!user) return;
 
+  // The only GET route in api/ — and a cached "not connected" right after
+  // connecting would be baffling. (public/sw.js already passes /api/* through.)
+  res.setHeader('Cache-Control', 'no-store');
+
   try {
     const supabase = getServiceClient();
 

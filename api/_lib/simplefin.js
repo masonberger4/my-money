@@ -80,6 +80,43 @@ function isHttpsUrl(value) {
   }
 }
 
+// The setup token is user-supplied and the server then POSTs to whatever URL it
+// decodes to, so it is an SSRF vector aimed at Vercel's internal network. The
+// household login is trusted, but a cloud metadata endpoint is one paste away
+// from a phished token, and the check is nearly free. Hosts are blocked rather
+// than allow-listed because a self-hosted SimpleFIN server is legitimate.
+const BLOCKED_HOST_RE = new RegExp(
+  [
+    '^localhost$',
+    '\\.local$',
+    '\\.internal$',
+    '^127\\.',
+    '^0\\.',
+    '^10\\.',
+    '^192\\.168\\.',
+    '^172\\.(1[6-9]|2\\d|3[01])\\.',
+    '^169\\.254\\.', // link-local, incl. 169.254.169.254 metadata
+    '^\\[?::1\\]?$',
+    '^\\[?f[cd]', // IPv6 unique-local
+  ].join('|'),
+  'i'
+);
+
+function assertPublicHost(value) {
+  let host;
+  try {
+    host = new URL(value).hostname;
+  } catch {
+    throw new SimpleFinError('invalid_token', 'That is not a valid URL.');
+  }
+  if (!host || BLOCKED_HOST_RE.test(host)) {
+    throw new SimpleFinError(
+      'invalid_token',
+      'That token points at a private network address, which SimpleFIN never does.'
+    );
+  }
+}
+
 // A SimpleFIN setup token is a base64-encoded claim URL. Users paste it out of
 // the Bridge UI, so it arrives with stray whitespace and newlines; some paste
 // the claim URL itself, and some paste an access URL they already hold.
@@ -94,6 +131,7 @@ export function decodeSetupToken(raw) {
     if (!isHttpsUrl(input)) {
       throw new SimpleFinError('invalid_token', 'SimpleFIN URLs must use https.');
     }
+    assertPublicHost(input);
     const parsed = new URL(input);
     return { kind: parsed.username ? 'access' : 'claim', url: input };
   }
@@ -114,6 +152,7 @@ export function decodeSetupToken(raw) {
       "That doesn't look like a SimpleFIN setup token — it should decode to an https claim URL."
     );
   }
+  assertPublicHost(decoded);
   const parsed = new URL(decoded);
   return { kind: parsed.username ? 'access' : 'claim', url: decoded };
 }
@@ -167,6 +206,9 @@ export async function claimAccessUrl(claimUrl) {
       'SimpleFIN returned something that is not an access URL. Try generating a new setup token.'
     );
   }
+  // The claim response is attacker-influenced too — it decides where every
+  // later pull goes, so it gets the same private-address check.
+  assertPublicHost(body);
   return body;
 }
 
@@ -335,6 +377,14 @@ export function orgKey(org) {
   if (id) return id;
   const domain = String(org?.domain || '').trim().toLowerCase();
   if (domain) return `domain:${domain}`;
+  // sfin-url is the ONLY org field the protocol actually requires — id, domain
+  // and name are all optional. Without it in the chain, two identity-poor orgs
+  // would both fall through to the caller's 'unknown' bucket and get merged
+  // into one institution.
+  const sfinHost = hostOf(org?.['sfin-url'] || org?.sfinUrl || '');
+  if (sfinHost) return `sfin:${sfinHost.toLowerCase()}`;
+  const url = hostOf(org?.url || '');
+  if (url) return `domain:${url.toLowerCase()}`;
   const name = String(org?.name || '').trim().toLowerCase();
   if (name) return `name:${name}`;
   return '';
@@ -356,7 +406,12 @@ export function orgLabel(org) {
 function orgFromConnection(conn) {
   if (!conn) return null;
   return {
-    id: conn.org_id || conn.conn_id || '',
+    // Deliberately NOT falling back to conn_id. conn_id identifies the
+    // *connection*, not the org, and using it would make orgKey return a
+    // different value than v1's domain/name fallback for the same bank — so a
+    // server-side version flip would fork the institution. Leaving it empty
+    // lets orgKey walk the same fallback chain both versions can satisfy.
+    id: conn.org_id || '',
     name: conn.org_name || conn.name || '',
     domain: hostOf(conn.org_url) || '',
     url: conn.org_url || '',

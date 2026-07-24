@@ -54,9 +54,13 @@ entry once shipped.
   - **SimpleFIN pass**: per *access URL*, not per institution — one URL covers
     every bank, fetched in a single GET with no cursor and no pagination. Fans
     out into institutions (one per SimpleFIN org), accounts and transactions.
-    Incremental via a `last_pulled_at` watermark minus a 30-day overlap;
-    the watermark advances **only on success**, so a failed pull can't skip
-    transactions. Throttled to one pull an hour (SimpleFIN refreshes ~daily).
+    Incremental via a `last_pulled_at` watermark minus a 30-day overlap.
+    `last_pulled_at` (data watermark, advanced **only on success** so a failed
+    pull can't skip transactions) and `last_attempt_at` (throttle, stamped
+    **before** the request so a timeout still counts) are deliberately two
+    columns — one column would force a choice between skipping transactions
+    after a failure and re-hitting the Bridge on every dashboard load while a
+    connection is broken. One pull an hour (SimpleFIN refreshes ~daily).
 
 ## Key files
 

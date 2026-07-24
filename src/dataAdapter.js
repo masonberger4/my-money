@@ -132,10 +132,20 @@ function getMonthTransactions(year, month) {
   return getTransactionsBetween(start, end);
 }
 
+// A debit on a LOAN account is a loan payment, not a purchase — and the cash
+// that paid it already counts when it leaves checking, so counting it here
+// double-counts the mortgage. Plaid never surfaced this (its loan accounts
+// carry sparse/no transactions), but SimpleFIN ships the servicer's real
+// transaction list. Note this guards `loan` ONLY: credit-card *purchases* are
+// exactly what purchase-based spending is supposed to measure.
+function isLoanAccount(t) {
+  return t.accounts?.type === 'loan';
+}
+
 function sumSpending(txs) {
   let total = 0;
   for (const t of txs) {
-    if (t.excluded) continue;
+    if (t.excluded || isLoanAccount(t)) continue;
     if (t.amount > 0 && !isTransferCategory(effectiveCategory(t))) total += t.amount;
   }
   return total;
@@ -227,7 +237,7 @@ export async function getSpending({ year, month }) {
   let total = 0;
 
   for (const t of txs) {
-    if (t.excluded) continue;
+    if (t.excluded || isLoanAccount(t)) continue; // see sumSpending
     if (t.amount <= 0) continue;
     const cat = effectiveCategory(t);
     if (isTransferCategory(cat)) continue;
