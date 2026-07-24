@@ -331,12 +331,12 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                   </div>
                   <div style={{
                     fontSize: 12, borderRadius: 8, padding: "9px 12px", lineHeight: 1.5,
-                    background: pdfApplied?.fingerprintChanged ? "#FCEBEB" : "var(--bg)",
-                    border: `1px solid ${pdfApplied?.fingerprintChanged ? "#F09595" : "var(--border)"}`,
-                    color: pdfApplied?.fingerprintChanged ? "#A32D2D" : "var(--muted)",
+                    background: pdfApplied?.layoutSuspect ? "#FCEBEB" : "var(--bg)",
+                    border: `1px solid ${pdfApplied?.layoutSuspect ? "#F09595" : "var(--border)"}`,
+                    color: pdfApplied?.layoutSuspect ? "#A32D2D" : "var(--muted)",
                   }}>
-                    {pdfApplied?.fingerprintChanged
-                      ? "This statement's layout looks different from the one saved for this account — check the columns below before importing."
+                    {pdfApplied?.layoutSuspect
+                      ? "Couldn't read this statement with the saved layout — the bank may have changed its format. Open “Adjust columns” and re-confirm."
                       : templateSource === "saved"
                         ? <>Using the layout you saved for this account. <strong style={{ color: "var(--text)" }}>{rows.length}</strong> transactions read.</>
                         : <>Layout detected automatically. <strong style={{ color: "var(--text)" }}>{rows.length}</strong> transactions read — check a few in the preview, then adjust the columns if anything looks off.</>}

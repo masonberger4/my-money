@@ -88,17 +88,35 @@ function dayNum(iso) {
 // A dated range like "May 25, 2026 - Jun 23, 2026" or "(06/17/2026 -
 // 07/16/2026)" — i.e. the statement period. Bank-agnostic: it matches the
 // shape, not any particular label.
-const D = '(?:[A-Za-z]{3,9}\\.?\\s+\\d{1,2},?\\s+\\d{4}|\\d{1,2}[/-]\\d{1,2}[/-]\\d{4}|\\d{4}-\\d{2}-\\d{2})';
-const RANGE_RE = new RegExp(`(${D})\\s*(?:-|–|—|to|through|thru)\\s*(${D})`, 'i');
+// A date carrying its own year (4- or 2-digit), and one without ("May 25").
+const D = '(?:[A-Za-z]{3,9}\\.?\\s*\\d{1,2},?\\s*\\d{2,4}|\\d{1,2}[/-]\\d{1,2}[/-]\\d{2,4}|\\d{4}-\\d{2}-\\d{2})';
+const D_NOYEAR = '(?:[A-Za-z]{3,9}\\.?\\s*\\d{1,2})';
+const SEP = '\\s*(?:-|–|—|to|through|thru)\\s*';
+// "May 25, 2026 - Jun 23, 2026" | "(06/17/2026 - 07/16/2026)" and the common
+// shorthand where only the closing date carries the year: "May 25 - Jun 23, 2026".
+const RANGE_RE = new RegExp(`(${D})${SEP}(${D})`, 'i');
+const RANGE_PARTIAL_RE = new RegExp(`(${D_NOYEAR})${SEP}(${D})`, 'i');
 
 function parseAnyDated(s) {
   const v = String(s).trim();
-  let m = v.match(/^([A-Za-z]{3,9})\.?\s+(\d{1,2}),?\s+(\d{4})$/);
+  const m = v.match(/^([A-Za-z]{3,9})\.?\s*(\d{1,2})\s*,?\s*(\d{2,4})$/);
   if (m) {
     const mo = MONTHS[m[1].toLowerCase()];
-    return mo ? isoFrom(Number(m[3]), mo, Number(m[2])) : null;
+    if (!mo) return null;
+    let y = Number(m[3]);
+    if (m[3].length === 2) y += y >= 70 ? 1900 : 2000;
+    return isoFrom(y, mo, Number(m[2]));
   }
   return parseNumericDate(v);
+}
+
+// Month + day with no year of its own ("May 25"), used for the common shorthand
+// where only the closing date of a period carries the year.
+function parseMonthDayOnly(s) {
+  const m = String(s).trim().match(/^([A-Za-z]{3,9})\.?\s*(\d{1,2})$/);
+  if (!m) return null;
+  const mo = MONTHS[m[1].toLowerCase()];
+  return mo ? { month: mo, day: Number(m[2]) } : null;
 }
 
 // Locate the statement period. This is what anchors year inference for the
@@ -107,17 +125,35 @@ function parseAnyDated(s) {
 // stale revision dates (a 2023 copyright line) that would otherwise widen the
 // window enough to make several years equally plausible.
 export function findStatementPeriod(pages) {
+  const ok = (a, b) => {
+    if (!a || !b) return null;
+    const span = dayNum(b) - dayNum(a);
+    // A billing cycle, not an arbitrary pair of dates.
+    if (span < 0 || span > 200) return null;
+    return { start: a, end: b };
+  };
   for (const pg of pages || []) {
     for (const line of groupIntoLines(pg.runs)) {
-      const m = line.text.match(RANGE_RE);
-      if (!m) continue;
-      const a = parseAnyDated(m[1]);
-      const b = parseAnyDated(m[2]);
-      if (!a || !b) continue;
-      const span = dayNum(b) - dayNum(a);
-      // A billing cycle, not an arbitrary pair of dates.
-      if (span < 0 || span > 200) continue;
-      return { start: a, end: b };
+      // Both endpoints dated: "May 25, 2026 - Jun 23, 2026".
+      const full = line.text.match(RANGE_RE);
+      if (full) {
+        const hit = ok(parseAnyDated(full[1]), parseAnyDated(full[2]));
+        if (hit) return hit;
+      }
+      // Only the closing date dated: "May 25 - Jun 23, 2026". Take the year
+      // from the end, stepping the start back a year when the cycle wraps.
+      const partial = line.text.match(RANGE_PARTIAL_RE);
+      if (partial) {
+        const md = parseMonthDayOnly(partial[1]);
+        const end = parseAnyDated(partial[2]);
+        if (md && end) {
+          const endYear = Number(end.slice(0, 4));
+          let start = isoFrom(endYear, md.month, md.day);
+          if (start && start > end) start = isoFrom(endYear - 1, md.month, md.day);
+          const hit = ok(start, end);
+          if (hit) return hit;
+        }
+      }
     }
   }
   return null;
@@ -147,14 +183,13 @@ export function collectYearContext(pages) {
   }
   if (!isoDates.length) return null;
   isoDates.sort();
-  return { min: isoDates[0], max: isoDates[isoDates.length - 1], years: [...years].sort() };
+  return { min: isoDates[0], max: isoDates[isoDates.length - 1], years: [...years].sort(), all: isoDates };
 }
 
 // The window used to resolve year-less dates. Preference order:
 //  1. the statement period, padded — transaction dates sit inside it (a card's
-//     "Trans Date" can fall a few days before the cycle start, hence the pad);
-//  2. failing that, the dates on page 1 (the statement header), looking back
-//     one cycle from the latest of them.
+//     transaction date can fall a few days before the cycle start, hence the pad);
+//  2. failing that, the dates printed on page 1, anchored on their MEDIAN.
 // Either way the window stays under ~half a year, so a given month/day resolves
 // to exactly one year — including across a December→January cycle.
 const PERIOD_PAD_DAYS = 45;
@@ -166,12 +201,16 @@ export function resolveYearWindow(pages) {
     const max = shiftIso(period.end, PERIOD_PAD_DAYS);
     return { min, max, years: yearsBetween(min, max), source: 'period' };
   }
-  const firstPage = (pages || []).slice(0, 1);
-  const ctx = collectYearContext(firstPage) || collectYearContext(pages);
-  if (!ctx) return null;
-  const max = shiftIso(ctx.max, 10);
-  const min = shiftIso(ctx.max, -120);
-  return { min, max, years: yearsBetween(min, max), source: 'header' };
+  const ctx = collectYearContext((pages || []).slice(0, 1)) || collectYearContext(pages);
+  if (!ctx || !ctx.all?.length) return null;
+  // Anchor on the MEDIAN, never the latest date. Statements print dates far
+  // outside the billing cycle — a mortgage shows a 2052 maturity date, fine
+  // print carries old revision years — and anchoring on the max would put the
+  // whole window decades away, resolving every row to the wrong year.
+  const anchor = ctx.all[Math.floor(ctx.all.length / 2)];
+  const min = shiftIso(anchor, -120);
+  const max = shiftIso(anchor, 45);
+  return { min, max, years: yearsBetween(min, max), source: 'header-median' };
 }
 
 function shiftIso(iso, days) {
@@ -455,20 +494,17 @@ export function autoDetectTemplate(pages) {
     startAnchor: header.text.slice(0, 60),
     stopAnchor: '',
     pages: null,
-    fingerprint: layoutFingerprint(pages),
   };
 }
 
-// A cheap signature of the document's layout. Stored with the template so a
-// later statement whose layout changed is FLAGGED for re-confirmation instead
-// of being silently mis-parsed.
-export function layoutFingerprint(pages) {
-  const first = (pages || [])[0];
-  if (!first) return '';
-  const lines = groupIntoLines(first.runs).slice(0, 12);
-  const shape = lines.map(l => `${Math.round(l.y / 10)}:${l.runs.length}`).join('|');
-  return `${Math.round(first.width)}x${Math.round(first.height)}#${shape}`;
-}
+// Detecting "this statement's layout changed" is deliberately EMPIRICAL rather
+// than a hash of the document. A content hash of page 1 is useless here twice
+// over: page 1 changes every month (balances, marketing, run counts) so it
+// false-alarms constantly, and the template actually depends on the transaction
+// table's geometry, which lives on later pages — so a real change there
+// wouldn't be caught. Instead applyTemplate reports whether the anchor was
+// found and whether any rows parsed; those are the only outcomes that matter,
+// and neither can be tripped by cosmetic change.
 
 // ---------------------------------------------------------------------------
 // Applying a template → the cell grid buildRows() consumes.
@@ -500,6 +536,7 @@ export function applyTemplate(pages, template) {
   const rowMeta = [];
   const skipped = [];
   let inside = !t.startAnchor;
+  let anchorFound = !t.startAnchor;
   const startRe = t.startAnchor ? new RegExp(escapeRe(t.startAnchor).replace(/\\\s+/g, '\\s+'), 'i') : null;
   const stopRe = t.stopAnchor ? new RegExp(escapeRe(t.stopAnchor).replace(/\\\s+/g, '\\s+'), 'i') : null;
   let lastRowIndex = -1;
@@ -510,7 +547,7 @@ export function applyTemplate(pages, template) {
     if (wantPages && !wantPages.has(pg.page)) continue;
     const lines = groupIntoLines(pg.runs);
     for (const line of lines) {
-      if (startRe && startRe.test(line.text)) { inside = true; lastRowIndex = -1; continue; }
+      if (startRe && startRe.test(line.text)) { inside = true; anchorFound = true; lastRowIndex = -1; continue; }
       if (stopRe && stopRe.test(line.text)) { inside = false; lastRowIndex = -1; continue; }
       if (!inside) continue;
 
@@ -582,8 +619,11 @@ export function applyTemplate(pages, template) {
     rowMeta,
     skipped,
     yearContext: ctx,
-    fingerprintNow: layoutFingerprint(pages),
-    fingerprintChanged: !!(t.fingerprint && t.fingerprint !== layoutFingerprint(pages)),
+    // Did the region marker this template relies on actually appear, and did
+    // anything parse? Either failing means this statement doesn't match the
+    // saved layout — the UI asks the user to re-confirm the columns.
+    anchorFound,
+    layoutSuspect: (!!t.startAnchor && !anchorFound) || grid.length === 0,
   };
 }
 
