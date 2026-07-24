@@ -47,8 +47,10 @@ entry once shipped.
 | File | Role |
 |---|---|
 | `src/components/Dashboard.jsx` | Almost the entire UI — single file, inline styles, tabs: overview/categories/transactions/accounts/trends/recurring/ask. Shared mini-components: `Pill`, `Swatch`, `EditName`, `Sk` (skeleton), `Donut`. |
-| `src/dataAdapter.js` | All Supabase reads + shapes consumed by Dashboard; the Trends cash-flow model lives here (see Conventions). Keep return shapes stable. |
-| `src/categoryMap.js` | Plaid category → app category mapping; `applyAccountRules` (credit-card negatives → "Return", excluded from income); pure JS, imported by server code too. |
+| `src/dataAdapter.js` | All Supabase reads + shapes consumed by Dashboard; the Trends cash-flow model lives here (see Conventions). Keep return shapes stable. Also holds the CSV-import writes (`findOrCreateManualInstitution`, `createManualAccount`, `getExistingTxIds`, `importCsvTransactions`, `isManualAccount`), the comparison-mode read `getAccountTransactionsInRange`, and exports the cash-flow helpers (`markInternalTransfers`/`cashIncome`/`cashSpending`) for the dry-run harness. |
+| `src/categoryMap.js` | Plaid category → app category mapping; `applyAccountRules` (credit-card negatives → "Return", excluded from income); pure JS, imported by server code too. `ERA_CATEGORIES` is the taxonomy source of truth (no "Housing"/"Income" member). |
+| `src/csvImport.js` | Pure CSV-import core (no React/Supabase): `parseCsv`, `detectHeader`, `parseMoney`/`parseDate`, `guessCategory` (validated against `ERA_CATEGORIES`), transfer flagging, dedup `plaid_tx_id` hashing, `buildRows`/`analyzeCsv`. Also the comparison-mode core: `reconcileCsv` (max-matching audit), `descSimilarity`, `csvDateRange`. Testable in isolation. |
+| `src/components/CsvImport.jsx` | Accounts-tab import modal, two modes by target: **standalone** (manual target) file → preview (greyed dupes) → confirm; **comparison** (Plaid-linked target) read-only reconciliation audit, inserts nothing. Writes via dataAdapter's `createManualAccount`/`importCsvTransactions`; reads Plaid rows via `getAccountTransactionsInRange`. |
 | `src/plaidClient.js` | Client → api/ fetch wrappers (JWT attached). |
 | `src/sync.js` | Single-flight wrapper triggering server sync. |
 | `src/db.js` | getSetting/setSetting on the Supabase `settings` table (dashboard prefs: colors, names, custom categories, `asst:model`/`asst:effort`). |
@@ -144,117 +146,40 @@ playwright-core screenshot (`executablePath:'/opt/pw-browsers/chromium'`,
 - **Assistant** — "Ask" tab, Claude spending Q&A (`api/assistant.js` +
   `api/_lib/spendingContext.js`), read-only, model/effort selectable.
 - **Trends joint-budget cash-flow + Cash flow section** (see Conventions).
+- **CSV import** — Accounts-tab modal, two modes by target account
+  (`src/csvImport.js` pure core + `src/components/CsvImport.jsx`; migration
+  `20260722000001_csv_import.sql` adds `accounts.is_manual` + `transactions.source`,
+  additive `not null default`). **Standalone** (manual target): parse a bank CSV
+  (BECU preset; sign flip Debit−Credit → positive=out; category validated against
+  `ERA_CATEGORIES`; internal-transfer flags), preview (greyed dupes), then upsert
+  real rows on a manual "Imported" account (no `plaid_tokens` + `status='disabled'`
+  → sync skips it). Dedup id `csv:`+64-bit hash(date,amount,normDesc)+per-day
+  ordinal (never the file row-index → idempotent re-import). **Comparison**
+  (Plaid-linked target): `reconcileCsv` maximum-matching audit (exact amount +
+  ±4-day window, description optional), inserts NOTHING — buckets: sync gaps /
+  pending-timing / amount·date·category mismatches. No cash-flow change (imported
+  depository rows flow through `getCashFlow`; personal↔joint transfers wash across
+  CSV+Plaid legs). The importer degrades gracefully if the two columns are absent.
 
 ## Pending branches
 _(none)_
 
 ## Roadmap
 
-**Next: CSV import** — make the un-synced personal-account income visible (spec
-below; also the permanent coverage floor for the off-Plaid plan). **Then:
-SimpleFIN migration** — replace Plaid as the bank feed (spec below; decided).
-**Then: Debt tracker** — now **balance-only + hand-entered APR** under SimpleFIN
-(spec below; the `loan` sync fix that unblocks it is already on main). Later
-(discussed, not committed): net worth over time, auto-categorization rules,
-cash-flow forecast, savings goals, CSV/PDF export, sign-out button.
-
-### CSV import — build spec
-Goal: upload a bank CSV → reconcile against the household's real accounts. Two
-**modes**, auto-selected by whether the target account is Plaid-linked:
-- **Standalone** (target NOT linked — the personal accounts: Mason's checking,
-  wife's checking + savings): create a manual account + real `transactions` so
-  they flow into Transactions/Categories/Search/Assistant/Trends with no
-  downstream special-casing (the transactions table is adapter-agnostic — the
-  whole reason the old `synthetic_id` existed). **Primary value** — makes the
-  un-synced personal-account paychecks visible. Build FIRST.
-- **Comparison** (target IS Plaid-linked — the joint accounts): reconcile the
-  CSV against what Plaid already synced; insert NOTHING (that's the double-count
-  trap). Emit an audit — rows in CSV but not Plaid (sync gaps), rows in Plaid
-  but not CSV (pending/timing), amount/date/category mismatches on matched
-  pairs. Auto-detecting linkage is what makes this safe (turns the old "don't
-  import a synced account" footgun into a feature). Lower value (joint Plaid
-  sync is solid) + needs a fuzzy matcher (exact amount, ±few days, description
-  optional — Plaid rewrites descriptions and posted/pending dates drift) → build
-  SECOND.
-
-Feasibility (verified against schema + api/):
-- **Client-side is sufficient.** The `*_all` RLS policies (`for all … with
-  check (household_id = current_household_id())`) let the authenticated client
-  INSERT into `institutions`/`accounts`/`transactions`; the WITH CHECK passes
-  because `household_id` defaults to `current_household_id()` (resolves from the
-  client — NOT in the SQL Editor, where `auth.uid()` is NULL). No new api/
-  endpoint or policy required. A service-role `api/import-csv.js` is optional
-  (only for server-side validation).
-- **Sync won't clobber manual data.** `api/sync.js` only processes institutions
-  that have a `plaid_tokens` row; a manual institution has none → skipped. This
-  (not any flag) is what keeps manual data safe.
-
-Data model (standalone mode — comparison mode inserts nothing):
-- **Manual institution**, one per household. NOTE `institutions.adapter_id` was
-  DROPPED in migration 2 — do NOT set it. Create with just `name='Imported'`
-  (`plaid_credential_key` defaults to 'main'); find-or-create by `name` (or the
-  `is_manual` flag below) so repeat imports don't spawn duplicates.
-- **Manual account** per imported account: `type='depository'`,
-  `subtype='checking'|'savings'`, synthetic `plaid_account_id='manual:'+uuid`
-  (satisfies unique `institution_id,plaid_account_id`). `name` user-supplied;
-  `mask`/balances nullable.
-- **Transaction rows** — mirror `api/sync.js` `mapTransactionRow` for the exact
-  insert contract (NOT NULL: `description` — the descriptor, Plaid's `name` maps
-  here — plus `date`, `amount`, `account_id`, `plaid_tx_id`; `merchant_name`/
-  `raw_category`/`pending` optional). Set:
-  - `amount` — **sign flip.** BECU has separate Debit/Credit columns (positive
-    magnitudes; strip $/commas; dates M/D/YYYY → ISO). Build
-    `csvSignedValue = Credit − Debit` (positive = money in), then
-    `amount = −csvSignedValue` (= Debit − Credit), matching the app's
-    positive = out convention.
-  - `mapped_category` — the FINAL app-category string. dataAdapter reads the
-    stored `mapped_category` (`effectiveCategory = user_category ||
-    mapped_category`); mapping happens at WRITE time, so set the resolved string
-    here, NOT a raw Plaid code. Valid strings + the exact "Transfers and card
-    payments" label are in `src/categoryMap.js` (source of truth); unmatched
-    rows → "Shopping and gear" (the effectiveCategory fallback). Start a small
-    keyword map (NEWREZ→Housing, WA ST EMPLOY SEC→Income, card issuers→"Transfers
-    and card payments", …), editable later.
-  - `raw_category` — set `'TRANSFER_IN'|'TRANSFER_OUT'` for "Online Banking
-    Transfer To/from" lines so `markInternalTransfers` washes them; `''`
-    otherwise (nothing requires it non-null).
-  - `plaid_tx_id` — `'csv:'+hash(date, amount, normalized_desc)` plus a per-day
-    occurrence ordinal ONLY to disambiguate genuinely identical
-    date/amount/desc rows. Do NOT include the absolute file row-index (it shifts
-    on the next export → same txn re-hashes → breaks the idempotent re-import).
-    Upsert onConflict `account_id,plaid_tx_id`.
-
-Trends impact — **no new field, `full` whole-household** (decided). Import a
-personal account as an ordinary `depository` account (checking/savings) and
-`getCashFlow` handles it automatically: inflows count as income, checking
-outflows as spending, and personal↔joint transfers now WASH because both legs
-exist (the CSV personal leg + the Plaid joint leg — `markInternalTransfers`
-matches across sources, since it only cares about account type/amount/date).
-Net: Trends becomes the true **whole-household** view — income = real paychecks
-+ UI benefits, spending = all real bills, the personal→joint funding shuffle
-cancels out. (Why `full` not income-only: income-only double-counts paychecks
-unless you wash the transfers, and once washed you're already at full — so the
-role field is unnecessary.) Two consequences: it **retroactively recomputes past
-Trends months** (personal→joint transfers that currently inflate income get
-replaced by real paychecks — the correction, not a regression), and import
-**all** the personal accounts for a consistent picture, not just one.
-
-Schema adds (additive, both recommended): `accounts.is_manual boolean default
-false` (UI badge + find-or-create + sync-skip belt-and-suspenders);
-`transactions.source text default 'plaid'` ('csv' for undo/filter). No
-`cash_flow_role` — `full` is just the default type/subtype behavior.
-
-UI: an action on the **Accounts tab** (file picker; don't add a bottom tab) →
-pick the target account (**existing Plaid-linked → comparison mode; new/existing
-manual → standalone mode**) → auto-detect the BECU header (may follow a
-preamble; dates M/D/YYYY → ISO) or map columns → preview (standalone: dupes
-greyed via the plaid_tx_id hash, guessed category, detected internal transfers;
-comparison: the match/gap/mismatch audit) → confirm.
-
-Caveats: per-bank formats differ (BECU preset first); no stable bank IDs (hash
-dedup; prompt on identical rows); CSV is a manual periodic export (stale vs live
-sync). The old double-count risk is handled by comparison mode auto-detecting a
-linked target.
+**Next: SimpleFIN migration** — replace Plaid as the bank feed (spec below;
+decided). **Then: Debt tracker** — **balance-only + hand-entered APR** under
+SimpleFIN (spec below; the `loan` sync fix that unblocks it is already on main).
+(CSV import — the permanent coverage floor for the off-Plaid plan — **shipped**;
+see Merged features.) Later (discussed, not committed): net worth over time,
+auto-categorization rules, cash-flow forecast, savings goals, CSV/PDF export,
+sign-out button. **`markInternalTransfers` max-matching** — the greedy
+nearest-gap matcher can strand one of two interleaved equal-amount transfer
+pairs whose legs drift across the 4-day window, leaving a genuine internal
+transfer counted (inflates Trends `cashIncome` AND `cashSpending` by the same
+amount, so monthly **net** is unaffected). CSV import's cross-bank personal↔joint
+legs (drift 1–3 days) make it more reachable — replace with earliest-unused-in
+ordering or a small bipartite max-matching. (Surfaced by the CSV adversarial
+pass; deliberately NOT changed there — cash-flow model changes were out of scope.)
 
 ### Off-Plaid: SimpleFIN migration — build spec
 Decision (settled): replace Plaid with **SimpleFIN Bridge** as the primary bank
@@ -427,10 +352,9 @@ specifically if any loan-account transactions appear — never guard out `credit
 whose *purchases* must still count. Card *payments* from checking stay transfers.
 
 Manual fallback (FOLLOW-UP, not v1): the CSV-import manual-account machinery
-(`is_manual`, manual institution) is NOT built yet — CSV import ships first. Once
-it lands, a manual debt reuses it (`is_manual`, `type='credit'|'loan'`,
-hand-entered balance/apr/min). **v1 is Plaid-linked debts only** — which is the
-point (the household wants it automatic).
+(`is_manual`, manual institution) has **shipped** — a manual debt can reuse it
+(`is_manual`, `type='credit'|'loan'`, hand-entered balance/apr/min). **v1 is
+Plaid-linked debts only** — which is the point (the household wants it automatic).
 
 Caveats: Liabilities is a separate Plaid product (billing) with uneven
 institution coverage; existing Items need re-linking to gain it; connecting many

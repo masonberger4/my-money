@@ -1,9 +1,10 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { getOverview, getSpending, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions } from "../dataAdapter.js";
+import { getOverview, getSpending, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount } from "../dataAdapter.js";
 import { detectRecurring } from "../recurring.js";
 import { unlinkInstitution, askAssistant } from "../plaidClient.js";
 import { ERA_CATEGORIES } from "../categoryMap.js";
 import { runSync } from "../sync.js";
+import CsvImport from "./CsvImport.jsx";
 import { getSetting, setSetting } from "../db.js";
 import { ASSISTANT_MODELS, EFFORT_LEVELS, DEFAULT_MODEL, DEFAULT_EFFORT, estimateCostRange, formatCents } from "../assistantModels.js";
 
@@ -325,6 +326,7 @@ export default function Dashboard({ refreshTick = 0 }) {
   const [unlinking,setUnlinking]=useState(false);
   const [togglingHide,setTogglingHide]=useState(false);
   const [selTx,setSelTx]=useState(null);
+  const [importing,setImporting]=useState(false);
 
   // Optimistic transaction edit: update every local copy immediately,
   // persist, then refresh totals in the background.
@@ -686,9 +688,13 @@ export default function Dashboard({ refreshTick = 0 }) {
         {/* ACCOUNTS */}
         {tab==="accounts"&&!selAcct&&(
           <div className="card">
-            <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em",marginBottom:4}}>Accounts</div>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:10,marginBottom:4}}>
+              <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em"}}>Accounts</div>
+              <button className="ibtn" style={{fontSize:11}} onClick={()=>setImporting(true)}>⤓ Import CSV</button>
+            </div>
             <div style={{fontSize:11,color:"var(--muted)",marginBottom:14}}>
               Give each account a nickname and color — they tag every transaction across the app.
+              Import a bank CSV to add a personal account that isn't connected to Plaid.
             </div>
             {loading&&accounts.length===0?[1,2,3].map(i=><div key={i} style={{marginBottom:12}}><Sk h={40}/></div>):
               [...accounts].sort((a,b)=>(a.hidden?1:0)-(b.hidden?1:0)).map((a,i)=>(
@@ -700,6 +706,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                   <div style={{flex:1,minWidth:0}}>
                     <div onClick={e=>e.stopPropagation()} style={{display:"flex",alignItems:"center",gap:6}}>
                       <EditName name={acctLabel(a)} onSave={v=>saveAccount(a.id,{nickname:v})}/>
+                      {isManualAccount(a)&&<Pill label="Imported" color="#7F77DD"/>}
                       {a.hidden&&<Pill label="Hidden" color="#888780"/>}
                     </div>
                     <div style={{fontSize:11,color:"var(--muted)",marginTop:2}}>
@@ -742,14 +749,18 @@ export default function Dashboard({ refreshTick = 0 }) {
                   color:"var(--text)",fontFamily:"inherit",fontSize:12,fontWeight:500,cursor:togglingHide?"default":"pointer",opacity:togglingHide?.6:1}}>
                 {togglingHide?"Saving…":selAcct.hidden?"Unhide":"Hide from dashboard"}
               </button>
-              <button onClick={handleUnlink} disabled={unlinking}
-                style={{flex:1,padding:"8px 0",borderRadius:8,border:"1px solid #F09595",background:"none",
-                  color:"#A32D2D",fontFamily:"inherit",fontSize:12,fontWeight:500,cursor:unlinking?"default":"pointer",opacity:unlinking?.6:1}}>
-                {unlinking?"Unlinking…":`Unlink ${acctInst(selAcct)||"bank"}…`}
-              </button>
+              {!isManualAccount(selAcct)&&(
+                <button onClick={handleUnlink} disabled={unlinking}
+                  style={{flex:1,padding:"8px 0",borderRadius:8,border:"1px solid #F09595",background:"none",
+                    color:"#A32D2D",fontFamily:"inherit",fontSize:12,fontWeight:500,cursor:unlinking?"default":"pointer",opacity:unlinking?.6:1}}>
+                  {unlinking?"Unlinking…":`Unlink ${acctInst(selAcct)||"bank"}…`}
+                </button>
+              )}
             </div>
             <div style={{marginTop:6,fontSize:10,color:"var(--muted)",textAlign:"center"}}>
-              Hide keeps syncing but drops it from totals · Unlink removes the connection and its data
+              {isManualAccount(selAcct)
+                ?"Imported account · re-import a CSV to add or correct transactions (duplicates are skipped automatically)"
+                :"Hide keeps syncing but drops it from totals · Unlink removes the connection and its data"}
             </div>
             <div style={{borderTop:"1px solid var(--border)",margin:"12px 0"}}/>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
@@ -1079,6 +1090,15 @@ export default function Dashboard({ refreshTick = 0 }) {
         </div>
         );
       })()}
+
+      {/* CSV import (standalone) */}
+      {importing&&(
+        <CsvImport
+          accounts={accounts}
+          onClose={()=>setImporting(false)}
+          onImported={()=>reloadData(year,month)}
+        />
+      )}
 
       {/* Add category modal */}
       {addingCat&&(

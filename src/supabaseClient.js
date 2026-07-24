@@ -1,7 +1,11 @@
 import { createClient } from '@supabase/supabase-js';
 
-const url = import.meta.env.VITE_SUPABASE_URL;
-const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+// `import.meta.env` is always defined under Vite; guard it so importing this
+// module in a plain Node context (the CSV-import dry-run harness) doesn't throw
+// before the ConfigErrorScreen can render.
+const env = import.meta.env || {};
+const url = env.VITE_SUPABASE_URL;
+const anonKey = env.VITE_SUPABASE_ANON_KEY;
 
 // Vite bakes VITE_* vars in at build time. If they're missing we don't throw
 // here — that would blank the whole app before React mounts. App.jsx checks

@@ -3,5 +3,6 @@ node_modules/
 .vercel/
 dist/
 .claude/
+.harness/
 
 .vercel
