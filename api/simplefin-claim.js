@@ -1,6 +1,12 @@
 import { getServiceClient, requireUser } from './_lib/supabase.js';
 import { decodeSetupToken, claimAccessUrl, fetchAccountSet } from './_lib/simplefin.js';
 
+function isMissingColumn(error, name) {
+  const blob = `${error?.message || ''} ${error?.details || ''}`.toLowerCase();
+  return blob.includes(String(name).toLowerCase()) &&
+    (error?.code === 'PGRST204' || error?.code === '42703' || /column/.test(blob));
+}
+
 // Exchange a SimpleFIN setup token for a durable access URL and store it.
 //
 // This is SimpleFIN's answer to Plaid's create-link-token + exchange-token
@@ -39,21 +45,24 @@ export default async function handler(req, res) {
     const supabase = getServiceClient();
     // household_id has no column default here: this runs as service_role, where
     // auth.uid() is NULL and current_household_id() would resolve to NULL.
-    const { error } = await supabase
-      .from('simplefin_access')
-      .upsert(
-        {
-          household_id: user.householdId,
-          access_url: accessUrl,
-          // Reset both clocks: the first pull should reach back for full
-          // history rather than inheriting a watermark from a previous
-          // connection, and it must not be throttled by an old attempt.
-          last_pulled_at: null,
-          last_attempt_at: null,
-          last_error: null,
-        },
-        { onConflict: 'household_id,access_url' }
-      );
+    //
+    // Reset the clocks: the first pull should reach back for full history
+    // rather than inheriting a watermark from a previous connection, and it
+    // must not be throttled by an old attempt. last_attempt_at was added to the
+    // migration after it was first published, so tolerate its absence.
+    const base = {
+      household_id: user.householdId,
+      access_url: accessUrl,
+      last_pulled_at: null,
+      last_error: null,
+    };
+    const save = row =>
+      supabase.from('simplefin_access').upsert(row, { onConflict: 'household_id,access_url' });
+
+    let { error } = await save({ ...base, last_attempt_at: null });
+    if (error && isMissingColumn(error, 'last_attempt_at')) {
+      ({ error } = await save(base));
+    }
     if (error) {
       if (error.code === 'PGRST205' || error.code === '42P01') {
         return res.status(503).json({

@@ -24,23 +24,41 @@ const ALLOWED_TYPES = new Set(['depository', 'credit', 'loan']);
 
 const DAY_MS = 86_400_000;
 
-// transactions.source landed with the CSV-import migration; tolerate its
-// absence the way the importer does. Module scope so a warm invocation only
-// has to learn it once.
+// Columns that may not exist yet on the shared production database.
+// Module scope so a warm invocation only has to learn each one once.
+// transactions.source landed with the CSV-import migration; last_attempt_at was
+// added to the SimpleFIN migration after it was first published.
 let txHaveSource = true;
+let hasAttemptColumn = true;
 
 // PostgREST/Postgres codes for "that column/table isn't there". Previews share
-// the production database, so every write has to survive the window between a
-// branch deploying and Mason pasting its migration.
-function isMissingSchemaError(error, name) {
+// the production database, so every read and write has to survive the window
+// between a branch deploying and Mason pasting its migration.
+function errorBlob(error) {
+  return `${error.message || ''} ${error.details || ''} ${error.hint || ''}`.toLowerCase();
+}
+
+// A missing COLUMN. The name must appear: PostgREST names it in the message,
+// and matching on the code alone would let a DIFFERENT missing column be
+// mistaken for the optional one and silently dropped.
+export function isMissingColumnError(error, name) {
   if (!error) return false;
-  const blob = `${error.message || ''} ${error.details || ''} ${error.hint || ''}`.toLowerCase();
-  // The name must appear: PostgREST names the missing column/table in the
-  // message, and matching on the code alone would let a DIFFERENT missing
-  // column be mistaken for the optional one and silently dropped.
+  const blob = errorBlob(error);
   if (!blob.includes(String(name).toLowerCase())) return false;
-  if (['PGRST204', 'PGRST205', '42703', '42P01'].includes(error.code)) return true;
-  return /column|table|schema cache/.test(blob);
+  if (error.code === 'PGRST204' || error.code === '42703') return true;
+  return /column/.test(blob);
+}
+
+// A missing TABLE — deliberately NOT the same test. A missing-column error
+// mentions the table name too ("column simplefin_access.last_attempt_at does
+// not exist"), so a loose check would read a column problem as "SimpleFIN isn't
+// installed" and silently switch the whole feed off with nothing surfaced.
+export function isMissingTableError(error, table) {
+  if (!error) return false;
+  const blob = errorBlob(error);
+  if (!blob.includes(String(table).toLowerCase())) return false;
+  if (error.code === 'PGRST205' || error.code === '42P01') return true;
+  return /could not find the table|relation .* does not exist/.test(blob);
 }
 
 // =============================================================================
@@ -174,12 +192,20 @@ async function syncOneInstitution(supabase, inst, accessToken, householdId) {
 // Read the household's stored access URLs. Returns null — not an error — when
 // the SimpleFIN migration hasn't been pasted yet.
 async function loadAccessRows(supabase, householdId) {
-  const { data, error } = await supabase
-    .from('simplefin_access')
-    .select('id, access_url, last_pulled_at, last_attempt_at')
-    .eq('household_id', householdId);
+  const read = columns =>
+    supabase.from('simplefin_access').select(columns).eq('household_id', householdId);
+
+  let { data, error } = await read('id, access_url, last_pulled_at, last_attempt_at');
+  if (error && isMissingColumnError(error, 'last_attempt_at')) {
+    // The throttle column was added to this migration after it was first
+    // published, so a database that ran the earlier version won't have it yet.
+    // Fall back to throttling on last_pulled_at (the original behavior) rather
+    // than refusing to sync.
+    hasAttemptColumn = false;
+    ({ data, error } = await read('id, access_url, last_pulled_at'));
+  }
   if (error) {
-    if (isMissingSchemaError(error, 'simplefin_access')) return null;
+    if (isMissingTableError(error, 'simplefin_access')) return null;
     throw error;
   }
   return data || [];
@@ -228,8 +254,10 @@ async function pullOneAccessUrl(supabase, householdId, accessRow, { force }) {
   const now = new Date();
   const lastPulled = accessRow.last_pulled_at ? new Date(accessRow.last_pulled_at) : null;
   // Throttle on the last ATTEMPT, not the last success — otherwise a broken
-  // connection would be retried on every dashboard load forever.
-  const lastAttempt = accessRow.last_attempt_at ? new Date(accessRow.last_attempt_at) : null;
+  // connection would be retried on every dashboard load forever. Falls back to
+  // the success watermark where the column isn't there yet.
+  const attemptStamp = hasAttemptColumn ? accessRow.last_attempt_at : accessRow.last_pulled_at;
+  const lastAttempt = attemptStamp ? new Date(attemptStamp) : null;
 
   if (!force && lastAttempt && now.getTime() - lastAttempt.getTime() < MIN_PULL_MINUTES * 60_000) {
     return {
@@ -249,11 +277,16 @@ async function pullOneAccessUrl(supabase, householdId, accessRow, { force }) {
 
   // Stamped before the request, so a timeout or a crashed invocation still
   // counts as an attempt and the throttle holds.
-  const { error: attemptErr } = await supabase
-    .from('simplefin_access')
-    .update({ last_attempt_at: now.toISOString() })
-    .eq('id', accessRow.id);
-  if (attemptErr) throw attemptErr;
+  if (hasAttemptColumn) {
+    const { error: attemptErr } = await supabase
+      .from('simplefin_access')
+      .update({ last_attempt_at: now.toISOString() })
+      .eq('id', accessRow.id);
+    if (attemptErr) {
+      if (!isMissingColumnError(attemptErr, 'last_attempt_at')) throw attemptErr;
+      hasAttemptColumn = false;
+    }
+  }
 
   const json = await fetchAccountSet(accessRow.access_url, {
     startDate,
@@ -500,7 +533,7 @@ async function pullOneAccessUrl(supabase, householdId, accessRow, { force }) {
         );
 
     let { error } = await attempt(txHaveSource);
-    if (error && txHaveSource && isMissingSchemaError(error, 'source')) {
+    if (error && txHaveSource && isMissingColumnError(error, 'source')) {
       txHaveSource = false;
       ({ error } = await attempt(false));
     }
@@ -604,7 +637,7 @@ export default async function handler(req, res) {
       .select('id, name, plaid_credential_key, sync_state, status, simplefin_org_id')
       .eq('household_id', user.householdId)
       .neq('status', 'disabled'));
-    if (instErr && isMissingSchemaError(instErr, 'simplefin_org_id')) {
+    if (instErr && isMissingColumnError(instErr, 'simplefin_org_id')) {
       ({ data: institutions, error: instErr } = await supabase
         .from('institutions')
         .select('id, name, plaid_credential_key, sync_state, status')

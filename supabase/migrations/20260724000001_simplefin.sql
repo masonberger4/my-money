@@ -49,6 +49,13 @@ create table if not exists simplefin_access (
   unique (household_id, access_url)
 );
 
+-- Columns added to this migration after it was first published. `create table
+-- if not exists` above is a NO-OP on a database that already ran an earlier
+-- version of this file, so anything added to its body later would never appear
+-- there. Restate them as idempotent ALTERs — harmless on a fresh install,
+-- load-bearing on one that already has the table.
+alter table simplefin_access add column if not exists last_attempt_at timestamptz;
+
 -- RLS on, no policies: authenticated users get nothing; service_role bypasses.
 alter table simplefin_access enable row level security;
 

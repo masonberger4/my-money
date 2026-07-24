@@ -413,6 +413,14 @@ tracker is the liability half of the future net-worth feature — the
   `create-link-token` counts those, not all institutions — the manual "Imported"
   institution and every SimpleFIN org also carry the `plaid_credential_key`
   default of 'main' and would otherwise burn phantom capacity.
+- A missing-COLUMN error names its table too ("column simplefin_access.
+  last_attempt_at does not exist"), so the graceful-degrade checks for a missing
+  table and a missing column must be **separate** tests (`isMissingTableError` /
+  `isMissingColumnError` in `api/sync.js`). Conflating them reads a column
+  problem as "the feature isn't installed" and silently switches the whole feed
+  off. Relatedly: never add a column to the body of an already-published
+  `create table if not exists` — that's a no-op on a database that already ran
+  it. Restate it as `alter table … add column if not exists`.
 - PostgREST bulk upsert needs an **identical key set** on every row in the
   array, which is why the SimpleFIN account write splits into a bulk insert for
   new accounts and per-row updates for existing ones — restating type/subtype/
