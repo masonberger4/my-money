@@ -17,10 +17,18 @@ entry once shipped.
 - **React + Vite SPA** on **Vercel**; secrets live in serverless `api/`
   functions. Client reads/writes Supabase directly (RLS-scoped) and calls `api/`
   only for Plaid or service-secret work.
-- **Plaid** is the *current* bank-data source (a custom scraper was designed then
-  abandoned — hence scraper-era names like the original `synthetic_id` column,
-  now `plaid_tx_id`). **Decided: migrating off Plaid to SimpleFIN** (cost — see
-  the SimpleFIN migration spec in Roadmap); Plaid stays live until that ships.
+- **Two bank feeds run side by side** during the Plaid→SimpleFIN migration
+  (cost; see the SimpleFIN spec in Roadmap). Plaid is still the live feed for
+  everything currently linked; **SimpleFIN is built and syncing** (phase 2).
+  A scraper was designed then abandoned — hence scraper-era names like the
+  original `synthetic_id` column, now `plaid_tx_id`, which SimpleFIN reuses as
+  an adapter-agnostic external id.
+  - Feed discriminator: `institutions.simplefin_org_id is not null` ⇒
+    SimpleFIN-fed. `api/sync.js` runs a Plaid pass (skipping those) then a
+    SimpleFIN pass, and a failure in either can't take the other down.
+  - **New SimpleFIN accounts arrive `hidden: true`.** A bank connected to both
+    feeds would otherwise import every transaction twice and silently double
+    every total. Unhiding is the deliberate act that switches a bank over.
 - **Multi-Plaid-credential**: `PLAID_CREDENTIALS` env = JSON list of
   `{key, client_id, secret}`; link-token creation picks the first credential
   with < 10 Items; each institution stores its `plaid_credential_key`. Legacy
@@ -33,14 +41,22 @@ entry once shipped.
   `for all to authenticated using (…) with check (household_id =
   current_household_id())` policy — INSERT is gated by the WITH CHECK, satisfied
   because `household_id` defaults to `current_household_id()`, so the **client
-  can INSERT/update/delete its own rows directly**. `plaid_tokens` has ZERO
-  client policies — only service_role (api/) reads them. Never expose them.
-- **Sync is server-side** (`api/sync.js`): cursor-based transactionsSync per
-  institution; upserts accounts (onConflict `institution_id,plaid_account_id`)
-  and transactions (onConflict `account_id,plaid_tx_id`); `needs_reauth` on
-  ITEM_LOGIN_REQUIRED. Syncs `depository`+`credit`+`loan` account types
+  can INSERT/update/delete its own rows directly**. `plaid_tokens` and
+  `simplefin_access` have ZERO client policies — only service_role (api/) reads
+  them. Never expose them (the SimpleFIN access URL embeds bank credentials).
+- **Sync is server-side** (`api/sync.js`), two passes, both upserting accounts
+  (onConflict `institution_id,plaid_account_id`) and transactions (onConflict
+  `account_id,plaid_tx_id`), both limited to `depository`+`credit`+`loan`
   (`ALLOWED_TYPES`); loans carry sparse/no transactions — their debt data comes
-  from the Liabilities product (see Debt tracker in Roadmap).
+  from Liabilities under Plaid, hand-entered under SimpleFIN (see Roadmap).
+  - **Plaid pass**: cursor-based transactionsSync per institution;
+    `needs_reauth` on ITEM_LOGIN_REQUIRED.
+  - **SimpleFIN pass**: per *access URL*, not per institution — one URL covers
+    every bank, fetched in a single GET with no cursor and no pagination. Fans
+    out into institutions (one per SimpleFIN org), accounts and transactions.
+    Incremental via a `last_pulled_at` watermark minus a 30-day overlap;
+    the watermark advances **only on success**, so a failed pull can't skip
+    transactions. Throttled to one pull an hour (SimpleFIN refreshes ~daily).
 
 ## Key files
 
@@ -49,7 +65,10 @@ entry once shipped.
 | `src/components/Dashboard.jsx` | Almost the entire UI — single file, inline styles, tabs: overview/categories/transactions/accounts/trends/recurring/ask. Shared mini-components: `Pill`, `Swatch`, `EditName`, `Sk` (skeleton), `Donut`. |
 | `src/dataAdapter.js` | All Supabase reads + shapes consumed by Dashboard; the Trends cash-flow model lives here (see Conventions). Keep return shapes stable. Also holds the CSV-import writes (`findOrCreateManualInstitution`, `createManualAccount`, `getExistingTxIds`, `importCsvTransactions`, `isManualAccount`), the comparison-mode read `getAccountTransactionsInRange`, and exports the cash-flow helpers (`markInternalTransfers`/`cashIncome`/`cashSpending`) for the dry-run harness. |
 | `src/categoryMap.js` | Plaid category → app category mapping; `applyAccountRules` (credit-card negatives → "Return", excluded from income); pure JS, imported by server code too. `ERA_CATEGORIES` is the taxonomy source of truth (no "Housing"/"Income" member). |
-| `src/csvImport.js` | Pure CSV-import core (no React/Supabase): `parseCsv`, `detectHeader`, `parseMoney`/`parseDate`, `guessCategory` (validated against `ERA_CATEGORIES`), transfer flagging, dedup `plaid_tx_id` hashing, `buildRows`/`analyzeCsv`. Also the comparison-mode core: `reconcileCsv` (max-matching audit), `descSimilarity`, `csvDateRange`. Testable in isolation. |
+| `src/csvImport.js` | Pure CSV-import core (no React/Supabase): `parseCsv`, `detectHeader`, `parseMoney`/`parseDate`, transfer flagging, dedup `plaid_tx_id` hashing, `buildRows`/`analyzeCsv`. Also the comparison-mode core: `reconcileCsv` (max-matching audit), `descSimilarity`, `csvDateRange`. Testable in isolation. |
+| `src/txClassify.js` | The shared descriptor→category rule table + internal-transfer tagging (`guessCategory`, `transferRawCategory`, `classifyDescription`), validated against `ERA_CATEGORIES` at load. Lifted out of `csvImport.js` when SimpleFIN became a second caller: both feeds get a descriptor and no category, so both derive `mapped_category` at WRITE time from this one table. Pure JS — imported by server code too. |
+| `api/_lib/simplefin.js` | SimpleFIN protocol layer: setup-token decode, claim POST, access-URL split (creds → Authorization header), the `/accounts` GET, and `normalizeAccountSet` (reads BOTH wire shapes). Also `inferAccountType`, `normalizeBalance`, the sign flip, and the env knobs. Server-only — handles bank credentials. |
+| `src/components/SimpleFinConnect.jsx` | Accounts-tab modal replacing Plaid Link: link banks at SimpleFIN Bridge → paste the setup token → claim + first sync. Shows connection status and a disconnect action. |
 | `src/components/CsvImport.jsx` | Accounts-tab import modal, two modes by target: **standalone** (manual target) file → preview (greyed dupes) → confirm; **comparison** (Plaid-linked target) read-only reconciliation audit, inserts nothing. Writes via dataAdapter's `createManualAccount`/`importCsvTransactions`; reads Plaid rows via `getAccountTransactionsInRange`. |
 | `src/plaidClient.js` | Client → api/ fetch wrappers (JWT attached). |
 | `src/sync.js` | Single-flight wrapper triggering server sync. |
@@ -90,7 +109,16 @@ playwright-core screenshot (`executablePath:'/opt/pw-browsers/chromium'`,
 - Dashboard style: compact inline-styled JSX, CSS vars (--bg, --card, --text,
   --muted, --border), dark mode via prefers-color-scheme, accent #7F77DD.
   Mobile-first: verify at 390px; tab bar scrolls horizontally.
-- Amounts follow Plaid: **positive = money out, negative = money in**.
+- Amounts follow Plaid: **positive = money out, negative = money in**. SimpleFIN
+  is the opposite (positive = money *in*) and its amounts arrive as numeric
+  *strings* ("-05.50" is real), so `api/_lib/simplefin.js` parses then negates.
+- **SimpleFIN sends no account type/subtype/mask/category.** Type is *inferred
+  from the account name* at first insert and is **user-owned thereafter** — the
+  sync writes it on INSERT only, and the Accounts tab lets it be corrected
+  (that's why the account write splits into insert-new / update-balances). It
+  matters because `isCheckingAccount` decides whether an account's outflows
+  count as household spending. The type editor is deliberately hidden for Plaid
+  accounts: their sync overwrites both columns, so an edit wouldn't survive.
 - Effective category = `user_category || mapped_category` (user override wins).
 - "Transfers and card payments" and "Return" (credit-card negatives) are never
   counted as spending; "Return" is never counted as income.
@@ -162,15 +190,22 @@ playwright-core screenshot (`executablePath:'/opt/pw-browsers/chromium'`,
   CSV+Plaid legs). The importer degrades gracefully if the two columns are absent.
 
 ## Pending branches
-_(none)_
+
+- `claude/simplefin-build-start-ijj2fa` — **SimpleFIN migration phase 2**
+  (SimpleFIN feed alongside Plaid). Migration to paste at merge:
+  `supabase/migrations/20260724000001_simplefin.sql` (additive: `simplefin_access`
+  table + `institutions.simplefin_org_id`). No new env vars are required —
+  `SIMPLEFIN_*` knobs in `.env.example` are all optional. After merge: connect
+  at Accounts → ⚡ SimpleFIN, then do the phase-3 diff (below) before unhiding
+  anything.
 
 ## Roadmap
 
-**Next: SimpleFIN migration** — replace Plaid as the bank feed (spec below;
-decided). **Then: Debt tracker** — **balance-only + hand-entered APR** under
-SimpleFIN (spec below; the `loan` sync fix that unblocks it is already on main).
-(CSV import — the permanent coverage floor for the off-Plaid plan — **shipped**;
-see Merged features.) Later (discussed, not committed): net worth over time,
+**Next: SimpleFIN phase 3** — diff SimpleFIN against Plaid on the joint BECU
+accounts, then unhide + retire the Plaid Items bank by bank (spec below; phases
+1–2 are **built**, pending branch above). **Then: Debt tracker** —
+**balance-only + hand-entered APR** under SimpleFIN (spec below; the `loan` sync
+fix that unblocks it is already on main). Later (discussed, not committed): net worth over time,
 auto-categorization rules, cash-flow forecast, savings goals, CSV/PDF export,
 sign-out button. **`markInternalTransfers` max-matching** — the greedy
 nearest-gap matcher can strand one of two interleaved equal-amount transfer
@@ -181,77 +216,69 @@ legs (drift 1–3 days) make it more reachable — replace with earliest-unused-
 ordering or a small bipartite max-matching. (Surfaced by the CSV adversarial
 pass; deliberately NOT changed there — cash-flow model changes were out of scope.)
 
-### Off-Plaid: SimpleFIN migration — build spec
-Decision (settled): replace Plaid with **SimpleFIN Bridge** as the primary bank
-feed — ~$15/yr flat (no per-product / Item-slot billing), read-only, daily
-refresh, **serverless-friendly (no daemon)**. Coverage verified for all
-household institutions incl. NewRez / Launch / Jenius. Plan is capped at
-**SimpleFIN + CSV import + (optional) email-alert cron**; a home-IP scraper
-(Channel C) is a possible LATER build-out, not in scope. Migrate incrementally
-alongside Plaid, then retire Plaid.
+### Off-Plaid: SimpleFIN migration — phases 1–2 BUILT, phase 3 next
+Decision (settled): replace Plaid with **SimpleFIN Bridge** as the bank feed —
+~$15/yr flat (no per-product / Item-slot billing), read-only, daily refresh,
+**serverless-friendly (no daemon)**. Coverage verified for all household
+institutions incl. NewRez / Launch / Jenius. The plan is capped at
+**SimpleFIN + CSV import + (optional) email-alert cron**.
 
-How SimpleFIN works (**verify against simplefin.org/protocol.md + SimpleFIN
-Bridge docs at build** — the details below are the plan, not gospel):
-- One-time link: user links banks at SimpleFIN Bridge's hosted page (SimpleFIN /
-  MX handle login + MFA — so the dormant `mfa_prompts` back-channel stays unused
-  here) → gets a base64 **setup token**. Server decodes it to a claim URL and
-  **POSTs once** to exchange it for a durable **access URL** (embeds HTTP Basic
-  creds, e.g. `https://user:pass@…/simplefin`).
-- Pull: a single authenticated **GET `{access_url}/accounts?start-date=<epoch>`**
-  returns ALL linked accounts + transactions as flat JSON — no cursor, no
-  pagination, no per-product calls. Refreshes ~once/day; keep ≤24 pulls/day
-  (fits the existing 24h rate-limit intent).
+Phases: 1. **CSV import** — permanent coverage floor. **SHIPPED** (Merged
+features). 2. **SimpleFIN alongside Plaid** — **BUILT** (pending branch above).
+3. **Diff, then migrate bank by bank** ← *next*. 4. **Remove Plaid** code paths
+and `PLAID_*` env once nothing depends on them, then rewrite the Architecture
+feed bullets → SimpleFIN only.
 
-Key model change — **one access URL spans ALL institutions** (keyed off SimpleFIN
-org + account id), inverting Plaid's one-token-per-institution model:
-- Store the single access URL like `plaid_tokens` — **service-role only, ZERO
-  client policies** (it contains bank creds). New `simplefin_access` table
-  (household_id, access_url) or reuse the tokens table; never expose to client.
-- Per SimpleFIN **org** → find-or-create an `institutions` row (by org
-  domain/name). Per SimpleFIN **account** → an `accounts` row with
-  `plaid_account_id = 'sfin:'+account.id` (reuse the column — adapter-agnostic
-  external id; satisfies unique `institution_id,plaid_account_id`).
-- Per SimpleFIN **transaction** → `plaid_tx_id = transaction.id` (SimpleFIN ids
-  are stable → the dedup key; upsert onConflict `account_id,plaid_tx_id`).
+**Phase 3 — what's left.** Connect at Accounts → ⚡ SimpleFIN. Accounts land
+hidden, so nothing moves until they're checked. For each bank: (a) confirm the
+inferred account **type/subtype** in the account sheet — a card typed as
+checking would turn its purchases into household spending; (b) compare the
+SimpleFIN account's transactions against the Plaid copy for the same month —
+count, amounts, **signs**, dates, categories; (c) unhide the SimpleFIN account
+and unlink the Plaid institution in the same sitting (never leave both visible —
+that's the double count). Things the diff is specifically there to catch:
+**date drift** (SimpleFIN gives an epoch, converted in UTC — an evening
+transaction can land a day later and cross a month boundary) and the
+**debt-balance sign** (below). Then rebuild `getOverview`'s expectations if the
+credit/depository header list looks wrong.
 
-Sync rewrite (`api/sync.js`, stays serverless):
-- Replace the `transactionsSync` cursor loop with one GET to the stored access
-  URL; drop cursor bookkeeping from `sync_state`. Map the JSON onto the existing
-  row shapes (mirror `mapAccountRow` / `mapTransactionRow`).
-- **Sign flip (verify).** SimpleFIN `amount` is a signed string where **positive
-  = money INTO the account**; the app uses Plaid's opposite (positive = money
-  out), so `amount = −simplefinAmount` (same flip as CSV import). Confirm against
-  the protocol doc.
-- **Balance sign for debts.** Normalize so `current_balance` is positive = owed
-  for credit/loan (SimpleFIN may report a card balance negative). `balance-date`
-  epoch → ISO.
-- **Categorization:** SimpleFIN emits little/no category → set `mapped_category`
-  at WRITE time via the keyword→category map (the same one CSV import builds; do
-  NOT call `mapPlaidCategory`). Unmatched → "Shopping and gear".
+**Settled during the build** (verified against simplefin.org/protocol.md plus
+independent Go/Rust/Python clients — don't relitigate):
+- Claim: setup token is base64 of a **single-use** claim URL → POST it, no body,
+  no auth → the response **body** is the durable access URL (plain text; trim).
+- The access URL embeds Basic credentials and **Node's fetch refuses a URL with
+  userinfo** — they must be split out into an `Authorization` header.
+- `amount`/`balance`/`available-balance` are numeric **strings** ("-05.50" is
+  real); `posted`/`transacted_at`/`balance-date` are epoch **seconds**, and
+  `posted` may be **0** for a pending row (a sentinel, not 1970).
+- **Two wire shapes** — v1 `errors` + a per-account `org`; v2 `errlist` (objects)
+  + top-level `connections` joined by `conn_id`. **The server picks** when the
+  request doesn't pin `version`, so `normalizeAccountSet` reads both and both
+  resolve to the same org key (a flip must not fork institutions).
+- Per-bank failures come back as **HTTP 200** with usable accounts *plus* error
+  entries; 403 = credentials revoked, 402 = payment required. The protocol
+  requires **sanitizing** feed messages before display.
+- No cursor, no pagination, and **no "removed" signal** — idempotent upsert on
+  `(account_id, plaid_tx_id)` is the only thing making a re-pull safe. Which is
+  why **pending transactions are off by default** (`SIMPLEFIN_INCLUDE_PENDING=1`
+  to try them): a pending row whose id changes when it posts would strand a
+  duplicate forever with nothing to clean it up.
+- Ids: `plaid_account_id = 'sfin:'+account.id`, `plaid_tx_id = 'sfin:'+tx.id`,
+  `transactions.source = 'simplefin'` (deviates from the original spec's bare
+  `tx.id` — the prefix matches the `csv:`/`manual:` precedent and keeps each
+  adapter's id space self-describing).
+- Unlinking a SimpleFIN institution **disables** it rather than deleting it: one
+  access URL covers every bank, so a deleted row would just be recreated by the
+  next pull. The disabled row is the tombstone that keeps it out.
 
-Link flow (`api/`): replace `create-link-token` / `exchange-token` with a
-SimpleFIN connect flow — UI sends the user to SimpleFIN Bridge to link banks +
-copy the setup token, posts it to an `api/simplefin-claim` route that claims the
-access URL (service-role) and stores it. Adding banks later reuses the same
-access URL (verify: re-claim vs portal-add).
-
-Debt tracker under SimpleFIN — **balance-only + hand-entered APR** (decided):
-SimpleFIN has no Liabilities equivalent, so the Plaid `/liabilities/get` steps in
-the Debt-tracker spec are **superseded**. `current_balance` comes from the feed;
-`apr` / `minimum_payment` are **hand-entered** (user-owned columns — keep them
-OUT of the sync upsert payload so the feed never clobbers them, like
-nickname/color). Payoff math runs on the hand-entered rate.
-
-Phased migration (no big-bang):
-1. **CSV import first** (already specced) — permanent coverage floor for the
-   personal BECU accounts + anything a feed misses.
-2. **SimpleFIN alongside Plaid** — diff SimpleFIN vs Plaid on the joint BECU
-   accounts to validate the mapping before trusting it.
-3. **Migrate institutions to SimpleFIN + retire Plaid Items** incrementally —
-   `api/sync.js` already skips institutions with no `plaid_tokens` row, so
-   SimpleFIN-fed and Plaid-fed institutions coexist with no flag.
-4. Remove Plaid code paths + `PLAID_*` env once nothing depends on them; then
-   rewrite the Architecture "Plaid" bullet → SimpleFIN.
+**OPEN — must be settled against live data:** how SimpleFIN **signs a credit /
+loan balance** when money is owed. Nothing in the spec, any client library, or
+the demo fixture answers it (the demo only exposes positive deposit accounts).
+`normalizeBalance()` currently assumes a negative reported balance means "owed"
+and flips it, which gets an overpaid card wrong under either convention;
+`api/sync.js` logs the raw feed value next to the stored one for every debt
+account so a real card settles it. **The Debt tracker must not trust this until
+it's checked.**
 
 OUT (not now): **email-alert cron** (Vercel Cron → `api/` route polling Gmail,
 parsing alerts, inserting service-role for minutes-fresh top-ups, reconciled
@@ -262,9 +289,8 @@ reusing the dormant `pull_jobs` / `mfa_prompts` / `pending_items` schema + the
 24h `check_pull_job_constraints` rate limiter; real ToS/lockout risk → scoped
 surgically, never the foundation.
 
-Caveats: verify the SimpleFIN protocol (claim flow, JSON shape, sign convention)
-against current docs at build; weaker categorization than Plaid (lean on the
-keyword map); daily freshness (not real-time — same as Plaid today); $15/yr flat.
+Caveats: weaker categorization than Plaid (leans on `src/txClassify.js`); daily
+freshness, not real-time (same as Plaid today); $15/yr flat.
 
 ### Debt tracker — build spec
 **NOTE (data source, decided):** with the off-Plaid → SimpleFIN move, debt data
@@ -366,7 +392,21 @@ tracker is the liability half of the future net-worth feature — the
 
 - Supabase SQL Editor runs as service_role: `auth.uid()` is NULL, so
   `household_id` defaults DON'T resolve — admin inserts there must set it
-  explicitly. (Client inserts are fine — `auth.uid()` resolves.)
+  explicitly. (Client inserts are fine — `auth.uid()` resolves.) Same trap in
+  `api/` routes: `simplefin_access` deliberately has **no** `household_id`
+  default so a service-role insert that forgets it fails loudly.
+- Node's `fetch` (undici) throws on any URL containing credentials — "Request
+  cannot be constructed from a URL that includes credentials". SimpleFIN access
+  URLs are exactly that, so `splitAccessUrl` moves them into an `Authorization`
+  header. Don't "simplify" it back to fetching the URL directly.
+- Only institutions holding a `plaid_tokens` row consume a Plaid Item slot.
+  `create-link-token` counts those, not all institutions — the manual "Imported"
+  institution and every SimpleFIN org also carry the `plaid_credential_key`
+  default of 'main' and would otherwise burn phantom capacity.
+- PostgREST bulk upsert needs an **identical key set** on every row in the
+  array, which is why the SimpleFIN account write splits into a bulk insert for
+  new accounts and per-row updates for existing ones — restating type/subtype/
+  hidden in a uniform payload is precisely what must not be overwritten.
 - Vercel `VITE_*` vars are baked at BUILD time — changing them needs a redeploy
   (check Production AND Preview). Missing client config renders the
   ConfigErrorScreen (App.jsx), not white.

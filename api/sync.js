@@ -1,12 +1,47 @@
 import { getPlaidClient } from './_lib/plaid.js';
 import { getServiceClient, requireUser } from './_lib/supabase.js';
+import {
+  fetchAccountSet,
+  normalizeAccountSet,
+  inferAccountType,
+  normalizeBalance,
+  SFIN_PREFIX,
+  FIRST_PULL_DAYS,
+  OVERLAP_DAYS,
+  MIN_PULL_MINUTES,
+  INCLUDE_PENDING,
+} from './_lib/simplefin.js';
 import { mapPlaidCategory } from '../src/categoryMap.js';
+import { classifyDescription } from '../src/txClassify.js';
 
-// depository + credit fund the spending/cash-flow views; loan lets Plaid-linked
+// depository + credit fund the spending/cash-flow views; loan lets linked
 // debts (mortgage, student/personal loans) sync their balances for the debt
-// tracker. Loan accounts carry sparse/no /transactions rows — their real data
-// (APR, minimum payment, due date) comes from the Liabilities product.
+// tracker. Loan accounts carry sparse/no transaction rows — under Plaid their
+// real data (APR, minimum payment, due date) comes from the Liabilities
+// product; under SimpleFIN it is hand-entered.
 const ALLOWED_TYPES = new Set(['depository', 'credit', 'loan']);
+
+const DAY_MS = 86_400_000;
+
+// transactions.source landed with the CSV-import migration; tolerate its
+// absence the way the importer does. Module scope so a warm invocation only
+// has to learn it once.
+let txHaveSource = true;
+
+// PostgREST/Postgres codes for "that column/table isn't there". Previews share
+// the production database, so every write has to survive the window between a
+// branch deploying and Mason pasting its migration.
+function isMissingSchemaError(error, name) {
+  if (!error) return false;
+  if (error.code === 'PGRST204' || error.code === 'PGRST205') return true;
+  if (error.code === '42703' || error.code === '42P01') return true;
+  const blob = `${error.message || ''} ${error.details || ''} ${error.hint || ''}`.toLowerCase();
+  return blob.includes(String(name).toLowerCase()) && /column|table|schema cache/.test(blob);
+}
+
+// =============================================================================
+// Plaid
+// =============================================================================
 
 function mapAccountRow(account, institutionId, householdId) {
   return {
@@ -122,6 +157,363 @@ async function syncOneInstitution(supabase, inst, accessToken, householdId) {
   return { added: added.length, modified: modified.length, removed: removedIds.length };
 }
 
+// =============================================================================
+// SimpleFIN
+//
+// Where Plaid gives one access token per institution and a per-institution
+// cursor, SimpleFIN gives ONE access URL covering every bank the user linked at
+// the Bridge, fetched in a single GET with no cursor and no pagination. So this
+// pass is per-access-URL, not per-institution: pull once, then fan the response
+// out into institutions (per SimpleFIN org), accounts and transactions.
+// =============================================================================
+
+// Read the household's stored access URLs. Returns null — not an error — when
+// the SimpleFIN migration hasn't been pasted yet.
+async function loadAccessRows(supabase, householdId) {
+  const { data, error } = await supabase
+    .from('simplefin_access')
+    .select('id, access_url, last_pulled_at')
+    .eq('household_id', householdId);
+  if (error) {
+    if (isMissingSchemaError(error, 'simplefin_access')) return null;
+    throw error;
+  }
+  return data || [];
+}
+
+// Find-or-create one institution row per SimpleFIN org. Returns a Map of
+// orgKey → { id, disabled }. A disabled institution is one the user removed
+// from the app (see api/unlink-institution.js): its org stays on the feed
+// because the access URL is shared, so the row is kept as a tombstone and its
+// accounts are never recreated.
+async function resolveOrgInstitutions(supabase, householdId, orgs) {
+  const { data: existing, error } = await supabase
+    .from('institutions')
+    .select('id, simplefin_org_id, status')
+    .eq('household_id', householdId)
+    .not('simplefin_org_id', 'is', null);
+  if (error) throw error;
+
+  const byKey = new Map();
+  for (const inst of existing || []) {
+    byKey.set(inst.simplefin_org_id, { id: inst.id, disabled: inst.status === 'disabled' });
+  }
+
+  const missing = orgs.filter(o => !byKey.has(o.key));
+  if (missing.length) {
+    const { data: inserted, error: insErr } = await supabase
+      .from('institutions')
+      .insert(
+        missing.map(o => ({
+          household_id: householdId,
+          name: o.label,
+          simplefin_org_id: o.key,
+          status: 'active',
+        }))
+      )
+      .select('id, simplefin_org_id');
+    if (insErr) throw insErr;
+    for (const inst of inserted || []) {
+      byKey.set(inst.simplefin_org_id, { id: inst.id, disabled: false });
+    }
+  }
+  return byKey;
+}
+
+async function pullOneAccessUrl(supabase, householdId, accessRow, { force }) {
+  const now = new Date();
+  const lastPulled = accessRow.last_pulled_at ? new Date(accessRow.last_pulled_at) : null;
+
+  if (!force && lastPulled && now.getTime() - lastPulled.getTime() < MIN_PULL_MINUTES * 60_000) {
+    return {
+      institution: 'SimpleFIN',
+      skipped: 'throttled',
+      last_pulled_at: lastPulled.toISOString(),
+    };
+  }
+
+  // Incremental: re-request an overlap window because a bank can amend or
+  // late-post a transaction inside a date we already pulled. Re-seeing a row is
+  // free — the upsert lands on the same (account_id, plaid_tx_id).
+  const startDate = lastPulled
+    ? new Date(lastPulled.getTime() - OVERLAP_DAYS * DAY_MS)
+    : new Date(now.getTime() - FIRST_PULL_DAYS * DAY_MS);
+
+  const json = await fetchAccountSet(accessRow.access_url, {
+    startDate,
+    pending: INCLUDE_PENDING,
+  });
+  const { errors, accounts, skipped } = normalizeAccountSet(json);
+
+  if (skipped) {
+    console.warn('[sync:simplefin] skipped %d unusable account object(s)', skipped);
+  }
+  // SimpleFIN reports a broken bank connection as a free-text string in the
+  // response body rather than an HTTP error, and keeps returning the accounts
+  // it *can* reach. Nothing back at all plus an error means the pull failed.
+  if (errors.length && accounts.length === 0) {
+    throw new Error(`SimpleFIN reported: ${errors.join('; ')}`);
+  }
+
+  // ---- institutions, one per org -------------------------------------------
+  const orgs = [];
+  const seenOrg = new Set();
+  for (const acct of accounts) {
+    const key = acct.org.key || 'unknown';
+    if (seenOrg.has(key)) continue;
+    seenOrg.add(key);
+    orgs.push({ key, label: acct.org.label });
+  }
+  const instByOrg = await resolveOrgInstitutions(supabase, householdId, orgs);
+
+  // ---- accounts -------------------------------------------------------------
+  const { data: existingRows, error: acctErr } = await supabase
+    .from('accounts')
+    .select('id, plaid_account_id, institution_id, type, subtype, current_balance')
+    .eq('household_id', householdId)
+    .like('plaid_account_id', `${SFIN_PREFIX}%`);
+  if (acctErr) throw acctErr;
+  const existingByExternal = new Map((existingRows || []).map(a => [a.plaid_account_id, a]));
+
+  const toInsert = [];
+  const toUpdate = [];
+  const usable = [];
+  let ignoredTypes = 0;
+
+  // A response that listed the same account twice would build the same
+  // transaction rows twice, and Postgres rejects an upsert whose payload hits
+  // one row twice ("ON CONFLICT DO UPDATE command cannot affect row a second
+  // time") — which would fail the entire sync, not just the duplicate.
+  const seenAccount = new Set();
+
+  for (const acct of accounts) {
+    const inst = instByOrg.get(acct.org.key || 'unknown');
+    if (!inst || inst.disabled) continue;
+
+    const externalId = SFIN_PREFIX + acct.externalId;
+    if (seenAccount.has(externalId)) continue;
+    seenAccount.add(externalId);
+    const existing = existingByExternal.get(externalId);
+
+    // The account's type is INSERT-ONLY. SimpleFIN sends no type at all, so it
+    // is guessed from the name once; after that it is user-owned (the Accounts
+    // tab can correct it) and the feed must never clobber the correction —
+    // the same rule that protects nickname/color/hidden.
+    const guessed = existing ? null : inferAccountType(acct.name, acct.org);
+    const type = existing ? existing.type : guessed.type;
+    const subtype = existing ? existing.subtype : guessed.subtype;
+
+    if (!ALLOWED_TYPES.has(type)) {
+      ignoredTypes++;
+      continue;
+    }
+
+    const balance = normalizeBalance(type, acct.balance);
+    if ((type === 'credit' || type === 'loan') && acct.balance != null) {
+      // The debt-balance sign convention is the one thing the protocol doesn't
+      // pin down (see normalizeBalance). Log both so a real card can settle it.
+      console.log(
+        '[sync:simplefin] debt balance %s: feed=%s stored=%s (verify the sign)',
+        acct.name,
+        acct.balance,
+        balance
+      );
+    }
+
+    usable.push({ acct, externalId });
+
+    if (existing) {
+      toUpdate.push({
+        id: existing.id,
+        patch: {
+          name: acct.name,
+          currency: acct.currency,
+          current_balance: balance,
+          available_balance: acct.availableBalance,
+          last_balance_at: acct.balanceDate || now.toISOString(),
+          // Re-home the account if its org now resolves to a different
+          // institution — e.g. the Bridge flipped protocol version and the org
+          // id moved. Without this the account would be stranded under the old
+          // institution while a new empty one sat beside it.
+          ...(existing.institution_id !== inst.id ? { institution_id: inst.id } : {}),
+        },
+      });
+    } else {
+      toInsert.push({
+        household_id: householdId,
+        institution_id: inst.id,
+        plaid_account_id: externalId,
+        name: acct.name,
+        official_name: '',
+        type,
+        subtype,
+        // SimpleFIN sends no mask, and the name often already ends in the last
+        // four digits — leaving it empty avoids "Checking 1234 ··1234" labels.
+        mask: '',
+        current_balance: balance,
+        available_balance: acct.availableBalance,
+        currency: acct.currency,
+        last_balance_at: acct.balanceDate || now.toISOString(),
+        // Hidden on arrival, on purpose. While SimpleFIN runs ALONGSIDE Plaid,
+        // a bank connected to both would otherwise land its transactions twice
+        // and silently double every total in the dashboard. Hidden accounts are
+        // fully browsable in the Accounts tab but excluded from spending,
+        // trends and totals, so the two feeds can be compared before switching
+        // over. Unhiding is a deliberate, one-tap act — and `hidden` is
+        // user-owned, so no later sync re-hides it.
+        hidden: true,
+      });
+    }
+  }
+
+  if (toInsert.length) {
+    const { error } = await supabase
+      .from('accounts')
+      .upsert(toInsert, {
+        onConflict: 'institution_id,plaid_account_id',
+        ignoreDuplicates: true,
+      });
+    if (error) throw error;
+  }
+  for (const { id, patch } of toUpdate) {
+    // One statement per account (there are only ever a handful) rather than a
+    // bulk upsert: a bulk upsert would have to restate type/subtype/hidden in
+    // every row, which is exactly what must not be overwritten.
+    const { error } = await supabase.from('accounts').update(patch).eq('id', id);
+    if (error) throw error;
+  }
+
+  // ---- transactions ---------------------------------------------------------
+  const { data: idRows, error: idErr } = await supabase
+    .from('accounts')
+    .select('id, plaid_account_id')
+    .eq('household_id', householdId)
+    .like('plaid_account_id', `${SFIN_PREFIX}%`);
+  if (idErr) throw idErr;
+  const uuidByExternal = new Map((idRows || []).map(a => [a.plaid_account_id, a.id]));
+
+  const txRows = [];
+  // Same duplicate hazard as accounts, one level down: a repeated transaction
+  // id inside one account would make the upsert touch a row twice and abort.
+  const seenTx = new Set();
+  for (const { acct, externalId } of usable) {
+    const accountUuid = uuidByExternal.get(externalId);
+    if (!accountUuid) continue;
+    for (const tx of acct.transactions) {
+      const dedupKey = `${accountUuid}|${tx.externalId}`;
+      if (seenTx.has(dedupKey)) continue;
+      seenTx.add(dedupKey);
+      // SimpleFIN ships no category, so it is derived from the descriptor at
+      // write time — the same keyword table the CSV importer uses. `payee` is
+      // the cleaner merchant string when the server sends one; memo is left out
+      // because freeform text ("transfer for rent") would mislabel real bills.
+      const descriptor =
+        tx.payee && tx.payee !== tx.description
+          ? `${tx.payee} ${tx.description}`
+          : tx.description;
+      const { raw_category, mapped_category } = classifyDescription(descriptor, tx.amount);
+      txRows.push({
+        household_id: householdId,
+        account_id: accountUuid,
+        plaid_tx_id: SFIN_PREFIX + tx.externalId,
+        date: tx.date,
+        amount: tx.amount,
+        merchant_name: tx.payee || '',
+        description: tx.description,
+        raw_category,
+        mapped_category,
+        pending: tx.pending,
+        pulled_at: now.toISOString(),
+      });
+    }
+  }
+
+  let written = 0;
+  const batch = 500;
+  for (let i = 0; i < txRows.length; i += batch) {
+    const slice = txRows.slice(i, i + batch);
+    const attempt = withSource =>
+      supabase
+        .from('transactions')
+        .upsert(
+          withSource ? slice.map(r => ({ ...r, source: 'simplefin' })) : slice,
+          { onConflict: 'account_id,plaid_tx_id' }
+        );
+
+    let { error } = await attempt(txHaveSource);
+    if (error && txHaveSource && isMissingSchemaError(error, 'source')) {
+      txHaveSource = false;
+      ({ error } = await attempt(false));
+    }
+    if (error) throw error;
+    written += slice.length;
+  }
+
+  // ---- bookkeeping ----------------------------------------------------------
+  const instIds = [...new Set(usable.map(u => instByOrg.get(u.acct.org.key || 'unknown')?.id))].filter(
+    Boolean
+  );
+  if (instIds.length) {
+    const { error } = await supabase
+      .from('institutions')
+      .update({
+        last_successful_pull_at: now.toISOString(),
+        status: 'active',
+        last_error: null,
+      })
+      .in('id', instIds);
+    if (error) throw error;
+  }
+
+  const { error: accessErr } = await supabase
+    .from('simplefin_access')
+    .update({
+      last_pulled_at: now.toISOString(),
+      last_error: errors.length ? errors.join('; ').slice(0, 1000) : null,
+    })
+    .eq('id', accessRow.id);
+  if (accessErr) throw accessErr;
+
+  return {
+    institution: 'SimpleFIN',
+    institutions: instIds.length,
+    accounts: usable.length,
+    accounts_created: toInsert.length,
+    ignored_accounts: ignoredTypes,
+    transactions: written,
+    ...(errors.length ? { warnings: errors } : {}),
+  };
+}
+
+async function syncSimpleFin(supabase, householdId, { force }) {
+  const accessRows = await loadAccessRows(supabase, householdId);
+  if (accessRows === null || accessRows.length === 0) return [];
+
+  const results = [];
+  for (const row of accessRows) {
+    try {
+      results.push(await pullOneAccessUrl(supabase, householdId, row, { force }));
+    } catch (err) {
+      const message = err?.message || 'Unknown error';
+      console.error('[sync:simplefin] pull failed', err);
+      // Record the failure but leave last_pulled_at alone: advancing the
+      // watermark on a failed pull would skip past transactions we never read.
+      await supabase
+        .from('simplefin_access')
+        .update({ last_error: String(message).slice(0, 1000) })
+        .eq('id', row.id);
+      results.push({
+        institution: 'SimpleFIN',
+        error: message,
+        needs_reauth: err?.code === 'auth_failed',
+      });
+    }
+  }
+  return results;
+}
+
+// =============================================================================
+
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
@@ -129,24 +521,47 @@ export default async function handler(req, res) {
   const user = await requireUser(req, res);
   if (!user) return;
 
+  const force = !!(req.body || {}).force;
+
   try {
     const supabase = getServiceClient();
-    const { data: institutions, error: instErr } = await supabase
+
+    // simplefin_org_id is the feed discriminator; select it defensively so a
+    // deploy that lands before its migration still syncs Plaid normally.
+    let institutions;
+    let instErr;
+    ({ data: institutions, error: instErr } = await supabase
       .from('institutions')
-      .select('id, name, plaid_credential_key, sync_state, status')
+      .select('id, name, plaid_credential_key, sync_state, status, simplefin_org_id')
       .eq('household_id', user.householdId)
-      .neq('status', 'disabled');
+      .neq('status', 'disabled'));
+    if (instErr && isMissingSchemaError(instErr, 'simplefin_org_id')) {
+      ({ data: institutions, error: instErr } = await supabase
+        .from('institutions')
+        .select('id, name, plaid_credential_key, sync_state, status')
+        .eq('household_id', user.householdId)
+        .neq('status', 'disabled'));
+    }
     if (instErr) throw instErr;
 
-    const { data: tokens, error: tokenErr } = await supabase
-      .from('plaid_tokens')
-      .select('institution_id, access_token')
-      .in('institution_id', institutions.map(i => i.id));
-    if (tokenErr) throw tokenErr;
-    const tokenByInst = new Map(tokens.map(t => [t.institution_id, t.access_token]));
+    // Plaid-fed institutions only. A SimpleFIN-fed one has no plaid_tokens row,
+    // so without this it would report a bogus "no access token" every sync.
+    const plaidInstitutions = institutions.filter(i => !i.simplefin_org_id);
+
+    // Guard the empty list: a household that has moved entirely to SimpleFIN
+    // has no Plaid institutions left to look tokens up for.
+    const tokenByInst = new Map();
+    if (plaidInstitutions.length) {
+      const { data: tokens, error: tokenErr } = await supabase
+        .from('plaid_tokens')
+        .select('institution_id, access_token')
+        .in('institution_id', plaidInstitutions.map(i => i.id));
+      if (tokenErr) throw tokenErr;
+      for (const t of tokens || []) tokenByInst.set(t.institution_id, t.access_token);
+    }
 
     const results = [];
-    for (const inst of institutions) {
+    for (const inst of plaidInstitutions) {
       const accessToken = tokenByInst.get(inst.id);
       if (!accessToken) {
         results.push({ institution: inst.name, error: 'no access token' });
@@ -172,6 +587,14 @@ export default async function handler(req, res) {
           needs_reauth: needsReauth,
         });
       }
+    }
+
+    // A SimpleFIN failure must never take the Plaid results down with it.
+    try {
+      results.push(...(await syncSimpleFin(supabase, user.householdId, { force })));
+    } catch (err) {
+      console.error('[sync:simplefin] pass failed', err);
+      results.push({ institution: 'SimpleFIN', error: err?.message || 'Unknown error' });
     }
 
     return res.status(200).json({ results });

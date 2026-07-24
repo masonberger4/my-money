@@ -15,15 +15,49 @@ export default async function handler(req, res) {
 
   try {
     const supabase = getServiceClient();
-    const { data: inst, error: instErr } = await supabase
+    let inst;
+    let instErr;
+    ({ data: inst, error: instErr } = await supabase
       .from('institutions')
-      .select('id, name, plaid_credential_key, household_id')
+      .select('id, name, plaid_credential_key, household_id, simplefin_org_id')
       .eq('id', institution_id)
       .eq('household_id', user.householdId)
-      .maybeSingle();
+      .maybeSingle());
+    // Tolerate a deploy that lands before the SimpleFIN migration.
+    if (instErr && (instErr.code === 'PGRST204' || instErr.code === '42703')) {
+      ({ data: inst, error: instErr } = await supabase
+        .from('institutions')
+        .select('id, name, plaid_credential_key, household_id')
+        .eq('id', institution_id)
+        .eq('household_id', user.householdId)
+        .maybeSingle());
+    }
     if (instErr) throw instErr;
     if (!inst) {
       return res.status(404).json({ error: 'Institution not found' });
+    }
+
+    // SimpleFIN institutions can't be unlinked by deleting the row. One access
+    // URL covers EVERY bank linked at the Bridge, so the very next pull would
+    // find this org again and recreate it. Instead: drop its accounts (which
+    // cascades their transactions) and keep the institution as a disabled
+    // tombstone — api/sync.js skips disabled institutions, so the org stays out
+    // of the app until the user reconnects it. To stop the bank feeding
+    // SimpleFIN at all, they remove it at SimpleFIN Bridge.
+    if (inst.simplefin_org_id) {
+      const { error: acctErr } = await supabase
+        .from('accounts')
+        .delete()
+        .eq('institution_id', inst.id);
+      if (acctErr) throw acctErr;
+
+      const { error: disableErr } = await supabase
+        .from('institutions')
+        .update({ status: 'disabled', last_error: null, sync_state: {} })
+        .eq('id', inst.id);
+      if (disableErr) throw disableErr;
+
+      return res.status(200).json({ ok: true, plaid_removed: false, disabled: true });
     }
 
     const { data: token } = await supabase

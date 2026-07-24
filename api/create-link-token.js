@@ -12,12 +12,28 @@ export default async function handler(req, res) {
     const supabase = getServiceClient();
     const { data: institutions, error } = await supabase
       .from('institutions')
-      .select('plaid_credential_key')
+      .select('id, plaid_credential_key')
       .eq('household_id', user.householdId);
     if (error) throw error;
 
+    // Only institutions that actually hold a Plaid Item consume a slot. The
+    // manual "Imported" institution (CSV import) and SimpleFIN-fed ones carry
+    // plaid_credential_key's 'main' default but have no plaid_tokens row, so
+    // counting institutions outright would burn phantom capacity and
+    // eventually report "all credentials full" while Plaid still has room.
+    let hasItem = new Set();
+    if (institutions.length) {
+      const { data: tokens, error: tokenErr } = await supabase
+        .from('plaid_tokens')
+        .select('institution_id')
+        .in('institution_id', institutions.map(i => i.id));
+      if (tokenErr) throw tokenErr;
+      hasItem = new Set((tokens || []).map(t => t.institution_id));
+    }
+
     const usedCounts = {};
     for (const inst of institutions) {
+      if (!hasItem.has(inst.id)) continue;
       usedCounts[inst.plaid_credential_key] =
         (usedCounts[inst.plaid_credential_key] || 0) + 1;
     }

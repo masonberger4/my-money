@@ -1,10 +1,11 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { getOverview, getSpending, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount } from "../dataAdapter.js";
+import { getOverview, getSpending, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES } from "../dataAdapter.js";
 import { detectRecurring } from "../recurring.js";
 import { unlinkInstitution, askAssistant } from "../plaidClient.js";
 import { ERA_CATEGORIES } from "../categoryMap.js";
 import { runSync } from "../sync.js";
 import CsvImport from "./CsvImport.jsx";
+import SimpleFinConnect from "./SimpleFinConnect.jsx";
 import { getSetting, setSetting } from "../db.js";
 import { ASSISTANT_MODELS, EFFORT_LEVELS, DEFAULT_MODEL, DEFAULT_EFFORT, estimateCostRange, formatCents } from "../assistantModels.js";
 
@@ -254,7 +255,7 @@ export default function Dashboard({ refreshTick = 0 }) {
     setLoading(true);
     if(sync){
       try{ await runSync(); }
-      catch(err){ console.error("sync failed",err); setError("Sync with Plaid failed. Showing cached data."); }
+      catch(err){ console.error("sync failed",err); setError("Bank sync failed. Showing cached data."); }
     }
     await reloadData(y,m);
     setLoading(false);
@@ -327,6 +328,7 @@ export default function Dashboard({ refreshTick = 0 }) {
   const [togglingHide,setTogglingHide]=useState(false);
   const [selTx,setSelTx]=useState(null);
   const [importing,setImporting]=useState(false);
+  const [connectingSfin,setConnectingSfin]=useState(false);
 
   // Optimistic transaction edit: update every local copy immediately,
   // persist, then refresh totals in the background.
@@ -366,8 +368,14 @@ export default function Dashboard({ refreshTick = 0 }) {
     const siblings=accounts.filter(a=>a.institution_id===selAcct.institution_id);
     const instName=acctInst(selAcct)||"this bank";
     const list=siblings.map(a=>`  • ${acctLabel(a)}`).join("\n");
+    // SimpleFIN can't be unlinked per bank from here: one access URL covers
+    // every bank linked at the Bridge, so the app stops syncing this one and
+    // forgets its data, while the bank itself stays linked at SimpleFIN.
+    const tail=isSimpleFinAccount(selAcct)
+      ?"This bank stops syncing into the app. It stays connected at SimpleFIN Bridge — remove it there too if you want it gone for good."
+      :"The bank connection is also removed from Plaid (freeing a slot). This cannot be undone — re-linking later re-imports history from Plaid.";
     const ok=window.confirm(
-      `Unlink ${instName}?\n\nThis removes ${siblings.length} account${siblings.length!==1?"s":""} and all their transactions from the app:\n${list}\n\nThe bank connection is also removed from Plaid (freeing a slot). This cannot be undone — re-linking later re-imports history from Plaid.`
+      `${isSimpleFinAccount(selAcct)?"Remove":"Unlink"} ${instName}?\n\nThis removes ${siblings.length} account${siblings.length!==1?"s":""} and all their transactions from the app:\n${list}\n\n${tail}`
     );
     if(!ok)return;
     setUnlinking(true);
@@ -690,11 +698,14 @@ export default function Dashboard({ refreshTick = 0 }) {
           <div className="card">
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:10,marginBottom:4}}>
               <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em"}}>Accounts</div>
-              <button className="ibtn" style={{fontSize:11}} onClick={()=>setImporting(true)}>⤓ Import CSV</button>
+              <div style={{display:"flex",gap:6,flexWrap:"wrap",justifyContent:"flex-end"}}>
+                <button className="ibtn" style={{fontSize:11}} onClick={()=>setConnectingSfin(true)}>⚡ SimpleFIN</button>
+                <button className="ibtn" style={{fontSize:11}} onClick={()=>setImporting(true)}>⤓ Import CSV</button>
+              </div>
             </div>
             <div style={{fontSize:11,color:"var(--muted)",marginBottom:14}}>
               Give each account a nickname and color — they tag every transaction across the app.
-              Import a bank CSV to add a personal account that isn't connected to Plaid.
+              Connect banks through SimpleFIN, or import a bank CSV for an account no feed covers.
             </div>
             {loading&&accounts.length===0?[1,2,3].map(i=><div key={i} style={{marginBottom:12}}><Sk h={40}/></div>):
               [...accounts].sort((a,b)=>(a.hidden?1:0)-(b.hidden?1:0)).map((a,i)=>(
@@ -704,9 +715,16 @@ export default function Dashboard({ refreshTick = 0 }) {
                     <Swatch color={acctColor(a)} onChange={hex=>saveAccount(a.id,{color:hex})}/>
                   </div>
                   <div style={{flex:1,minWidth:0}}>
-                    <div onClick={e=>e.stopPropagation()} style={{display:"flex",alignItems:"center",gap:6}}>
-                      <EditName name={acctLabel(a)} onSave={v=>saveAccount(a.id,{nickname:v})}/>
+                    {/* Wraps, and the name keeps a flex-basis: a SimpleFIN
+                        account carries two badges, and EditName is flex:1
+                        minWidth:0, so without a basis it would shrink to
+                        "Member…" rather than letting the badges wrap. */}
+                    <div onClick={e=>e.stopPropagation()} style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
+                      <span style={{display:"flex",flex:"1 1 150px",minWidth:0}}>
+                        <EditName name={acctLabel(a)} onSave={v=>saveAccount(a.id,{nickname:v})}/>
+                      </span>
                       {isManualAccount(a)&&<Pill label="Imported" color="#7F77DD"/>}
+                      {isSimpleFinAccount(a)&&<Pill label="SimpleFIN" color="#378ADD"/>}
                       {a.hidden&&<Pill label="Hidden" color="#888780"/>}
                     </div>
                     <div style={{fontSize:11,color:"var(--muted)",marginTop:2}}>
@@ -753,15 +771,62 @@ export default function Dashboard({ refreshTick = 0 }) {
                 <button onClick={handleUnlink} disabled={unlinking}
                   style={{flex:1,padding:"8px 0",borderRadius:8,border:"1px solid #F09595",background:"none",
                     color:"#A32D2D",fontFamily:"inherit",fontSize:12,fontWeight:500,cursor:unlinking?"default":"pointer",opacity:unlinking?.6:1}}>
-                  {unlinking?"Unlinking…":`Unlink ${acctInst(selAcct)||"bank"}…`}
+                  {unlinking?"Removing…":`${isSimpleFinAccount(selAcct)?"Remove":"Unlink"} ${acctInst(selAcct)||"bank"}…`}
                 </button>
               )}
             </div>
             <div style={{marginTop:6,fontSize:10,color:"var(--muted)",textAlign:"center"}}>
               {isManualAccount(selAcct)
                 ?"Imported account · re-import a CSV to add or correct transactions (duplicates are skipped automatically)"
+                :isSimpleFinAccount(selAcct)
+                ?"Hide keeps syncing but drops it from totals · Remove deletes its data here and stops syncing this bank (it stays linked at SimpleFIN Bridge)"
                 :"Hide keeps syncing but drops it from totals · Unlink removes the connection and its data"}
             </div>
+
+            {/* Account type — editable only for feeds that don't send one.
+                SimpleFIN sends no type at all, so it's guessed from the account
+                name on first sync; the checking/savings split drives the Trends
+                cash-flow model, so a wrong guess has to be fixable. Plaid
+                accounts are excluded: their sync re-writes both columns. */}
+            {isSimpleFinAccount(selAcct)&&(
+              <div style={{marginTop:12,background:"var(--bg)",borderRadius:8,padding:"10px 12px"}}>
+                <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em",marginBottom:8}}>Account type</div>
+                <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+                  {ACCOUNT_TYPES.map(t=>{
+                    const active=selAcct.type===t;
+                    const label=t==="depository"?"Bank":t==="credit"?"Credit card":"Loan";
+                    return (
+                      <button key={t}
+                        onClick={()=>saveAccount(selAcct.id,{type:t,subtype:t==="depository"?(selAcct.subtype==="savings"?"savings":"checking"):t==="credit"?"credit card":"loan"})}
+                        style={{fontSize:11,fontWeight:600,padding:"5px 10px",borderRadius:20,fontFamily:"inherit",cursor:"pointer",
+                          background:active?"#378ADD22":"var(--card)",color:active?"#378ADD":"var(--muted)",
+                          border:`1px solid ${active?"#378ADD":"var(--border)"}`,transition:"all .15s"}}>
+                        {label}
+                      </button>
+                    );
+                  })}
+                </div>
+                {selAcct.type==="depository"&&(
+                  <div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:8}}>
+                    {["checking","savings"].map(st=>{
+                      const active=(selAcct.subtype==="savings"?"savings":"checking")===st;
+                      return (
+                        <button key={st} onClick={()=>saveAccount(selAcct.id,{subtype:st})}
+                          style={{fontSize:11,fontWeight:600,padding:"5px 10px",borderRadius:20,fontFamily:"inherit",cursor:"pointer",
+                            background:active?"#378ADD22":"var(--card)",color:active?"#378ADD":"var(--muted)",
+                            border:`1px solid ${active?"#378ADD":"var(--border)"}`,transition:"all .15s"}}>
+                          {st==="checking"?"Checking":"Savings"}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+                <div style={{fontSize:10,color:"var(--muted)",marginTop:8,lineHeight:1.5}}>
+                  SimpleFIN doesn't send an account type — this was guessed from the name. Money out of
+                  <em> checking</em> counts as spending in Trends; money out of <em>savings</em> never does.
+                </div>
+              </div>
+            )}
             <div style={{borderTop:"1px solid var(--border)",margin:"12px 0"}}/>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
               <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em"}}>All transactions</div>
@@ -1097,6 +1162,14 @@ export default function Dashboard({ refreshTick = 0 }) {
           accounts={accounts}
           onClose={()=>setImporting(false)}
           onImported={()=>reloadData(year,month)}
+        />
+      )}
+
+      {/* SimpleFIN connect */}
+      {connectingSfin&&(
+        <SimpleFinConnect
+          onClose={()=>setConnectingSfin(false)}
+          onConnected={()=>reloadData(year,month)}
         />
       )}
 

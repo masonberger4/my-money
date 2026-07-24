@@ -297,11 +297,19 @@ export async function getAccounts() {
   return { accounts: data };
 }
 
+// type/subtype are editable for feeds that don't send one (SimpleFIN) — see
+// ACCOUNT_TYPES. Never expose them for Plaid accounts: the Plaid sync upserts
+// both columns, so an edit there would be silently reverted on the next sync.
+export const ACCOUNT_TYPES = ['depository', 'credit', 'loan'];
+export const ACCOUNT_SUBTYPES = ['checking', 'savings'];
+
 export async function updateAccount(id, fields) {
   const allowed = {};
   if ('nickname' in fields) allowed.nickname = fields.nickname;
   if ('color' in fields) allowed.color = fields.color;
   if ('hidden' in fields) allowed.hidden = fields.hidden;
+  if ('type' in fields && ACCOUNT_TYPES.includes(fields.type)) allowed.type = fields.type;
+  if ('subtype' in fields) allowed.subtype = fields.subtype;
   const { error } = await supabase.from('accounts').update(allowed).eq('id', id);
   if (error) throw error;
 }
@@ -469,6 +477,18 @@ export async function getCashFlow({ num_periods = 6 } = {}) {
 
 const MANUAL_INSTITUTION_NAME = 'Imported';
 const MANUAL_ACCOUNT_PREFIX = 'manual:';
+// Mirrors SFIN_PREFIX in api/_lib/simplefin.js — that module is server-only
+// (it handles bank credentials), so the browser gets its own copy of the one
+// string it needs.
+const SIMPLEFIN_ACCOUNT_PREFIX = 'sfin:';
+
+// A SimpleFIN-fed account. Matters to the UI for two reasons: its type was
+// GUESSED from the account name (SimpleFIN sends none) so it must be
+// correctable by hand, and it arrives hidden until it's been compared against
+// the Plaid copy of the same bank.
+export function isSimpleFinAccount(a) {
+  return String(a?.plaid_account_id || '').startsWith(SIMPLEFIN_ACCOUNT_PREFIX);
+}
 
 // The is_manual / source columns land with the CSV-import migration. Previews
 // share the prod DB until Mason pastes it, so writes must work before it does:
