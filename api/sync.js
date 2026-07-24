@@ -499,6 +499,7 @@ async function pullOneAccessUrl(supabase, householdId, accessRow, { force }) {
   const backfillIds = toInsert
     .map(r => String(r.plaid_account_id).slice(SFIN_PREFIX.length))
     .filter(Boolean);
+  let backfillFailed = false;
   if (backfillIds.length && lastPulled) {
     try {
       const history = await fetchAccountSet(accessRow.access_url, {
@@ -514,8 +515,13 @@ async function pullOneAccessUrl(supabase, householdId, accessRow, { force }) {
         backfillIds.length
       );
     } catch (err) {
-      // Not fatal: the accounts and their recent transactions are already
-      // written, and the next pull can be forced to try the backfill again.
+      // Not fatal — the accounts and their recent transactions are already
+      // written. But this pull can't simply be retried: backfillIds comes from
+      // the accounts INSERTED this time round, so by the next pull they exist
+      // and nothing would trigger it again. Flagged so the watermark is reset
+      // instead, which makes the next pull a full-history one for every
+      // account (idempotent upserts make that safe, just a bigger response).
+      backfillFailed = true;
       console.warn('[sync:simplefin] history backfill failed', err?.message || err);
     }
   }
@@ -564,11 +570,20 @@ async function pullOneAccessUrl(supabase, householdId, accessRow, { force }) {
   // overlap. Leaving it put means the next pull re-requests from where the
   // last good one ended; startDate is floored at FIRST_PULL_DAYS so a bank the
   // user never fixes can't grow the window without bound.
+  //
+  // A failed history backfill clears the watermark instead, so the next pull
+  // re-requests full history for every account — the only way to give the new
+  // account the history it missed, since it will no longer look "new".
+  // last_attempt_at still holds the throttle, so this can't turn into a loop.
   const clean = errors.length === 0;
   const { error: accessErr } = await supabase
     .from('simplefin_access')
     .update({
-      ...(clean ? { last_pulled_at: now.toISOString() } : {}),
+      ...(backfillFailed
+        ? { last_pulled_at: null }
+        : clean
+          ? { last_pulled_at: now.toISOString() }
+          : {}),
       last_error: clean ? null : errors.join('; ').slice(0, 1000),
     })
     .eq('id', accessRow.id);
