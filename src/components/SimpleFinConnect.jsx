@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { claimSimpleFinToken, getSimpleFinStatus, disconnectSimpleFin } from "../plaidClient.js";
+import { claimSimpleFinToken, getSimpleFinStatus, disconnectSimpleFin, restoreSimpleFinInstitution } from "../plaidClient.js";
 import { runSync } from "../sync.js";
 
 // SimpleFIN connect — the Accounts-tab modal that replaces Plaid Link.
@@ -99,6 +99,25 @@ export default function SimpleFinConnect({ onClose, onConnected }) {
     setBusy(false);
   }
 
+  // "Remove bank" on the account screen only disables the bank — one access URL
+  // covers them all, so deleting the row would let the next pull recreate it.
+  // This is the way back: without it, removing a bank by mistake is permanent.
+  async function restore(inst) {
+    setBusy(true);
+    setError(null);
+    try {
+      await restoreSimpleFinInstitution(inst.id);
+      await runSync({ force: true });
+      await load();
+      if (onConnected) onConnected();
+    } catch (err) {
+      console.error("simplefin restore failed", err);
+      setError(describeError(err, `Could not restore ${inst.name}`));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function disconnect() {
     const ok = window.confirm(
       "Stop syncing from SimpleFIN?\n\nThe stored access URL is deleted, so no further data is pulled. " +
@@ -174,6 +193,23 @@ export default function SimpleFinConnect({ onClose, onConnected }) {
                     </div>
                   )}
                 </div>
+                {status.removed?.length > 0 && (
+                  <div style={{ marginTop: 10, background: "var(--bg)", borderRadius: 10, padding: "12px 14px" }}>
+                    <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>Removed banks</div>
+                    <div style={{ ...note, marginBottom: 8 }}>
+                      Still linked at SimpleFIN, but not syncing here. Restoring re-imports their
+                      accounts (hidden again, as new).
+                    </div>
+                    {status.removed.map(inst => (
+                      <div key={inst.id} style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 6 }}>
+                        <span style={{ flex: 1, minWidth: 0, fontSize: 12 }}>{inst.name}</span>
+                        <button className="ibtn" disabled={busy} style={{ fontSize: 11 }} onClick={() => restore(inst)}>
+                          Restore
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
 
               {result ? (

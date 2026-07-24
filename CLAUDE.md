@@ -275,7 +275,9 @@ independent Go/Rust/Python clients — don't relitigate):
   adapter's id space self-describing).
 - Unlinking a SimpleFIN institution **disables** it rather than deleting it: one
   access URL covers every bank, so a deleted row would just be recreated by the
-  next pull. The disabled row is the tombstone that keeps it out.
+  next pull. The disabled row is the tombstone that keeps it out — and the
+  connect modal lists removed banks with a Restore button, because without one
+  that tombstone is permanent and a mis-tap is unrecoverable.
 
 **OPEN — must be settled against live data:** how SimpleFIN **signs a credit /
 loan balance** when money is owed. Nothing in the spec, any client library, or

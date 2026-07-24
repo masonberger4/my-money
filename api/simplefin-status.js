@@ -8,11 +8,13 @@ import { MIN_PULL_MINUTES } from './_lib/simplefin.js';
 // stored access URL without ever revealing it — no URL, no host, no username.
 //
 // GET  → { connected, connections, last_pulled_at, last_error, institutions,
-//          accounts, hidden_accounts, min_pull_minutes }
+//          accounts, hidden_accounts, removed[], min_pull_minutes }
+// POST { restore_institution_id } → undo a "Remove bank": clears the disabled
+//          tombstone so the next pull recreates its accounts.
 // DELETE → forget the stored access URL (stops all SimpleFIN syncing; leaves
 //          already-imported accounts and transactions in place).
 export default async function handler(req, res) {
-  if (req.method !== 'GET' && req.method !== 'DELETE') {
+  if (!['GET', 'POST', 'DELETE'].includes(req.method)) {
     return res.status(405).json({ error: 'Method not allowed' });
   }
   const user = await requireUser(req, res);
@@ -24,6 +26,29 @@ export default async function handler(req, res) {
 
   try {
     const supabase = getServiceClient();
+
+    // Removing a SimpleFIN bank only disables it (one access URL covers every
+    // bank, so deleting the row would let the next pull recreate it). Without
+    // this route that tombstone would be permanent — the bank could never be
+    // brought back from inside the app.
+    if (req.method === 'POST') {
+      const { restore_institution_id } = req.body || {};
+      if (!restore_institution_id) {
+        return res.status(400).json({ error: 'restore_institution_id required' });
+      }
+      const { data, error } = await supabase
+        .from('institutions')
+        .update({ status: 'active', last_error: null })
+        .eq('id', restore_institution_id)
+        .eq('household_id', user.householdId)
+        .not('simplefin_org_id', 'is', null)
+        .select('id, name');
+      if (error) throw error;
+      if (!data?.length) {
+        return res.status(404).json({ error: 'No such SimpleFIN bank in this household' });
+      }
+      return res.status(200).json({ ok: true, restored: data[0].name });
+    }
 
     if (req.method === 'DELETE') {
       const { error } = await supabase
@@ -59,12 +84,15 @@ export default async function handler(req, res) {
     // against Plaid" without a second round trip.
     const { data: institutions, error: instErr } = await supabase
       .from('institutions')
-      .select('id, status')
+      .select('id, name, status')
       .eq('household_id', user.householdId)
       .not('simplefin_org_id', 'is', null);
     if (instErr && !isMissingColumn(instErr)) throw instErr;
 
     const active = (institutions || []).filter(i => i.status !== 'disabled');
+    const removed = (institutions || [])
+      .filter(i => i.status === 'disabled')
+      .map(i => ({ id: i.id, name: i.name }));
     let accounts = 0;
     let hidden = 0;
     if (active.length) {
@@ -85,6 +113,7 @@ export default async function handler(req, res) {
       institutions: active.length,
       accounts,
       hidden_accounts: hidden,
+      removed,
       min_pull_minutes: MIN_PULL_MINUTES,
     });
   } catch (err) {

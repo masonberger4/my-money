@@ -77,6 +77,12 @@ export function disconnectSimpleFin() {
   return request('DELETE', '/api/simplefin-status');
 }
 
+// Undo a "Remove bank": clears the disabled tombstone so the next pull
+// recreates that bank's accounts.
+export function restoreSimpleFinInstitution(institutionId) {
+  return postJson('/api/simplefin-status', { restore_institution_id: institutionId });
+}
+
 // messages: [{role: 'user'|'assistant', content: string}, ...]
 // opts: { model, effort } — validated server-side against the allowlist.
 // Returns { reply, stop_reason, usage }.

@@ -96,8 +96,13 @@ const BLOCKED_HOST_RE = new RegExp(
     '^192\\.168\\.',
     '^172\\.(1[6-9]|2\\d|3[01])\\.',
     '^169\\.254\\.', // link-local, incl. 169.254.169.254 metadata
-    '^\\[?::1\\]?$',
-    '^\\[?f[cd]', // IPv6 unique-local
+    // IPv6 literals only — URL.hostname always brackets them, so requiring the
+    // bracket keeps the pattern from swallowing ordinary hostnames that merely
+    // start with the same letters (fdic.gov, fcu-bridge.example.com).
+    '^\\[::1\\]$',
+    '^\\[f[cd][0-9a-f]{0,2}:', // unique-local fc00::/7
+    '^\\[fe[89ab][0-9a-f]?:', // link-local fe80::/10
+    '^\\[::ffff:', // IPv4-mapped, e.g. [::ffff:127.0.0.1]
   ].join('|'),
   'i'
 );

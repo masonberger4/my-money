@@ -5,6 +5,7 @@ import {
   normalizeAccountSet,
   inferAccountType,
   normalizeBalance,
+  sanitizeFeedMessage,
   SFIN_PREFIX,
   FIRST_PULL_DAYS,
   OVERLAP_DAYS,
@@ -337,15 +338,25 @@ async function pullOneAccessUrl(supabase, householdId, accessRow, { force }) {
 
     usable.push({ acct, externalId });
 
+    // available-balance is omitted when it equals the balance, so fall back
+    // rather than nulling it out.
+    const available = acct.availableBalance ?? balance;
+
     if (existing) {
       toUpdate.push({
         id: existing.id,
         patch: {
           name: acct.name,
           currency: acct.currency,
-          current_balance: balance,
-          available_balance: acct.availableBalance,
-          last_balance_at: acct.balanceDate || now.toISOString(),
+          // A degraded connection can return the account with a blank balance.
+          // parseMoney maps that to null (deliberately — absent must not read
+          // as zero), but writing the null over a known balance would show the
+          // account as $0.00 in every view. Keep the last known good instead.
+          ...(balance == null ? {} : { current_balance: balance }),
+          ...(available == null ? {} : { available_balance: available }),
+          ...(balance == null
+            ? {}
+            : { last_balance_at: acct.balanceDate || now.toISOString() }),
           // Re-home the account if its org now resolves to a different
           // institution — e.g. the Bridge flipped protocol version and the org
           // id moved. Without this the account would be stranded under the old
@@ -366,7 +377,7 @@ async function pullOneAccessUrl(supabase, householdId, accessRow, { force }) {
         // four digits — leaving it empty avoids "Checking 1234 ··1234" labels.
         mask: '',
         current_balance: balance,
-        available_balance: acct.availableBalance,
+        available_balance: available,
         currency: acct.currency,
         last_balance_at: acct.balanceDate || now.toISOString(),
         // Hidden on arrival, on purpose. While SimpleFIN runs ALONGSIDE Plaid,
@@ -554,9 +565,11 @@ async function syncSimpleFin(supabase, householdId, { force }) {
       console.error('[sync:simplefin] pull failed', err);
       // Record the failure but leave last_pulled_at alone: advancing the
       // watermark on a failed pull would skip past transactions we never read.
+      // Sanitized because last_error is rendered in the connect modal and a
+      // database error can quote feed-supplied text (an account name, say).
       await supabase
         .from('simplefin_access')
-        .update({ last_error: String(message).slice(0, 1000) })
+        .update({ last_error: sanitizeFeedMessage(message) })
         .eq('id', row.id);
       results.push({
         institution: 'SimpleFIN',
