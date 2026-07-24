@@ -60,7 +60,10 @@ export default function PdfTemplateEditor({ pages, template, onChange, rowCount 
   const roles = template.roles || [];
   const nCols = boundaries.length + 1;
 
-  const set = patch => onChange({ ...template, ...patch });
+  // Functional updates throughout: a pointer drag fires many times against a
+  // closure captured at pointerdown, and spreading the stale `template` there
+  // would throw away the very change being made.
+  const set = patch => onChange(prev => ({ ...prev, ...patch }));
   const setRole = (i, role) => {
     const next = [...roles];
     while (next.length < nCols) next.push("ignore");
@@ -78,16 +81,18 @@ export default function PdfTemplateEditor({ pages, template, onChange, rowCount 
     const px = page.width * scale;
     const move = ev => {
       const nextVal = clamp(start + (ev.clientX - startX) / px, 0.02, 0.98);
-      const next = [...boundaries];
-      next[i] = Math.round(nextVal * 10000) / 10000;
-      set({ boundaries: next });
+      onChange(prev => {
+        const next = [...(prev.boundaries || [])];
+        next[i] = Math.round(nextVal * 10000) / 10000;
+        return { ...prev, boundaries: next };
+      });
     };
     const up = () => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
-      // Re-sort after a drag so column order always matches visual order.
-      const sorted = [...(template.boundaries || [])].sort((a, b) => a - b);
-      onChange({ ...template, boundaries: sorted });
+      // Re-sort after a drag so column order always matches visual order —
+      // reading the CURRENT boundaries, not the ones captured at pointerdown.
+      onChange(prev => ({ ...prev, boundaries: [...(prev.boundaries || [])].sort((a, b) => a - b) }));
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);

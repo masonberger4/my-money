@@ -312,6 +312,21 @@ export function splitLineIntoCells(line, boundaries, pageWidth) {
   return cells.map(parts => parts.join(' ').replace(/\s+/g, ' ').trim());
 }
 
+// Left edge of each column's content on a line — the x where its text starts.
+// Used to tell a wrapped description (which lines up under its parent) from a
+// centred page footer that merely happens to sit in the description band.
+export function lineCellStarts(line, boundaries, pageWidth) {
+  const cuts = boundaries.map(b => b * pageWidth);
+  const starts = new Array(cuts.length + 1).fill(null);
+  for (const run of line.runs) {
+    const mid = run.x + (run.w || 0) / 2;
+    let col = 0;
+    while (col < cuts.length && mid >= cuts[col]) col++;
+    if (starts[col] === null || run.x < starts[col]) starts[col] = run.x;
+  }
+  return starts;
+}
+
 // ---------------------------------------------------------------------------
 // Auto-detection: propose a template from the document so the user usually only
 // has to confirm rather than build one from scratch.
@@ -521,6 +536,8 @@ export function autoDetectTemplate(pages) {
 // contain dates and dollar amounts, e.g. a mortgage statement's payment tables).
 // ---------------------------------------------------------------------------
 const CANONICAL_COLUMNS = { date: 0, description: 1, debit: 2, credit: 3, amount: 4 };
+// How far a wrapped description line may start from its parent's left edge.
+const DESC_CONTINUATION_X_TOL = 12;
 
 export function applyTemplate(pages, template) {
   const t = template || {};
@@ -546,13 +563,14 @@ export function applyTemplate(pages, template) {
   let lastRowIndex = -1;
   let lastY = null;
   let lastPage = null;
+  let lastDescX = null;
 
   for (const pg of pages || []) {
     if (wantPages && !wantPages.has(pg.page)) continue;
     const lines = groupIntoLines(pg.runs);
     for (const line of lines) {
-      if (startRe && startRe.test(line.text)) { inside = true; anchorFound = true; lastRowIndex = -1; continue; }
-      if (stopRe && stopRe.test(line.text)) { inside = false; lastRowIndex = -1; continue; }
+      if (startRe && startRe.test(line.text)) { inside = true; anchorFound = true; lastRowIndex = -1; lastDescX = null; continue; }
+      if (stopRe && stopRe.test(line.text)) { inside = false; lastRowIndex = -1; lastDescX = null; continue; }
       if (!inside) continue;
 
       const cells = splitLineIntoCells(line, boundaries, pg.width);
@@ -580,12 +598,20 @@ export function applyTemplate(pages, template) {
         lastRowIndex = grid.length - 1;
         lastY = line.y;
         lastPage = pg.page;
+        lastDescX = descCol >= 0 ? lineCellStarts(line, boundaries, pg.width)[descCol] : null;
         continue;
       }
 
       // Continuation of the previous row's description: same page, immediately
-      // below it, text only in the description column (no date, no money).
-      // Conservative on purpose — marketing copy must never be appended.
+      // below it, text only in the description column (no date, no money), AND
+      // starting at the same left edge as the parent's description.
+      //
+      // That last test is load-bearing. Without it a centred page footer
+      // ("Additional Information on the next page") satisfies every geometric
+      // condition — it sits just under the last row of the page and its
+      // midpoint falls in the description band — and gets glued onto a real
+      // transaction's description. A wrapped description lines up under its
+      // parent; a centred footer does not.
       const descOnly =
         lastRowIndex >= 0 &&
         pg.page === lastPage &&
@@ -596,7 +622,12 @@ export function applyTemplate(pages, template) {
         !hasMoney &&
         descCol >= 0 &&
         (cells[descCol] || '').trim() !== '' &&
-        cells.every((v, i) => i === descCol || !String(v).trim());
+        cells.every((v, i) => i === descCol || !String(v).trim()) &&
+        lastDescX !== null &&
+        (() => {
+          const x = lineCellStarts(line, boundaries, pg.width)[descCol];
+          return x !== null && Math.abs(x - lastDescX) <= DESC_CONTINUATION_X_TOL;
+        })();
       if (descOnly) {
         grid[lastRowIndex][CANONICAL_COLUMNS.description] =
           `${grid[lastRowIndex][CANONICAL_COLUMNS.description]} ${cells[descCol].trim()}`.replace(/\s+/g, ' ').trim();
@@ -606,6 +637,7 @@ export function applyTemplate(pages, template) {
 
       if (line.text) skipped.push({ page: pg.page, y: Math.round(line.y), text: line.text.slice(0, 90) });
       lastRowIndex = -1;
+      lastDescX = null;
     }
   }
 
@@ -658,18 +690,17 @@ export function normalizeDebitCredit(debitRaw, creditRaw) {
   return { debit: '', credit: '' };
 }
 
-// Sum of the parsed rows, for the "does this match the statement's stated
-// total?" sanity check surfaced in the UI.
-export function gridTotals(grid, columns) {
+// Totals of the rows that will ACTUALLY be imported, for the "does this match
+// the statement's stated total?" check surfaced in the UI. Deliberately takes
+// buildRows' output rather than the raw grid: only those rows carry the
+// template's sign convention applied, and only they exclude the rows buildRows
+// drops (unreadable or zero-amount). Summing the grid instead would print a
+// total that doesn't correspond to anything the user is about to import.
+export function rowTotals(builtRows) {
   let out = 0;
   let inn = 0;
-  for (const row of grid) {
-    let amt;
-    if (columns.debit >= 0 || columns.credit >= 0) {
-      amt = Math.abs(parseMoney(row[columns.debit]) || 0) - Math.abs(parseMoney(row[columns.credit]) || 0);
-    } else {
-      amt = parseMoney(row[columns.amount]) || 0;
-    }
+  for (const r of builtRows || []) {
+    const amt = Number(r.amount) || 0;
     if (amt > 0) out += amt;
     else inn += -amt;
   }

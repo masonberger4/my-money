@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { analyzeCsv, toInsertRow, parseCsv, reconcileCsv, csvDateRange, buildRows } from "../csvImport.js";
-import { applyTemplate, autoDetectTemplate, gridTotals, TEMPLATE_VERSION } from "../pdfImport.js";
+import { applyTemplate, autoDetectTemplate, rowTotals, TEMPLATE_VERSION } from "../pdfImport.js";
 import { createManualAccount, importCsvTransactions, getExistingTxIds, getAccountTransactionsInRange, isManualAccount } from "../dataAdapter.js";
 import { getSetting, setSetting } from "../db.js";
 import PdfTemplateEditor from "./PdfTemplateEditor.jsx";
@@ -338,7 +338,7 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                     {pdfApplied?.layoutSuspect
                       ? "Couldn't read this statement with the saved layout — the bank may have changed its format. Open “Adjust columns” and re-confirm."
                       : (() => {
-                        const t = gridTotals(pdfApplied.grid, pdfApplied.columns);
+                        const t = rowTotals(rows);
                         return (
                           <>
                             {templateSource === "saved"
