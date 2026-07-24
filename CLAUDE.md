@@ -409,6 +409,11 @@ tracker is the liability half of the future net-worth feature — the
   cannot be constructed from a URL that includes credentials". SimpleFIN access
   URLs are exactly that, so `splitAccessUrl` moves them into an `Authorization`
   header. Don't "simplify" it back to fetching the URL directly.
+- The SimpleFIN setup token is user-supplied and the server POSTs to whatever it
+  decodes to, so both outbound calls go through `fetchNoOpenRedirect`
+  (`redirect: 'manual'`, re-checking scheme + host at every hop). Plain `fetch`
+  follows redirects by default, which walks straight past the private-address
+  check — a public claim URL can 302 to the cloud metadata endpoint.
 - Only institutions holding a `plaid_tokens` row consume a Plaid Item slot.
   `create-link-token` counts those, not all institutions — the manual "Imported"
   institution and every SimpleFIN org also carry the `plaid_credential_key`

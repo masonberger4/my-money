@@ -162,6 +162,43 @@ export function decodeSetupToken(raw) {
   return { kind: parsed.username ? 'access' : 'claim', url: decoded };
 }
 
+// fetch follows redirects by default, which would walk straight past
+// assertPublicHost: a perfectly public claim URL can 302 to
+// http://169.254.169.254/. Redirects are handled by hand instead, re-checking
+// the scheme and host at every hop.
+const MAX_REDIRECTS = 3;
+
+async function fetchNoOpenRedirect(url, init, signal) {
+  let current = url;
+  for (let hop = 0; ; hop++) {
+    const res = await fetch(current, { ...init, redirect: 'manual', signal });
+    if (res.status < 300 || res.status > 399) return res;
+
+    const location = res.headers.get('location');
+    if (!location) return res;
+    if (hop >= MAX_REDIRECTS) {
+      throw new SimpleFinError('too_many_redirects', 'SimpleFIN redirected too many times.');
+    }
+
+    const next = new URL(location, current).toString();
+    if (!isHttpsUrl(next)) {
+      throw new SimpleFinError('insecure_redirect', 'SimpleFIN redirected to a non-https URL.');
+    }
+    assertPublicHost(next);
+
+    // A POST that gets a 301/302/303 would be replayed as a GET by normal fetch
+    // semantics, which is meaningless for a single-use claim — refuse instead
+    // of silently burning the token on the wrong request.
+    if (init?.method === 'POST' && res.status !== 307 && res.status !== 308) {
+      throw new SimpleFinError(
+        'claim_failed',
+        `SimpleFIN redirected the claim (HTTP ${res.status}). Generate a fresh setup token.`
+      );
+    }
+    current = next;
+  }
+}
+
 async function withTimeout(fn, ms = DEFAULT_TIMEOUT_MS) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), ms);
@@ -182,12 +219,15 @@ async function withTimeout(fn, ms = DEFAULT_TIMEOUT_MS) {
 // (possibly by an earlier attempt of ours).
 export async function claimAccessUrl(claimUrl) {
   const res = await withTimeout(signal =>
-    fetch(claimUrl, {
-      method: 'POST',
-      // Some servers reject a POST with no length header.
-      headers: { 'Content-Length': '0', Accept: 'text/plain' },
-      signal,
-    })
+    fetchNoOpenRedirect(
+      claimUrl,
+      {
+        method: 'POST',
+        // Some servers reject a POST with no length header.
+        headers: { 'Content-Length': '0', Accept: 'text/plain' },
+      },
+      signal
+    )
   );
 
   const body = (await res.text()).trim();
@@ -231,6 +271,9 @@ export function splitAccessUrl(accessUrl) {
   if (parsed.protocol !== 'https:') {
     throw new SimpleFinError('invalid_access_url', 'SimpleFIN access URL must use https.');
   }
+  // Re-checked on every pull, not just at claim time, so a URL stored before
+  // this guard existed can't quietly keep pointing somewhere internal.
+  assertPublicHost(parsed.toString());
   // URL keeps these percent-encoded; Basic auth needs the raw bytes.
   const user = decodeURIComponent(parsed.username || '');
   const pass = decodeURIComponent(parsed.password || '');
@@ -286,14 +329,17 @@ export async function fetchAccountSet(accessUrl, opts = {}) {
 
   const res = await withTimeout(
     signal =>
-      fetch(url, {
-        method: 'GET',
-        headers: {
-          Accept: 'application/json',
-          ...(authorization ? { Authorization: authorization } : {}),
+      fetchNoOpenRedirect(
+        url,
+        {
+          method: 'GET',
+          headers: {
+            Accept: 'application/json',
+            ...(authorization ? { Authorization: authorization } : {}),
+          },
         },
-        signal,
-      }),
+        signal
+      ),
     opts.timeoutMs || DEFAULT_TIMEOUT_MS
   );
 
