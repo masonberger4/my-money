@@ -134,7 +134,9 @@ playwright-core screenshot (`executablePath:'/opt/pw-browsers/chromium'`,
 ### Two spending/income models (deliberate — don't "unify" without asking)
 - **Purchase-based** (Categories tab, Overview headline, budgets, "vs last
   month" delta): `sumSpending` / `getSpending` count what was *bought* by
-  category, excluding Transfers/Return.
+  category, excluding Transfers/Return **and every `type === 'loan'` account**
+  (a loan debit is a payment, not a purchase, and the cash already counts on its
+  way out of checking).
 - **Joint-budget cash-flow** (Trends income-vs-spending, 6-mo bars, Cash flow
   section): `getCashFlow`. The connected accounts are two **joint** BECU
   accounts (checking + savings); real paychecks land in three **personal**
@@ -377,9 +379,11 @@ Build steps:
 
 Keep out of spending/cash-flow: loan/credit accounts are debts, not spend —
 `isCheckingAccount`/`isHouseholdDepository` already exclude them from cash-flow,
-but `sumSpending`/`getSpending` have NO type filter, so guard `type === 'loan'`
-specifically if any loan-account transactions appear — never guard out `credit`,
-whose *purchases* must still count. Card *payments* from checking stay transfers.
+and `sumSpending`/`getSpending`/`buildSpendingContext` now **guard
+`type === 'loan'`** (done on the SimpleFIN branch — Plaid loans carry no
+transactions, but SimpleFIN ships the servicer's real list, which double-counted
+the mortgage against the checking outflow). Never guard out `credit`, whose
+*purchases* must still count. Card *payments* from checking stay transfers.
 
 Manual fallback (FOLLOW-UP, not v1): the CSV-import manual-account machinery
 (`is_manual`, manual institution) has **shipped** — a manual debt can reuse it
