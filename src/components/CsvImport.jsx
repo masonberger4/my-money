@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { analyzeCsv, toInsertRow, parseCsv, reconcileCsv, csvDateRange, buildRows } from "../csvImport.js";
-import { applyTemplate, autoDetectTemplate, TEMPLATE_VERSION } from "../pdfImport.js";
+import { applyTemplate, autoDetectTemplate, gridTotals, TEMPLATE_VERSION } from "../pdfImport.js";
 import { createManualAccount, importCsvTransactions, getExistingTxIds, getAccountTransactionsInRange, isManualAccount } from "../dataAdapter.js";
 import { getSetting, setSetting } from "../db.js";
 import PdfTemplateEditor from "./PdfTemplateEditor.jsx";
@@ -337,9 +337,21 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                   }}>
                     {pdfApplied?.layoutSuspect
                       ? "Couldn't read this statement with the saved layout — the bank may have changed its format. Open “Adjust columns” and re-confirm."
-                      : templateSource === "saved"
-                        ? <>Using the layout you saved for this account. <strong style={{ color: "var(--text)" }}>{rows.length}</strong> transactions read.</>
-                        : <>Layout detected automatically. <strong style={{ color: "var(--text)" }}>{rows.length}</strong> transactions read — check a few in the preview, then adjust the columns if anything looks off.</>}
+                      : (() => {
+                        const t = gridTotals(pdfApplied.grid, pdfApplied.columns);
+                        return (
+                          <>
+                            {templateSource === "saved"
+                              ? <>Using the layout you saved for this account. </>
+                              : <>Layout detected automatically. </>}
+                            <strong style={{ color: "var(--text)" }}>{rows.length}</strong> transactions read,
+                            totalling <strong style={{ color: "var(--text)" }}>{money(t.out)} out</strong>
+                            {t.in > 0 && <> and <strong style={{ color: "var(--text)" }}>{money(t.in)} in</strong></>}.
+                            <br />Compare those totals with the ones printed on your statement — if they match, the whole
+                            statement was read correctly.
+                          </>
+                        );
+                      })()}
                   </div>
                   {showEditor && (
                     <div style={{ marginTop: 12 }}>
@@ -405,8 +417,8 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
 
                     {targetIsPlaid && (
                       <div style={{ marginTop: 10, fontSize: 12, color: "var(--muted)", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8, padding: "10px 12px", lineHeight: 1.5 }}>
-                        This account already syncs via Plaid. Nothing will be imported — the CSV is compared against what Plaid synced
-                        to surface sync gaps, pending/timing differences, and amount mismatches.
+                        This account already syncs via Plaid. Nothing will be imported — your statement is compared against what
+                        Plaid synced, to surface sync gaps, pending/timing differences, and amount mismatches.
                       </div>
                     )}
                   </div>
