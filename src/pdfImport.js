@@ -538,6 +538,14 @@ export function autoDetectTemplate(pages) {
 const CANONICAL_COLUMNS = { date: 0, description: 1, debit: 2, credit: 3, amount: 4 };
 // How far a wrapped description line may start from its parent's left edge.
 const DESC_CONTINUATION_X_TOL = 12;
+// How far below its parent a wrapped line may sit, as a multiple of line
+// height. This must stay BELOW the table's row pitch: if the band is wider
+// than one row slot, then any fixed page element sitting where the next row
+// would have gone (a footer, a section title) qualifies as a continuation.
+// Measured on a real card statement: row pitch 16.8pt, genuine wraps 13.2pt
+// below their parent, the page footer 16.8pt — so 1.8× line height (14.4pt)
+// admits the wraps and excludes both.
+const DESC_CONTINUATION_Y_FACTOR = 1.8;
 
 export function applyTemplate(pages, template) {
   const t = template || {};
@@ -617,7 +625,7 @@ export function applyTemplate(pages, template) {
         pg.page === lastPage &&
         lastY !== null &&
         line.y - lastY > 0 &&
-        line.y - lastY < (line.height || 10) * 2.2 &&
+        line.y - lastY < (line.height || 10) * DESC_CONTINUATION_Y_FACTOR &&
         !iso &&
         !hasMoney &&
         descCol >= 0 &&
