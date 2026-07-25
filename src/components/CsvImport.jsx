@@ -154,10 +154,16 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
     setFileKind("pdf");
     setFileText(null);
     setPdfBusy(true);
+    // Named so a failure says WHICH step broke — the difference between
+    // "your browser can't run the PDF reader" and "we couldn't read the
+    // layout" matters, and a bare message from a phone is impossible to act on.
+    let stage = "loading the PDF reader";
     try {
       // pdf.js is ~1MB and only loaded here, the first time a PDF is opened.
       const { extractPdfPages } = await import("../pdfExtract.js");
+      stage = "reading the file";
       const buf = await f.arrayBuffer();
+      stage = "extracting text from the PDF";
       const { pages, hasTextLayer } = await extractPdfPages(buf);
       if (!hasTextLayer) {
         setError(
@@ -167,6 +173,7 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
         return;
       }
       setPdfPages(pages);
+      stage = "detecting the statement layout";
       const auto = autoDetectTemplate(pages);
       setPdfAutoTemplate(auto);
       if (!auto) {
@@ -181,8 +188,14 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
         setTemplateSource("auto");
       }
     } catch (err) {
-      console.error("pdf parse failed", err);
-      setError(`Couldn't read that PDF: ${err.message || err}`);
+      console.error(`pdf import failed while ${stage}`, err);
+      const detail = [err?.name, err?.message || String(err)].filter(Boolean).join(": ");
+      setError(
+        `Couldn't read that PDF — it failed while ${stage}. ${detail}` +
+        (stage === "extracting text from the PDF" || stage === "loading the PDF reader"
+          ? " If this phone is on an older iOS, updating it may fix this."
+          : "")
+      );
     } finally {
       setPdfBusy(false);
     }

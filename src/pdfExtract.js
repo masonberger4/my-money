@@ -8,20 +8,40 @@
 // bundled by Vite via `?url` (a local asset), so nothing is fetched from a CDN:
 // the import works offline and under a strict CSP, same as the rest of the app.
 
+import { installPdfPolyfills } from './pdfPolyfills.js';
+
 let pdfjsPromise = null;
 
 function loadPdfjs() {
   if (pdfjsPromise) return pdfjsPromise;
   pdfjsPromise = (async () => {
+    // Must run BEFORE pdf.js is imported: its legacy build assumes
+    // Array.prototype.at and structuredClone exist (both Safari 15.4+).
+    installPdfPolyfills();
     // The LEGACY build, deliberately. pdf.js's modern bundle calls very new JS
     // (e.g. Map.prototype.getOrInsertComputed) that current Chromium and iOS
     // Safari don't have yet — it throws "getOrInsertComputed is not a function"
     // on a real device. The legacy bundle is transpiled for the browsers this
     // app actually runs in, including the iPhone PWA.
     const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs');
-    // Vite resolves this to a bundled asset URL at build time.
-    const workerUrl = (await import('pdfjs-dist/legacy/build/pdf.worker.min.mjs?url')).default;
-    pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
+
+    // Run the parser on the MAIN THREAD rather than in a Worker. pdf.js picks
+    // this path when globalThis.pdfjsWorker exposes a WorkerMessageHandler.
+    //
+    // A real Worker gets its own global scope, which the polyfills above cannot
+    // reach — and the worker bundle does NOT polyfill Array.prototype.at itself
+    // (verified: importing it with `at` deleted throws "t.at is not a
+    // function"). So on an older iPhone the worker would fail no matter what we
+    // do here. Main-thread parsing also removes a whole class of failure:
+    // module-worker support, the worker asset's MIME type, and cross-origin
+    // worker rules. The cost is small — a real 8-page statement parses in about
+    // half a second — and it only happens while the import modal is open.
+    const worker = await import('pdfjs-dist/legacy/build/pdf.worker.mjs');
+    globalThis.pdfjsWorker = worker;
+    // Still set a src: pdf.js reads it in some code paths even when the
+    // main-thread handler is used.
+    pdfjs.GlobalWorkerOptions.workerSrc =
+      (await import('pdfjs-dist/legacy/build/pdf.worker.min.mjs?url')).default;
     return pdfjs;
   })();
   return pdfjsPromise;
