@@ -528,17 +528,22 @@ export async function findOrCreateManualInstitution() {
   return data.id;
 }
 
-// Create one manual account. subtype is 'checking' or 'savings' (drives the
-// Trends checking-vs-savings split). Returns the inserted account row.
+// Create one manual account. kind is 'checking' | 'savings' | 'credit'.
+// checking/savings are depository (and drive the Trends checking-vs-savings
+// split); 'credit' is a credit-card account, for a card whose statements are
+// only available as CSV/PDF — its purchases count as spending by category and
+// applyAccountRules turns its negatives into "Return" (never income), exactly
+// like a Plaid-linked card. Returns the inserted account row.
 export async function createManualAccount({ name, subtype = 'checking' }) {
   const institutionId = await findOrCreateManualInstitution();
   const plaidAccountId = MANUAL_ACCOUNT_PREFIX + makeUuid();
+  const isCredit = subtype === 'credit';
   const base = {
     institution_id: institutionId,
     plaid_account_id: plaidAccountId,
     name: (name || 'Imported account').trim(),
-    type: 'depository',
-    subtype: subtype === 'savings' ? 'savings' : 'checking',
+    type: isCredit ? 'credit' : 'depository',
+    subtype: isCredit ? 'credit card' : subtype === 'savings' ? 'savings' : 'checking',
   };
 
   const attempt = async withFlag => {
@@ -556,22 +561,40 @@ export async function createManualAccount({ name, subtype = 'checking' }) {
 }
 
 // plaid_tx_ids already stored for an account, so the preview can grey out rows
-// a prior import already inserted. Empty for a brand-new account.
+// a prior import already inserted, plus which sources those rows came from.
+// The dedup id hashes the description, and a bank's CSV and PDF word the same
+// transaction differently — so feeding one account from both formats
+// double-inserts. The caller warns when the sources would be mixed.
+// Returns { ids: Set, sources: Set }. Empty for a brand-new account.
 export async function getExistingTxIds(accountId) {
   const ids = new Set();
-  if (!accountId) return ids;
+  const sources = new Set();
+  if (!accountId) return { ids, sources };
   const page = 1000;
+  let selectCols = transactionsHaveSource ? 'plaid_tx_id, source' : 'plaid_tx_id';
   for (let from = 0; ; from += page) {
-    const { data, error } = await supabase
+    let { data, error } = await supabase
       .from('transactions')
-      .select('plaid_tx_id')
+      .select(selectCols)
       .eq('account_id', accountId)
       .range(from, from + page - 1);
+    if (error && selectCols !== 'plaid_tx_id' && isMissingColumnError(error, 'source')) {
+      transactionsHaveSource = false;
+      selectCols = 'plaid_tx_id';
+      ({ data, error } = await supabase
+        .from('transactions')
+        .select(selectCols)
+        .eq('account_id', accountId)
+        .range(from, from + page - 1));
+    }
     if (error) throw error;
-    for (const r of data) ids.add(r.plaid_tx_id);
+    for (const r of data) {
+      ids.add(r.plaid_tx_id);
+      if (r.source) sources.add(r.source);
+    }
     if (data.length < page) break;
   }
-  return ids;
+  return { ids, sources };
 }
 
 // Raw transactions on one account within a date range, for CSV reconciliation
@@ -603,7 +626,7 @@ export async function getAccountTransactionsInRange(accountId, start, end) {
 // place instead of duplicating; user-owned columns (user_category, excluded,
 // user_description) are omitted from the payload so those edits survive the
 // re-import, exactly like Plaid syncs. Returns the number of rows written.
-export async function importCsvTransactions(accountId, rows) {
+export async function importCsvTransactions(accountId, rows, source = 'csv') {
   if (!accountId) throw new Error('importCsvTransactions requires an account id');
   if (!rows || rows.length === 0) return 0;
 
@@ -613,7 +636,7 @@ export async function importCsvTransactions(accountId, rows) {
     const slice = rows.slice(i, i + batchSize).map(r => ({ ...r, account_id: accountId }));
 
     const attempt = async withSource => {
-      const payload = withSource ? slice.map(r => ({ ...r, source: 'csv' })) : slice;
+      const payload = withSource ? slice.map(r => ({ ...r, source })) : slice;
       return supabase
         .from('transactions')
         .upsert(payload, { onConflict: 'account_id,plaid_tx_id' });

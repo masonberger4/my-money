@@ -690,11 +690,12 @@ export default function Dashboard({ refreshTick = 0 }) {
           <div className="card">
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:10,marginBottom:4}}>
               <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em"}}>Accounts</div>
-              <button className="ibtn" style={{fontSize:11}} onClick={()=>setImporting(true)}>⤓ Import CSV</button>
+              <button className="ibtn" style={{fontSize:11}} onClick={()=>setImporting(true)}>⤓ Import statement</button>
             </div>
             <div style={{fontSize:11,color:"var(--muted)",marginBottom:14}}>
               Give each account a nickname and color — they tag every transaction across the app.
-              Import a bank CSV to add a personal account that isn't connected to Plaid.
+              Import a bank statement (CSV or PDF) to add an account that isn't connected to Plaid,
+              or to check a connected one against its statement.
             </div>
             {loading&&accounts.length===0?[1,2,3].map(i=><div key={i} style={{marginBottom:12}}><Sk h={40}/></div>):
               [...accounts].sort((a,b)=>(a.hidden?1:0)-(b.hidden?1:0)).map((a,i)=>(

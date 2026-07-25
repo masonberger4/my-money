@@ -1,9 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { analyzeCsv, toInsertRow, parseCsv, reconcileCsv, csvDateRange } from "../csvImport.js";
+import { analyzeCsv, toInsertRow, parseCsv, reconcileCsv, csvDateRange, buildRows } from "../csvImport.js";
+import { applyTemplate, autoDetectTemplate, rowTotals, TEMPLATE_VERSION } from "../pdfImport.js";
 import { createManualAccount, importCsvTransactions, getExistingTxIds, getAccountTransactionsInRange, isManualAccount } from "../dataAdapter.js";
+import { getSetting, setSetting } from "../db.js";
+import PdfTemplateEditor from "./PdfTemplateEditor.jsx";
 
-// CSV import — a file-picker action on the Accounts tab, in two modes chosen by
-// the target account:
+// Statement import — a file-picker action on the Accounts tab, accepting a bank
+// CSV or a PDF statement. A PDF is turned into the same cell grid a CSV
+// produces (see pdfImport.js) by a per-account TEMPLATE the user confirms once
+// in the visual editor, so everything below this point is shared by both.
+//
+// Two modes, chosen by the target account:
 //  • STANDALONE (Phase 1) — target is a new/existing MANUAL account: pick a
 //    bank CSV → preview the exact rows → confirm → real transactions land on a
 //    non-Plaid account. No DB write before Confirm; the preview greys out rows a
@@ -39,12 +46,20 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
   const [newName, setNewName] = useState("");
   const [newSubtype, setNewSubtype] = useState("checking");
   const [existingIds, setExistingIds] = useState(new Set());
+  const [existingSources, setExistingSources] = useState(new Set());
   const [loadingIds, setLoadingIds] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [result, setResult] = useState(null);
   const [recon, setRecon] = useState(null);
   const [reconLoading, setReconLoading] = useState(false);
+  const [fileKind, setFileKind] = useState("csv"); // "csv" | "pdf"
+  const [pdfPages, setPdfPages] = useState(null);
+  const [pdfTemplate, setPdfTemplate] = useState(null);
+  const [pdfAutoTemplate, setPdfAutoTemplate] = useState(null);
+  const [pdfBusy, setPdfBusy] = useState(false);
+  const [templateSource, setTemplateSource] = useState(null); // 'saved' | 'auto'
+  const [showEditor, setShowEditor] = useState(false);
   const fileRef = useRef(null);
 
   const manual = accounts.filter(isManualAccount);
@@ -52,28 +67,66 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
   const targetIsPlaid = target !== "new" && plaid.some(a => a.id === target);
   const targetAcct = target !== "new" ? accounts.find(a => a.id === target) : null;
 
-  // Parse + build rows. Small files → cheap to recompute on every change.
-  const analysis = useMemo(() => {
-    if (!fileText) return null;
+  // Apply the PDF template → the same cell grid a CSV yields. Guarded like the
+  // CSV parse below: this runs during render, and the app has no error
+  // boundary, so an unexpected throw here would blank the whole PWA instead of
+  // showing a message.
+  // Derived, not stored: returning the error from the memo means it clears
+  // itself as soon as the inputs change. Setting state from inside a memo would
+  // leave a one-off failure stuck on screen for the rest of the session.
+  const { applied: pdfApplied, error: pdfApplyError } = useMemo(() => {
+    if (!(fileKind === "pdf" && pdfPages && pdfTemplate)) return { applied: null, error: null };
     try {
+      return { applied: applyTemplate(pdfPages, pdfTemplate), error: null };
+    } catch (e) {
+      console.error("applyTemplate failed", e);
+      return { applied: null, error: `Couldn't read this statement with these columns: ${e.message || e}` };
+    }
+  }, [fileKind, pdfPages, pdfTemplate]);
+
+  // Parse + build rows. Small files → cheap to recompute on every change.
+  // Both sources converge on buildRows, so the preview, dedup, categories,
+  // insert and comparison audit are identical for CSV and PDF.
+  const analysis = useMemo(() => {
+    try {
+      if (fileKind === "pdf") {
+        if (!pdfApplied) return null;
+        const { rows, skipped } = buildRows(pdfApplied.grid, { ...pdfApplied.buildOpts, existingIds });
+        return { rows, skipped, needsManualMapping: false, parsedRowCount: pdfApplied.grid.length };
+      }
+      if (!fileText) return null;
       return analyzeCsv(fileText, { existingIds, manualColumns: manualCols, amountSign });
     } catch (e) {
       return { error: e.message, rows: [], skipped: [], needsManualMapping: false };
     }
-  }, [fileText, existingIds, manualCols, amountSign]);
+  }, [fileKind, pdfApplied, fileText, existingIds, manualCols, amountSign]);
 
   // Load the target account's existing ids so dupes grey out. New account or a
   // Plaid target (comparison mode, no insert) → none.
   useEffect(() => {
-    if (target === "new" || targetIsPlaid) { setExistingIds(new Set()); return; }
+    if (target === "new" || targetIsPlaid) { setExistingIds(new Set()); setExistingSources(new Set()); return; }
     let cancelled = false;
     setLoadingIds(true);
     getExistingTxIds(target)
-      .then(ids => { if (!cancelled) setExistingIds(ids); })
-      .catch(() => { if (!cancelled) setExistingIds(new Set()); })
+      .then(({ ids, sources }) => { if (!cancelled) { setExistingIds(ids); setExistingSources(sources); } })
+      .catch(() => { if (!cancelled) { setExistingIds(new Set()); setExistingSources(new Set()); } })
       .finally(() => { if (!cancelled) setLoadingIds(false); });
     return () => { cancelled = true; };
   }, [target, targetIsPlaid]);
+
+  // A bank words the same transaction differently in its CSV and its PDF, so
+  // the dedup hash differs and feeding one account both formats double-inserts.
+  // Warn when the account already holds rows from the other format.
+  const incomingSource = fileKind === "pdf" ? "pdf" : "csv";
+  const targetIsManual = target !== "new" && !targetIsPlaid;
+  // Every row on a manual account arrived through an import, so its `source` is
+  // the format it came from — or 'plaid', the column default, if it predates
+  // the source column (sync never writes to a manual account, so that value
+  // can't mean anything else here). Treat ANY value that isn't the incoming
+  // format as a conflict, including that legacy one: we can't tell which format
+  // those rows came from, and guessing wrong double-counts them permanently.
+  const mixedSource = targetIsManual && [...existingSources].some(s => s !== incomingSource);
+  const legacySource = mixedSource && ![...existingSources].some(s => s === "csv" || s === "pdf");
 
   // Comparison mode: when the target is Plaid-linked, reconcile the CSV against
   // what Plaid already synced over the CSV's date range (± the drift window).
@@ -85,27 +138,136 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
     if (!min || !max) { setRecon({ counts: { matched: 0, csvOnly: 0, plaidOnly: 0, amountMismatches: 0 }, matched: [], amountMismatches: [], csvOnly: [], plaidOnly: [] }); return; }
     let cancelled = false;
     setReconLoading(true);
-    getAccountTransactionsInRange(target, padIso(min, -7), padIso(max, 7))
-      .then(plaidRows => { if (!cancelled) setRecon(reconcileCsv(csvRows, plaidRows)); })
-      .catch(e => { if (!cancelled) { console.error("reconcile failed", e); setError(e.message || "Couldn't load Plaid transactions to compare."); setRecon(null); } })
-      .finally(() => { if (!cancelled) setReconLoading(false); });
-    return () => { cancelled = true; };
+    // Debounced. Dragging a column edge in the PDF template editor re-derives
+    // the rows on every pointermove, and without this each one would fire
+    // another query at the database.
+    const handle = setTimeout(() => {
+      getAccountTransactionsInRange(target, padIso(min, -7), padIso(max, 7))
+        .then(plaidRows => { if (!cancelled) setRecon(reconcileCsv(csvRows, plaidRows)); })
+        .catch(e => { if (!cancelled) { console.error("reconcile failed", e); setError(e.message || "Couldn't load Plaid transactions to compare."); setRecon(null); } })
+        .finally(() => { if (!cancelled) setReconLoading(false); });
+    }, 350);
+    return () => { cancelled = true; clearTimeout(handle); };
   }, [target, targetIsPlaid, csvRows]);
+
+  // A statement is well under a megabyte. Reading a huge file would be held
+  // several times over in memory (the ArrayBuffer, pdf.js's copy, and its
+  // internal transfer), and on a phone that kills the whole app rather than
+  // surfacing an error — so refuse it up front with a clear message.
+  const MAX_FILE_BYTES = 25 * 1024 * 1024;
 
   async function onFile(e) {
     const f = e.target.files?.[0];
     if (!f) return;
+    if (f.size > MAX_FILE_BYTES) {
+      setFileName(f.name);
+      setFileText(null);
+      setPdfPages(null);
+      setError(
+        `That file is ${(f.size / 1024 / 1024).toFixed(0)}MB, which is too large to read safely on a phone. ` +
+        `Bank statements are normally well under 5MB — check you picked the right file.`
+      );
+      return;
+    }
     setError(null);
     setResult(null);
     setManualCols(null);
     setFileName(f.name);
+    setPdfPages(null);
+    setPdfTemplate(null);
+    setPdfAutoTemplate(null);
+    setTemplateSource(null);
+    setShowEditor(false);
+
+    const isPdf = /\.pdf$/i.test(f.name) || f.type === "application/pdf";
+    if (!isPdf) {
+      setFileKind("csv");
+      try {
+        setFileText(await f.text());
+      } catch {
+        setError("Couldn't read that file.");
+      }
+      return;
+    }
+
+    setFileKind("pdf");
+    setFileText(null);
+    setPdfBusy(true);
+    // Named so a failure says WHICH step broke — the difference between
+    // "your browser can't run the PDF reader" and "we couldn't read the
+    // layout" matters, and a bare message from a phone is impossible to act on.
+    let stage = "loading the PDF reader";
     try {
-      const text = await f.text();
-      setFileText(text);
-    } catch {
-      setError("Couldn't read that file.");
+      // pdf.js is ~1MB and only loaded here, the first time a PDF is opened.
+      const { extractPdfPages } = await import("../pdfExtract.js");
+      stage = "reading the file";
+      const buf = await f.arrayBuffer();
+      stage = "extracting text from the PDF";
+      const { pages, hasTextLayer, pageCount, truncated } = await extractPdfPages(buf);
+      if (truncated) {
+        // Never import part of a statement without saying so.
+        setError(
+          `This PDF has ${pageCount} pages and only the first ${pages.length} were read. ` +
+          `Anything after that would be missing — split the file if you need the rest.`
+        );
+      }
+      if (!hasTextLayer) {
+        setError(
+          "This PDF has no text layer — it looks like a scan or photo of a statement. " +
+          "Reading it would need OCR, which isn't supported. Download the CSV export instead if your bank offers one."
+        );
+        return;
+      }
+      setPdfPages(pages);
+      stage = "detecting the statement layout";
+      const auto = autoDetectTemplate(pages);
+      setPdfAutoTemplate(auto);
+      if (!auto) {
+        setError("Couldn't find a transaction table in this PDF automatically — set the columns by hand below.");
+        setPdfTemplate({
+          version: TEMPLATE_VERSION, boundaries: [0.2, 0.7], roles: ["date", "description", "amount"],
+          amountMode: "signed", amountSign: "out_positive", startAnchor: "", stopAnchor: "", pages: null,
+        });
+        setShowEditor(true);
+      } else {
+        setPdfTemplate(auto);
+        setTemplateSource("auto");
+      }
+    } catch (err) {
+      console.error(`pdf import failed while ${stage}`, err);
+      const detail = [err?.name, err?.message || String(err)].filter(Boolean).join(": ");
+      setError(`Couldn't read that PDF — it failed while ${stage}. ${detail}`);
+    } finally {
+      setPdfBusy(false);
     }
   }
+
+  // A template the user already taught for THIS account wins over auto-detect.
+  // Switching to an account without one must fall back to auto-detect rather
+  // than silently keeping the previous account's layout.
+  useEffect(() => {
+    if (fileKind !== "pdf" || !pdfPages) return;
+    let cancelled = false;
+    const useAuto = () => {
+      if (cancelled || !pdfAutoTemplate) return;
+      setPdfTemplate(pdfAutoTemplate);
+      setTemplateSource("auto");
+    };
+    if (target === "new") { useAuto(); return; }
+    getSetting(`pdftpl:${target}`)
+      .then(raw => {
+        if (cancelled) return;
+        const saved = raw ? JSON.parse(raw) : null;
+        if (saved && saved.version === TEMPLATE_VERSION) {
+          setPdfTemplate(saved);
+          setTemplateSource("saved");
+        } else {
+          useAuto();
+        }
+      })
+      .catch(() => useAuto());
+    return () => { cancelled = true; };
+  }, [fileKind, pdfPages, target, pdfAutoTemplate]);
 
   const rows = analysis?.rows || [];
   const newRows = rows.filter(r => !r.isDuplicate);
@@ -113,9 +275,12 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
   const skipped = analysis?.skipped || [];
   const preview = rows.slice(0, 200);
 
+  // mixedSource BLOCKS rather than warns: the app has no way to delete
+  // transactions, so importing a second format into the same account would
+  // permanently double-count it until someone runs SQL against the database.
   const canConfirm =
     !!analysis && !analysis.needsManualMapping && !analysis.error && !busy && !loadingIds &&
-    !targetIsPlaid && newRows.length > 0 &&
+    !targetIsPlaid && !mixedSource && newRows.length > 0 &&
     (target !== "new" || newName.trim().length > 0);
 
   async function confirm() {
@@ -131,8 +296,17 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
         accountName = acct.name;
       }
       const payload = newRows.map(toInsertRow);
-      const written = await importCsvTransactions(accountId, payload);
-      setResult({ written, dupCount, skipped: skipped.length, accountName });
+      const written = await importCsvTransactions(accountId, payload, incomingSource);
+      // Remember the PDF layout for this account so the next statement from the
+      // same bank is read without teaching it again.
+      if (fileKind === "pdf" && pdfTemplate) {
+        try {
+          await setSetting(`pdftpl:${accountId}`, JSON.stringify({ ...pdfTemplate, version: TEMPLATE_VERSION }));
+        } catch (e) {
+          console.warn("could not save the PDF layout template", e);
+        }
+      }
+      setResult({ written, dupCount, skipped: skipped.length, accountName, savedTemplate: fileKind === "pdf" });
       if (onImported) onImported();
     } catch (e) {
       console.error("csv import failed", e);
@@ -154,7 +328,7 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
       <div onClick={e => e.stopPropagation()} style={panelStyle}>
         {/* Header */}
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "18px 20px", borderBottom: "1px solid var(--border)" }}>
-          <div style={{ fontSize: 15, fontWeight: 600 }}>Import transactions from CSV</div>
+          <div style={{ fontSize: 15, fontWeight: 600 }}>Import transactions</div>
           <button onClick={onClose} disabled={busy} className="nbtn" title="Close" style={{ opacity: busy ? .4 : 1 }}>×</button>
         </div>
 
@@ -169,40 +343,88 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
               <div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.6 }}>
                 into <strong style={{ color: "var(--text)" }}>{result.accountName}</strong>.<br />
                 {result.dupCount > 0 && <>Skipped {result.dupCount} already-imported row{result.dupCount !== 1 ? "s" : ""}. </>}
-                {result.skipped > 0 && <>Ignored {result.skipped} unreadable/zero row{result.skipped !== 1 ? "s" : ""}.</>}
+                {result.skipped > 0 && <>Ignored {result.skipped} unreadable/zero row{result.skipped !== 1 ? "s" : ""}. </>}
+                {result.savedTemplate && <><br />The statement layout was saved — next month's PDF reads automatically.</>}
               </div>
             </div>
           ) : (
             <>
               {/* 1 — File */}
               <div style={{ marginBottom: 18 }}>
-                <div style={sectionLabel}>1 · Choose a CSV file</div>
-                <input ref={fileRef} type="file" accept=".csv,text/csv,text/plain" onChange={onFile}
+                <div style={sectionLabel}>1 · Choose a statement file</div>
+                <input ref={fileRef} type="file" accept=".csv,.pdf,text/csv,text/plain,application/pdf" onChange={onFile}
                   style={{ display: "none" }} />
-                <button className="ibtn" onClick={() => fileRef.current?.click()} style={{ fontSize: 13 }}>
-                  {fileName ? "Choose a different file" : "Choose file…"}
+                <button className="ibtn" onClick={() => fileRef.current?.click()} style={{ fontSize: 13 }} disabled={pdfBusy}>
+                  {pdfBusy ? "Reading PDF…" : fileName ? "Choose a different file" : "Choose CSV or PDF…"}
                 </button>
                 {fileName && (
                   <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 8 }}>
                     {fileName}
+                    {fileKind === "pdf" && pdfPages && <> · {pdfPages.length} page{pdfPages.length !== 1 ? "s" : ""}</>}
                     {analysis && !analysis.needsManualMapping && !analysis.error && (
                       <> · <strong style={{ color: "var(--text)" }}>{rows.length}</strong> transaction{rows.length !== 1 ? "s" : ""} found
                         {skipped.length > 0 && <> · {skipped.length} skipped</>}</>
                     )}
                   </div>
                 )}
-                {analysis?.error && (
-                  <div style={{ fontSize: 12, color: "#A32D2D", marginTop: 8 }}>{analysis.error}</div>
+                {(analysis?.error || pdfApplyError) && (
+                  <div style={{ fontSize: 12, color: "#A32D2D", marginTop: 8 }}>{analysis?.error || pdfApplyError}</div>
                 )}
               </div>
 
               {/* 1b — Manual column mapping fallback (non-BECU / undetected header) */}
-              {fileText && analysis?.needsManualMapping && (
+              {fileKind === "csv" && fileText && analysis?.needsManualMapping && (
                 <ManualMapper fileText={fileText} onApply={setManualCols} amountSign={amountSign} setAmountSign={setAmountSign} selStyle={selStyle} sectionLabel={sectionLabel} />
               )}
 
+              {/* 1c — PDF layout template: auto-detected or previously taught. */}
+              {fileKind === "pdf" && pdfPages && pdfTemplate && (
+                <div style={{ marginBottom: 18 }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 8 }}>
+                    <div style={sectionLabel}>Statement layout</div>
+                    <button className="ibtn" style={{ fontSize: 11 }} onClick={() => setShowEditor(s => !s)}>
+                      {showEditor ? "Done adjusting" : "Adjust columns"}
+                    </button>
+                  </div>
+                  <div style={{
+                    fontSize: 12, borderRadius: 8, padding: "9px 12px", lineHeight: 1.5,
+                    background: pdfApplied?.layoutSuspect ? "#FCEBEB" : "var(--bg)",
+                    border: `1px solid ${pdfApplied?.layoutSuspect ? "#F09595" : "var(--border)"}`,
+                    color: pdfApplied?.layoutSuspect ? "#A32D2D" : "var(--muted)",
+                  }}>
+                    {pdfApplied?.layoutSuspect
+                      ? "Couldn't read this statement with the saved layout — the bank may have changed its format. Open “Adjust columns” and re-confirm."
+                      : (() => {
+                        const t = rowTotals(rows);
+                        return (
+                          <>
+                            {templateSource === "saved"
+                              ? <>Using the layout you saved for this account. </>
+                              : <>Layout detected automatically. </>}
+                            <strong style={{ color: "var(--text)" }}>{rows.length}</strong> transactions read,
+                            totalling <strong style={{ color: "var(--text)" }}>{money(t.out)} out</strong>
+                            {t.in > 0 && <> and <strong style={{ color: "var(--text)" }}>{money(t.in)} in</strong></>}.
+                            <br />Compare those totals with the ones printed on your statement — if they match, the whole
+                            statement was read correctly.
+                          </>
+                        );
+                      })()}
+                  </div>
+                  {showEditor && (
+                    <div style={{ marginTop: 12 }}>
+                      <PdfTemplateEditor pages={pdfPages} template={pdfTemplate} onChange={setPdfTemplate} rowCount={rows.length} />
+                      {pdfAutoTemplate && (
+                        <button className="ibtn" style={{ fontSize: 11 }} onClick={() => { setPdfTemplate(pdfAutoTemplate); setTemplateSource("auto"); }}>
+                          Reset to auto-detected
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
               {/* 2 — Target account */}
-              {fileText && analysis && !analysis.needsManualMapping && !analysis.error && (
+              {(fileKind === "pdf" ? !!pdfApplied : !!fileText) && analysis && !analysis.needsManualMapping && !analysis.error && (
                 <>
                   <div style={{ marginBottom: 18 }}>
                     <div style={sectionLabel}>2 · Import into</div>
@@ -225,25 +447,46 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                         <input value={newName} onChange={e => setNewName(e.target.value)} placeholder="Account name (e.g. Mason Checking)"
                           style={{ ...selStyle, fontSize: 16 }} autoFocus />
                         <div style={{ display: "flex", gap: 8 }}>
-                          {["checking", "savings"].map(st => (
+                          {["checking", "savings", "credit"].map(st => (
                             <button key={st} onClick={() => setNewSubtype(st)}
                               style={{ flex: 1, padding: "8px 0", borderRadius: 8, fontFamily: "inherit", fontSize: 12, fontWeight: 600, cursor: "pointer",
                                 background: newSubtype === st ? "#7F77DD22" : "var(--bg)", color: newSubtype === st ? "#7F77DD" : "var(--muted)",
                                 border: `1px solid ${newSubtype === st ? "#7F77DD" : "var(--border)"}` }}>
-                              {st[0].toUpperCase() + st.slice(1)}
+                              {st === "credit" ? "Credit card" : st[0].toUpperCase() + st.slice(1)}
                             </button>
                           ))}
                         </div>
                         <div style={{ fontSize: 11, color: "var(--muted)" }}>
-                          Savings outflows never count as spending in Trends; pick Checking for a day-to-day account.
+                          {newSubtype === "credit"
+                            ? "Card purchases count as spending by category; refunds and payments never count as income."
+                            : "Savings outflows never count as spending in Trends; pick Checking for a day-to-day account."}
                         </div>
+                        {plaid.length > 0 && (
+                          <div style={{ fontSize: 11, color: "#8A6D1F", background: "#FDF6E3", border: "1px solid #E8D9A8", borderRadius: 8, padding: "8px 10px", lineHeight: 1.5 }}>
+                            Only for an account that <strong>isn't</strong> already connected. If this statement belongs to one of your
+                            connected accounts, pick it above instead — importing it here would count every transaction twice.
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {mixedSource && (
+                      <div style={{ marginTop: 10, fontSize: 12, color: "#A32D2D", background: "#FCEBEB", border: "1px solid #F09595", borderRadius: 8, padding: "10px 12px", lineHeight: 1.5 }}>
+                        {legacySource
+                          ? <>This account already holds imported transactions from before the app started recording which format they
+                            came from. If they came from a {incomingSource === "pdf" ? "CSV" : "PDF"}, importing this
+                            {incomingSource === "pdf" ? " PDF" : " CSV"} would add every transaction a second time — banks word the same
+                            transaction differently in the two formats, so the duplicate check can't see it. Import into a new account instead.</>
+                          : <>This account already holds transactions imported from {incomingSource === "pdf" ? "a CSV" : "a PDF"}. Banks word
+                            the same transaction differently in the two formats, so importing both would add each transaction twice. Stick to
+                            one format per account, or create a separate account for this one.</>}
                       </div>
                     )}
 
                     {targetIsPlaid && (
                       <div style={{ marginTop: 10, fontSize: 12, color: "var(--muted)", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8, padding: "10px 12px", lineHeight: 1.5 }}>
-                        This account already syncs via Plaid. Nothing will be imported — the CSV is compared against what Plaid synced
-                        to surface sync gaps, pending/timing differences, and amount mismatches.
+                        This account already syncs via Plaid. Nothing will be imported — your statement is compared against what
+                        Plaid synced, to surface sync gaps, pending/timing differences, and amount mismatches.
                       </div>
                     )}
                   </div>
@@ -467,7 +710,7 @@ function Reconciliation({ recon, loading, sectionLabel }) {
     <div style={{ marginBottom: 10 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
         <div style={sectionLabel}>3 · Comparison audit</div>
-        <div style={{ fontSize: 11, color: "var(--muted)" }}>{c.csvTotal} CSV · {c.plaidTotal} synced</div>
+        <div style={{ fontSize: 11, color: "var(--muted)" }}>{c.csvTotal} in file · {c.plaidTotal} synced</div>
       </div>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 12 }}>
         {chip("matched", c.matched, "#1D9E75")}
@@ -476,7 +719,7 @@ function Reconciliation({ recon, loading, sectionLabel }) {
         {chip("Plaid-only", c.plaidOnly, "#888780")}
       </div>
 
-      <ReconSection title="In your CSV, missing from Plaid" hint="Possible sync gaps — Plaid may not have picked these up." color="#D85A30" count={recon.csvOnly.length}>
+      <ReconSection title="In your statement, missing from Plaid" hint="Possible sync gaps — Plaid may not have picked these up." color="#D85A30" count={recon.csvOnly.length}>
         {recon.csvOnly.slice(0, RECON_CAP).map((r, i) => (
           <ReconRow key={i} left={r.description} sub={r.date} amount={money(r.amount)} />
         ))}
@@ -492,7 +735,7 @@ function Reconciliation({ recon, loading, sectionLabel }) {
         ))}
       </ReconSection>
 
-      <ReconSection title="Synced by Plaid, not in your CSV" hint="Pending, timing, or simply not in this export yet." color="#888780" count={recon.plaidOnly.length}>
+      <ReconSection title="Synced by Plaid, not in your statement" hint="Pending, timing, or simply not in this export yet." color="#888780" count={recon.plaidOnly.length}>
         {recon.plaidOnly.slice(0, RECON_CAP).map((r, i) => (
           <ReconRow key={i} left={r.description || r.merchant_name || "Transaction"} sub={`${r.date}${r.pending ? " · pending" : ""}`} amount={money(r.amount)} />
         ))}
@@ -509,7 +752,7 @@ function Reconciliation({ recon, loading, sectionLabel }) {
       </ReconSection>
 
       <div style={{ fontSize: 11, color: "var(--muted)", background: "var(--bg)", borderRadius: 8, padding: "8px 10px", lineHeight: 1.5 }}>
-        {cleanMatched} of {c.csvTotal} CSV rows matched cleanly. Nothing was imported — this account stays Plaid-synced.
+        {cleanMatched} of {c.csvTotal} statement rows matched cleanly. Nothing was imported — this account stays Plaid-synced.
       </div>
     </div>
   );
