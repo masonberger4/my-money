@@ -48,14 +48,36 @@ function cloneValue(value, seen) {
     return out;
   }
   if (typeof ArrayBuffer !== 'undefined') {
-    if (value instanceof ArrayBuffer) return value.slice(0);
-    if (ArrayBuffer.isView(value)) {
-      // Typed arrays and DataViews get their own copy of the buffer.
-      if (typeof DataView !== 'undefined' && value instanceof DataView) {
-        return new DataView(value.buffer.slice(0), 0, value.byteLength);
-      }
-      return new value.constructor(value);
+    if (value instanceof ArrayBuffer) {
+      const copy = value.slice(0);
+      seen.set(value, copy);
+      return copy;
     }
+    if (ArrayBuffer.isView(value)) {
+      // Clone the underlying buffer once (memoized, so several views onto the
+      // same buffer keep sharing it) and rebuild the view over it at the SAME
+      // byteOffset. Copying just the window would silently move the view to
+      // offset 0 and hand back the wrong bytes.
+      const buffer = cloneValue(value.buffer, seen);
+      const out =
+        typeof DataView !== 'undefined' && value instanceof DataView
+          ? new DataView(buffer, value.byteOffset, value.byteLength)
+          : new value.constructor(buffer, value.byteOffset, value.length);
+      seen.set(value, out);
+      return out;
+    }
+  }
+  if (value instanceof Error) {
+    // Plain object cloning would flatten an Error to {} — message, name and
+    // stack are all non-enumerable.
+    const Ctor = typeof globalThis[value.name] === 'function' ? globalThis[value.name] : Error;
+    const out = new Ctor(value.message);
+    seen.set(value, out);
+    out.name = value.name;
+    if (value.stack !== undefined) out.stack = value.stack;
+    if (value.cause !== undefined) out.cause = cloneValue(value.cause, seen);
+    for (const key of Object.keys(value)) out[key] = cloneValue(value[key], seen);
+    return out;
   }
   if (typeof ImageData !== 'undefined' && value instanceof ImageData) {
     return new ImageData(new Uint8ClampedArray(value.data), value.width, value.height);

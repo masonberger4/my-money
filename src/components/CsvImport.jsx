@@ -71,15 +71,16 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
   // CSV parse below: this runs during render, and the app has no error
   // boundary, so an unexpected throw here would blank the whole PWA instead of
   // showing a message.
-  const [pdfApplyError, setPdfApplyError] = useState(null);
-  const pdfApplied = useMemo(() => {
-    if (!(fileKind === "pdf" && pdfPages && pdfTemplate)) return null;
+  // Derived, not stored: returning the error from the memo means it clears
+  // itself as soon as the inputs change. Setting state from inside a memo would
+  // leave a one-off failure stuck on screen for the rest of the session.
+  const { applied: pdfApplied, error: pdfApplyError } = useMemo(() => {
+    if (!(fileKind === "pdf" && pdfPages && pdfTemplate)) return { applied: null, error: null };
     try {
-      return applyTemplate(pdfPages, pdfTemplate);
+      return { applied: applyTemplate(pdfPages, pdfTemplate), error: null };
     } catch (e) {
       console.error("applyTemplate failed", e);
-      setPdfApplyError(e.message || String(e));
-      return null;
+      return { applied: null, error: `Couldn't read this statement with these columns: ${e.message || e}` };
     }
   }, [fileKind, pdfPages, pdfTemplate]);
 
@@ -130,16 +131,37 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
     if (!min || !max) { setRecon({ counts: { matched: 0, csvOnly: 0, plaidOnly: 0, amountMismatches: 0 }, matched: [], amountMismatches: [], csvOnly: [], plaidOnly: [] }); return; }
     let cancelled = false;
     setReconLoading(true);
-    getAccountTransactionsInRange(target, padIso(min, -7), padIso(max, 7))
-      .then(plaidRows => { if (!cancelled) setRecon(reconcileCsv(csvRows, plaidRows)); })
-      .catch(e => { if (!cancelled) { console.error("reconcile failed", e); setError(e.message || "Couldn't load Plaid transactions to compare."); setRecon(null); } })
-      .finally(() => { if (!cancelled) setReconLoading(false); });
-    return () => { cancelled = true; };
+    // Debounced. Dragging a column edge in the PDF template editor re-derives
+    // the rows on every pointermove, and without this each one would fire
+    // another query at the database.
+    const handle = setTimeout(() => {
+      getAccountTransactionsInRange(target, padIso(min, -7), padIso(max, 7))
+        .then(plaidRows => { if (!cancelled) setRecon(reconcileCsv(csvRows, plaidRows)); })
+        .catch(e => { if (!cancelled) { console.error("reconcile failed", e); setError(e.message || "Couldn't load Plaid transactions to compare."); setRecon(null); } })
+        .finally(() => { if (!cancelled) setReconLoading(false); });
+    }, 350);
+    return () => { cancelled = true; clearTimeout(handle); };
   }, [target, targetIsPlaid, csvRows]);
+
+  // A statement is well under a megabyte. Reading a huge file would be held
+  // several times over in memory (the ArrayBuffer, pdf.js's copy, and its
+  // internal transfer), and on a phone that kills the whole app rather than
+  // surfacing an error — so refuse it up front with a clear message.
+  const MAX_FILE_BYTES = 25 * 1024 * 1024;
 
   async function onFile(e) {
     const f = e.target.files?.[0];
     if (!f) return;
+    if (f.size > MAX_FILE_BYTES) {
+      setFileName(f.name);
+      setFileText(null);
+      setPdfPages(null);
+      setError(
+        `That file is ${(f.size / 1024 / 1024).toFixed(0)}MB, which is too large to read safely on a phone. ` +
+        `Bank statements are normally well under 5MB — check you picked the right file.`
+      );
+      return;
+    }
     setError(null);
     setResult(null);
     setManualCols(null);
