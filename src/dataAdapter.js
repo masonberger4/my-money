@@ -154,12 +154,35 @@ function maxMatchTransfers(outs, ins) {
 
   // Candidate ins for each out, nearest first: among the maximum matchings, this
   // biases towards the most plausible (closest-dated) pairing.
-  const adj = L.map(out =>
-    R.map((inn, j) => ({ j, gap: Math.abs(dayNumber(inn.date) - dayNumber(out.date)) }))
-      .filter(({ j, gap }) => gap <= INTERNAL_MATCH_WINDOW_DAYS && R[j].account_id !== out.account_id)
-      .sort((a, b) => a.gap - b.gap || a.j - b.j)
-      .map(({ j }) => j)
-  );
+  //
+  // R is date-sorted, so the in-window candidates are a CONTIGUOUS slice — found
+  // by binary search rather than by scanning every in for every out. Years of
+  // imported history can put hundreds of same-amount transfers in one bucket,
+  // and building the full product there would cost quadratic time on the main
+  // thread every time Trends loads.
+  const rDays = R.map(r => dayNumber(r.date));
+  const firstFrom = target => {
+    let lo = 0;
+    let hi = rDays.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (rDays[mid] < target) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  };
+  const adj = L.map(out => {
+    const od = dayNumber(out.date);
+    const edges = [];
+    for (let j = firstFrom(od - INTERNAL_MATCH_WINDOW_DAYS); j < R.length; j++) {
+      const gap = rDays[j] - od;
+      if (!(gap <= INTERNAL_MATCH_WINDOW_DAYS)) break; // sorted → nothing later fits
+      if (R[j].account_id === out.account_id) continue;
+      edges.push({ j, gap: Math.abs(gap) });
+    }
+    edges.sort((a, b) => a.gap - b.gap || a.j - b.j);
+    return edges.map(e => e.j);
+  });
 
   const matchOfIn = new Array(R.length).fill(-1);
   const matchOfOut = new Array(L.length).fill(-1);
