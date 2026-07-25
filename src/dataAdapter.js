@@ -160,6 +160,12 @@ function maxMatchTransfers(outs, ins) {
   // imported history can put hundreds of same-amount transfers in one bucket,
   // and building the full product there would cost quadratic time on the main
   // thread every time Trends loads.
+  //
+  // Load-bearing invariant: `byRow` orders by the date STRING, and these are
+  // canonical padded ISO (a Postgres `date not null` column), where lexicographic
+  // order equals chronological order — so rDays below is non-decreasing and the
+  // early `break` is safe. Keep byRow's first key the date if you touch it;
+  // sorting by anything else first would silently truncate the candidate walk.
   const rDays = R.map(r => dayNumber(r.date));
   const firstFrom = target => {
     let lo = 0;
