@@ -85,4 +85,62 @@ export function installPdfPolyfills() {
     // and copying is always a valid implementation of it.
     globalThis.structuredClone = value => cloneValue(value, new Map());
   }
+
+  installStreamAsyncIterator();
+}
+
+// Safari — including current versions — does not implement async iteration on
+// ReadableStream. pdf.js decompresses Flate/Brotli streams with
+//
+//     const { readable } = new DecompressionStream(name);
+//     for await (const chunk of readable) { … }
+//
+// and `readable[Symbol.asyncIterator]` is undefined there, so the loop throws
+// "undefined is not a function" — which is exactly what an iPhone reports
+// ("near '...i of t...'", the minified `for await (const i of t)`). Flate is
+// the standard PDF compression, so this fires on essentially every statement.
+//
+// The polyfill is the spec's own async-iterator semantics expressed over the
+// public reader API, so behavior matches a browser that has it natively.
+function installStreamAsyncIterator() {
+  if (typeof ReadableStream === 'undefined') return;
+  const proto = ReadableStream.prototype;
+  if (typeof proto[Symbol.asyncIterator] === 'function') return;
+
+  function values({ preventCancel = false } = {}) {
+    const reader = this.getReader();
+    return {
+      async next() {
+        try {
+          const { done, value } = await reader.read();
+          if (done) reader.releaseLock();
+          return { done, value };
+        } catch (err) {
+          reader.releaseLock();
+          throw err;
+        }
+      },
+      async return(value) {
+        if (!preventCancel) {
+          const cancelled = reader.cancel(value);
+          reader.releaseLock();
+          await cancelled;
+        } else {
+          reader.releaseLock();
+        }
+        return { done: true, value };
+      },
+      [Symbol.asyncIterator]() {
+        return this;
+      },
+    };
+  }
+
+  defineIfMissing(proto, 'values', values);
+  Object.defineProperty(proto, Symbol.asyncIterator, {
+    value: values,
+    writable: true,
+    configurable: true,
+    enumerable: false,
+  });
 }

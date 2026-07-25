@@ -190,12 +190,7 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
     } catch (err) {
       console.error(`pdf import failed while ${stage}`, err);
       const detail = [err?.name, err?.message || String(err)].filter(Boolean).join(": ");
-      setError(
-        `Couldn't read that PDF — it failed while ${stage}. ${detail}` +
-        (stage === "extracting text from the PDF" || stage === "loading the PDF reader"
-          ? " If this phone is on an older iOS, updating it may fix this."
-          : "")
-      );
+      setError(`Couldn't read that PDF — it failed while ${stage}. ${detail}`);
     } finally {
       setPdfBusy(false);
     }
