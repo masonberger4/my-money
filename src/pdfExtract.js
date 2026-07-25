@@ -4,9 +4,11 @@
 // testable in Node: this file is the ONLY place that touches pdf.js.
 //
 // pdfjs-dist is ~1MB, so it is loaded with a dynamic import the first time a
-// PDF is actually opened — it never lands in the main bundle. The worker is
-// bundled by Vite via `?url` (a local asset), so nothing is fetched from a CDN:
-// the import works offline and under a strict CSP, same as the rest of the app.
+// PDF is actually opened — it never lands in the main bundle. Nothing is
+// fetched from a CDN: both modules are bundled locally, so this works offline
+// and under a strict CSP, same as the rest of the app.
+//
+// The parser runs on the MAIN THREAD rather than in a Worker — see loadPdfjs().
 
 import { installPdfPolyfills } from './pdfPolyfills.js';
 

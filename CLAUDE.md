@@ -52,7 +52,8 @@ entry once shipped.
 | `src/csvImport.js` | Pure CSV-import core (no React/Supabase): `parseCsv`, `detectHeader`, `parseMoney`/`parseDate`, `guessCategory` (validated against `ERA_CATEGORIES`), transfer flagging, dedup `plaid_tx_id` hashing, `buildRows`/`analyzeCsv`. Also the comparison-mode core: `reconcileCsv` (max-matching audit), `descSimilarity`, `csvDateRange`. Testable in isolation. |
 | `src/components/CsvImport.jsx` | Accounts-tab import modal for **CSV *and* PDF**, two modes by target: **standalone** (manual target) file → preview (greyed dupes) → confirm; **comparison** (Plaid-linked target) read-only reconciliation audit, inserts nothing. Writes via dataAdapter's `createManualAccount`/`importCsvTransactions`; reads Plaid rows via `getAccountTransactionsInRange`. |
 | `src/pdfImport.js` | Pure PDF-statement parsing core (no pdf.js/React/Supabase): text runs → lines → columns → **the same cell grid `buildRows` consumes**. Template auto-detect (`autoDetectTemplate`), `applyTemplate`, month-name dates + year inference from the statement period, `normalizeDebitCredit`, `layoutFingerprint`. Testable in Node. |
-| `src/pdfExtract.js` | The only file that touches pdf.js. Lazy `import()` (keeps ~1.7MB out of the main bundle) of the **legacy** build; worker bundled by Vite via `?url` (no CDN, CSP/offline-safe). |
+| `src/pdfExtract.js` | The only file that touches pdf.js. Lazy `import()` (keeps ~1.8MB out of the main bundle) of the **legacy** build, bundled locally (no CDN, CSP/offline-safe). Runs the parser on the **main thread** via `globalThis.pdfjsWorker` so `src/pdfPolyfills.js` is in scope for it (a Worker has its own globals). |
+| `src/pdfPolyfills.js` | Feature-detected polyfills pdf.js needs on iOS Safari — **`ReadableStream` async iteration** (the load-bearing one; see Gotchas), plus `.at` and `structuredClone` for genuinely old devices. |
 | `src/components/PdfTemplateEditor.jsx` | Visual "teach it once" editor: renders the statement from its own text runs, draggable column boundaries, per-column role selectors, live parsed-row count. Saved per account as `pdftpl:<accountId>` in `settings`. |
 | `src/plaidClient.js` | Client → api/ fetch wrappers (JWT attached). |
 | `src/sync.js` | Single-flight wrapper triggering server sync. |
@@ -397,6 +398,16 @@ tracker is the liability half of the future net-worth feature — the
   iOS Safari don't have — it throws "getOrInsertComputed is not a function" on a
   real device (caught only because the harness drives a real browser). Load it
   with a dynamic `import()` so it stays out of the main bundle.
+- **Safari has no `ReadableStream` async iteration** — and pdf.js's
+  `getTextContent()` does `for await (const v of readableStream)`, so on EVERY
+  iPhone (not just old ones) reading a PDF died with JavaScriptCore's
+  "undefined is not a function (near '…i of t…')". `src/pdfPolyfills.js` fills
+  it in. The tell: `getDocument` succeeds and `getTextContent` throws. Don't
+  mistake this for an old-iOS problem — it isn't version-dependent. Emulate it
+  locally by `delete ReadableStream.prototype[Symbol.asyncIterator]`.
+- Anything new that runs during **render** in the import modal must be
+  try/caught — the app has **no React error boundary**, so a throw blanks the
+  whole PWA instead of showing a message.
 - A bank words the same transaction differently in its CSV and its PDF, so the
   dedup hash differs: importing both formats into ONE manual account
   double-inserts. `transactions.source` records `'csv'|'pdf'` and the importer

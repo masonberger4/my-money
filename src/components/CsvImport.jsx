@@ -67,11 +67,21 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
   const targetIsPlaid = target !== "new" && plaid.some(a => a.id === target);
   const targetAcct = target !== "new" ? accounts.find(a => a.id === target) : null;
 
-  // Apply the PDF template → the same cell grid a CSV yields.
-  const pdfApplied = useMemo(
-    () => (fileKind === "pdf" && pdfPages && pdfTemplate ? applyTemplate(pdfPages, pdfTemplate) : null),
-    [fileKind, pdfPages, pdfTemplate]
-  );
+  // Apply the PDF template → the same cell grid a CSV yields. Guarded like the
+  // CSV parse below: this runs during render, and the app has no error
+  // boundary, so an unexpected throw here would blank the whole PWA instead of
+  // showing a message.
+  const [pdfApplyError, setPdfApplyError] = useState(null);
+  const pdfApplied = useMemo(() => {
+    if (!(fileKind === "pdf" && pdfPages && pdfTemplate)) return null;
+    try {
+      return applyTemplate(pdfPages, pdfTemplate);
+    } catch (e) {
+      console.error("applyTemplate failed", e);
+      setPdfApplyError(e.message || String(e));
+      return null;
+    }
+  }, [fileKind, pdfPages, pdfTemplate]);
 
   // Parse + build rows. Small files → cheap to recompute on every change.
   // Both sources converge on buildRows, so the preview, dedup, categories,
@@ -164,7 +174,14 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
       stage = "reading the file";
       const buf = await f.arrayBuffer();
       stage = "extracting text from the PDF";
-      const { pages, hasTextLayer } = await extractPdfPages(buf);
+      const { pages, hasTextLayer, pageCount, truncated } = await extractPdfPages(buf);
+      if (truncated) {
+        // Never import part of a statement without saying so.
+        setError(
+          `This PDF has ${pageCount} pages and only the first ${pages.length} were read. ` +
+          `Anything after that would be missing — split the file if you need the rest.`
+        );
+      }
       if (!hasTextLayer) {
         setError(
           "This PDF has no text layer — it looks like a scan or photo of a statement. " +
@@ -229,9 +246,12 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
   const skipped = analysis?.skipped || [];
   const preview = rows.slice(0, 200);
 
+  // mixedSource BLOCKS rather than warns: the app has no way to delete
+  // transactions, so importing a second format into the same account would
+  // permanently double-count it until someone runs SQL against the database.
   const canConfirm =
     !!analysis && !analysis.needsManualMapping && !analysis.error && !busy && !loadingIds &&
-    !targetIsPlaid && newRows.length > 0 &&
+    !targetIsPlaid && !mixedSource && newRows.length > 0 &&
     (target !== "new" || newName.trim().length > 0);
 
   async function confirm() {
@@ -318,8 +338,8 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                     )}
                   </div>
                 )}
-                {analysis?.error && (
-                  <div style={{ fontSize: 12, color: "#A32D2D", marginTop: 8 }}>{analysis.error}</div>
+                {(analysis?.error || pdfApplyError) && (
+                  <div style={{ fontSize: 12, color: "#A32D2D", marginTop: 8 }}>{analysis?.error || pdfApplyError}</div>
                 )}
               </div>
 
