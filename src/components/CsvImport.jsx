@@ -118,8 +118,15 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
   // the dedup hash differs and feeding one account both formats double-inserts.
   // Warn when the account already holds rows from the other format.
   const incomingSource = fileKind === "pdf" ? "pdf" : "csv";
-  const mixedSource = !targetIsPlaid && target !== "new" &&
-    [...existingSources].some(s => s === "csv" || s === "pdf" ? s !== incomingSource : false);
+  const targetIsManual = target !== "new" && !targetIsPlaid;
+  // Every row on a manual account arrived through an import, so its `source` is
+  // the format it came from — or 'plaid', the column default, if it predates
+  // the source column (sync never writes to a manual account, so that value
+  // can't mean anything else here). Treat ANY value that isn't the incoming
+  // format as a conflict, including that legacy one: we can't tell which format
+  // those rows came from, and guessing wrong double-counts them permanently.
+  const mixedSource = targetIsManual && [...existingSources].some(s => s !== incomingSource);
+  const legacySource = mixedSource && ![...existingSources].some(s => s === "csv" || s === "pdf");
 
   // Comparison mode: when the target is Plaid-linked, reconcile the CSV against
   // what Plaid already synced over the CSV's date range (± the drift window).
@@ -465,9 +472,14 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
 
                     {mixedSource && (
                       <div style={{ marginTop: 10, fontSize: 12, color: "#A32D2D", background: "#FCEBEB", border: "1px solid #F09595", borderRadius: 8, padding: "10px 12px", lineHeight: 1.5 }}>
-                        This account already holds transactions imported from {incomingSource === "pdf" ? "a CSV" : "a PDF"}. Banks word the
-                        same transaction differently in the two formats, so importing both would add each transaction twice. Stick to one
-                        format per account, or create a separate account for this one.
+                        {legacySource
+                          ? <>This account already holds imported transactions from before the app started recording which format they
+                            came from. If they came from a {incomingSource === "pdf" ? "CSV" : "PDF"}, importing this
+                            {incomingSource === "pdf" ? " PDF" : " CSV"} would add every transaction a second time — banks word the same
+                            transaction differently in the two formats, so the duplicate check can't see it. Import into a new account instead.</>
+                          : <>This account already holds transactions imported from {incomingSource === "pdf" ? "a CSV" : "a PDF"}. Banks word
+                            the same transaction differently in the two formats, so importing both would add each transaction twice. Stick to
+                            one format per account, or create a separate account for this one.</>}
                       </div>
                     )}
 
