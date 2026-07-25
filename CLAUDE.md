@@ -130,6 +130,12 @@ playwright-core screenshot (`executablePath:'/opt/pw-browsers/chromium'`,
     tight — matching a depository→credit leg would wrongly wash out card
     payments (which `cashSpending` must count) and unmatched real-income
     deposits. Needs `raw_category` + `subtype` (both queried).
+    Pairing is a **maximum bipartite matching** (Kuhn's, in `maxMatchTransfers`,
+    per equal-amount bucket) — NOT greedy nearest-partner, which could give an
+    early leg the nearer partner and strand a later pair outside the window,
+    leaving a real transfer counted and inflating income AND spending equally
+    (net unaffected). Verified maximum against brute force. Inputs are sorted
+    before matching so the same data always washes the same pairs.
   - **Cash flow section** = net per month (income − spending), diverging bars.
   - Trends spending can legitimately differ from the Overview headline —
     different questions. Abandoned attempts (same-day/same-amount wash; blanket
@@ -164,6 +170,12 @@ playwright-core screenshot (`executablePath:'/opt/pw-browsers/chromium'`,
   pending-timing / amount·date·category mismatches. No cash-flow change (imported
   depository rows flow through `getCashFlow`; personal↔joint transfers wash across
   CSV+Plaid legs). The importer degrades gracefully if the two columns are absent.
+- **Internal-transfer max-matching** — `markInternalTransfers` pairs transfer
+  legs with a maximum bipartite matching instead of greedy nearest-partner (see
+  Conventions). Only affects two same-amount transfers made 2–5 days apart whose
+  legs drift 2–3 days — i.e. cross-bank personal↔joint ACH, which CSV/PDF import
+  made reachable; same-day BECU sweeps were already matched correctly, so most
+  months' figures don't move at all.
 - **PDF statement import** — the same modal accepts a PDF, for accounts whose
   statements are only downloadable that way. No per-bank code: `src/pdfExtract.js`
   (lazy pdf.js) yields positioned text runs, and a **template** the user confirms
@@ -188,17 +200,10 @@ _(none)_
 **Next: SimpleFIN migration** — replace Plaid as the bank feed (spec below;
 decided). **Then: Debt tracker** — **balance-only + hand-entered APR** under
 SimpleFIN (spec below; the `loan` sync fix that unblocks it is already on main).
-(CSV import — the permanent coverage floor for the off-Plaid plan — **shipped**;
-see Merged features.) Later (discussed, not committed): net worth over time,
-auto-categorization rules, cash-flow forecast, savings goals, CSV/PDF export,
-sign-out button. **`markInternalTransfers` max-matching** — the greedy
-nearest-gap matcher can strand one of two interleaved equal-amount transfer
-pairs whose legs drift across the 4-day window, leaving a genuine internal
-transfer counted (inflates Trends `cashIncome` AND `cashSpending` by the same
-amount, so monthly **net** is unaffected). CSV import's cross-bank personal↔joint
-legs (drift 1–3 days) make it more reachable — replace with earliest-unused-in
-ordering or a small bipartite max-matching. (Surfaced by the CSV adversarial
-pass; deliberately NOT changed there — cash-flow model changes were out of scope.)
+(CSV/PDF import — the permanent coverage floor for the off-Plaid plan — and the
+`markInternalTransfers` max-matching fix are **shipped**; see Merged features.)
+Later (discussed, not committed): net worth over time, auto-categorization
+rules, cash-flow forecast, savings goals, CSV/PDF export, sign-out button.
 
 ### Off-Plaid: SimpleFIN migration — build spec
 Decision (settled): replace Plaid with **SimpleFIN Bridge** as the primary bank

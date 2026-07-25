@@ -93,38 +93,100 @@ function dayNumber(iso) {
 // Exported so the CSV-import dry-run harness can verify washing against the
 // real logic (a personal↔joint transfer pair cancels across CSV + Plaid legs).
 export function markInternalTransfers(rows) {
-  const outs = [];
+  // Eligibility is unchanged: a depository TRANSFER_OUT pairs with a depository
+  // TRANSFER_IN of equal amount, on a DIFFERENT account, within the window.
+  // Keep the depository↔depository restriction tight — matching a
+  // depository→credit leg would wrongly wash out card payments (which
+  // cashSpending must count) and unmatched real-income deposits.
+  const outsByAmount = new Map();
   const insByAmount = new Map();
   for (const t of rows) {
     if (t.excluded || t.accounts?.type !== 'depository') continue;
     const raw = (t.raw_category || '').toUpperCase();
     if (t.amount > 0 && raw.startsWith('TRANSFER_OUT')) {
-      outs.push(t);
+      pushTo(outsByAmount, t.amount.toFixed(2), t);
     } else if (t.amount < 0 && raw.startsWith('TRANSFER_IN')) {
-      const key = (-t.amount).toFixed(2);
-      if (!insByAmount.has(key)) insByAmount.set(key, []);
-      insByAmount.get(key).push(t);
+      pushTo(insByAmount, (-t.amount).toFixed(2), t);
     }
   }
-  outs.sort((a, b) => (a.date < b.date ? -1 : 1));
-  for (const out of outs) {
-    const candidates = insByAmount.get(out.amount.toFixed(2));
-    if (!candidates) continue;
-    let best = null;
-    let bestGap = Infinity;
-    for (const cand of candidates) {
-      if (cand._internal || cand.account_id === out.account_id) continue;
-      const gap = Math.abs(dayNumber(cand.date) - dayNumber(out.date));
-      if (gap <= INTERNAL_MATCH_WINDOW_DAYS && gap < bestGap) {
-        best = cand;
-        bestGap = gap;
+
+  // Match within each equal-amount bucket — amounts must be equal to pair, so
+  // the buckets are independent and each stays small.
+  for (const [amount, outs] of outsByAmount) {
+    const ins = insByAmount.get(amount);
+    if (!ins || !ins.length) continue;
+    for (const [out, inn] of maxMatchTransfers(outs, ins)) {
+      out._internal = true;
+      inn._internal = true;
+    }
+  }
+}
+
+function pushTo(map, key, value) {
+  const list = map.get(key);
+  if (list) list.push(value);
+  else map.set(key, [value]);
+}
+
+// Pair up equal-amount transfer legs, washing AS MANY genuine pairs as
+// possible.
+//
+// The previous version walked the outs in date order and gave each one its
+// nearest unused in. That is greedy, and a nearer partner taken early can
+// strand a later pair whose only remaining partner is then outside the window:
+// outs on the 4th and 9th with ins on the 1st and 6th have a perfect pairing
+// (4↔1, 9↔6, both 3 days apart), but the 4th grabs the 6th (2 days) and the 9th
+// is left with the 1st, 8 days away. One real transfer then stays counted,
+// inflating BOTH Trends income and spending by the same amount.
+//
+// A maximum bipartite matching (Kuhn's augmenting paths — the same approach
+// reconcileCsv uses for the statement audit) has no such ordering sensitivity:
+// if a full pairing exists, it finds one.
+function maxMatchTransfers(outs, ins) {
+  // Deterministic order, so the same data always washes the same pairs
+  // regardless of the order rows arrived from the database.
+  const byRow = (a, b) =>
+    (a.date < b.date ? -1 : a.date > b.date ? 1 : 0) ||
+    String(a.account_id).localeCompare(String(b.account_id)) ||
+    String(a.plaid_tx_id || a.id || '').localeCompare(String(b.plaid_tx_id || b.id || ''));
+  const L = [...outs].sort(byRow);
+  const R = [...ins].sort(byRow);
+
+  // Candidate ins for each out, nearest first: among the maximum matchings, this
+  // biases towards the most plausible (closest-dated) pairing.
+  const adj = L.map(out =>
+    R.map((inn, j) => ({ j, gap: Math.abs(dayNumber(inn.date) - dayNumber(out.date)) }))
+      .filter(({ j, gap }) => gap <= INTERNAL_MATCH_WINDOW_DAYS && R[j].account_id !== out.account_id)
+      .sort((a, b) => a.gap - b.gap || a.j - b.j)
+      .map(({ j }) => j)
+  );
+
+  const matchOfIn = new Array(R.length).fill(-1);
+  const matchOfOut = new Array(L.length).fill(-1);
+  const augment = (i, seen) => {
+    for (const j of adj[i]) {
+      if (seen[j]) continue;
+      seen[j] = true;
+      if (matchOfIn[j] === -1 || augment(matchOfIn[j], seen)) {
+        matchOfIn[j] = i;
+        matchOfOut[i] = j;
+        return true;
       }
     }
-    if (best) {
-      best._internal = true;
-      out._internal = true;
-    }
+    return false;
+  };
+  // Fewest candidates first — the constrained legs claim a partner before the
+  // flexible ones do, which reaches a maximum matching with less backtracking.
+  const order = L.map((_, i) => i).sort((a, b) => adj[a].length - adj[b].length || a - b);
+  for (const i of order) {
+    if (adj[i].length) augment(i, new Array(R.length).fill(false));
   }
+
+  const pairs = [];
+  for (let i = 0; i < L.length; i++) {
+    if (matchOfOut[i] >= 0) pairs.push([L[i], R[matchOfOut[i]]]);
+  }
+  return pairs;
 }
 
 function getMonthTransactions(year, month) {
