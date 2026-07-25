@@ -412,6 +412,12 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                             ? "Card purchases count as spending by category; refunds and payments never count as income."
                             : "Savings outflows never count as spending in Trends; pick Checking for a day-to-day account."}
                         </div>
+                        {plaid.length > 0 && (
+                          <div style={{ fontSize: 11, color: "#8A6D1F", background: "#FDF6E3", border: "1px solid #E8D9A8", borderRadius: 8, padding: "8px 10px", lineHeight: 1.5 }}>
+                            Only for an account that <strong>isn't</strong> already connected. If this statement belongs to one of your
+                            connected accounts, pick it above instead — importing it here would count every transaction twice.
+                          </div>
+                        )}
                       </div>
                     )}
 

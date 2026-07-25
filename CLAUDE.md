@@ -163,21 +163,24 @@ playwright-core screenshot (`executablePath:'/opt/pw-browsers/chromium'`,
   pending-timing / amount·date·category mismatches. No cash-flow change (imported
   depository rows flow through `getCashFlow`; personal↔joint transfers wash across
   CSV+Plaid legs). The importer degrades gracefully if the two columns are absent.
+- **PDF statement import** — the same modal accepts a PDF, for accounts whose
+  statements are only downloadable that way. No per-bank code: `src/pdfExtract.js`
+  (lazy pdf.js) yields positioned text runs, and a **template** the user confirms
+  once in `PdfTemplateEditor` (drag column edges, label each column) turns them
+  into the **same cell grid `buildRows` consumes** — so dedup, categories, the
+  preview, the standalone insert and the comparison audit are reused unchanged.
+  Templates save per account as `pdftpl:<accountId>` in `settings` and re-apply to
+  later statements; rows are selected by SHAPE inside a text-anchored region and
+  no page/y coordinate is stored, so a template survives the table moving next
+  month. Month-name dates resolve from the statement period (Dec→Jan wrap
+  handled); card statements use the POSTED date to match Plaid. Adds a manual
+  **credit-card** account type and tags rows `source='csv'|'pdf'`. No migration.
+  Verified on real statements (Capital One 112 rows with totals matching the
+  statement exactly; NewRez mortgage 7 rows across a page-split table) and on a
+  real iPhone.
 
 ## Pending branches
-
-- **`claude/pdf-import`** — **PDF statement import**, for accounts whose statements
-  are only downloadable as PDFs. No per-bank code: pdf.js extracts positioned
-  text, a **template** the user confirms once in a visual editor (drag column
-  edges, label each column) is saved per account (`pdftpl:<accountId>` in
-  `settings`) and re-applied to later statements. A PDF becomes the same cell
-  grid a CSV yields, so `buildRows` and everything downstream (dedup, categories,
-  preview, standalone insert, comparison audit) are reused **unchanged**.
-  Also adds a manual **credit-card** account type (for a genuinely PDF-only card)
-  and tags imported rows `source='csv'|'pdf'` to warn on mixing formats.
-  No migration. Verified against two real statements (Capital One card: 112 rows,
-  totals match the statement exactly; NewRez mortgage: table split across pages
-  with negative reversal rows). Awaiting Mason's preview review + "merge pdf-import".
+_(none)_
 
 ## Roadmap
 
