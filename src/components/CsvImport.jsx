@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Component, useEffect, useMemo, useRef, useState } from "react";
 import { analyzeCsv, toInsertRow, parseCsv, reconcileCsv, csvDateRange, buildRows } from "../csvImport.js";
-import { applyTemplate, autoDetectTemplate, rowTotals, TEMPLATE_VERSION } from "../pdfImport.js";
+import { applyTemplate, autoDetectTemplate, defaultTemplate, rowTotals, TEMPLATE_VERSION } from "../pdfImport.js";
 import { createManualAccount, importCsvTransactions, getExistingTxIds, getAccountTransactionsInRange, isManualAccount } from "../dataAdapter.js";
 import { getSetting, setSetting } from "../db.js";
 import PdfTemplateEditor from "./PdfTemplateEditor.jsx";
@@ -37,6 +37,26 @@ function money(n) {
 
 const ROLE_LABELS = { date: "Date", description: "Description", debit: "Debit", credit: "Credit", amount: "Amount (signed)" };
 
+// Backstop for anything unguarded that throws during render inside the modal —
+// the app has no global error boundary, so without this a render throw blanks
+// the whole PWA. Scoped to the modal body only, so it can't swallow errors
+// elsewhere in the app.
+class ModalErrorBoundary extends Component {
+  constructor(props) { super(props); this.state = { failed: false }; }
+  static getDerivedStateFromError() { return { failed: true }; }
+  componentDidCatch(err, info) { console.error("import modal render failed", err, info); }
+  render() {
+    if (this.state.failed) {
+      return (
+        <div style={{ fontSize: 12, color: "#A32D2D", background: "#FCEBEB", border: "1px solid #F09595", borderRadius: 8, padding: "10px 12px" }}>
+          Something went wrong rendering this step — close and retry.
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 export default function CsvImport({ accounts = [], onClose, onImported }) {
   const [fileName, setFileName] = useState(null);
   const [fileText, setFileText] = useState(null);
@@ -50,6 +70,7 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
   const [loadingIds, setLoadingIds] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
+  const [pdfAdvisory, setPdfAdvisory] = useState(null); // non-fatal guidance, not the terminal error slot
   const [result, setResult] = useState(null);
   const [recon, setRecon] = useState(null);
   const [reconLoading, setReconLoading] = useState(false);
@@ -83,6 +104,12 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
       return { applied: null, error: `Couldn't read this statement with these columns: ${e.message || e}` };
     }
   }, [fileKind, pdfPages, pdfTemplate]);
+
+  // The auto-detect advisory has done its job once the hand-set columns parse
+  // rows — leaving it up next to a working preview reads as a problem.
+  useEffect(() => {
+    if (pdfAdvisory && pdfApplied?.grid?.length) setPdfAdvisory(null);
+  }, [pdfAdvisory, pdfApplied]);
 
   // Parse + build rows. Small files → cheap to recompute on every change.
   // Both sources converge on buildRows, so the preview, dedup, categories,
@@ -163,6 +190,7 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
       setFileName(f.name);
       setFileText(null);
       setPdfPages(null);
+      setPdfAdvisory(null);
       setError(
         `That file is ${(f.size / 1024 / 1024).toFixed(0)}MB, which is too large to read safely on a phone. ` +
         `Bank statements are normally well under 5MB — check you picked the right file.`
@@ -170,6 +198,7 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
       return;
     }
     setError(null);
+    setPdfAdvisory(null);
     setResult(null);
     setManualCols(null);
     setFileName(f.name);
@@ -223,11 +252,10 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
       const auto = autoDetectTemplate(pages);
       setPdfAutoTemplate(auto);
       if (!auto) {
-        setError("Couldn't find a transaction table in this PDF automatically — set the columns by hand below.");
-        setPdfTemplate({
-          version: TEMPLATE_VERSION, boundaries: [0.2, 0.7], roles: ["date", "description", "amount"],
-          amountMode: "signed", amountSign: "out_positive", startAnchor: "", stopAnchor: "", pages: null,
-        });
+        // Advisory, not the terminal error slot — the user can still fix the
+        // columns by hand, and this must clear once they do.
+        setPdfAdvisory("Couldn't find a transaction table in this PDF automatically — set the columns by hand below.");
+        setPdfTemplate(defaultTemplate());
         setShowEditor(true);
       } else {
         setPdfTemplate(auto);
@@ -334,6 +362,7 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
 
         {/* Body */}
         <div style={{ padding: "16px 20px", overflowY: "auto" }}>
+          <ModalErrorBoundary>
           {result ? (
             <div style={{ textAlign: "center", padding: "12px 0" }}>
               <div style={{ fontSize: 34, marginBottom: 8 }}>✓</div>
@@ -369,6 +398,11 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                 )}
                 {(analysis?.error || pdfApplyError) && (
                   <div style={{ fontSize: 12, color: "#A32D2D", marginTop: 8 }}>{analysis?.error || pdfApplyError}</div>
+                )}
+                {pdfAdvisory && (
+                  <div style={{ marginTop: 8, fontSize: 12, color: "var(--muted)", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8, padding: "10px 12px", lineHeight: 1.5 }}>
+                    {pdfAdvisory}
+                  </div>
                 )}
               </div>
 
@@ -558,6 +592,7 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
               )}
             </>
           )}
+          </ModalErrorBoundary>
         </div>
 
         {/* Footer */}
