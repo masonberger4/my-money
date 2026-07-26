@@ -21,8 +21,9 @@ export const ERA_CATEGORIES = [
   'Return',
 ];
 
-const TRANSFER_CATEGORY = 'Transfers and card payments';
-const RETURN_CATEGORY = 'Return';
+export const TRANSFER_CATEGORY = 'Transfers and card payments';
+export const RETURN_CATEGORY = 'Return';
+export const FALLBACK_CATEGORY = 'Shopping and gear';
 
 const unmappedWarned = new Set();
 

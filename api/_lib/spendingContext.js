@@ -29,7 +29,7 @@ export async function buildSpendingContext(householdId) {
 
   const { data: txs, error: txErr } = await supabase
     .from('transactions')
-    .select('account_id, date, amount, merchant_name, description, mapped_category')
+    .select('account_id, date, amount, merchant_name, description, mapped_category, user_category, user_description, excluded')
     .eq('household_id', householdId)
     .gte('date', sinceStr)
     .order('date', { ascending: false })
@@ -37,9 +37,10 @@ export async function buildSpendingContext(householdId) {
   if (txErr) throw txErr;
 
   const visibleIds = new Set(visible.map(a => a.id));
-  const usable = txs.filter(t => visibleIds.has(t.account_id));
+  const usable = txs.filter(t => visibleIds.has(t.account_id) && !t.excluded);
   for (const t of usable) {
-    t.mapped_category = applyAccountRules(
+    // Effective category: the user's override wins over the account rules.
+    t.mapped_category = t.user_category || applyAccountRules(
       t.mapped_category,
       t.amount,
       acctById.get(t.account_id)?.type
@@ -78,7 +79,7 @@ export async function buildSpendingContext(householdId) {
   for (const t of usable) {
     const a = acctById.get(t.account_id);
     const acctLabel = a?.nickname || `${a?.name || 'Account'}${a?.mask ? ` ··${a.mask}` : ''}`;
-    const name = t.merchant_name || t.description || 'Card transaction';
+    const name = t.user_description || t.merchant_name || t.description || 'Card transaction';
     lines.push(
       `${t.date} | ${acctLabel} | ${name} | ${t.mapped_category || 'Uncategorized'} | $${Number(t.amount).toFixed(2)}`
     );

@@ -7,12 +7,12 @@
     "dev": "concurrently -k -n vite,api -c blue,magenta \"vite\" \"node dev-server.js\"",
     "dev:api": "node dev-server.js",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "node --test \"test/**/*.test.js\""
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.112.1",
     "@supabase/supabase-js": "^2.45.0",
-    "date-fns": "^3.6.0",
     "pdfjs-dist": "^6.1.200",
     "plaid": "^27.0.0",
     "react": "^18.3.1",

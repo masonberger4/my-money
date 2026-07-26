@@ -456,6 +456,22 @@ export function suggestRoles(sampleRows, headerCells) {
   return roles;
 }
 
+// Bare-bones starting template for when auto-detect fails and the user must
+// set the columns by hand in the editor. No dateColumn — applyTemplate
+// defaults it to 'date'.
+export function defaultTemplate() {
+  return {
+    version: TEMPLATE_VERSION,
+    boundaries: [0.2, 0.7],
+    roles: ['date', 'description', 'amount'],
+    amountMode: 'signed',
+    amountSign: 'out_positive',
+    startAnchor: '',
+    stopAnchor: '',
+    pages: null,
+  };
+}
+
 // Full auto-detect: find a header, derive boundaries from the rows beneath it,
 // and propose roles + the anchor that bounds the table.
 export function autoDetectTemplate(pages) {

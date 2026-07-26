@@ -15,10 +15,7 @@
 //   amount         = -csvSignedValue     (= Debit - Credit, positive = out)
 // So a purchase (Debit) lands positive and a deposit (Credit) lands negative.
 
-import { ERA_CATEGORIES } from './categoryMap.js';
-
-const TRANSFER_CATEGORY = 'Transfers and card payments';
-const FALLBACK_CATEGORY = 'Shopping and gear';
+import { ERA_CATEGORIES, TRANSFER_CATEGORY, FALLBACK_CATEGORY } from './categoryMap.js';
 
 // ---------------------------------------------------------------------------
 // CSV tokenizer — a small state machine so quoted fields (embedded commas,
@@ -317,7 +314,7 @@ const TRANSFER_RE = /ONLINE BANKING TRANSFER|\bTRANSFER\s+(TO|FROM)\b/i;
 // spending) via guessCategory.
 const CARD_PAYMENT_RE = /\b(VISA|MASTERCARD|MASTER CARD|AMEX|AMERICAN EXPRESS|DISCOVER|CREDIT CARD|CREDIT CRD|CARD PAYMENT|CARD PMT|CC PYMT|CARDMEMBER)\b/i;
 
-function transferRawCategory(description, amount) {
+export function transferRawCategory(description, amount) {
   const d = String(description ?? '');
   if (CARD_PAYMENT_RE.test(d)) return '';
   if (!TRANSFER_RE.test(d)) return '';
@@ -335,6 +332,8 @@ function transferRawCategory(description, amount) {
 // the next export can prepend rows and shift every position, and folding that
 // in would re-hash every transaction and break idempotent re-import.
 // ---------------------------------------------------------------------------
+export const CSV_TX_ID_PREFIX = 'csv:';
+
 export function normalizeDescription(desc) {
   return String(desc ?? '')
     .trim()
@@ -455,7 +454,7 @@ export function buildRows(rows, opts = {}) {
     const hash = baseHash(dateIso, amount, normDesc);
     const ordinal = seenHash.get(hash) || 0;
     seenHash.set(hash, ordinal + 1);
-    const plaid_tx_id = `csv:${hash}:${ordinal}`;
+    const plaid_tx_id = `${CSV_TX_ID_PREFIX}${hash}:${ordinal}`;
 
     const raw_category = transferRawCategory(rawDesc, amount);
     const mapped_category = guessCategory(rawDesc);
@@ -539,9 +538,6 @@ export function analyzeCsv(text, { existingIds = new Set(), manualColumns = null
     needsManualMapping: false,
   };
 }
-
-export const MANUAL_INSTITUTION_NAME = 'Imported';
-export const CSV_TX_ID_PREFIX = 'csv:';
 
 // ===========================================================================
 // Reconciliation (Comparison mode — Phase 2). When the import target is a

@@ -45,7 +45,19 @@ export default function PdfTemplateEditor({ pages, template, onChange, rowCount 
 
   // Jump to the first page that actually yields rows, so the user lands on the
   // transaction table rather than the cover page.
-  const applied = useMemo(() => (pages && template ? applyTemplate(pages, template) : null), [pages, template]);
+  // Guarded: this runs during render, the app has no error boundary, and the
+  // editor opens on exactly the statements auto-detect FAILED on — a throw here
+  // would blank the whole PWA. null is the "no rows" shape everything below
+  // already handles.
+  const applied = useMemo(() => {
+    if (!(pages && template)) return null;
+    try {
+      return applyTemplate(pages, template);
+    } catch (e) {
+      console.error("applyTemplate failed in the template editor", e);
+      return null;
+    }
+  }, [pages, template]);
   useEffect(() => {
     if (!applied?.rowMeta?.length) return;
     const first = applied.rowMeta[0].page;

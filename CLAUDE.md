@@ -47,11 +47,12 @@ entry once shipped.
 | File | Role |
 |---|---|
 | `src/components/Dashboard.jsx` | Almost the entire UI — single file, inline styles, tabs: overview/categories/transactions/accounts/trends/recurring/ask. Shared mini-components: `Pill`, `Swatch`, `EditName`, `Sk` (skeleton), `Donut`. |
-| `src/dataAdapter.js` | All Supabase reads + shapes consumed by Dashboard; the Trends cash-flow model lives here (see Conventions). Keep return shapes stable. Also holds the CSV-import writes (`findOrCreateManualInstitution`, `createManualAccount`, `getExistingTxIds`, `importCsvTransactions`, `isManualAccount`), the comparison-mode read `getAccountTransactionsInRange`, and exports the cash-flow helpers (`markInternalTransfers`/`cashIncome`/`cashSpending`) for the dry-run harness. |
+| `src/dataAdapter.js` | All Supabase reads + shapes consumed by Dashboard. Keep return shapes stable. Also holds the CSV-import writes (`findOrCreateManualInstitution`, `createManualAccount`, `getExistingTxIds`, `importCsvTransactions`, `isManualAccount`), the comparison-mode read `getAccountTransactionsInRange`, and re-exports the cash-flow helpers (`markInternalTransfers`/`cashIncome`/`cashSpending`) from `cashFlow.js` so existing importers/harnesses keep working. |
+| `src/cashFlow.js` | The Trends cash-flow model (see Conventions), extracted pure: `markInternalTransfers` + `maxMatchTransfers` (Kuhn's), `cashIncome`/`cashSpending`, account-type predicates. Zero imports — plain-Node importable; covered by `test/cashFlow.test.js` incl. the brute-force matching parity check. |
 | `src/categoryMap.js` | Plaid category → app category mapping; `applyAccountRules` (credit-card negatives → "Return", excluded from income); pure JS, imported by server code too. `ERA_CATEGORIES` is the taxonomy source of truth (no "Housing"/"Income" member). |
 | `src/csvImport.js` | Pure CSV-import core (no React/Supabase): `parseCsv`, `detectHeader`, `parseMoney`/`parseDate`, `guessCategory` (validated against `ERA_CATEGORIES`), transfer flagging, dedup `plaid_tx_id` hashing, `buildRows`/`analyzeCsv`. Also the comparison-mode core: `reconcileCsv` (max-matching audit), `descSimilarity`, `csvDateRange`. Testable in isolation. |
 | `src/components/CsvImport.jsx` | Accounts-tab import modal for **CSV *and* PDF**, two modes by target: **standalone** (manual target) file → preview (greyed dupes) → confirm; **comparison** (Plaid-linked target) read-only reconciliation audit, inserts nothing. Writes via dataAdapter's `createManualAccount`/`importCsvTransactions`; reads Plaid rows via `getAccountTransactionsInRange`. |
-| `src/pdfImport.js` | Pure PDF-statement parsing core (no pdf.js/React/Supabase): text runs → lines → columns → **the same cell grid `buildRows` consumes**. Template auto-detect (`autoDetectTemplate`), `applyTemplate`, month-name dates + year inference from the statement period, `normalizeDebitCredit`, `layoutFingerprint`. Testable in Node. |
+| `src/pdfImport.js` | Pure PDF-statement parsing core (no pdf.js/React/Supabase): text runs → lines → columns → **the same cell grid `buildRows` consumes**. Template auto-detect (`autoDetectTemplate`), `applyTemplate`, month-name dates + year inference from the statement period, `normalizeDebitCredit`, `defaultTemplate` (the fallback the modal seeds the editor with). Testable in Node. |
 | `src/pdfExtract.js` | The only file that touches pdf.js. Lazy `import()` (keeps ~1.8MB out of the main bundle) of the **legacy** build, bundled locally (no CDN, CSP/offline-safe). Runs the parser on the **main thread** via `globalThis.pdfjsWorker` so `src/pdfPolyfills.js` is in scope for it (a Worker has its own globals). |
 | `src/pdfPolyfills.js` | Feature-detected polyfills pdf.js needs on iOS Safari — **`ReadableStream` async iteration** (the load-bearing one; see Gotchas), plus `.at` and `structuredClone` for genuinely old devices. |
 | `src/components/PdfTemplateEditor.jsx` | Visual "teach it once" editor: renders the statement from its own text runs, draggable column boundaries, per-column role selectors, live parsed-row count. Saved per account as `pdftpl:<accountId>` in `settings`. |
@@ -62,7 +63,8 @@ entry once shipped.
 | `api/_lib/plaid.js` | Credential list parsing + capacity picker. |
 | `api/_lib/supabase.js` | Service-role client + `requireUser` (JWT → householdId). |
 | `supabase/migrations/` | Ordered SQL migrations (additive-only on live data). |
-| `supabase/setup_all.sql` | One-paste fresh install — **DESTRUCTIVE, wipes all tables. Never run on live data. Never re-generate to include new migrations without that warning.** |
+| `supabase/setup_all.sql` | One-paste fresh install — **DESTRUCTIVE, wipes all tables. Never run on live data. Never re-generate to include new migrations without that warning.** Convenience snapshot only — `migrations/` is the source of truth; ends with a column-level self-check that raises if it drifts behind migrations. |
+| `test/` | `npm test` — Node's built-in `node --test`, zero deps. Covers the pure cores only: cashFlow (incl. brute-force max-matching parity), csvImport parsing/dedup-id idempotency, category rules. Run before pushing. |
 
 ## Development workflow
 
@@ -86,7 +88,8 @@ migrations in order, test triggers/RLS). UI — mock harness: a tiny Vite app
 rendering `Dashboard.jsx` with `resolve.alias` **full-match** regexes
 (`/^.*\/dataAdapter\.js$/`) swapping dataAdapter/sync/db/plaidClient for mocks;
 playwright-core screenshot (`executablePath:'/opt/pw-browsers/chromium'`,
-390×844). Screenshot new UI before pushing. Build:
+390×844). Screenshot new UI before pushing. Tests (checked in, not gitignored):
+`npm test` (node --test over `test/`). Build:
 `VITE_SUPABASE_URL=https://placeholder.supabase.co VITE_SUPABASE_ANON_KEY=placeholder npm run build`.
 
 ## Conventions
@@ -134,8 +137,11 @@ playwright-core screenshot (`executablePath:'/opt/pw-browsers/chromium'`,
     per equal-amount bucket) — NOT greedy nearest-partner, which could give an
     early leg the nearer partner and strand a later pair outside the window,
     leaving a real transfer counted and inflating income AND spending equally
-    (net unaffected). Verified maximum against brute force. Inputs are sorted
-    before matching so the same data always washes the same pairs.
+    (net unaffected). Verified maximum against brute force — that check is now a
+    permanent seeded test in `test/cashFlow.test.js`. Inputs are sorted
+    before matching so the same data always washes the same pairs. The whole
+    model lives in `src/cashFlow.js` (pure, zero imports); dataAdapter
+    re-exports the helpers.
   - **Cash flow section** = net per month (income − spending), diverging bars.
   - Trends spending can legitimately differ from the Overview headline —
     different questions. Abandoned attempts (same-day/same-amount wash; blanket
@@ -154,7 +160,10 @@ playwright-core screenshot (`executablePath:'/opt/pw-browsers/chromium'`,
 - **Recurring** — client-side subscription detection (`src/recurring.js`, pure).
 - **Search** — cross-month `ilike` search (`searchTransactions`).
 - **Assistant** — "Ask" tab, Claude spending Q&A (`api/assistant.js` +
-  `api/_lib/spendingContext.js`), read-only, model/effort selectable.
+  `api/_lib/spendingContext.js`), read-only, model/effort selectable. The
+  context honors user edits: skips `excluded` rows, prefers `user_category` /
+  `user_description` — keep any change to it deterministic (byte-stable output
+  per DB state) or prompt caching stops hitting.
 - **Trends joint-budget cash-flow + Cash flow section** (see Conventions).
 - **CSV import** — Accounts-tab modal, two modes by target account
   (`src/csvImport.js` pure core + `src/components/CsvImport.jsx`; migration
@@ -410,9 +419,10 @@ tracker is the liability half of the future net-worth feature — the
   it in. The tell: `getDocument` succeeds and `getTextContent` throws. Don't
   mistake this for an old-iOS problem — it isn't version-dependent. Emulate it
   locally by `delete ReadableStream.prototype[Symbol.asyncIterator]`.
-- Anything new that runs during **render** in the import modal must be
-  try/caught — the app has **no React error boundary**, so a throw blanks the
-  whole PWA instead of showing a message.
+- Anything that runs during **render** must be try/caught — the app has **no
+  React error boundary** except `ModalErrorBoundary` inside `CsvImport.jsx`,
+  which backstops only the import-modal body. Outside the modal a render throw
+  still blanks the whole PWA instead of showing a message.
 - A bank words the same transaction differently in its CSV and its PDF, so the
   dedup hash differs: importing both formats into ONE manual account
   double-inserts. `transactions.source` records `'csv'|'pdf'` and the importer
