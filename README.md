@@ -1,6 +1,6 @@
 # Personal Finance App
 
-A self-hosted, private personal finance dashboard. Connects to all your financial accounts — checking, savings, credit cards, 401k, brokerage, loans, mortgages — via Plaid. All data is cached locally on your device. No subscriptions. Your data stays yours.
+A self-hosted, private personal finance dashboard. Connects to your financial accounts — checking, savings, credit cards, loans, mortgages — via Plaid. All data lives in the household's own Supabase Postgres (cloud-first, no local cache). No subscriptions. Your data stays yours.
 
 ---
 
@@ -17,7 +17,7 @@ This project started as a spending dashboard built on top of Era Context (a fina
 - **Color picker per category** — click the swatch to change it, persists across sessions
 - **Inline category renaming** — double-click any category name to edit it
 - **Custom categories** — add your own with name and color via a modal
-- **All customizations persist** via artifact storage (migrating to IndexedDB in the full app)
+- **All customizations persist** via artifact storage (now the Supabase `settings` table in the full app)
 
 During that process we also:
 - Recategorized Costco from "Shopping and gear" → "Groceries" across 8 transactions
@@ -73,8 +73,7 @@ Era connects to Plaid under the hood and charges a subscription to sit in the mi
 | Backend / hosting | Vercel (Hobby tier) | Free, serverless functions in `/api/`, deploys from GitHub |
 | Database + auth | Supabase (free tier) | Postgres with row-level security, shared household login, multi-device |
 | Frontend | React + Vite | Carries forward the existing dashboard; fast dev experience |
-| Charts | Recharts | Replaces hand-rolled SVG donut chart with something maintainable |
-| Date handling | date-fns | Lightweight, tree-shakeable |
+| Charts | Hand-rolled inline SVG (incl. the `Donut` component) | No chart library — small, styleable, no bundle weight |
 | Bank auth UI | react-plaid-link | Plaid's official React component for the OAuth-style Link flow |
 
 ---
@@ -84,12 +83,10 @@ Era connects to Plaid under the hood and charges a subscription to sit in the mi
 | Type | Plaid product | What we show |
 |---|---|---|
 | Checking / savings | Transactions | Balance, transaction history, income detection |
-| Credit cards | Transactions + Liabilities | Balance, APR, payment due, transaction history |
-| 401k / brokerage | Investments | Holdings, allocation, gain/loss, total value |
-| Loans | Liabilities | Balance, APR, minimum payment, payoff projection |
-| Mortgages | Liabilities | Balance, rate, escrow, next payment |
+| Credit cards | Transactions | Balance, transaction history |
+| Loans / mortgages | Transactions | Balance (APR / minimum payment / payoff projection is the planned Debt tracker — see CLAUDE.md Roadmap) |
 
-All accounts feed into a **net worth view**: total assets minus total liabilities, computed live from IndexedDB.
+Only `depository`, `credit`, and `loan` account types are synced — no investments support. A **net worth view** (assets minus liabilities, computed from Supabase) is a possible later feature, not built.
 
 ---
 
@@ -154,23 +151,22 @@ Existing institutions keep syncing through whichever credential linked them.
 
 ## Carry-forward from Era dashboard
 
-Everything already built should be ported in with minimal changes. Storage swaps from `window.storage` (artifact API) to `db.settings` (Dexie). Everything else is UI code that transfers directly:
+Everything already built was ported in with minimal changes. Storage swapped from `window.storage` (artifact API) to the Supabase `settings` table. Everything else was UI code that transferred directly:
 
-- [ ] Month navigation with ‹ › arrows
-- [ ] Overview tab: donut chart + top categories + recent transactions
-- [ ] Categories tab: color swatches, inline renaming, custom categories, bar chart
-- [ ] Transactions tab: full list with category pills
-- [ ] Trends tab: 6-month bar chart (clickable), income vs. spending comparison
-- [ ] Summary cards: total spent, balance, month-over-month delta
+- [x] Month navigation with ‹ › arrows
+- [x] Overview tab: donut chart + top categories + recent transactions
+- [x] Categories tab: color swatches, inline renaming, custom categories, bar chart
+- [x] Transactions tab: full list with category pills
+- [x] Trends tab: 6-month bar chart (clickable), income vs. spending comparison
+- [x] Summary cards: total spent, balance, month-over-month delta
 
 ---
 
 ## New views to build
 
-- [ ] **Account list**: all linked accounts, grouped by type, with current balances and institution logos
-- [ ] **Net worth**: assets vs. liabilities summary at top, breakdown by account type
-- [ ] **Investments**: holdings table, allocation donut, total value and gain/loss
-- [ ] **Liabilities**: each loan/mortgage/card with payoff projection and minimum payment tracker
+- [x] **Account list**: all linked accounts, grouped by type, with current balances
+- [ ] **Net worth**: assets vs. liabilities summary at top, breakdown by account type (discussed, not committed)
+- [ ] **Debt tracker**: each loan/mortgage/card with payoff projection and minimum payment tracker (specced in CLAUDE.md Roadmap)
 - [ ] **Multi-account filter**: "All accounts" default, filter to one account or one account type
 
 ---
@@ -202,7 +198,7 @@ The app shell is cached by a service worker, so the home-screen app opens instan
 | Plaid | Free trial (10 connections) → Production | $0 during trial; paid after |
 | Vercel | Hobby | $0 |
 | Domain (optional) | — | ~$0.85/mo |
-| Supabase (optional, v2 cross-device sync) | Free tier | $0 |
+| Supabase (primary data store) | Free tier | $0 |
 
 ### Plaid connections
 
@@ -220,14 +216,14 @@ A **connection** is one bank login (Plaid calls it an *Item*), even if that logi
 | Phase | Description | Status |
 |---|---|---|
 | 0 | Era dashboard — spending breakdown, categories, trends, month nav | ✅ Done (as artifact) |
-| 1 | Plaid developer account, credentials, enable products | ⬜ Not started |
-| 2 | Project scaffold — Vite, dependencies, folder structure, git | ⬜ Not started |
-| 3 | Vercel serverless functions — link token, exchange, transactions, accounts, investments, liabilities | ⬜ Not started |
-| 4 | IndexedDB schema + sync logic via Dexie | ⬜ Not started |
-| 5 | Frontend — port Era dashboard, add multi-account views, net worth, investments, liabilities | ⬜ Not started |
-| 6 | Deploy to Vercel, environment variables, live URL | ⬜ Not started |
-| 7 | Mobile polish — PWA, touch targets, swipe nav, pull to refresh | ⬜ Not started |
-| 8 | (Optional) Supabase sync layer for cross-device consistency | ⬜ Backlog |
+| 1 | Plaid developer account, credentials, enable products | ✅ Done |
+| 2 | Project scaffold — Vite, dependencies, folder structure, git | ✅ Done |
+| 3 | Vercel serverless functions — link token, exchange, sync | ✅ Done |
+| 4 | Supabase schema + server-side sync (replaced the original IndexedDB/Dexie plan) | ✅ Done |
+| 5 | Frontend — port Era dashboard, multi-account accounts view | ✅ Done |
+| 6 | Deploy to Vercel, environment variables, live URL | ✅ Done |
+| 7 | Mobile polish — PWA install | ✅ Done (further polish tracked in Mobile section) |
+| 8 | Supabase as the primary store (promoted from optional sync layer) | ✅ Done |
 
 ---
 
