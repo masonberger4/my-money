@@ -5,18 +5,13 @@ export default function EmptyState({ onLinked }) {
     <div
       style={{
         minHeight: '100vh',
-        background: 'var(--bg,#F7F6F2)',
-        color: 'var(--text,#1a1a18)',
+        background: 'var(--bg)',
+        color: 'var(--text)',
         fontFamily: "'DM Sans','Helvetica Neue',sans-serif",
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
         padding: 24,
-        '--bg': '#F7F6F2',
-        '--card': '#FFFFFF',
-        '--text': '#1a1a18',
-        '--muted': '#888780',
-        '--border': '#E4E2DC',
       }}
     >
       <div

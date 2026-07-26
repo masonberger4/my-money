@@ -48,7 +48,7 @@ class ModalErrorBoundary extends Component {
   render() {
     if (this.state.failed) {
       return (
-        <div style={{ fontSize: 12, color: "#A32D2D", background: "#FCEBEB", border: "1px solid #F09595", borderRadius: 8, padding: "10px 12px" }}>
+        <div style={{ fontSize: 12, color: "var(--danger)", background: "var(--danger-bg)", border: "1px solid var(--danger-border)", borderRadius: 8, padding: "10px 12px" }}>
           Something went wrong rendering this step — close and retry.
         </div>
       );
@@ -349,7 +349,7 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
     width: "92vw", maxWidth: 540, maxHeight: "88vh", display: "flex", flexDirection: "column", overflow: "hidden",
   };
   const sectionLabel = { fontSize: 11, fontWeight: 600, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".05em", marginBottom: 8 };
-  const selStyle = { fontSize: 13, fontFamily: "inherit", color: "var(--text)", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8, padding: "8px 10px", outline: "none", width: "100%" };
+  const selStyle = { fontSize: 13, fontFamily: "inherit", color: "var(--text)", background: "var(--input-bg)", border: "1px solid var(--border)", borderRadius: 8, padding: "8px 10px", outline: "none", width: "100%" };
 
   return (
     <div className="overlay" onClick={busy ? undefined : onClose}>
@@ -397,7 +397,7 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                   </div>
                 )}
                 {(analysis?.error || pdfApplyError) && (
-                  <div style={{ fontSize: 12, color: "#A32D2D", marginTop: 8 }}>{analysis?.error || pdfApplyError}</div>
+                  <div style={{ fontSize: 12, color: "var(--danger)", marginTop: 8 }}>{analysis?.error || pdfApplyError}</div>
                 )}
                 {pdfAdvisory && (
                   <div style={{ marginTop: 8, fontSize: 12, color: "var(--muted)", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8, padding: "10px 12px", lineHeight: 1.5 }}>
@@ -422,9 +422,9 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                   </div>
                   <div style={{
                     fontSize: 12, borderRadius: 8, padding: "9px 12px", lineHeight: 1.5,
-                    background: pdfApplied?.layoutSuspect ? "#FCEBEB" : "var(--bg)",
-                    border: `1px solid ${pdfApplied?.layoutSuspect ? "#F09595" : "var(--border)"}`,
-                    color: pdfApplied?.layoutSuspect ? "#A32D2D" : "var(--muted)",
+                    background: pdfApplied?.layoutSuspect ? "var(--danger-bg)" : "var(--bg)",
+                    border: `1px solid ${pdfApplied?.layoutSuspect ? "var(--danger-border)" : "var(--border)"}`,
+                    color: pdfApplied?.layoutSuspect ? "var(--danger)" : "var(--muted)",
                   }}>
                     {pdfApplied?.layoutSuspect
                       ? "Couldn't read this statement with the saved layout — the bank may have changed its format. Open “Adjust columns” and re-confirm."
@@ -484,8 +484,12 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                           {["checking", "savings", "credit"].map(st => (
                             <button key={st} onClick={() => setNewSubtype(st)}
                               style={{ flex: 1, padding: "8px 0", borderRadius: 8, fontFamily: "inherit", fontSize: 12, fontWeight: 600, cursor: "pointer",
-                                background: newSubtype === st ? "#7F77DD22" : "var(--bg)", color: newSubtype === st ? "#7F77DD" : "var(--muted)",
-                                border: `1px solid ${newSubtype === st ? "#7F77DD" : "var(--border)"}` }}>
+                                // Accent tint, derived from the token so it re-tints in dark mode. If a browser
+                                // can't do color-mix the fill just drops out — the accent text + border still
+                                // show which subtype is selected.
+                                background: newSubtype === st ? "color-mix(in srgb, var(--accent) 14%, transparent)" : "var(--bg)",
+                                color: newSubtype === st ? "var(--accent)" : "var(--muted)",
+                                border: `1px solid ${newSubtype === st ? "var(--accent)" : "var(--border)"}` }}>
                               {st === "credit" ? "Credit card" : st[0].toUpperCase() + st.slice(1)}
                             </button>
                           ))}
@@ -496,7 +500,7 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                             : "Savings outflows never count as spending in Trends; pick Checking for a day-to-day account."}
                         </div>
                         {plaid.length > 0 && (
-                          <div style={{ fontSize: 11, color: "#8A6D1F", background: "#FDF6E3", border: "1px solid #E8D9A8", borderRadius: 8, padding: "8px 10px", lineHeight: 1.5 }}>
+                          <div style={{ fontSize: 11, color: "var(--warn)", background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 8, padding: "8px 10px", lineHeight: 1.5 }}>
                             Only for an account that <strong>isn't</strong> already connected. If this statement belongs to one of your
                             connected accounts, pick it above instead — importing it here would count every transaction twice.
                           </div>
@@ -505,7 +509,7 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                     )}
 
                     {mixedSource && (
-                      <div style={{ marginTop: 10, fontSize: 12, color: "#A32D2D", background: "#FCEBEB", border: "1px solid #F09595", borderRadius: 8, padding: "10px 12px", lineHeight: 1.5 }}>
+                      <div style={{ marginTop: 10, fontSize: 12, color: "var(--danger)", background: "var(--danger-bg)", border: "1px solid var(--danger-border)", borderRadius: 8, padding: "10px 12px", lineHeight: 1.5 }}>
                         {legacySource
                           ? <>This account already holds imported transactions from before the app started recording which format they
                             came from. If they came from a {incomingSource === "pdf" ? "CSV" : "PDF"}, importing this
@@ -558,8 +562,8 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                               <span>{r.date}</span>
                               <span>·</span>
                               <span>{r.mapped_category}</span>
-                              {r.isTransfer && <span style={{ background: "#88878022", color: "#888780", borderRadius: 10, padding: "1px 6px", fontWeight: 600 }}>transfer</span>}
-                              {r.isDuplicate && <span style={{ background: "#88878022", color: "#888780", borderRadius: 10, padding: "1px 6px", fontWeight: 600 }}>already imported</span>}
+                              {r.isTransfer && <span style={{ background: "var(--bg)", color: "var(--muted)", borderRadius: 10, padding: "1px 6px", fontWeight: 600 }}>transfer</span>}
+                              {r.isDuplicate && <span style={{ background: "var(--bg)", color: "var(--muted)", borderRadius: 10, padding: "1px 6px", fontWeight: 600 }}>already imported</span>}
                             </div>
                           </div>
                           <div style={{ fontSize: 12, fontFamily: "'DM Mono',monospace", fontWeight: 500, flexShrink: 0, color: r.amount < 0 ? "#1D9E75" : "var(--text)" }}>
@@ -588,7 +592,7 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
               )}
 
               {error && (
-                <div style={{ fontSize: 12, color: "#A32D2D", background: "#FCEBEB", border: "1px solid #F09595", borderRadius: 8, padding: "10px 12px", marginTop: 8 }}>{error}</div>
+                <div style={{ fontSize: 12, color: "var(--danger)", background: "var(--danger-bg)", border: "1px solid var(--danger-border)", borderRadius: 8, padding: "10px 12px", marginTop: 8 }}>{error}</div>
               )}
             </>
           )}
@@ -598,15 +602,15 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
         {/* Footer */}
         <div style={{ display: "flex", gap: 8, padding: "14px 20px", borderTop: "1px solid var(--border)" }}>
           {result ? (
-            <button onClick={onClose} style={{ flex: 1, padding: "10px 0", borderRadius: 8, border: "none", background: "#7F77DD", color: "#fff", fontFamily: "inherit", fontSize: 14, fontWeight: 500, cursor: "pointer" }}>Done</button>
+            <button onClick={onClose} style={{ flex: 1, padding: "10px 0", borderRadius: 8, border: "none", background: "var(--accent)", color: "var(--accent-text)", fontFamily: "inherit", fontSize: 14, fontWeight: 500, cursor: "pointer" }}>Done</button>
           ) : targetIsPlaid ? (
             // Comparison mode inserts nothing — only a close action.
-            <button onClick={onClose} style={{ flex: 1, padding: "10px 0", borderRadius: 8, border: "none", background: "#7F77DD", color: "#fff", fontFamily: "inherit", fontSize: 14, fontWeight: 500, cursor: "pointer" }}>Close (nothing imported)</button>
+            <button onClick={onClose} style={{ flex: 1, padding: "10px 0", borderRadius: 8, border: "none", background: "var(--accent)", color: "var(--accent-text)", fontFamily: "inherit", fontSize: 14, fontWeight: 500, cursor: "pointer" }}>Close (nothing imported)</button>
           ) : (
             <>
               <button onClick={onClose} disabled={busy} className="ibtn" style={{ flex: 1, justifyContent: "center", opacity: busy ? .5 : 1 }}>Cancel</button>
               <button onClick={confirm} disabled={!canConfirm}
-                style={{ flex: 2, padding: "10px 0", borderRadius: 8, border: "none", background: "#7F77DD", color: "#fff", fontFamily: "inherit", fontSize: 14, fontWeight: 500, cursor: canConfirm ? "pointer" : "default", opacity: canConfirm ? 1 : .5 }}>
+                style={{ flex: 2, padding: "10px 0", borderRadius: 8, border: "none", background: "var(--accent)", color: "var(--accent-text)", fontFamily: "inherit", fontSize: 14, fontWeight: 500, cursor: canConfirm ? "pointer" : "default", opacity: canConfirm ? 1 : .5 }}>
                 {busy ? "Importing…" : `Import ${newRows.length || ""} transaction${newRows.length !== 1 ? "s" : ""}`}
               </button>
             </>
@@ -691,6 +695,11 @@ function ManualMapper({ fileText, onApply, amountSign, setAmountSign, selStyle, 
 // Comparison-mode audit. Reconciles the CSV against Plaid-synced rows and shows
 // four buckets. Inserts nothing. Kept compact + mobile-first; each list caps at
 // 50 rows with a "+N more" line so a big month doesn't blow up the modal.
+//
+// The per-bucket hexes below are a STATUS palette (one hue per bucket, drawn as
+// a dot + a tinted chip), not theme tokens — the four buckets have to stay
+// distinguishable from each other, so they're mid-tone hues that hold up on
+// both the light and the dark card surface.
 const RECON_CAP = 50;
 
 function ReconRow({ left, sub, amount, amountNote }) {

@@ -64,7 +64,7 @@ function Swatch({color,onChange}) {
   return (
     <div onClick={()=>ref.current?.click()} title="Click to change color"
       style={{width:14,height:14,borderRadius:3,background:color,cursor:"pointer",flexShrink:0,
-        outline:"1.5px solid rgba(0,0,0,0.12)",transition:"transform .1s",position:"relative"}}
+        outline:"1.5px solid var(--border)",transition:"transform .1s",position:"relative"}}
       onMouseEnter={e=>e.currentTarget.style.transform="scale(1.3)"}
       onMouseLeave={e=>e.currentTarget.style.transform="scale(1)"}>
       <input ref={ref} type="color" value={color} onChange={e=>onChange(e.target.value)}
@@ -422,30 +422,17 @@ export default function Dashboard({ refreshTick = 0 }) {
   }
 
   return (
-    <div style={{fontFamily:"'DM Sans','Helvetica Neue',sans-serif",background:"var(--bg,#F7F6F2)",minHeight:"100vh",
-      color:"var(--text,#1a1a18)","--bg":"#F7F6F2","--card":"#FFFFFF","--text":"#1a1a18","--muted":"#888780","--border":"#E4E2DC"}}>
+    <div style={{fontFamily:"'DM Sans','Helvetica Neue',sans-serif",background:"var(--bg)",minHeight:"100vh",
+      color:"var(--text)"}}>
       <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&family=DM+Mono:wght@400;500&display=swap');
-        @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
-        @keyframes fadeIn{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:none}}
-        @keyframes spin{to{transform:rotate(360deg)}}
-        @media(prefers-color-scheme:dark){:root{--bg:#18181A!important;--card:#222224!important;--text:#F0EFEB!important;--muted:#6e6e6a!important;--border:#2E2E30!important;}}
-        *{box-sizing:border-box;margin:0;padding:0;}
-        .card{background:var(--card);border-radius:14px;border:1px solid var(--border);padding:18px 20px;animation:fadeIn .25s ease both;}
-        .tab{background:none;border:none;cursor:pointer;font-family:inherit;font-size:13px;font-weight:500;color:var(--muted);padding:6px 10px;border-radius:20px;transition:all .15s;flex:1;}
-        .tab.active{background:var(--card);color:var(--text);box-shadow:0 1px 3px rgba(0,0,0,.08);}
-        .tab:hover:not(.active){color:var(--text);}
-        .ibtn{background:none;border:1px solid var(--border);border-radius:8px;padding:5px 12px;font-family:inherit;font-size:12px;font-weight:500;color:var(--muted);cursor:pointer;display:inline-flex;align-items:center;gap:5px;transition:all .15s;}
-        .ibtn:hover{color:var(--text);border-color:var(--text);}
-        .ibtn:disabled{opacity:.35;cursor:default;}
         .nbtn{background:var(--card);border:1px solid var(--border);border-radius:8px;width:30px;height:30px;display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:16px;transition:all .15s;line-height:1;}
         .nbtn:hover:not(:disabled){border-color:var(--text);}
         .nbtn:disabled{opacity:.3;cursor:default;}
         .tx{display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--border);}
         .tx:last-child{border-bottom:none;}
-        .overlay{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:100;}
+        .overlay{position:fixed;inset:0;background:var(--overlay);display:flex;align-items:center;justify-content:center;z-index:100;}
         .modal{background:var(--card);border-radius:16px;padding:24px;width:320px;border:1px solid var(--border);}
-        .bar-bg{flex:1;height:5px;background:var(--border);border-radius:3px;overflow:hidden;}
+        .bar-bg{flex:1;height:5px;background:var(--track);border-radius:3px;overflow:hidden;}
         .bar-fill{height:100%;border-radius:3px;transition:width .5s ease;}
       `}</style>
 
@@ -469,7 +456,7 @@ export default function Dashboard({ refreshTick = 0 }) {
           </button>
         </div>
 
-        {error&&<div style={{background:"#FCEBEB",border:"1px solid #F09595",borderRadius:10,padding:"12px 16px",fontSize:13,color:"#A32D2D",marginBottom:14}}>{error}</div>}
+        {error&&<div style={{background:"var(--danger-bg)",border:"1px solid var(--danger-border)",borderRadius:10,padding:"12px 16px",fontSize:13,color:"var(--danger)",marginBottom:14}}>{error}</div>}
 
         {/* Summary */}
         <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10,marginBottom:14}}>
@@ -752,8 +739,8 @@ export default function Dashboard({ refreshTick = 0 }) {
               </button>
               {!isManualAccount(selAcct)&&(
                 <button onClick={handleUnlink} disabled={unlinking}
-                  style={{flex:1,padding:"8px 0",borderRadius:8,border:"1px solid #F09595",background:"none",
-                    color:"#A32D2D",fontFamily:"inherit",fontSize:12,fontWeight:500,cursor:unlinking?"default":"pointer",opacity:unlinking?.6:1}}>
+                  style={{flex:1,padding:"8px 0",borderRadius:8,border:"1px solid var(--danger-border)",background:"none",
+                    color:"var(--danger)",fontFamily:"inherit",fontSize:12,fontWeight:500,cursor:unlinking?"default":"pointer",opacity:unlinking?.6:1}}>
                   {unlinking?"Unlinking…":`Unlink ${acctInst(selAcct)||"bank"}…`}
                 </button>
               )}
@@ -851,8 +838,8 @@ export default function Dashboard({ refreshTick = 0 }) {
               {chatMsgs.map((m,i)=>(
                 <div key={i} style={{display:"flex",justifyContent:m.role==="user"?"flex-end":"flex-start",marginBottom:8}}>
                   <div style={{maxWidth:"85%",fontSize:13,lineHeight:1.5,whiteSpace:"pre-wrap",borderRadius:12,padding:"8px 12px",
-                    background:m.role==="user"?"#7F77DD":"var(--bg)",
-                    color:m.role==="user"?"#fff":"var(--text)",
+                    background:m.role==="user"?"var(--accent)":"var(--bg)",
+                    color:m.role==="user"?"var(--accent-text)":"var(--text)",
                     border:m.role==="user"?"none":"1px solid var(--border)"}}>
                     {m.content}
                   </div>
@@ -866,7 +853,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                 </div>
               )}
               {chatError&&(
-                <div style={{fontSize:12,color:"#A32D2D",background:"#FCEBEB",border:"1px solid #F09595",borderRadius:8,padding:"8px 12px",marginBottom:8}}>
+                <div style={{fontSize:12,color:"var(--danger)",background:"var(--danger-bg)",border:"1px solid var(--danger-border)",borderRadius:8,padding:"8px 12px",marginBottom:8}}>
                   {chatError}
                 </div>
               )}
@@ -879,7 +866,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                 style={{flex:1,padding:"10px 12px",borderRadius:10,border:"1px solid var(--border)",background:"var(--bg)",
                   color:"var(--text)",fontSize:13,fontFamily:"inherit",outline:"none"}}/>
               <button onClick={()=>sendChat()} disabled={chatBusy||!chatInput.trim()}
-                style={{padding:"0 16px",borderRadius:10,border:"none",background:"#7F77DD",color:"#fff",fontFamily:"inherit",
+                style={{padding:"0 16px",borderRadius:10,border:"none",background:"var(--accent)",color:"var(--accent-text)",fontFamily:"inherit",
                   fontSize:13,fontWeight:500,cursor:chatBusy||!chatInput.trim()?"default":"pointer",opacity:chatBusy||!chatInput.trim()?.5:1}}>
                 Send
               </button>
@@ -899,7 +886,11 @@ export default function Dashboard({ refreshTick = 0 }) {
                 <>
                   <div style={{display:"flex",alignItems:"flex-end",gap:8,height:130,marginBottom:8}}>
                     {cfPs.map((p,i)=>{
-                      const h=Math.max((p.spending.amount/maxSpend)*100,3);
+                      // Pixels, not a percentage: the column below is auto-height
+                      // (the row only bottom-aligns it), so a % height has nothing
+                      // definite to resolve against and every bar collapsed to
+                      // minHeight. 114 = the 130px row minus the amount label + gap.
+                      const h=Math.max((p.spending.amount/maxSpend)*114,3);
                       const pStart=new Date(p.start);
                       const isSel=pStart.getFullYear()===year&&pStart.getMonth()+1===month;
                       return (
@@ -907,7 +898,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                           <span style={{fontSize:9,fontFamily:"'DM Mono',monospace",color:"var(--muted)",whiteSpace:"nowrap"}}>{fmt(p.spending.amount)}</span>
                           <div onClick={()=>{setYear(pStart.getFullYear());setMonth(pStart.getMonth()+1);setTab("overview");}}
                             title={`View ${p.label}`}
-                            style={{width:"100%",height:h+"%",minHeight:4,background:isSel?"#7F77DD":"var(--border)",
+                            style={{width:"100%",height:h,minHeight:4,background:isSel?"var(--accent)":"var(--track)",
                               borderRadius:"4px 4px 0 0",transition:"all .4s ease",cursor:"pointer"}}
                             onMouseEnter={e=>e.currentTarget.style.opacity=".7"}
                             onMouseLeave={e=>e.currentTarget.style.opacity="1"}/>
@@ -1123,7 +1114,7 @@ export default function Dashboard({ refreshTick = 0 }) {
               <button onClick={()=>setAddingCat(false)} className="ibtn" style={{flex:1,justifyContent:"center"}}>Cancel</button>
               <button onClick={()=>{if(!newName.trim())return;saveCats([...customCats,{id:Date.now().toString(),name:newName.trim(),color:newColor}]);setNewName("");setNewColor("#7F77DD");setAddingCat(false);}}
                 disabled={!newName.trim()}
-                style={{flex:1,padding:"8px 0",borderRadius:8,border:"none",background:"#7F77DD",color:"#fff",fontFamily:"inherit",fontSize:14,fontWeight:500,cursor:newName.trim()?"pointer":"default",opacity:newName.trim()?1:.5}}>
+                style={{flex:1,padding:"8px 0",borderRadius:8,border:"none",background:"var(--accent)",color:"var(--accent-text)",fontFamily:"inherit",fontSize:14,fontWeight:500,cursor:newName.trim()?"pointer":"default",opacity:newName.trim()?1:.5}}>
                 Add
               </button>
             </div>

@@ -1,0 +1,70 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&family=DM+Mono:wght@400;500&display=swap');
+
+/* Theme tokens — the ONE place these values live.
+   Never redeclare a token value in a component, and never set one as an
+   inline style on an element: an inline custom property on a subtree root
+   beats even an !important declaration on :root, which is exactly the bug
+   that kept dark mode from ever rendering. */
+
+:root {
+  color-scheme: light dark;
+
+  --bg: #F7F6F2;
+  --card: #FFFFFF;
+  --text: #1a1a18;
+  --muted: #888780;
+  --border: #E4E2DC;
+  --accent: #7F77DD;
+  --accent-text: #FFFFFF;
+  --danger: #A32D2D;
+  --danger-bg: #FCEBEB;
+  --danger-border: #F09595;
+  --warn: #8A6D1F;
+  --warn-bg: #FDF6E3;
+  --warn-border: #E8D9A8;
+  --input-bg: #F7F6F2;
+  --track: #E4E2DC;
+  --shadow: rgba(0, 0, 0, .08);
+  --overlay: rgba(0, 0, 0, .45);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #18181A;
+    --card: #222224;
+    --text: #F0EFEB;          /* 13.8:1 on --card */
+    --muted: #9A9992;         /* 5.56:1 on --card */
+    --border: #2E2E30;
+    --accent: #A79FF0;        /* 7.48:1 on --bg */
+    --accent-text: #18181A;   /* 7.48:1 on --accent */
+    --danger: #F2A0A0;        /* 8.16:1 on --danger-bg */
+    --danger-bg: #2A1A1C;
+    --danger-border: #7F3639;
+    --warn: #E8C069;          /* 8.95:1 on --warn-bg */
+    --warn-bg: #2A2415;
+    --warn-border: #5A4A22;
+    --input-bg: #2A2A2C;
+    --track: #6E6E76;         /* 3.14:1 on --card — a data mark, not a hairline */
+    --shadow: rgba(0, 0, 0, .5);
+    --overlay: rgba(0, 0, 0, .65);
+  }
+}
+
+/* Shared primitives — global so Login / EmptyState / LinkAccount, which
+   render before Dashboard mounts, get them too. */
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+@keyframes pulse { 0%, 100% { opacity: 1 } 50% { opacity: .4 } }
+@keyframes fadeIn { from { opacity: 0; transform: translateY(5px) } to { opacity: 1; transform: none } }
+@keyframes spin { to { transform: rotate(360deg) } }
+
+.card { background: var(--card); border-radius: 14px; border: 1px solid var(--border); padding: 18px 20px; animation: fadeIn .25s ease both; }
+
+.tab { background: none; border: none; cursor: pointer; font-family: inherit; font-size: 13px; font-weight: 500; color: var(--muted); padding: 6px 10px; border-radius: 20px; transition: all .15s; flex: 1; }
+.tab.active { background: var(--card); color: var(--text); box-shadow: 0 1px 3px var(--shadow); }
+.tab:hover:not(.active) { color: var(--text); }
+
+.ibtn { background: none; border: 1px solid var(--border); border-radius: 8px; padding: 5px 12px; font-family: inherit; font-size: 12px; font-weight: 500; color: var(--muted); cursor: pointer; display: inline-flex; align-items: center; gap: 5px; transition: all .15s; }
+.ibtn:hover { color: var(--text); border-color: var(--text); }
+.ibtn:disabled { opacity: .35; cursor: default; }

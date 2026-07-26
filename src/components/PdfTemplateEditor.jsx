@@ -16,6 +16,10 @@ const ROLE_LABELS = {
   date: "Date", date2: "Date 2", description: "Description",
   debit: "Debit / charges", credit: "Credit / payments", amount: "Amount", ignore: "— ignore —",
 };
+// One hue per column role, drawn as the column card's outline and the role
+// <select>'s border. A ROLE palette, not theme tokens — the roles have to stay
+// tellable apart from each other, and these are only ever used as hairlines
+// (never as text), so they hold up on the light and the dark surface alike.
 const ROLE_COLORS = {
   date: "#378ADD", date2: "#7F9BDD", description: "#7F77DD",
   debit: "#D85A30", credit: "#1D9E75", amount: "#B7791F", ignore: "#888780",
@@ -139,7 +143,7 @@ export default function PdfTemplateEditor({ pages, template, onChange, rowCount 
   const rowYs = new Set(rowsOnPage.map(m => Math.round(m.y)));
 
   const label = { fontSize: 11, fontWeight: 600, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".05em" };
-  const sel = { fontSize: 12, fontFamily: "inherit", color: "var(--text)", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8, padding: "6px 8px", outline: "none", width: "100%" };
+  const sel = { fontSize: 12, fontFamily: "inherit", color: "var(--text)", background: "var(--input-bg)", border: "1px solid var(--border)", borderRadius: 8, padding: "6px 8px", outline: "none", width: "100%" };
 
   return (
     <div style={{ marginBottom: 16 }}>
@@ -159,17 +163,23 @@ export default function PdfTemplateEditor({ pages, template, onChange, rowCount 
         transactions being read.
       </div>
 
-      {/* Page render: the statement's own text runs, positioned. */}
+      {/* Page render: the statement's own text runs, positioned. Not an image of
+          the page — every glyph is a DOM node we colour ourselves, so the
+          "paper" follows the theme (dark paper, light text) instead of having to
+          stay white. */}
       <div ref={wrapRef} style={{ border: "1px solid var(--border)", borderRadius: 10, overflow: "auto", background: "var(--card)", maxHeight: 300 }}>
         <div
           onClick={addBoundaryAt}
           style={{ position: "relative", width: page.width * scale, height: page.height * scale, cursor: "crosshair" }}
         >
-          {/* highlight the detected transaction rows */}
+          {/* highlight the detected transaction rows — a translucent accent band.
+              opacity rather than a baked-in alpha hex so the band follows the
+              accent token into dark mode; it paints under the text runs, which
+              are drawn after it. */}
           {rowsOnPage.map((m, i) => (
             <div key={`hl${i}`} style={{
               position: "absolute", left: 0, right: 0, top: (m.y - 1) * scale, height: 11 * scale,
-              background: "#7F77DD18", pointerEvents: "none",
+              background: "var(--accent)", opacity: .12, pointerEvents: "none",
             }} />
           ))}
           {page.runs.map((r, i) => (
@@ -191,7 +201,7 @@ export default function PdfTemplateEditor({ pages, template, onChange, rowCount 
                 position: "absolute", top: 0, bottom: 0, left: b * page.width * scale - 6, width: 12,
                 cursor: "col-resize", touchAction: "none", display: "flex", justifyContent: "center",
               }}>
-              <div style={{ width: 2, height: "100%", background: "#7F77DD", opacity: .85 }} />
+              <div style={{ width: 2, height: "100%", background: "var(--accent)", opacity: .85 }} />
             </div>
           ))}
         </div>

@@ -46,6 +46,7 @@ entry once shipped.
 
 | File | Role |
 |---|---|
+| `src/ui.css` | The ONLY place theme-token values live: `:root` light + a `prefers-color-scheme: dark` block (--bg/--card/--text/--muted/--border/--accent/--accent-text/--danger*/--warn*/--input-bg/--track/--shadow/--overlay), plus the font `@import` (must stay line 1), the `*` reset, keyframes, and the shared `.card`/`.tab`/`.ibtn` classes. Global so the pre-Dashboard screens get them. |
 | `src/components/Dashboard.jsx` | Almost the entire UI — single file, inline styles, tabs: overview/categories/transactions/accounts/trends/recurring/ask. Shared mini-components: `Pill`, `Swatch`, `EditName`, `Sk` (skeleton), `Donut`. |
 | `src/dataAdapter.js` | All Supabase reads + shapes consumed by Dashboard. Keep return shapes stable. Also holds the CSV-import writes (`findOrCreateManualInstitution`, `createManualAccount`, `getExistingTxIds`, `importCsvTransactions`, `isManualAccount`), the comparison-mode read `getAccountTransactionsInRange`, and re-exports the cash-flow helpers (`markInternalTransfers`/`cashIncome`/`cashSpending`) from `cashFlow.js` so existing importers/harnesses keep working. |
 | `src/cashFlow.js` | The Trends cash-flow model (see Conventions), extracted pure: `markInternalTransfers` + `maxMatchTransfers` (Kuhn's), `cashIncome`/`cashSpending`, account-type predicates. Zero imports — plain-Node importable; covered by `test/cashFlow.test.js` incl. the brute-force matching parity check. |
@@ -94,9 +95,18 @@ playwright-core screenshot (`executablePath:'/opt/pw-browsers/chromium'`,
 
 ## Conventions
 
-- Dashboard style: compact inline-styled JSX, CSS vars (--bg, --card, --text,
-  --muted, --border), dark mode via prefers-color-scheme, accent #7F77DD.
+- Dashboard style: compact inline-styled JSX, CSS vars, dark mode via
+  prefers-color-scheme (system-following; no manual toggle), accent #7F77DD.
   Mobile-first: verify at 390px; tab bar scrolls horizontally.
+- **Theme tokens live ONLY in `src/ui.css`.** Never redeclare a token value in a
+  component and never set one as an inline style — an inline custom property on
+  a subtree root beats even `!important` on `:root` (that was the dark-mode bug).
+  Use tokens, not literals, for anything themed. Two exceptions that must stay
+  hardcoded and be changed in lockstep with `--bg`: index.html's `theme-color`
+  metas and its pre-paint `html/body` background (parsed before CSS loads).
+- `ACCOUNT_COLORS` / `DEFAULT_COLORS` (Dashboard.jsx) are **data, not theme** —
+  user-overridable colors persisted in `settings`. Never tokenize them or change
+  their hex values. Same for the `#1D9E75`/`#D85A30` good/bad status pair.
 - Amounts follow Plaid: **positive = money out, negative = money in**.
 - Effective category = `user_category || mapped_category` (user override wins).
 - "Transfers and card payments" and "Return" (credit-card negatives) are never
@@ -202,7 +212,14 @@ playwright-core screenshot (`executablePath:'/opt/pw-browsers/chromium'`,
   real iPhone.
 
 ## Pending branches
-_(none)_
+
+- `claude/ultracode-refactoring-review-a2tm5f` — **dark mode**. Awaiting Mason's
+  preview review. Notable: the app had NEVER rendered dark (inline CSS vars on
+  Dashboard's root div shadowed the `:root` dark rule); `src/ui.css` now owns the
+  tokens and the shared classes, so Login/EmptyState/LinkAccount also pick up
+  `.card`/`.ibtn` for the first time. Also fixes a pre-existing Trends bug where
+  the 6-month bars collapsed to 4px stubs (% height against an auto-height flex
+  parent) — the one deliberate light-mode pixel change.
 
 ## Roadmap
 
