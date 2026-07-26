@@ -7,8 +7,7 @@
 // charges at a ~monthly cadence (median gap 28±4 days, most gaps within ±4
 // days of that median) with similar amounts (within ±20% of the median).
 
-const TRANSFER_CATEGORY = 'Transfers and card payments';
-const RETURN_CATEGORY = 'Return';
+import { TRANSFER_CATEGORY, RETURN_CATEGORY } from './categoryMap.js';
 
 // 'YYYY-MM-DD' → whole days since epoch. String split, not new Date(string),
 // so day arithmetic can't pick up UTC off-by-one surprises.
