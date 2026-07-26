@@ -9,12 +9,10 @@ see them.
 
 | File | Purpose |
 |---|---|
-| **`setup_all.sql`** | **Start here.** One paste: wipes partial state, applies all migrations, auto-creates the household. |
-| `migrations/20260605000001_init.sql` | Base tables, RLS, Realtime publication. Run first on an empty database. |
-| `migrations/20260606000001_plaid.sql` | Reshapes the schema for Plaid: drops scraper-era tables, adds `plaid_tokens` (service-role only), `plaid_credential_key` for multi-Plaid-account routing, `settings` for dashboard prefs. Run second. |
-| `migrations/20260714000001_account_labels.sql` | Adds `nickname` + `color` to accounts for the per-account badges shown on transactions. Run third. |
+| **`setup_all.sql`** | **Start here for a FRESH install.** One paste: wipes partial state, recreates the full schema, auto-creates the household. A convenience snapshot of the migrations — `migrations/` is the source of truth. **Destructive: never run on a project with real data.** |
+| `migrations/` | The source of truth for the schema. On an existing database, run every file in filename order (each is additive-safe on live data unless its header says otherwise). |
 | `seed.sql` | Optional sample data. Real data arrives via Plaid on first sync. |
-| `reset.sql` | Drops everything from both migrations. For dev resets. |
+| `reset.sql` | Drops everything the migrations create. For dev resets. |
 
 ## The secrets involved, and where each one goes
 
@@ -61,31 +59,28 @@ see them.
 1. SQL Editor (left sidebar, `>_` icon) → **New query**.
 2. Open **`setup_all.sql`** (in this folder), select ALL of it, copy.
 3. Paste into the editor → **Run** (or Cmd/Ctrl+Enter).
-4. The result at the bottom should show:
-   `tables_created_of_7 = 7` and `household_linked = true`.
+4. The result at the bottom should show `household_linked = true` (a built-in
+   schema check raises an error if the script is out of sync with
+   `migrations/` — if it does, the file needs regenerating, not your setup).
 
-That one file wipes any partial state, applies all three migrations in
-order, and automatically creates the household linked to the auth user you
-made in step 2 — no UUID copy-pasting. It's safe to re-run any time before
-you have real data in the project. If you forgot step 2, it still creates
-the tables, prints "No auth user found", and you just re-run it after
-creating the user.
+That one file wipes any partial state, recreates the full schema (everything
+in `migrations/`, in order), and automatically creates the household linked
+to the auth user you made in step 2 — no UUID copy-pasting. It's safe to
+re-run any time before you have real data in the project. If you forgot
+step 2, it still creates the tables, prints "No auth user found", and you
+just re-run it after creating the user.
 
 Table Editor should now show: `households`, `household_members`,
-`institutions`, `accounts`, `transactions`, `plaid_tokens`, `settings`.
+`institutions`, `accounts`, `transactions`, `plaid_tokens`, `settings`,
+`budgets`.
 
 <details>
 <summary>Alternative: run migrations individually</summary>
 
-Paste and run, in order:
-
-1. `migrations/20260605000001_init.sql`
-2. `migrations/20260606000001_plaid.sql`
-3. `migrations/20260714000001_account_labels.sql`
-
-Then create the household manually (step 4 below). Use this path only for
-applying a NEW migration to a project that already has real data —
-`setup_all.sql` would wipe it.
+Paste and run every file in `migrations/`, in filename order. Then create
+the household manually (step 4 below). This path is REQUIRED for applying a
+NEW migration to a project that already has real data — `setup_all.sql` is
+for fresh installs only and would wipe it.
 </details>
 
 **About RLS:** the migrations explicitly enable row-level security on every
