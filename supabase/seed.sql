@@ -27,7 +27,12 @@ ins as (
 insert into accounts (household_id, institution_id, plaid_account_id, name, official_name, type, subtype, mask, current_balance, available_balance, last_balance_at)
 select ins.household_id, ins.id, 'tb-chk-001', 'Test Checking', 'Test Bank Checking ****1234', 'depository', 'checking', '1234', 4231.07, 4231.07, now() from ins
 union all
-select ins.household_id, ins.id, 'tb-cc-001',  'Test Credit',   'Test Bank Visa ****9012',     'credit',    'credit card','9012', -845.31, 4154.69, now() from ins;
+-- current_balance is stored POSITIVE = owed for credit/loan (see the
+-- Conventions section of CLAUDE.md). $845.31 owed against a $5,000 limit
+-- leaves $4,154.69 available. It was seeded negative, which the UI now renders
+-- backwards — displayBalance negates a debt, so a card that owes money showed
+-- as a positive balance.
+select ins.household_id, ins.id, 'tb-cc-001',  'Test Credit',   'Test Bank Visa ****9012',     'credit',    'credit card','9012', 845.31, 4154.69, now() from ins;
 
 -- ---- 3. Sample transactions -------------------------------------------------
 with chk as (select id, household_id from accounts where plaid_account_id = 'tb-chk-001'),

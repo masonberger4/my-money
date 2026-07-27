@@ -226,7 +226,13 @@ accounts, then unhide + retire the Plaid Items bank by bank (spec below; phases
 **balance-only + hand-entered APR** under SimpleFIN (spec below; the `loan` sync
 fix that unblocks it is already on main). Later (discussed, not committed): net worth over time,
 auto-categorization rules, cash-flow forecast, savings goals, CSV/PDF export,
-sign-out button. **`markInternalTransfers` max-matching** — the greedy
+sign-out button. **`accounts.available_balance` holds three
+conventions** — SimpleFIN's raw feed value when it sends `available-balance`,
+the *normalized* balance when it doesn't (`api/sync.js`'s `?? balance`
+fallback), and Plaid's "available credit" for cards. Invisible today (nothing
+renders it) but it surfaces the moment the Debt view shows utilization; sort it
+out then, and never run it through `displayBalance` — for a card it means
+available *credit*, not a debt. **`markInternalTransfers` max-matching** — the greedy
 nearest-gap matcher can strand one of two interleaved equal-amount transfer
 pairs whose legs drift across the 4-day window, leaving a genuine internal
 transfer counted (inflates Trends `cashIncome` AND `cashSpending` by the same
@@ -384,7 +390,11 @@ Build steps:
    fields without column sprawl (recommended).
 4. **Balance history:** `balance_snapshots (id, account_id, household_id,
    captured_on date, balance numeric, unique(account_id, captured_on))` — same
-   RLS shape as other tables. Sync appends a row only when the balance changed
+   RLS shape as other tables. **`balance` mirrors the STORED convention** (it is
+   `accounts.current_balance` at capture time, so debts positive); the chart
+   flips at render via `displayBalance` like everywhere else. Do NOT store debts
+   negative here to make a net-worth `SUM()` easier — mixing both signs in one
+   column is unrecoverable once rows accumulate. Sync appends a row only when the balance changed
    (≤ one/day; upsert on the unique key) and — running as **service_role** —
    must set `household_id` explicitly (the `current_household_id()` default is
    NULL there; see Gotchas). Powers the debt-over-time chart AND seeds net worth.
@@ -394,6 +404,9 @@ Build steps:
    what-if → debt-free date, total interest, interest saved.
 6. **`getDebts()` in dataAdapter:** accounts where `type in ('credit','loan')`
    with the liability fields + computed totals (total debt, total minimums).
+   Compute totals from the STORED positives; then decide deliberately how the
+   total is shown, because a positive "total debt" sitting above negative
+   per-card rows is exactly the inconsistency `displayBalance` exists to remove.
 7. **Debt view** (new "Debt" tab): per-debt cards (balance, APR, min, due date,
    card utilization = `current_balance/credit_limit`), totals (exclude hidden
    accounts), payoff projection (snowball/avalanche toggle + extra-payment slider

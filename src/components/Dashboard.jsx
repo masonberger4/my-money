@@ -3,7 +3,7 @@ import { getOverview, getSpending, getTransactions, getCashFlow, getAccounts, up
 import { detectRecurring } from "../recurring.js";
 import { unlinkInstitution, askAssistant } from "../plaidClient.js";
 import { ERA_CATEGORIES } from "../categoryMap.js";
-import { displayBalance } from "../accountBalance.js";
+import { displayBalance, isDebtAccount as isDebtType } from "../accountBalance.js";
 import { runSync } from "../sync.js";
 import CsvImport from "./CsvImport.jsx";
 import SimpleFinConnect from "./SimpleFinConnect.jsx";
@@ -362,6 +362,31 @@ export default function Dashboard({ refreshTick = 0 }) {
       console.error("transaction update failed",err);
     }
     reloadData(year,month);
+  }
+
+  // Correcting an inferred type can cross the debt boundary (Bank ⇄ Credit
+  // card/Loan), and the STORED balance was normalized under the old type: a
+  // card mis-inferred as a bank stored SimpleFIN's raw negative, so the moment
+  // it is retyped as credit, displayBalance negates it and the card reads
+  // +$5,127.97 — backwards, and on exactly the phase-3 screen where types get
+  // fixed. The stored sign can't be recovered locally (we can't tell a flipped
+  // value from an unflipped one), so re-pull: the feed is authoritative and
+  // api/sync.js re-normalizes against the corrected type. `force` skips the
+  // once-an-hour throttle. Only on a boundary crossing — credit→loan is free.
+  const [retyping,setRetyping]=useState(false);
+  async function saveAccountType(id,fields,prevType){
+    const crossed=isDebtType(prevType)!==isDebtType(fields.type);
+    await saveAccount(id,fields);
+    if(!crossed)return;
+    setRetyping(true);
+    try{
+      await runSync({force:true});
+      await reloadData(year,month);
+    }catch(err){
+      console.error("re-sync after type change failed",err);
+    }finally{
+      setRetyping(false);
+    }
   }
 
   async function handleToggleHide(){
@@ -813,9 +838,9 @@ export default function Dashboard({ refreshTick = 0 }) {
                     const active=selAcct.type===t;
                     const label=t==="depository"?"Bank":t==="credit"?"Credit card":"Loan";
                     return (
-                      <button key={t}
-                        onClick={()=>saveAccount(selAcct.id,{type:t,subtype:t==="depository"?(selAcct.subtype==="savings"?"savings":"checking"):t==="credit"?"credit card":"loan"})}
-                        style={{fontSize:11,fontWeight:600,padding:"5px 10px",borderRadius:20,fontFamily:"inherit",cursor:"pointer",
+                      <button key={t} disabled={retyping}
+                        onClick={()=>saveAccountType(selAcct.id,{type:t,subtype:t==="depository"?(selAcct.subtype==="savings"?"savings":"checking"):t==="credit"?"credit card":"loan"},selAcct.type)}
+                        style={{fontSize:11,fontWeight:600,padding:"5px 10px",borderRadius:20,fontFamily:"inherit",cursor:retyping?"default":"pointer",opacity:retyping?.6:1,
                           background:active?"#378ADD22":"var(--card)",color:active?"#378ADD":"var(--muted)",
                           border:`1px solid ${active?"#378ADD":"var(--border)"}`,transition:"all .15s"}}>
                         {label}
@@ -839,8 +864,10 @@ export default function Dashboard({ refreshTick = 0 }) {
                   </div>
                 )}
                 <div style={{fontSize:10,color:"var(--muted)",marginTop:8,lineHeight:1.5}}>
-                  SimpleFIN doesn't send an account type — this was guessed from the name. Money out of
-                  <em> checking</em> counts as spending in Trends; money out of <em>savings</em> never does.
+                  {retyping
+                    ?"Re-syncing so the balance is read the right way round for the new type…"
+                    :<>SimpleFIN doesn't send an account type — this was guessed from the name. Money out of
+                      <em> checking</em> counts as spending in Trends; money out of <em>savings</em> never does.</>}
                 </div>
               </div>
             )}
