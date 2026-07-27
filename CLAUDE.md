@@ -70,6 +70,7 @@ entry once shipped.
 | `src/dataAdapter.js` | All Supabase reads + shapes consumed by Dashboard; the Trends cash-flow model lives here (see Conventions). Keep return shapes stable. Also holds the CSV-import writes (`findOrCreateManualInstitution`, `createManualAccount`, `getExistingTxIds`, `importCsvTransactions`, `isManualAccount`), the comparison-mode read `getAccountTransactionsInRange`, and exports the cash-flow helpers (`markInternalTransfers`/`cashIncome`/`cashSpending`) for the dry-run harness. |
 | `src/categoryMap.js` | Plaid category → app category mapping; `applyAccountRules` (credit-card negatives → "Return", excluded from income); pure JS, imported by server code too. `ERA_CATEGORIES` is the taxonomy source of truth (no "Housing"/"Income" member). |
 | `src/csvImport.js` | Pure CSV-import core (no React/Supabase): `parseCsv`, `detectHeader`, `parseMoney`/`parseDate`, transfer flagging, dedup `plaid_tx_id` hashing, `buildRows`/`analyzeCsv`. Also the comparison-mode core: `reconcileCsv` (max-matching audit), `descSimilarity`, `csvDateRange`. Testable in isolation. |
+| `src/accountBalance.js` | `isDebtAccount` / `displayBalance` — the stored-positive → displayed-negative rule for credit and loan balances. Pure JS; imported by both Dashboard.jsx and the server-side assistant context. |
 | `src/txClassify.js` | The shared descriptor→category rule table + internal-transfer tagging (`guessCategory`, `transferRawCategory`, `classifyDescription`), validated against `ERA_CATEGORIES` at load. Lifted out of `csvImport.js` when SimpleFIN became a second caller: both feeds get a descriptor and no category, so both derive `mapped_category` at WRITE time from this one table. Pure JS — imported by server code too. |
 | `api/_lib/simplefin.js` | SimpleFIN protocol layer: setup-token decode, claim POST, access-URL split (creds → Authorization header), the `/accounts` GET, and `normalizeAccountSet` (reads BOTH wire shapes). Also `inferAccountType`, `normalizeBalance`, the sign flip, and the env knobs. Server-only — handles bank credentials. |
 | `src/components/SimpleFinConnect.jsx` | Accounts-tab modal replacing Plaid Link: link banks at SimpleFIN Bridge → paste the setup token → claim + first sync. Shows connection status and a disconnect action. |
@@ -123,6 +124,18 @@ playwright-core screenshot (`executablePath:'/opt/pw-browsers/chromium'`,
   matters because `isCheckingAccount` decides whether an account's outflows
   count as household spending. The type editor is deliberately hidden for Plaid
   accounts: their sync overwrites both columns, so an edit wouldn't survive.
+- **Debt balances: stored positive, displayed negative.** `accounts.current_balance`
+  is POSITIVE = money owed for `credit`/`loan` (Plaid's convention; SimpleFIN
+  reports negative and `normalizeBalance` flips it on the way in, so both feeds
+  agree in the database). Every place a balance is shown to a human runs it
+  through `displayBalance(balance, type)` (`src/accountBalance.js`), which
+  negates debts — a card reads −$5,127.97. Keeping storage positive is what
+  keeps payoff amortization and utilization (`current_balance / credit_limit`)
+  natural and keeps Plaid and SimpleFIN rows identical; only presentation flips.
+  There are exactly four display sites — three in Dashboard.jsx (Overview
+  headline, accounts list, account sheet) and the assistant context in
+  `api/_lib/spendingContext.js`, which must match or the Ask tab contradicts the
+  screen. `fmtX` renders negatives as −$1,234.56.
 - Effective category = `user_category || mapped_category` (user override wins).
 - "Transfers and card payments" and "Return" (credit-card negatives) are never
   counted as spending; "Return" is never counted as income.
@@ -364,7 +377,9 @@ Build steps:
    `original_balance` (all nullable numeric/date). Plaid returns rates as
    **percent**; payoff/getDebts read one normalized `debtRate = apr ??
    interest_rate` and divide by 100 for monthly math. `current_balance` is the
-   outstanding balance (positive = owed). These are **Plaid-owned** (refreshed
+   outstanding balance, **stored** positive = owed — payoff math and utilization
+   both want that; the Debt view must render it through `displayBalance` like
+   every other balance. These are **Plaid-owned** (refreshed
    each sync). Optional `liabilities_raw jsonb` to keep overdue/last-payment/YTD
    fields without column sprawl (recommended).
 4. **Balance history:** `balance_snapshots (id, account_id, household_id,

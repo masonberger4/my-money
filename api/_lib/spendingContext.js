@@ -1,5 +1,6 @@
 import { getServiceClient } from './supabase.js';
 import { applyAccountRules } from '../../src/categoryMap.js';
+import { displayBalance } from '../../src/accountBalance.js';
 
 function monthKey(dateStr) {
   return (dateStr || '').slice(0, 7);
@@ -62,17 +63,24 @@ export async function buildSpendingContext(householdId) {
   const lines = [];
 
   lines.push('## Accounts');
+  // Balances are stated exactly as the dashboard shows them — credit cards and
+  // loans negative, because that is money owed. Without this the assistant
+  // would quote a card as +$5,127.97 while the screen reads −$5,127.97.
+  lines.push('Credit card and loan balances are negative: that is the amount owed.');
   for (const a of visible) {
     const label = a.nickname || `${a.name}${a.mask ? ` ··${a.mask}` : ''}`;
     const inst = a.institutions?.name || 'Unknown bank';
     lines.push(
-      `- ${label} (${inst}, ${a.subtype || a.type}): balance $${Number(a.current_balance ?? 0).toFixed(2)}`
+      `- ${label} (${inst}, ${a.subtype || a.type}): balance $${displayBalance(a.current_balance, a.type).toFixed(2)}`
     );
   }
 
   lines.push('');
   lines.push('## Monthly spending by category (last 90 days)');
-  lines.push('Positive amounts are money out; "Transfers and card payments" and "Return" are not real spending.');
+  // "Amounts" here means TRANSACTION amounts, which use the opposite rule from
+  // the account balances listed above — spell that out so the model can't
+  // conflate the two.
+  lines.push('Transaction amounts (unlike the balances above): positive is money out; "Transfers and card payments" and "Return" are not real spending.');
   const byMonthCat = new Map();
   for (const t of usable) {
     if (t.amount <= 0) continue;

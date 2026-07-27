@@ -3,6 +3,7 @@ import { getOverview, getSpending, getTransactions, getCashFlow, getAccounts, up
 import { detectRecurring } from "../recurring.js";
 import { unlinkInstitution, askAssistant } from "../plaidClient.js";
 import { ERA_CATEGORIES } from "../categoryMap.js";
+import { displayBalance } from "../accountBalance.js";
 import { runSync } from "../sync.js";
 import CsvImport from "./CsvImport.jsx";
 import SimpleFinConnect from "./SimpleFinConnect.jsx";
@@ -33,8 +34,19 @@ const ACCOUNT_COLORS = ["#7F77DD","#1D9E75","#D85A30","#378ADD","#FAC775","#D453
 
 function monthLabel(y, m) { return new Date(y,m-1,1).toLocaleString("default",{month:"long",year:"numeric"}); }
 function shortDate(iso) { const [y,m,d]=iso.split("-").map(Number); return new Date(y,m-1,d).toLocaleDateString("default",{month:"short",day:"numeric"}); }
-function fmt(n) { return "$"+Number(n).toLocaleString("en-US",{maximumFractionDigits:0}); }
-function fmtX(n) { return "$"+Number(n).toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2}); }
+// Negatives render as −$1,234.56, not $-1,234.56 (matches money() in
+// CsvImport.jsx). Debts now always display negative, and money-in transactions
+// already did, so this is the common case rather than an edge one.
+function fmt(n) {
+  const v = Number(n);
+  const s = "$"+Math.abs(v).toLocaleString("en-US",{maximumFractionDigits:0});
+  return v < 0 ? "−"+s : s;
+}
+function fmtX(n) {
+  const v = Number(n);
+  const s = "$"+Math.abs(v).toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2});
+  return v < 0 ? "−"+s : s;
+}
 
 function Sk({w="100%",h=16,r=6}) {
   return <div style={{width:w,height:h,borderRadius:r,background:"var(--border)",animation:"pulse 1.5s ease-in-out infinite"}} />;
@@ -405,7 +417,9 @@ export default function Dashboard({ refreshTick = 0 }) {
   const maxCat=cats[0]?.amount||1;
   const maxSpend=Math.max(...cfPs.map(p=>p.spending?.amount||0),1);
   const totalSpent=cats.reduce((s,c)=>s+c.amount,0);
-  const balance=overview?.accounts?.[0]?.balance?.current||0;
+  // Debts read negative (see src/accountBalance.js). getOverview orders credit
+  // accounts first, so this headline is usually a card — and it carries `type`.
+  const balance=displayBalance(overview?.accounts?.[0]?.balance?.current,overview?.accounts?.[0]?.type);
   const lastSpent=overview?.last_month?.spending?.amount;
   const delta=lastSpent!=null?totalSpent-lastSpent:null;
   const donutData=cats.slice(0,7).map(c=>({label:getName(c.label),value:c.amount,color:getColor(c.label)}));
@@ -483,7 +497,10 @@ export default function Dashboard({ refreshTick = 0 }) {
         <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10,marginBottom:14}}>
           {[
             {label:"Total spent",val:loading?null:fmt(totalSpent),sub:isCurrent&&lastSpent!=null?`vs ${fmt(lastSpent)} last month`:monthLabel(year,month)},
-            {label:"Card balance",val:loading?null:fmtX(balance),sub:overview?.accounts?.[0]?.name||"Linked account"},
+            // Whole dollars like its neighbours: a negative card balance with
+            // cents is too wide for a third of a 390px screen and wrapped the
+            // minus sign onto its own line.
+            {label:"Card balance",val:loading?null:fmt(balance),sub:overview?.accounts?.[0]?.name||"Linked account"},
             {label:"vs last month",val:loading||delta==null?null:`${delta>=0?"+":""}${fmt(delta)}`,sub:delta==null?"—":delta>=0?"↑ more spending":"↓ less spending",clr:delta==null?"var(--muted)":delta>=0?"#D85A30":"#1D9E75"},
           ].map((c,i)=>(
             <div key={i} className="card" style={{animationDelay:i*.04+"s"}}>
@@ -732,7 +749,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                     </div>
                   </div>
                   <div style={{textAlign:"right",flexShrink:0}}>
-                    <div style={{fontSize:13,fontFamily:"'DM Mono',monospace",fontWeight:500}}>{fmtX(a.current_balance??0)}</div>
+                    <div style={{fontSize:13,fontFamily:"'DM Mono',monospace",fontWeight:500}}>{fmtX(displayBalance(a.current_balance,a.type))}</div>
                     <div style={{fontSize:10,color:"var(--muted)",marginTop:2}}>tap to view →</div>
                   </div>
                 </div>
@@ -759,7 +776,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                   {[acctInst(selAcct),`${selAcct.name}${selAcct.mask?` ··${selAcct.mask}`:""}`,selAcct.subtype||selAcct.type].filter(Boolean).join(" · ")}
                 </div>
               </div>
-              <div style={{fontSize:15,fontFamily:"'DM Mono',monospace",fontWeight:600,flexShrink:0}}>{fmtX(selAcct.current_balance??0)}</div>
+              <div style={{fontSize:15,fontFamily:"'DM Mono',monospace",fontWeight:600,flexShrink:0}}>{fmtX(displayBalance(selAcct.current_balance,selAcct.type))}</div>
             </div>
             <div style={{display:"flex",gap:8,marginTop:12}}>
               <button onClick={handleToggleHide} disabled={togglingHide}
