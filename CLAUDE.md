@@ -279,14 +279,23 @@ independent Go/Rust/Python clients — don't relitigate):
   connect modal lists removed banks with a Restore button, because without one
   that tombstone is permanent and a mis-tap is unrecoverable.
 
-**OPEN — must be settled against live data:** how SimpleFIN **signs a credit /
-loan balance** when money is owed. Nothing in the spec, any client library, or
-the demo fixture answers it (the demo only exposes positive deposit accounts).
-`normalizeBalance()` currently assumes a negative reported balance means "owed"
-and flips it, which gets an overpaid card wrong under either convention;
-`api/sync.js` logs the raw feed value next to the stored one for every debt
-account so a real card settles it. **The Debt tracker must not trust this until
-it's checked.**
+**SETTLED against live data (2026-07, Capital One Venture X):** SimpleFIN
+reports a credit/loan balance **NEGATIVE when money is owed**. The feed sent
+-5127.97 for a card Plaid reported as +5127.97, so `normalizeBalance()`'s flip
+is correct and the Debt tracker can rely on it. (Proof it was the raw feed
+value: `normalizeBalance` can never *return* a negative for a credit account, so
+a stored negative means the row was typed `depository` at sync time.) Still
+approximate for an **overpaid** card — reported positive, left positive, i.e.
+shown as owed. Rare and small.
+
+**Account-type inference is the fragile part, not the balance.** Card *product*
+names carry no card-ish word — a "Venture X" landed as `depository/checking`,
+which would have counted all 348 card purchases as household cash spending the
+moment it was unhidden. `inferAccountType` now also matches product names
+(venture/quicksilver/freedom/sapphire/…), card-only issuers, and falls back to
+`credit` on a negative balance; the deposit rules still run first so
+"Platinum Savings" and "Preferred Checking" stay deposits. **Always eyeball the
+type on a new SimpleFIN account** — the sync logs a warning when it guessed.
 
 OUT (not now): **email-alert cron** (Vercel Cron → `api/` route polling Gmail,
 parsing alerts, inserting service-role for minutes-fresh top-ups, reconciled

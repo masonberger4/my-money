@@ -348,9 +348,20 @@ async function pullOneAccessUrl(supabase, householdId, accessRow, { force }) {
     // is guessed from the name once; after that it is user-owned (the Accounts
     // tab can correct it) and the feed must never clobber the correction —
     // the same rule that protects nickname/color/hidden.
-    const guessed = existing ? null : inferAccountType(acct.name, acct.org);
+    const guessed = existing ? null : inferAccountType(acct.name, acct.org, acct.balance);
     const type = existing ? existing.type : guessed.type;
     const subtype = existing ? existing.subtype : guessed.subtype;
+    if (guessed?.uncertain) {
+      // Worth a log line: a card guessed as checking turns every purchase on it
+      // into household spending the moment the account is unhidden.
+      console.warn(
+        '[sync:simplefin] account type is a GUESS for "%s" (%s) -> %s/%s — confirm it in the Accounts tab',
+        acct.name,
+        acct.org.label,
+        type,
+        subtype
+      );
+    }
 
     if (!ALLOWED_TYPES.has(type)) {
       ignoredTypes++;

@@ -503,18 +503,45 @@ function readFeedError(entry) {
 // corrected by hand. Order matters — investments and loans first, then the
 // deposit words, then card words (so "Discover Bank Savings" and "Cash Rewards
 // Checking" resolve as deposit accounts, not cards).
+// The deposit rules run BEFORE the card rules on purpose, and that ordering is
+// what makes the card rules safe to write generously: a real deposit account
+// claims itself first, so generic product words ("Preferred", "Platinum",
+// "Unlimited", "Reserve") can sit in the card list without stealing
+// "Platinum Savings" or "Preferred Checking".
 const TYPE_RULES = [
   [/\b(brokerage|invest|investment|401\s?k|403\s?b|\bira\b|roth|hsa|portfolio|securities|mutual fund)\b/i, { type: 'investment', subtype: 'brokerage' }],
   [/\b(mortgage|home loan|auto loan|car loan|student loan|personal loan|loan|heloc|line of credit|lending)\b/i, { type: 'loan', subtype: 'loan' }],
   [/\b(savings|saver|save|money market|\bmma\b|certificate|\bcd\b|holiday|christmas club|emergency fund|share savings)\b/i, { type: 'depository', subtype: 'savings' }],
-  [/\b(checking|chequing|share draft|debit|spending|everyday|current account)\b/i, { type: 'depository', subtype: 'checking' }],
-  [/\b(credit card|visa|mastercard|master card|amex|american express|discover card|platinum|signature|rewards card|cash ?back|\bcredit\b|\bcard\b)\b/i, { type: 'credit', subtype: 'credit card' }],
+  // "everyday" was removed as a bare word: "Blue Cash Everyday" and "Amex
+  // EveryDay" are CARDS, and it was claiming them for checking. Wells Fargo's
+  // "Everyday Checking" is still matched, by the word "checking".
+  [/\b(checking|chequing|share draft|debit|spending|current account)\b/i, { type: 'depository', subtype: 'checking' }],
+  // Card product names carry no card-ish word at all — "Venture X", "Freedom
+  // Unlimited", "Quicksilver" — which is how a Capital One Venture X landed as
+  // checking and would have counted 348 card purchases as household spending.
+  [/\b(credit card|visa|mastercard|master card|amex|american express|discover card|rewards card|cash ?back|\bcredit\b|\bcard\b)\b/i, { type: 'credit', subtype: 'credit card' }],
+  [/\b(venture|quicksilver|savor(one)?|spark|freedom|sapphire|slate|\bink\b|reserve|preferred|unlimited|double cash|active cash|custom cash|altitude|propel|bonvoy|skymiles|aadvantage|rapid rewards|hyatt|platinum|signature|gold)\b/i, { type: 'credit', subtype: 'credit card' }],
 ];
 
-export function inferAccountType(name, org) {
+// Issuers that essentially only issue cards. Capital One and Chase are NOT here
+// — they both offer checking, so their name alone proves nothing.
+const CARD_ONLY_ISSUER_RE = /\b(american express|amex|discover|barclaycard|barclays|synchrony|comenity|credit one|first premier|bread financial)\b/i;
+
+export function inferAccountType(name, org, balance) {
   const haystack = `${String(name || '')} ${String(org?.name || '')}`;
   for (const [re, out] of TYPE_RULES) {
     if (re.test(haystack)) return { ...out, inferred: true };
+  }
+  if (CARD_ONLY_ISSUER_RE.test(String(org?.name || ''))) {
+    return { type: 'credit', subtype: 'credit card', inferred: true };
+  }
+  // Last resort before the fallback: SimpleFIN reports a debt balance as
+  // NEGATIVE when money is owed (confirmed against a real Capital One card), and
+  // a deposit account is only negative while overdrawn — rare, and not usually
+  // the state it's in at sync time. So a negative balance on an otherwise
+  // unrecognisable account is much more likely a card than a checking account.
+  if (typeof balance === 'number' && balance < 0) {
+    return { type: 'credit', subtype: 'credit card', inferred: true, uncertain: true };
   }
   // Nothing matched. Depository/checking is the commonest account and keeps the
   // row visible in every view so a wrong guess is noticed and corrected, rather
@@ -525,15 +552,16 @@ export function inferAccountType(name, org) {
 // Normalize the reported balance so `current_balance` means what the rest of
 // the app assumes: for credit/loan, positive = money OWED (Plaid's convention).
 //
-// ⚠ UNVERIFIED. Nothing in the SimpleFIN spec, in any client library, or in the
-// demo fixture says how a debt balance is signed — the demo only exposes
-// positive-balance deposit accounts. The rule below assumes a card reported as
-// -1,234.56 means $1,234.56 owed, and that a positive number on a card already
-// means "owed". It gets the rare overpaid/credit-balance card wrong under either
-// convention. Deposit balances are unambiguous and pass through untouched.
+// CONFIRMED against a real linked card (Capital One Venture X, 2026-07):
+// SimpleFIN reports a credit-card balance as NEGATIVE when money is owed — the
+// feed sent -5127.97 for a card with $5,127.97 outstanding, matching Plaid's
+// +5127.97 for the same card after this flip. Nothing in the spec, any client
+// library, or the demo fixture said so; the demo only exposes positive-balance
+// deposit accounts, so it took live data.
 //
-// This must be checked against a real linked card before the Debt tracker
-// trusts it — api/sync.js logs the raw feed value for exactly that reason.
+// Still approximate at one boundary: an OVERPAID card (the bank owes you) would
+// be reported positive and is left positive here, i.e. shown as owed. Rare, and
+// small when it happens. Deposit balances are unambiguous and pass through.
 export function normalizeBalance(type, balance) {
   if (balance == null) return null;
   if (type !== 'credit' && type !== 'loan') return balance;
