@@ -1,5 +1,5 @@
 import { supabase } from './supabaseClient.js';
-import { isTransferCategory, applyAccountRules } from './categoryMap.js';
+import { isTransferCategory, applyAccountRules, UNCATEGORIZED } from './categoryMap.js';
 
 function pad2(n) {
   return String(n).padStart(2, '0');
@@ -29,7 +29,7 @@ const TX_COLUMNS =
 
 // User override wins over the Plaid-derived category.
 function effectiveCategory(t) {
-  return t.user_category || t.mapped_category || 'Shopping and gear';
+  return t.user_category || t.mapped_category || UNCATEGORIZED;
 }
 
 // Some banks send masked descriptors ("****** *********"). Treat those as
@@ -270,7 +270,7 @@ function toTxShape(t) {
     transaction_date: t.date,
     amount: t.amount,
     category: effectiveCategory(t),
-    auto_category: t.mapped_category || 'Shopping and gear',
+    auto_category: t.mapped_category || UNCATEGORIZED,
     user_category: t.user_category || null,
     user_description: t.user_description || null,
     excluded: !!t.excluded,

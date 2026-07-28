@@ -68,7 +68,7 @@ entry once shipped.
 |---|---|
 | `src/components/Dashboard.jsx` | Almost the entire UI — single file, inline styles, tabs: overview/categories/transactions/accounts/trends/recurring/ask. Shared mini-components: `Pill`, `Swatch`, `EditName`, `Sk` (skeleton), `Donut`. |
 | `src/dataAdapter.js` | All Supabase reads + shapes consumed by Dashboard; the Trends cash-flow model lives here (see Conventions). Keep return shapes stable. Also holds the CSV-import writes (`findOrCreateManualInstitution`, `createManualAccount`, `getExistingTxIds`, `importCsvTransactions`, `isManualAccount`), the comparison-mode read `getAccountTransactionsInRange`, and exports the cash-flow helpers (`markInternalTransfers`/`cashIncome`/`cashSpending`) for the dry-run harness. |
-| `src/categoryMap.js` | Plaid category → app category mapping; `applyAccountRules` (credit-card negatives → "Return", excluded from income); pure JS, imported by server code too. `ERA_CATEGORIES` is the taxonomy source of truth (no "Housing"/"Income" member). |
+| `src/categoryMap.js` | Plaid category → app category mapping; `applyAccountRules` (credit-card negatives → "Return", excluded from income); `UNCATEGORIZED` + `isBudgetableCategory`; pure JS, imported by server code too. `ERA_CATEGORIES` is the taxonomy source of truth (no "Housing"/"Income" member; `Uncategorized` IS one). |
 | `src/csvImport.js` | Pure CSV-import core (no React/Supabase): `parseCsv`, `detectHeader`, `parseMoney`/`parseDate`, transfer flagging, dedup `plaid_tx_id` hashing, `buildRows`/`analyzeCsv`. Also the comparison-mode core: `reconcileCsv` (max-matching audit), `descSimilarity`, `csvDateRange`. Testable in isolation. |
 | `src/accountBalance.js` | `isDebtAccount` / `displayBalance` — the stored-positive → displayed-negative rule for credit and loan balances. Pure JS; imported by both Dashboard.jsx and the server-side assistant context. |
 | `src/txClassify.js` | The shared descriptor→category rule table + internal-transfer tagging (`guessCategory`, `transferRawCategory`, `classifyDescription`), validated against `ERA_CATEGORIES` at load. Lifted out of `csvImport.js` when SimpleFIN became a second caller: both feeds get a descriptor and no category, so both derive `mapped_category` at WRITE time from this one table. Pure JS — imported by server code too. |
@@ -139,6 +139,22 @@ playwright-core screenshot (`executablePath:'/opt/pw-browsers/chromium'`,
 - Effective category = `user_category || mapped_category` (user override wins).
 - "Transfers and card payments" and "Return" (credit-card negatives) are never
   counted as spending; "Return" is never counted as income.
+- **`Uncategorized` is the fallback, and it is a real taxonomy member.** It IS
+  counted as spending (the money left) but is never budgetable and is never
+  offered in the manual category picker — the way to undo a wrong pick is
+  "Reset to automatic". It exists because the old fallback was "Shopping and
+  gear", a category actually in use, so "we don't know" was indistinguishable
+  from a confident answer: 46% of a realistic merchant corpus landed there.
+  Now the unknown is visible and sized. Don't reintroduce a real category as
+  the fallback.
+- **A card PURCHASE can never be classified as a card payment.** "Transfers and
+  card payments" is excluded from spending, so a false positive there deletes
+  money from every total silently. Two guards in `src/txClassify.js`: an issuer
+  name (CAPITAL ONE / AMEX / DISCOVER…) must co-occur with payment wording, and
+  a positive amount on a `credit` account skips the transfer rules entirely — a
+  payment arrives as money *in*. Always pass `accountType` to
+  `classifyDescription` where it's known. Before this, "Capital One Travel" and
+  "Discover Tire and Auto" vanished from the dashboard.
 - Plaid sync upserts deliberately OMIT user-owned columns (nickname, color,
   hidden, user_category, user_description, excluded) so edits survive syncs.
 - Account labels: `nickname || "name ··mask"`; badge color from `ACCOUNT_COLORS`

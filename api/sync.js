@@ -327,6 +327,7 @@ async function pullOneAccessUrl(supabase, householdId, accessRow, { force }) {
   const toInsert = [];
   const toUpdate = [];
   const usable = [];
+  const typeByExternal = new Map();
   let ignoredTypes = 0;
 
   // A response that listed the same account twice would build the same
@@ -381,6 +382,9 @@ async function pullOneAccessUrl(supabase, householdId, accessRow, { force }) {
     }
 
     usable.push({ acct, externalId });
+    // Needed when classifying this account's transactions below — `collect`
+    // only sees normalized feed accounts, which carry no type.
+    typeByExternal.set(externalId, type);
 
     // available-balance is omitted when it equals the balance, so fall back
     // rather than nulling it out.
@@ -468,8 +472,10 @@ async function pullOneAccessUrl(supabase, householdId, accessRow, { force }) {
   const seenTx = new Set();
   const collect = normalizedAccounts => {
     for (const acct of normalizedAccounts) {
-      const accountUuid = uuidByExternal.get(SFIN_PREFIX + acct.externalId);
+      const externalId = SFIN_PREFIX + acct.externalId;
+      const accountUuid = uuidByExternal.get(externalId);
       if (!accountUuid) continue;
+      const acctType = typeByExternal.get(externalId);
       for (const tx of acct.transactions) {
         const dedupKey = `${accountUuid}|${tx.externalId}`;
         if (seenTx.has(dedupKey)) continue;
@@ -482,7 +488,9 @@ async function pullOneAccessUrl(supabase, householdId, accessRow, { force }) {
           tx.payee && tx.payee !== tx.description
             ? `${tx.payee} ${tx.description}`
             : tx.description;
-        const { raw_category, mapped_category } = classifyDescription(descriptor, tx.amount);
+        // The account type is what stops a card PURCHASE from being read as a
+        // card PAYMENT and dropped from spending entirely (see txClassify.js).
+        const { raw_category, mapped_category } = classifyDescription(descriptor, tx.amount, acctType);
         txRows.push({
           household_id: householdId,
           account_id: accountUuid,

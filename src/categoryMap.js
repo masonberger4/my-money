@@ -19,10 +19,25 @@ export const ERA_CATEGORIES = [
   'Cash, checks, and misc',
   'Transfers and card payments',
   'Return',
+  // Not a real spending category — the honest answer when the classifier does
+  // not recognise a merchant. It exists because the previous fallback was
+  // "Shopping and gear", a category actually in use, which made "we don't know"
+  // indistinguishable from "this is shopping" and quietly inflated it (46% of a
+  // realistic merchant corpus landed there). Uncategorized IS counted as
+  // spending — the money did leave — but it can't be budgeted, and it shows up
+  // in the Categories tab so the size of the unknown is visible.
+  'Uncategorized',
 ];
 
 const TRANSFER_CATEGORY = 'Transfers and card payments';
 const RETURN_CATEGORY = 'Return';
+export const UNCATEGORIZED = 'Uncategorized';
+
+// Categories that exist for bookkeeping rather than budgeting. A budget on
+// "Uncategorized" would be a budget on the classifier's ignorance.
+export function isBudgetableCategory(category) {
+  return category !== UNCATEGORIZED && category !== TRANSFER_CATEGORY;
+}
 
 const unmappedWarned = new Set();
 
@@ -88,9 +103,11 @@ export function mapPlaidCategory(primary, detailed) {
       const key = `${p}|${d}`;
       if (!unmappedWarned.has(key)) {
         unmappedWarned.add(key);
-        console.warn(`[categoryMap] Unmapped Plaid category: ${key} → defaulting to "Shopping and gear"`);
+        console.warn(`[categoryMap] Unmapped Plaid category: ${key} → "${UNCATEGORIZED}"`);
       }
-      return 'Shopping and gear';
+      // Was "Shopping and gear", for the same bad reason the keyword table used
+      // it: an unmapped code is not shopping, it's unknown. Say so.
+      return UNCATEGORIZED;
     }
   }
 }

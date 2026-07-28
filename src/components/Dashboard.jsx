@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { getOverview, getSpending, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES } from "../dataAdapter.js";
 import { detectRecurring } from "../recurring.js";
 import { unlinkInstitution, askAssistant } from "../plaidClient.js";
-import { ERA_CATEGORIES } from "../categoryMap.js";
+import { ERA_CATEGORIES, UNCATEGORIZED, isBudgetableCategory } from "../categoryMap.js";
 import { displayBalance, isDebtAccount as isDebtType } from "../accountBalance.js";
 import { runSync } from "../sync.js";
 import CsvImport from "./CsvImport.jsx";
@@ -20,6 +20,9 @@ const DEFAULT_COLORS = {
   "Education": "#FAC775", "Side hustles and business": "#888780",
   "Cash, checks, and misc": "#888780", "Transfers and card payments": "#888780",
   "Return": "#1D9E75",
+  // Amber, deliberately unlike every real category: this bucket is a prompt to
+  // do something, not a spending area.
+  "Uncategorized": "#C08A2E",
 };
 
 const TX_ICONS = {
@@ -27,7 +30,7 @@ const TX_ICONS = {
   "Childcare":"👶","Pets":"🐾","Health and fitness":"💪","Home maintenance and improvement":"🔧",
   "Entertainment and subscriptions":"🎬","Shopping and gear":"🛍","Travel and vacation":"✈️",
   "Healthcare and pharmacy":"💊","Education":"📚","Side hustles and business":"💼",
-  "Return":"↩️",
+  "Return":"↩️","Uncategorized":"❓",
 };
 
 const ACCOUNT_COLORS = ["#7F77DD","#1D9E75","#D85A30","#378ADD","#FAC775","#D4537E","#639922","#E24B4A"];
@@ -625,7 +628,10 @@ export default function Dashboard({ refreshTick = 0 }) {
                     </div>
                     <div style={{display:"flex",alignItems:"baseline",gap:5,marginLeft:12,flexShrink:0}}>
                       <span style={{fontSize:13,fontFamily:"'DM Mono',monospace"}}>{fmt(c.amount)}</span>
-                      <BudgetEdit limit={lim} onSave={v=>saveBudget(c.label,v)}/>
+                      {/* No budget on Uncategorized — it would be a budget on
+                          the classifier's ignorance, and the number moves as
+                          merchants get learned rather than as spending changes. */}
+                      {isBudgetableCategory(c.label)&&<BudgetEdit limit={lim} onSave={v=>saveBudget(c.label,v)}/>}
                     </div>
                   </div>
                   <div style={{display:"flex",alignItems:"center",gap:8}}>
@@ -634,6 +640,12 @@ export default function Dashboard({ refreshTick = 0 }) {
                       {hasB?(lim>0?Math.round(ratio*100)+"%":"—"):`${c.percent_of_total?.toFixed(0)}%`}
                     </span>
                   </div>
+                  {c.label===UNCATEGORIZED&&(
+                    <div style={{fontSize:10,color:"var(--muted)",marginTop:5,lineHeight:1.5}}>
+                      Merchants the classifier didn't recognise. Still counted as spending — open one
+                      and set its category, and it'll remember that merchant next time.
+                    </div>
+                  )}
                 </div>
                 );
               })}
@@ -1142,7 +1154,10 @@ export default function Dashboard({ refreshTick = 0 }) {
       {/* Transaction detail modal */}
       {selTx&&(()=>{
         const a=acctById(selTx.account_id);
-        const allCats=[...ERA_CATEGORIES,...customCats.map(c=>c.name).filter(n=>!ERA_CATEGORIES.includes(n))];
+        // Uncategorized is never offered as a manual choice — it means "the
+        // classifier didn't know", and the way to undo a wrong pick is
+        // "Reset to automatic" below, not to assert ignorance by hand.
+        const allCats=[...ERA_CATEGORIES.filter(c=>c!==UNCATEGORIZED),...customCats.map(c=>c.name).filter(n=>!ERA_CATEGORIES.includes(n))];
         return (
         <div className="overlay" onClick={()=>setSelTx(null)}>
           <div className="modal" onClick={e=>e.stopPropagation()} style={{maxHeight:"80vh",overflowY:"auto"}}>
