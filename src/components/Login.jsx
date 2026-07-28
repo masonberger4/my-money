@@ -27,7 +27,7 @@ export default function Login() {
     padding: '10px 12px',
     borderRadius: 8,
     border: '1px solid var(--border)',
-    background: 'var(--bg)',
+    background: 'var(--input-bg)',
     color: 'var(--text)',
     fontSize: 14,
     fontFamily: 'inherit',
@@ -39,18 +39,13 @@ export default function Login() {
     <div
       style={{
         minHeight: '100vh',
-        background: 'var(--bg,#F7F6F2)',
-        color: 'var(--text,#1a1a18)',
+        background: 'var(--bg)',
+        color: 'var(--text)',
         fontFamily: "'DM Sans','Helvetica Neue',sans-serif",
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
         padding: 24,
-        '--bg': '#F7F6F2',
-        '--card': '#FFFFFF',
-        '--text': '#1a1a18',
-        '--muted': '#888780',
-        '--border': '#E4E2DC',
       }}
     >
       <form
@@ -107,12 +102,12 @@ export default function Login() {
         {error && (
           <div
             style={{
-              background: '#FCEBEB',
-              border: '1px solid #F09595',
+              background: 'var(--danger-bg)',
+              border: '1px solid var(--danger-border)',
               borderRadius: 8,
               padding: '8px 12px',
               fontSize: 12,
-              color: '#A32D2D',
+              color: 'var(--danger)',
               marginBottom: 12,
             }}
           >
@@ -127,8 +122,8 @@ export default function Login() {
             padding: '10px 0',
             borderRadius: 8,
             border: 'none',
-            background: '#7F77DD',
-            color: '#fff',
+            background: 'var(--accent)',
+            color: 'var(--accent-text)',
             fontFamily: 'inherit',
             fontSize: 14,
             fontWeight: 500,

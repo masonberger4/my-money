@@ -7,6 +7,8 @@ import { runSync } from "../sync.js";
 import CsvImport from "./CsvImport.jsx";
 import { getSetting, setSetting } from "../db.js";
 import { ASSISTANT_MODELS, EFFORT_LEVELS, DEFAULT_MODEL, DEFAULT_EFFORT, estimateCostRange, formatCents } from "../assistantModels.js";
+import { useTheme, readToken, THEME_PREFS } from "../theme.js";
+import { chipStyle, markColor, readableInk } from "../paletteContrast.js";
 
 const DEFAULT_COLORS = {
   "Shopping and gear": "#7F77DD", "Health and fitness": "#7F77DD",
@@ -29,6 +31,71 @@ const TX_ICONS = {
 };
 
 const ACCOUNT_COLORS = ["#7F77DD","#1D9E75","#D85A30","#378ADD","#FAC775","#D4537E","#639922","#E24B4A"];
+
+// Three-state theme control: system -> light -> dark -> system. An icon alone
+// can't say which of THREE states is active, so each one carries a label too.
+const THEME_UI = {
+  system: {icon:"◐",label:"Auto"}, light: {icon:"☀",label:"Light"}, dark: {icon:"☾",label:"Dark"},
+};
+
+// --- render-time palette contrast --------------------------------------------
+// The palette (ACCOUNT_COLORS / DEFAULT_COLORS, and any hex picked with the
+// Swatch input) is DATA: the STORED value must never change. But a colour that
+// reads on a near-white card is unreadable on a near-black one, so legibility is
+// computed AT RENDER against whatever surface the mark actually sits on — which
+// also covers arbitrary user-picked colours a second fixed palette never could.
+// Surfaces are read from the CSS tokens at runtime (below), so src/ui.css stays
+// the single source of truth for their values.
+
+// Memoised: the palette is small and there are ~3 surfaces, so this stays a
+// handful of entries even with hundreds of rows on screen, and no row pays for
+// the search twice.
+const contrastCache = new Map();
+function cached(key,compute){
+  if(contrastCache.has(key))return contrastCache.get(key);
+  const v=compute();
+  if(contrastCache.size>400)contrastCache.clear();
+  contrastCache.set(key,v);
+  return v;
+}
+
+// A tinted chip on `surface`: {bg, ink, dot}. With no surface (no stylesheet
+// yet — SSR/jsdom) fall back to the historical `color + "22"` look. Nothing here
+// may throw: this runs during render and the app has no error boundary.
+function chipOn(color,surface){
+  if(!color)return {bg:"var(--bg)",ink:"var(--muted)",dot:"var(--muted)"};
+  if(!surface)return {bg:color+"22",ink:color,dot:color};
+  return cached("c|"+color+"|"+surface,()=>{
+    const c=chipStyle(color,surface);
+    return {bg:c.bg||color+"22",ink:c.ink||color,dot:c.dot||color};
+  });
+}
+// A non-text mark (donut slice, bar fill, dot, chip border) — WCAG asks 3:1.
+function markOn(color,surface){
+  if(!color||!surface)return color;
+  return cached("m|"+color+"|"+surface,()=>markColor(color,surface)||color);
+}
+// Text — 4.5:1.
+function inkOn(color,surface){
+  if(!color||!surface)return color;
+  return cached("i|"+color+"|"+surface,()=>readableInk(color,surface)||color);
+}
+
+// The surfaces palette colours get drawn on. Read from the tokens rather than
+// hardcoded, and re-read whenever the RESOLVED theme moves. readToken never
+// throws and returns '' when there is no stylesheet -> null -> the fallbacks
+// above.
+function readSurfaces(){
+  return {card:readToken("--card")||null,bg:readToken("--bg")||null,track:readToken("--track")||null};
+}
+function useSurfaces(resolved){
+  const [surf,setSurf]=useState(readSurfaces);
+  useEffect(()=>{
+    const next=readSurfaces();
+    setSurf(prev=>(prev.card===next.card&&prev.bg===next.bg&&prev.track===next.track)?prev:next);
+  },[resolved]);
+  return surf;
+}
 
 function monthLabel(y, m) { return new Date(y,m-1,1).toLocaleString("default",{month:"long",year:"numeric"}); }
 function shortDate(iso) { const [y,m,d]=iso.split("-").map(Number); return new Date(y,m-1,d).toLocaleDateString("default",{month:"short",day:"numeric"}); }
@@ -53,7 +120,14 @@ function Donut({data,size=130}) {
   }
   return (
     <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
-      {slices.map((s,i)=><path key={i} d={arc(s.s,s.e,r,ir)} fill={s.color} opacity=".9"/>)}
+      {/* No opacity here: the slice colour is already contrast-corrected against
+          the card, and compositing it back toward the card would erode the 3:1
+          the correction just bought (measured 2.68:1 for amber in light).
+          The card-coloured stroke separates ADJACENT slices, which contrast
+          correction cannot: the palette legitimately maps several categories to
+          one colour (Groceries / Dining out / Pets are all #1D9E75), so
+          neighbours can be a literal 1:1 and would otherwise read as one wedge. */}
+      {slices.map((s,i)=><path key={i} d={arc(s.s,s.e,r,ir)} fill={s.color} stroke="var(--card)" strokeWidth="1.5"/>)}
       <circle cx={cx} cy={cy} r={ir-2} fill="var(--card)"/>
     </svg>
   );
@@ -61,10 +135,14 @@ function Donut({data,size=130}) {
 
 function Swatch({color,onChange}) {
   const ref=useRef();
+  // The fill is the STORED colour, shown truthfully — this is the colour picker,
+  // so it must never be contrast-adjusted. The outline is --muted (>=3:1 on the
+  // card in both themes) rather than the --border hairline, which disappears
+  // against a swatch in either theme.
   return (
     <div onClick={()=>ref.current?.click()} title="Click to change color"
       style={{width:14,height:14,borderRadius:3,background:color,cursor:"pointer",flexShrink:0,
-        outline:"1.5px solid rgba(0,0,0,0.12)",transition:"transform .1s",position:"relative"}}
+        outline:"1.5px solid var(--muted)",transition:"transform .1s",position:"relative"}}
       onMouseEnter={e=>e.currentTarget.style.transform="scale(1.3)"}
       onMouseLeave={e=>e.currentTarget.style.transform="scale(1)"}>
       <input ref={ref} type="color" value={color} onChange={e=>onChange(e.target.value)}
@@ -120,10 +198,14 @@ function BudgetEdit({limit,onSave}) {
   );
 }
 
-function Pill({label,color}) {
-  return <span style={{display:"inline-flex",alignItems:"center",gap:4,fontSize:10,background:color+"22",color,
+// `surface` = the token value of whatever the pill sits on (every pill sits on a
+// card today). The tint, the label ink and the dot are all derived from `color`
+// against it, so the same stored colour stays legible in either theme.
+function Pill({label,color,surface}) {
+  const c=chipOn(color,surface);
+  return <span style={{display:"inline-flex",alignItems:"center",gap:4,fontSize:10,background:c.bg,color:c.ink,
     borderRadius:20,padding:"2px 8px",fontWeight:600}}>
-    <span style={{width:5,height:5,borderRadius:"50%",background:color,display:"inline-block"}}/>
+    <span style={{width:5,height:5,borderRadius:"50%",background:c.dot,display:"inline-block"}}/>
     {label}
   </span>;
 }
@@ -168,6 +250,18 @@ export default function Dashboard({ refreshTick = 0 }) {
   const [asstEffort,setAsstEffort]=useState(DEFAULT_EFFORT);
   const chatEndRef=useRef(null);
   const didInitialSync=useRef(false);
+
+  // Theme. useTheme owns the persistence (localStorage, NOT the shared
+  // `settings` table — that would flip the other person's phone) and the OS
+  // listener: it subscribes only while the preference is 'system' and returns
+  // the unsubscribe, so an explicit choice is never overridden. Declared BEFORE
+  // useSurfaces so its effect applies the theme first and the tokens below are
+  // read after the change, not before it.
+  const {pref:themePref,resolved:themeResolved,cycleTheme}=useTheme();
+  const surf=useSurfaces(themeResolved);
+  const themeUi=THEME_UI[themePref]||THEME_UI.system;
+  const themeNext=THEME_UI[THEME_PREFS[(THEME_PREFS.indexOf(themePref)+1)%THEME_PREFS.length]]||THEME_UI.system;
+  const themeTitle=`Theme: ${themeUi.label}${themePref==="system"?` — following your device, ${themeResolved} right now`:""}. Tap for ${themeNext.label}.`;
 
   useEffect(()=>{chatEndRef.current?.scrollIntoView({behavior:"smooth"});},[chatMsgs,chatBusy]);
 
@@ -400,7 +494,8 @@ export default function Dashboard({ refreshTick = 0 }) {
   const balance=overview?.accounts?.[0]?.balance?.current||0;
   const lastSpent=overview?.last_month?.spending?.amount;
   const delta=lastSpent!=null?totalSpent-lastSpent:null;
-  const donutData=cats.slice(0,7).map(c=>({label:getName(c.label),value:c.amount,color:getColor(c.label)}));
+  // Donut slices are non-text marks on the card -> 3:1.
+  const donutData=cats.slice(0,7).map(c=>({label:getName(c.label),value:c.amount,color:markOn(getColor(c.label),surf.card)}));
 
   // Budgets read the getSpending() groups (not raw transactions), so when the
   // adapter's effective-category logic changes (transaction-editing branch),
@@ -422,37 +517,24 @@ export default function Dashboard({ refreshTick = 0 }) {
   }
 
   return (
-    <div style={{fontFamily:"'DM Sans','Helvetica Neue',sans-serif",background:"var(--bg,#F7F6F2)",minHeight:"100vh",
-      color:"var(--text,#1a1a18)","--bg":"#F7F6F2","--card":"#FFFFFF","--text":"#1a1a18","--muted":"#888780","--border":"#E4E2DC"}}>
+    <div style={{fontFamily:"'DM Sans','Helvetica Neue',sans-serif",background:"var(--bg)",minHeight:"100vh",
+      color:"var(--text)"}}>
       <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&family=DM+Mono:wght@400;500&display=swap');
-        @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
-        @keyframes fadeIn{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:none}}
-        @keyframes spin{to{transform:rotate(360deg)}}
-        @media(prefers-color-scheme:dark){:root{--bg:#18181A!important;--card:#222224!important;--text:#F0EFEB!important;--muted:#6e6e6a!important;--border:#2E2E30!important;}}
-        *{box-sizing:border-box;margin:0;padding:0;}
-        .card{background:var(--card);border-radius:14px;border:1px solid var(--border);padding:18px 20px;animation:fadeIn .25s ease both;}
-        .tab{background:none;border:none;cursor:pointer;font-family:inherit;font-size:13px;font-weight:500;color:var(--muted);padding:6px 10px;border-radius:20px;transition:all .15s;flex:1;}
-        .tab.active{background:var(--card);color:var(--text);box-shadow:0 1px 3px rgba(0,0,0,.08);}
-        .tab:hover:not(.active){color:var(--text);}
-        .ibtn{background:none;border:1px solid var(--border);border-radius:8px;padding:5px 12px;font-family:inherit;font-size:12px;font-weight:500;color:var(--muted);cursor:pointer;display:inline-flex;align-items:center;gap:5px;transition:all .15s;}
-        .ibtn:hover{color:var(--text);border-color:var(--text);}
-        .ibtn:disabled{opacity:.35;cursor:default;}
         .nbtn{background:var(--card);border:1px solid var(--border);border-radius:8px;width:30px;height:30px;display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:16px;transition:all .15s;line-height:1;}
         .nbtn:hover:not(:disabled){border-color:var(--text);}
         .nbtn:disabled{opacity:.3;cursor:default;}
         .tx{display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--border);}
         .tx:last-child{border-bottom:none;}
-        .overlay{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:100;}
+        .overlay{position:fixed;inset:0;background:var(--overlay);display:flex;align-items:center;justify-content:center;z-index:100;}
         .modal{background:var(--card);border-radius:16px;padding:24px;width:320px;border:1px solid var(--border);}
-        .bar-bg{flex:1;height:5px;background:var(--border);border-radius:3px;overflow:hidden;}
+        .bar-bg{flex:1;height:5px;background:var(--track);border-radius:3px;overflow:hidden;}
         .bar-fill{height:100%;border-radius:3px;transition:width .5s ease;}
       `}</style>
 
       <div style={{maxWidth:720,margin:"0 auto",padding:"24px 16px"}}>
 
         {/* Header */}
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:18}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,flexWrap:"wrap",marginBottom:18}}>
           <div>
             <div style={{fontSize:11,fontWeight:600,letterSpacing:".08em",color:"var(--muted)",textTransform:"uppercase",marginBottom:4}}>Spending Dashboard</div>
             <div style={{display:"flex",alignItems:"center",gap:10}}>
@@ -463,20 +545,31 @@ export default function Dashboard({ refreshTick = 0 }) {
               <button className="nbtn" onClick={nextMonth} disabled={!canNext}>›</button>
             </div>
           </div>
-          <button className="ibtn" onClick={()=>fetchData(year,month,{sync:true})} disabled={loading}>
-            <span style={{display:"inline-block",animation:loading?"spin 1s linear infinite":"none"}}>↻</span>
-            {lastUpd?lastUpd.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}):"Refresh"}
-          </button>
+          {/* Header controls. `stretch` against the 40px row gives both buttons a
+              40px tap target (.ibtn's own padding is ~26px, too small for a
+              thumb); the header wraps this row under the month nav at 390px
+              rather than overflowing or squeezing the buttons. */}
+          <div style={{display:"flex",alignItems:"stretch",gap:8,minHeight:40,marginLeft:"auto"}}>
+            <button className="ibtn" onClick={cycleTheme} title={themeTitle} aria-label={themeTitle}
+              style={{padding:"0 12px",flexShrink:0}}>
+              <span aria-hidden="true" style={{fontSize:14,lineHeight:1}}>{themeUi.icon}</span>
+              {themeUi.label}
+            </button>
+            <button className="ibtn" onClick={()=>fetchData(year,month,{sync:true})} disabled={loading} style={{padding:"0 12px"}}>
+              <span style={{display:"inline-block",animation:loading?"spin 1s linear infinite":"none"}}>↻</span>
+              {lastUpd?lastUpd.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}):"Refresh"}
+            </button>
+          </div>
         </div>
 
-        {error&&<div style={{background:"#FCEBEB",border:"1px solid #F09595",borderRadius:10,padding:"12px 16px",fontSize:13,color:"#A32D2D",marginBottom:14}}>{error}</div>}
+        {error&&<div style={{background:"var(--danger-bg)",border:"1px solid var(--danger-border)",borderRadius:10,padding:"12px 16px",fontSize:13,color:"var(--danger)",marginBottom:14}}>{error}</div>}
 
         {/* Summary */}
         <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10,marginBottom:14}}>
           {[
             {label:"Total spent",val:loading?null:fmt(totalSpent),sub:isCurrent&&lastSpent!=null?`vs ${fmt(lastSpent)} last month`:monthLabel(year,month)},
             {label:"Card balance",val:loading?null:fmtX(balance),sub:overview?.accounts?.[0]?.name||"Linked account"},
-            {label:"vs last month",val:loading||delta==null?null:`${delta>=0?"+":""}${fmt(delta)}`,sub:delta==null?"—":delta>=0?"↑ more spending":"↓ less spending",clr:delta==null?"var(--muted)":delta>=0?"#D85A30":"#1D9E75"},
+            {label:"vs last month",val:loading||delta==null?null:`${delta>=0?"+":""}${fmt(delta)}`,sub:delta==null?"—":delta>=0?"↑ more spending":"↓ less spending",clr:delta==null?"var(--muted)":inkOn(delta>=0?"#D85A30":"#1D9E75",surf.card)},
           ].map((c,i)=>(
             <div key={i} className="card" style={{animationDelay:i*.04+"s"}}>
               <div style={{fontSize:11,color:"var(--muted)",fontWeight:500,marginBottom:5}}>{c.label}</div>
@@ -506,7 +599,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                   {loading?[1,2,3,4].map(i=><div key={i} style={{marginBottom:8}}><Sk h={12}/></div>):
                     cats.slice(0,6).map((c,i)=>(
                       <div key={i} style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
-                        <div style={{width:8,height:8,borderRadius:"50%",background:getColor(c.label),flexShrink:0}}/>
+                        <div style={{width:8,height:8,borderRadius:"50%",background:markOn(getColor(c.label),surf.card),flexShrink:0}}/>
                         <span style={{fontSize:12,color:"var(--text)",flex:1,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{getName(c.label)}</span>
                         <span style={{fontSize:12,fontFamily:"'DM Mono',monospace",color:"var(--muted)",flexShrink:0}}>{fmt(c.amount)}</span>
                       </div>
@@ -526,8 +619,8 @@ export default function Dashboard({ refreshTick = 0 }) {
                       <div style={{fontSize:13,fontWeight:500,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{t.merchant_name||t.description}</div>
                       <div style={{fontSize:11,color:"var(--muted)",marginTop:2,display:"flex",alignItems:"center",gap:5,flexWrap:"wrap"}}>
                         <span>{getName(t.category)} · {t.transaction_date}</span>
-                        {a&&<Pill label={acctLabel(a)} color={acctColor(a)}/>}
-                        {t.excluded&&<Pill label="Excluded" color="#888780"/>}
+                        {a&&<Pill label={acctLabel(a)} color={acctColor(a)} surface={surf.card}/>}
+                        {t.excluded&&<Pill label="Excluded" color="#888780" surface={surf.card}/>}
                       </div>
                     </div>
                     <div style={{fontSize:13,fontFamily:"'DM Mono',monospace",fontWeight:500,flexShrink:0}}>{fmtX(t.amount)}</div>
@@ -553,7 +646,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                 <span style={{color:"var(--muted)"}}>·</span>
                 <span style={{color:"var(--muted)"}}>Spent <strong style={{color:"var(--text)",fontFamily:"'DM Mono',monospace"}}>{fmt(budgetedSpent)}</strong></span>
                 <span style={{flex:1}}/>
-                <span style={{fontWeight:600,color:budgetLeft>=0?"#1D9E75":"#D85A30"}}>
+                <span style={{fontWeight:600,color:inkOn(budgetLeft>=0?"#1D9E75":"#D85A30",surf.bg)}}>
                   {budgetLeft>=0?`${fmt(budgetLeft)} left`:`${fmt(-budgetLeft)} over`}
                 </span>
               </div>
@@ -563,7 +656,11 @@ export default function Dashboard({ refreshTick = 0 }) {
                 const lim=budgets[c.label];
                 const hasB=lim!=null;
                 const ratio=hasB&&lim>0?c.amount/lim:0;
-                const barColor=hasB?(ratio>=1?"#D85A30":ratio>=0.8?"#FAC775":getColor(c.label)):getColor(c.label);
+                // The bar sits on the --track fill, not the card: contrast is
+                // computed against THAT. The #D85A30/#FAC775 pair is semantic
+                // status, not palette, but it needs the same treatment to stay
+                // visible on a dark track — the stored hexes are untouched.
+                const barColor=markOn(hasB?(ratio>=1?"#D85A30":ratio>=0.8?"#FAC775":getColor(c.label)):getColor(c.label),surf.track);
                 const barW=hasB?Math.min(ratio,1)*100:(c.amount/maxCat)*100;
                 return (
                 <div key={c.label} style={{marginBottom:14,animationDelay:i*.03+"s"}}>
@@ -580,7 +677,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                   </div>
                   <div style={{display:"flex",alignItems:"center",gap:8}}>
                     <div className="bar-bg"><div className="bar-fill" style={{width:barW+"%",background:barColor}}/></div>
-                    <span style={{fontSize:11,color:hasB&&ratio>=1?"#D85A30":"var(--muted)",width:38,textAlign:"right",flexShrink:0}}>
+                    <span style={{fontSize:11,color:hasB&&ratio>=1?inkOn("#D85A30",surf.card):"var(--muted)",width:38,textAlign:"right",flexShrink:0}}>
                       {hasB?(lim>0?Math.round(ratio*100)+"%":"—"):`${c.percent_of_total?.toFixed(0)}%`}
                     </span>
                   </div>
@@ -633,15 +730,20 @@ export default function Dashboard({ refreshTick = 0 }) {
             </div>
             {accounts.filter(a=>!a.hidden).length>1&&(
               <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:12}}>
-                {[{id:null,label:"All accounts",color:"var(--muted)"},...accounts.filter(a=>!a.hidden).map(a=>({id:a.id,label:acctLabel(a),color:acctColor(a)}))].map(c=>{
+                {/* "All accounts" has no palette colour of its own — it stays on
+                    tokens (it used to ask for `var(--muted)22`, which is not a
+                    colour, so its active tint never painted at all). */}
+                {[{id:null,label:"All accounts",color:null},...accounts.filter(a=>!a.hidden).map(a=>({id:a.id,label:acctLabel(a),color:acctColor(a)}))].map(c=>{
                   const active=txAcctFilter===c.id;
+                  const cs=c.color?chipOn(c.color,surf.card):null;
                   return (
                     <button key={c.id||"all"} onClick={()=>setTxAcctFilter(c.id)}
                       style={{display:"inline-flex",alignItems:"center",gap:5,fontSize:11,fontWeight:600,
-                        background:active?c.color+"22":"var(--bg)",color:active?c.color:"var(--muted)",
-                        border:`1px solid ${active?c.color:"var(--border)"}`,borderRadius:20,padding:"4px 10px",
+                        background:active&&cs?cs.bg:"var(--bg)",color:active?(cs?cs.ink:"var(--text)"):"var(--muted)",
+                        border:`1px solid ${active?(cs?markOn(c.color,surf.card):"var(--text)"):"var(--border)"}`,borderRadius:20,padding:"4px 10px",
                         cursor:"pointer",fontFamily:"inherit",transition:"all .15s"}}>
-                      {c.id&&<span style={{width:6,height:6,borderRadius:"50%",background:c.color,display:"inline-block"}}/>}
+                      {cs&&<span style={{width:6,height:6,borderRadius:"50%",display:"inline-block",
+                        background:active?cs.dot:markOn(c.color,surf.bg)}}/>}
                       {c.label}
                     </button>
                   );
@@ -668,9 +770,9 @@ export default function Dashboard({ refreshTick = 0 }) {
                   <div style={{fontSize:11,color:"var(--muted)",marginTop:3,display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
                     <span>{t.transaction_date}</span>
                     <span>·</span>
-                    <Pill label={getName(t.category)} color={getColor(t.category)}/>
-                    {a&&<Pill label={acctLabel(a)} color={acctColor(a)}/>}
-                    {t.excluded&&<Pill label="Excluded" color="#888780"/>}
+                    <Pill label={getName(t.category)} color={getColor(t.category)} surface={surf.card}/>
+                    {a&&<Pill label={acctLabel(a)} color={acctColor(a)} surface={surf.card}/>}
+                    {t.excluded&&<Pill label="Excluded" color="#888780" surface={surf.card}/>}
                   </div>
                 </div>
                 <div style={{fontSize:13,fontFamily:"'DM Mono',monospace",fontWeight:500,flexShrink:0}}>{fmtX(t.amount)}</div>
@@ -707,8 +809,8 @@ export default function Dashboard({ refreshTick = 0 }) {
                   <div style={{flex:1,minWidth:0}}>
                     <div onClick={e=>e.stopPropagation()} style={{display:"flex",alignItems:"center",gap:6}}>
                       <EditName name={acctLabel(a)} onSave={v=>saveAccount(a.id,{nickname:v})}/>
-                      {isManualAccount(a)&&<Pill label="Imported" color="#7F77DD"/>}
-                      {a.hidden&&<Pill label="Hidden" color="#888780"/>}
+                      {isManualAccount(a)&&<Pill label="Imported" color="#7F77DD" surface={surf.card}/>}
+                      {a.hidden&&<Pill label="Hidden" color="#888780" surface={surf.card}/>}
                     </div>
                     <div style={{fontSize:11,color:"var(--muted)",marginTop:2}}>
                       {[acctInst(a),`${a.name}${a.mask?` ··${a.mask}`:""}`,a.subtype||a.type].filter(Boolean).join(" · ")}
@@ -735,7 +837,7 @@ export default function Dashboard({ refreshTick = 0 }) {
               <button className="nbtn" onClick={()=>setSelAcct(null)} title="Back to accounts">‹</button>
               <div style={{flex:1,minWidth:0}}>
                 <div style={{display:"flex",alignItems:"center",gap:8}}>
-                  <span style={{width:10,height:10,borderRadius:3,background:acctColor(selAcct),flexShrink:0}}/>
+                  <span style={{width:10,height:10,borderRadius:3,background:markOn(acctColor(selAcct),surf.card),flexShrink:0}}/>
                   <span style={{fontSize:15,fontWeight:600,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{acctLabel(selAcct)}</span>
                 </div>
                 <div style={{fontSize:11,color:"var(--muted)",marginTop:2}}>
@@ -752,8 +854,8 @@ export default function Dashboard({ refreshTick = 0 }) {
               </button>
               {!isManualAccount(selAcct)&&(
                 <button onClick={handleUnlink} disabled={unlinking}
-                  style={{flex:1,padding:"8px 0",borderRadius:8,border:"1px solid #F09595",background:"none",
-                    color:"#A32D2D",fontFamily:"inherit",fontSize:12,fontWeight:500,cursor:unlinking?"default":"pointer",opacity:unlinking?.6:1}}>
+                  style={{flex:1,padding:"8px 0",borderRadius:8,border:"1px solid var(--danger-border)",background:"none",
+                    color:"var(--danger)",fontFamily:"inherit",fontSize:12,fontWeight:500,cursor:unlinking?"default":"pointer",opacity:unlinking?.6:1}}>
                   {unlinking?"Unlinking…":`Unlink ${acctInst(selAcct)||"bank"}…`}
                 </button>
               )}
@@ -784,8 +886,8 @@ export default function Dashboard({ refreshTick = 0 }) {
                       <div style={{fontSize:11,color:"var(--muted)",marginTop:3,display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
                         <span>{t.transaction_date}</span>
                         <span>·</span>
-                        <Pill label={getName(t.category)} color={getColor(t.category)}/>
-                        {t.excluded&&<Pill label="Excluded" color="#888780"/>}
+                        <Pill label={getName(t.category)} color={getColor(t.category)} surface={surf.card}/>
+                        {t.excluded&&<Pill label="Excluded" color="#888780" surface={surf.card}/>}
                       </div>
                     </div>
                     <div style={{fontSize:13,fontFamily:"'DM Mono',monospace",fontWeight:500,flexShrink:0}}>{fmtX(t.amount)}</div>
@@ -851,8 +953,8 @@ export default function Dashboard({ refreshTick = 0 }) {
               {chatMsgs.map((m,i)=>(
                 <div key={i} style={{display:"flex",justifyContent:m.role==="user"?"flex-end":"flex-start",marginBottom:8}}>
                   <div style={{maxWidth:"85%",fontSize:13,lineHeight:1.5,whiteSpace:"pre-wrap",borderRadius:12,padding:"8px 12px",
-                    background:m.role==="user"?"#7F77DD":"var(--bg)",
-                    color:m.role==="user"?"#fff":"var(--text)",
+                    background:m.role==="user"?"var(--accent)":"var(--bg)",
+                    color:m.role==="user"?"var(--accent-text)":"var(--text)",
                     border:m.role==="user"?"none":"1px solid var(--border)"}}>
                     {m.content}
                   </div>
@@ -866,7 +968,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                 </div>
               )}
               {chatError&&(
-                <div style={{fontSize:12,color:"#A32D2D",background:"#FCEBEB",border:"1px solid #F09595",borderRadius:8,padding:"8px 12px",marginBottom:8}}>
+                <div style={{fontSize:12,color:"var(--danger)",background:"var(--danger-bg)",border:"1px solid var(--danger-border)",borderRadius:8,padding:"8px 12px",marginBottom:8}}>
                   {chatError}
                 </div>
               )}
@@ -879,7 +981,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                 style={{flex:1,padding:"10px 12px",borderRadius:10,border:"1px solid var(--border)",background:"var(--bg)",
                   color:"var(--text)",fontSize:13,fontFamily:"inherit",outline:"none"}}/>
               <button onClick={()=>sendChat()} disabled={chatBusy||!chatInput.trim()}
-                style={{padding:"0 16px",borderRadius:10,border:"none",background:"#7F77DD",color:"#fff",fontFamily:"inherit",
+                style={{padding:"0 16px",borderRadius:10,border:"none",background:"var(--accent)",color:"var(--accent-text)",fontFamily:"inherit",
                   fontSize:13,fontWeight:500,cursor:chatBusy||!chatInput.trim()?"default":"pointer",opacity:chatBusy||!chatInput.trim()?.5:1}}>
                 Send
               </button>
@@ -899,7 +1001,11 @@ export default function Dashboard({ refreshTick = 0 }) {
                 <>
                   <div style={{display:"flex",alignItems:"flex-end",gap:8,height:130,marginBottom:8}}>
                     {cfPs.map((p,i)=>{
-                      const h=Math.max((p.spending.amount/maxSpend)*100,3);
+                      // Pixels, not a percentage: the column below is auto-height
+                      // (the row only bottom-aligns it), so a % height has nothing
+                      // definite to resolve against and every bar collapsed to
+                      // minHeight. 114 = the 130px row minus the amount label + gap.
+                      const h=Math.max((p.spending.amount/maxSpend)*114,3);
                       const pStart=new Date(p.start);
                       const isSel=pStart.getFullYear()===year&&pStart.getMonth()+1===month;
                       return (
@@ -907,7 +1013,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                           <span style={{fontSize:9,fontFamily:"'DM Mono',monospace",color:"var(--muted)",whiteSpace:"nowrap"}}>{fmt(p.spending.amount)}</span>
                           <div onClick={()=>{setYear(pStart.getFullYear());setMonth(pStart.getMonth()+1);setTab("overview");}}
                             title={`View ${p.label}`}
-                            style={{width:"100%",height:h+"%",minHeight:4,background:isSel?"#7F77DD":"var(--border)",
+                            style={{width:"100%",height:h,minHeight:4,background:isSel?"var(--accent)":"var(--track)",
                               borderRadius:"4px 4px 0 0",transition:"all .4s ease",cursor:"pointer"}}
                             onMouseEnter={e=>e.currentTarget.style.opacity=".7"}
                             onMouseLeave={e=>e.currentTarget.style.opacity="1"}/>
@@ -937,7 +1043,10 @@ export default function Dashboard({ refreshTick = 0 }) {
                 return (
                   <div key={i} style={{marginBottom:14}}>
                     <div style={{fontSize:12,fontWeight:500,marginBottom:5}}>{p.label}</div>
-                    {[{label:"Spend",w:sw,color:"#D85A30",val:p.spending.amount},{label:"Income",w:iw,color:"#1D9E75",val:p.income.amount}].map(row=>(
+                    {/* Bar fills sit on the --track, so that is what they are
+                        contrasted against — not the card. */}
+                    {[{label:"Spend",w:sw,color:markOn("#D85A30",surf.track),val:p.spending.amount},
+                      {label:"Income",w:iw,color:markOn("#1D9E75",surf.track),val:p.income.amount}].map(row=>(
                       <div key={row.label} style={{display:"flex",gap:6,alignItems:"center",marginBottom:3}}>
                         <span style={{fontSize:11,color:"var(--muted)",width:44}}>{row.label}</span>
                         <div className="bar-bg"><div className="bar-fill" style={{width:row.w+"%",background:row.color}}/></div>
@@ -962,9 +1071,12 @@ export default function Dashboard({ refreshTick = 0 }) {
                       <span style={{fontSize:12,fontWeight:500,width:44,flexShrink:0}}>{n.label.split(" ")[0]}</span>
                       <div style={{flex:1,position:"relative",height:14,background:"var(--bg)",borderRadius:7}}>
                         <div style={{position:"absolute",left:"50%",top:0,bottom:0,width:1,background:"var(--border)"}}/>
-                        <div style={{position:"absolute",top:2,height:10,borderRadius:5,background:pos?"#1D9E75":"#D85A30",width:w+"%",left:pos?"50%":"auto",right:pos?"auto":"50%"}}/>
+                        {/* The bar is a mark on the --bg gutter; the amount is
+                            text on the card. Different surfaces, different
+                            targets. */}
+                        <div style={{position:"absolute",top:2,height:10,borderRadius:5,background:markOn(pos?"#1D9E75":"#D85A30",surf.bg),width:w+"%",left:pos?"50%":"auto",right:pos?"auto":"50%"}}/>
                       </div>
-                      <span style={{fontSize:11,fontFamily:"'DM Mono',monospace",fontWeight:500,color:pos?"#1D9E75":"#D85A30",width:64,textAlign:"right",flexShrink:0}}>{pos?"+":"−"}{fmt(Math.abs(n.net))}</span>
+                      <span style={{fontSize:11,fontFamily:"'DM Mono',monospace",fontWeight:500,color:inkOn(pos?"#1D9E75":"#D85A30",surf.card),width:64,textAlign:"right",flexShrink:0}}>{pos?"+":"−"}{fmt(Math.abs(n.net))}</span>
                     </div>
                   );
                 });
@@ -1011,8 +1123,8 @@ export default function Dashboard({ refreshTick = 0 }) {
                       ~every {r.avgGapDays} days · last {shortDate(r.lastDate)} · next ~{shortDate(r.nextDate)}
                     </div>
                     <div style={{marginTop:4,display:"flex",gap:5,flexWrap:"wrap"}}>
-                      <Pill label={getName(r.category)} color={getColor(r.category)}/>
-                      {a&&<Pill label={acctLabel(a)} color={acctColor(a)}/>}
+                      <Pill label={getName(r.category)} color={getColor(r.category)} surface={surf.card}/>
+                      {a&&<Pill label={acctLabel(a)} color={acctColor(a)} surface={surf.card}/>}
                     </div>
                   </div>
                   <div style={{fontSize:13,fontFamily:"'DM Mono',monospace",fontWeight:500,flexShrink:0}}>
@@ -1046,7 +1158,7 @@ export default function Dashboard({ refreshTick = 0 }) {
             </div>
             <div style={{fontSize:11,color:"var(--muted)",marginBottom:14,display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
               <span>{selTx.transaction_date}</span>
-              {a&&<Pill label={acctLabel(a)} color={acctColor(a)}/>}
+              {a&&<Pill label={acctLabel(a)} color={acctColor(a)} surface={surf.card}/>}
               {selTx.user_description&&(
                 <button onClick={()=>saveTx({user_description:null})}
                   style={{background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",fontSize:10,color:"var(--muted)",textDecoration:"underline",padding:0}}>
@@ -1060,11 +1172,13 @@ export default function Dashboard({ refreshTick = 0 }) {
             <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:6}}>
               {allCats.map(cat=>{
                 const active=selTx.category===cat;
+                // .modal is --card, so that is the surface these tint over.
+                const cs=active?chipOn(getColor(cat),surf.card):null;
                 return (
                   <button key={cat} onClick={()=>saveTx({user_category:cat===selTx.auto_category?null:cat})}
                     style={{fontSize:11,fontWeight:600,padding:"5px 10px",borderRadius:20,fontFamily:"inherit",cursor:"pointer",
-                      background:active?getColor(cat)+"22":"var(--bg)",color:active?getColor(cat):"var(--muted)",
-                      border:`1px solid ${active?getColor(cat):"var(--border)"}`,transition:"all .15s"}}>
+                      background:cs?cs.bg:"var(--bg)",color:cs?cs.ink:"var(--muted)",
+                      border:`1px solid ${active?markOn(getColor(cat),surf.card):"var(--border)"}`,transition:"all .15s"}}>
                     {getName(cat)}
                   </button>
                 );
@@ -1123,7 +1237,7 @@ export default function Dashboard({ refreshTick = 0 }) {
               <button onClick={()=>setAddingCat(false)} className="ibtn" style={{flex:1,justifyContent:"center"}}>Cancel</button>
               <button onClick={()=>{if(!newName.trim())return;saveCats([...customCats,{id:Date.now().toString(),name:newName.trim(),color:newColor}]);setNewName("");setNewColor("#7F77DD");setAddingCat(false);}}
                 disabled={!newName.trim()}
-                style={{flex:1,padding:"8px 0",borderRadius:8,border:"none",background:"#7F77DD",color:"#fff",fontFamily:"inherit",fontSize:14,fontWeight:500,cursor:newName.trim()?"pointer":"default",opacity:newName.trim()?1:.5}}>
+                style={{flex:1,padding:"8px 0",borderRadius:8,border:"none",background:"var(--accent)",color:"var(--accent-text)",fontFamily:"inherit",fontSize:14,fontWeight:500,cursor:newName.trim()?"pointer":"default",opacity:newName.trim()?1:.5}}>
                 Add
               </button>
             </div>

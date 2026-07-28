@@ -1,0 +1,151 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&family=DM+Mono:wght@400;500&display=swap');
+
+/* Theme tokens — the ONE place these values live.
+   Never redeclare a token value in a component, and never set one as an
+   inline style on an element: an inline custom property on a subtree root
+   beats even an !important declaration on :root, which is exactly the bug
+   that kept dark mode from ever rendering.
+
+   Shape: the two palettes are written ONCE below as --light-* / --dark-*
+   sources; every block after that only MAPS the tokens onto one palette, so
+   the forced-theme blocks can't drift from the OS-preference ones.
+   Components must use the tokens (--bg, --card, …) and never the sources.
+
+   Theme selection: no [data-theme] on <html> => follow the OS. <html
+   data-theme="light|dark"> (set by src/theme.js, and pre-paint by the inline
+   script in index.html) => force that theme, in BOTH directions. */
+
+:root {
+  /* light palette */
+  --light-bg: #F7F6F2;
+  --light-card: #FFFFFF;
+  --light-text: #1a1a18;
+  --light-muted: #888780;
+  --light-border: #E4E2DC;
+  --light-accent: #7F77DD;
+  --light-accent-text: #FFFFFF;
+  --light-danger: #A32D2D;
+  --light-danger-bg: #FCEBEB;
+  --light-danger-border: #F09595;
+  --light-warn: #8A6D1F;
+  --light-warn-bg: #FDF6E3;
+  --light-warn-border: #E8D9A8;
+  --light-input-bg: #F7F6F2;
+  --light-track: #E4E2DC;
+  --light-shadow: rgba(0, 0, 0, .08);
+  --light-overlay: rgba(0, 0, 0, .45);
+
+  /* dark palette */
+  --dark-bg: #18181A;
+  --dark-card: #222224;
+  --dark-text: #F0EFEB;          /* 13.8:1 on --card */
+  --dark-muted: #9A9992;         /* 5.56:1 on --card */
+  --dark-border: #2E2E30;
+  --dark-accent: #A79FF0;        /* 7.48:1 on --bg */
+  --dark-accent-text: #18181A;   /* 7.48:1 on --accent */
+  --dark-danger: #F2A0A0;        /* 8.16:1 on --danger-bg */
+  --dark-danger-bg: #2A1A1C;
+  --dark-danger-border: #7F3639;
+  --dark-warn: #E8C069;          /* 8.95:1 on --warn-bg */
+  --dark-warn-bg: #2A2415;
+  --dark-warn-border: #5A4A22;
+  --dark-input-bg: #2A2A2C;
+  --dark-track: #6E6E76;         /* 3.14:1 on --card — a data mark, not a hairline */
+  --dark-shadow: rgba(0, 0, 0, .5);
+  --dark-overlay: rgba(0, 0, 0, .65);
+}
+
+/* LIGHT — the default (no data-theme, OS light) and the explicit choice. */
+:root,
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --bg: var(--light-bg);
+  --card: var(--light-card);
+  --text: var(--light-text);
+  --muted: var(--light-muted);
+  --border: var(--light-border);
+  --accent: var(--light-accent);
+  --accent-text: var(--light-accent-text);
+  --danger: var(--light-danger);
+  --danger-bg: var(--light-danger-bg);
+  --danger-border: var(--light-danger-border);
+  --warn: var(--light-warn);
+  --warn-bg: var(--light-warn-bg);
+  --warn-border: var(--light-warn-border);
+  --input-bg: var(--light-input-bg);
+  --track: var(--light-track);
+  --shadow: var(--light-shadow);
+  --overlay: var(--light-overlay);
+}
+
+/* DARK — the OS preference. The :not() is load-bearing: this block and
+   :root[data-theme="light"] have the SAME specificity (0,2,0), and this one
+   comes later in the file, so without the :not() the OS would beat a forced
+   light theme. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+
+    --bg: var(--dark-bg);
+    --card: var(--dark-card);
+    --text: var(--dark-text);
+    --muted: var(--dark-muted);
+    --border: var(--dark-border);
+    --accent: var(--dark-accent);
+    --accent-text: var(--dark-accent-text);
+    --danger: var(--dark-danger);
+    --danger-bg: var(--dark-danger-bg);
+    --danger-border: var(--dark-danger-border);
+    --warn: var(--dark-warn);
+    --warn-bg: var(--dark-warn-bg);
+    --warn-border: var(--dark-warn-border);
+    --input-bg: var(--dark-input-bg);
+    --track: var(--dark-track);
+    --shadow: var(--dark-shadow);
+    --overlay: var(--dark-overlay);
+  }
+}
+
+/* DARK — the explicit choice. Beats the bare :root light block on specificity
+   (0,2,0 vs 0,1,0), so a forced dark theme wins under an OS light preference. */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --bg: var(--dark-bg);
+  --card: var(--dark-card);
+  --text: var(--dark-text);
+  --muted: var(--dark-muted);
+  --border: var(--dark-border);
+  --accent: var(--dark-accent);
+  --accent-text: var(--dark-accent-text);
+  --danger: var(--dark-danger);
+  --danger-bg: var(--dark-danger-bg);
+  --danger-border: var(--dark-danger-border);
+  --warn: var(--dark-warn);
+  --warn-bg: var(--dark-warn-bg);
+  --warn-border: var(--dark-warn-border);
+  --input-bg: var(--dark-input-bg);
+  --track: var(--dark-track);
+  --shadow: var(--dark-shadow);
+  --overlay: var(--dark-overlay);
+}
+
+/* Shared primitives — global so Login / EmptyState / LinkAccount, which
+   render before Dashboard mounts, get them too. */
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+@keyframes pulse { 0%, 100% { opacity: 1 } 50% { opacity: .4 } }
+@keyframes fadeIn { from { opacity: 0; transform: translateY(5px) } to { opacity: 1; transform: none } }
+@keyframes spin { to { transform: rotate(360deg) } }
+
+.card { background: var(--card); border-radius: 14px; border: 1px solid var(--border); padding: 18px 20px; animation: fadeIn .25s ease both; }
+
+.tab { background: none; border: none; cursor: pointer; font-family: inherit; font-size: 13px; font-weight: 500; color: var(--muted); padding: 6px 10px; border-radius: 20px; transition: all .15s; flex: 1; }
+.tab.active { background: var(--card); color: var(--text); box-shadow: 0 1px 3px var(--shadow); }
+.tab:hover:not(.active) { color: var(--text); }
+
+.ibtn { background: none; border: 1px solid var(--border); border-radius: 8px; padding: 5px 12px; font-family: inherit; font-size: 12px; font-weight: 500; color: var(--muted); cursor: pointer; display: inline-flex; align-items: center; gap: 5px; transition: all .15s; }
+.ibtn:hover { color: var(--text); border-color: var(--text); }
+.ibtn:disabled { opacity: .35; cursor: default; }

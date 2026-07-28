@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { applyTemplate, COLUMN_ROLES, splitLineIntoCells, groupIntoLines } from "../pdfImport.js";
+import { markColor, readableInk } from "../paletteContrast.js";
+import { readToken, subscribeTheme } from "../theme.js";
 
 // Visual "teach it once" template editor.
 //
@@ -16,10 +18,43 @@ const ROLE_LABELS = {
   date: "Date", date2: "Date 2", description: "Description",
   debit: "Debit / charges", credit: "Credit / payments", amount: "Amount", ignore: "— ignore —",
 };
+// One hue per column role, drawn as the column card's outline and the role
+// <select>'s border. A ROLE palette, not theme tokens — the roles have to stay
+// tellable apart from each other. The stored hexes never change; they are
+// contrast-corrected at render against the surface each is drawn on.
+// These mid-tone hues mostly DO hold up on both surfaces — measured, the only
+// one that missed WCAG's 3:1 for a meaningful border was date2 on the LIGHT
+// --input-bg (2.54:1, nudged to 3.00). So this is a guaranteed floor rather than
+// a redesign: every other role border is returned byte-identical in both themes.
 const ROLE_COLORS = {
   date: "#378ADD", date2: "#7F9BDD", description: "#7F77DD",
   debit: "#D85A30", credit: "#1D9E75", amount: "#B7791F", ignore: "#888780",
 };
+// The good/bad status pair, shared app-wide. Values fixed; rendering corrected.
+const OK = "#1D9E75";
+const NONE = "#D85A30";
+
+// markColor's 3:1 is WCAG's non-text minimum — right for a border/hairline that
+// carries meaning. Falls back to the raw hue if the surface can't be read.
+const roleHue = (role, surface) => {
+  const raw = ROLE_COLORS[role] || ROLE_COLORS.ignore;
+  return markColor(raw, surface) || raw;
+};
+
+// Read a theme surface at RUNTIME from src/ui.css — never hardcode a token value
+// here — re-reading whenever the theme is applied so these follow the header
+// toggle, not just the OS. Deliberately duplicated from CsvImport.jsx rather
+// than imported: CsvImport imports THIS file, so sharing it there would make the
+// two modules circular.
+function useSurface(token) {
+  const [value, setValue] = useState(() => readToken(token, ""));
+  useEffect(() => {
+    const read = () => setValue(readToken(token, ""));
+    read();
+    return subscribeTheme(read);
+  }, [token]);
+  return value;
+}
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
@@ -29,6 +64,12 @@ export default function PdfTemplateEditor({ pages, template, onChange, rowCount 
   const [showAdvanced, setShowAdvanced] = useState(false);
   const wrapRef = useRef(null);
   const [wrapW, setWrapW] = useState(340);
+  // Surfaces each mark is actually drawn on: the column cards paint --bg, the
+  // role <select> paints --input-bg, and the row-count line sits on the import
+  // modal's --card panel. Hooks stay above the `if (!page)` early return below.
+  const bgSurface = useSurface("--bg");
+  const inputSurface = useSurface("--input-bg");
+  const cardSurface = useSurface("--card");
 
   const page = pages?.[Math.min(pageIdx, (pages?.length || 1) - 1)] || null;
 
@@ -139,7 +180,7 @@ export default function PdfTemplateEditor({ pages, template, onChange, rowCount 
   const rowYs = new Set(rowsOnPage.map(m => Math.round(m.y)));
 
   const label = { fontSize: 11, fontWeight: 600, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".05em" };
-  const sel = { fontSize: 12, fontFamily: "inherit", color: "var(--text)", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8, padding: "6px 8px", outline: "none", width: "100%" };
+  const sel = { fontSize: 12, fontFamily: "inherit", color: "var(--text)", background: "var(--input-bg)", border: "1px solid var(--border)", borderRadius: 8, padding: "6px 8px", outline: "none", width: "100%" };
 
   return (
     <div style={{ marginBottom: 16 }}>
@@ -159,17 +200,23 @@ export default function PdfTemplateEditor({ pages, template, onChange, rowCount 
         transactions being read.
       </div>
 
-      {/* Page render: the statement's own text runs, positioned. */}
+      {/* Page render: the statement's own text runs, positioned. Not an image of
+          the page — every glyph is a DOM node we colour ourselves, so the
+          "paper" follows the theme (dark paper, light text) instead of having to
+          stay white. */}
       <div ref={wrapRef} style={{ border: "1px solid var(--border)", borderRadius: 10, overflow: "auto", background: "var(--card)", maxHeight: 300 }}>
         <div
           onClick={addBoundaryAt}
           style={{ position: "relative", width: page.width * scale, height: page.height * scale, cursor: "crosshair" }}
         >
-          {/* highlight the detected transaction rows */}
+          {/* highlight the detected transaction rows — a translucent accent band.
+              opacity rather than a baked-in alpha hex so the band follows the
+              accent token into dark mode; it paints under the text runs, which
+              are drawn after it. */}
           {rowsOnPage.map((m, i) => (
             <div key={`hl${i}`} style={{
               position: "absolute", left: 0, right: 0, top: (m.y - 1) * scale, height: 11 * scale,
-              background: "#7F77DD18", pointerEvents: "none",
+              background: "var(--accent)", opacity: .12, pointerEvents: "none",
             }} />
           ))}
           {page.runs.map((r, i) => (
@@ -191,20 +238,24 @@ export default function PdfTemplateEditor({ pages, template, onChange, rowCount 
                 position: "absolute", top: 0, bottom: 0, left: b * page.width * scale - 6, width: 12,
                 cursor: "col-resize", touchAction: "none", display: "flex", justifyContent: "center",
               }}>
-              <div style={{ width: 2, height: "100%", background: "#7F77DD", opacity: .85 }} />
+              <div style={{ width: 2, height: "100%", background: "var(--accent)", opacity: .85 }} />
             </div>
           ))}
         </div>
       </div>
 
-      {/* One selector per column, showing what it captured. */}
+      {/* One selector per column, showing what it captured. The card outline is a
+          decorative echo of the role (the <select> states it in words), so it
+          keeps its soft 33% alpha rather than being pushed to a full 3:1 — but
+          the hue it softens is the corrected one, which gives it a floor. In
+          practice only date2/light moves at all: 1.32 -> 1.39. */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(140px,1fr))", gap: 8, marginTop: 10 }}>
         {Array.from({ length: nCols }).map((_, i) => (
-          <div key={i} style={{ border: `1px solid ${ROLE_COLORS[roles[i] || "ignore"]}55`, borderRadius: 8, padding: 7, background: "var(--bg)" }}>
+          <div key={i} style={{ border: `1px solid ${roleHue(roles[i] || "ignore", bgSurface)}55`, borderRadius: 8, padding: 7, background: "var(--bg)" }}>
             <div style={{ fontSize: 10, color: "var(--muted)", marginBottom: 4, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
               Col {i + 1}{sample && sample[i] ? ` · “${sample[i].slice(0, 18)}”` : ""}
             </div>
-            <select value={roles[i] || "ignore"} onChange={e => setRole(i, e.target.value)} style={{ ...sel, borderColor: ROLE_COLORS[roles[i] || "ignore"] }}>
+            <select value={roles[i] || "ignore"} onChange={e => setRole(i, e.target.value)} style={{ ...sel, borderColor: roleHue(roles[i] || "ignore", inputSurface) }}>
               {COLUMN_ROLES.map(r => <option key={r} value={r}>{ROLE_LABELS[r]}</option>)}
             </select>
           </div>
@@ -232,7 +283,7 @@ export default function PdfTemplateEditor({ pages, template, onChange, rowCount 
         <button className="ibtn" style={{ fontSize: 11 }} onClick={() => setShowAdvanced(s => !s)}>
           {showAdvanced ? "Hide" : "More"} options
         </button>
-        <span style={{ marginLeft: "auto", fontSize: 12, fontWeight: 600, color: rowCount ? "#1D9E75" : "#D85A30" }}>
+        <span style={{ marginLeft: "auto", fontSize: 12, fontWeight: 600, color: readableInk(rowCount ? OK : NONE, cardSurface) }}>
           {rowCount ?? 0} transaction{rowCount === 1 ? "" : "s"} found
         </span>
       </div>

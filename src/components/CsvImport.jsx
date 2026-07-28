@@ -3,6 +3,8 @@ import { analyzeCsv, toInsertRow, parseCsv, reconcileCsv, csvDateRange, buildRow
 import { applyTemplate, autoDetectTemplate, defaultTemplate, rowTotals, TEMPLATE_VERSION } from "../pdfImport.js";
 import { createManualAccount, importCsvTransactions, getExistingTxIds, getAccountTransactionsInRange, isManualAccount } from "../dataAdapter.js";
 import { getSetting, setSetting } from "../db.js";
+import { chipStyle, markColor, readableInk } from "../paletteContrast.js";
+import { readToken, subscribeTheme } from "../theme.js";
 import PdfTemplateEditor from "./PdfTemplateEditor.jsx";
 
 // Statement import — a file-picker action on the Accounts tab, accepting a bank
@@ -37,6 +39,37 @@ function money(n) {
 
 const ROLE_LABELS = { date: "Date", description: "Description", debit: "Debit", credit: "Credit", amount: "Amount (signed)" };
 
+// Read a theme surface at RUNTIME from src/ui.css — never hardcode a token
+// value here — and re-read it whenever the theme is applied, so these colours
+// follow a FORCED theme (the header toggle) exactly as they follow the OS one.
+// "" is the deliberate fallback: paletteContrast reads an unparseable surface as
+// "no surface to reason about" and hands the colour back untouched, i.e. exactly
+// today's rendering, rather than throwing during render.
+function useSurface(token) {
+  const [value, setValue] = useState(() => readToken(token, ""));
+  useEffect(() => {
+    const read = () => setValue(readToken(token, ""));
+    read();
+    return subscribeTheme(read);
+  }, [token]);
+  return value;
+}
+
+// The good/money-in green and the comparison-bucket hues are DATA — a status
+// palette, not theme tokens: the four buckets have to stay tellable apart from
+// each other, and #1D9E75/#D85A30 are the app-wide good/bad pair whose STORED
+// values must not change. What changed is how they are RENDERED — every one is
+// now contrast-corrected at render against the surface it actually sits on, so
+// the same hex stays legible on the near-white card and the near-black one.
+// Measured: this fixes LIGHT mode too, not just dark — the audit chips drew the
+// raw hue as text on its own 13% tint and came in at 2.92–3.29:1 on the white
+// card (all four buckets), and the money-in amount was 3.39:1. Now >= 4.5:1 in
+// both themes, with the light-mode tint itself unchanged to the byte.
+const MONEY_IN = "#1D9E75";     // also the "matched" bucket
+const SYNC_GAP = "#D85A30";
+const AMOUNT_DIFF = "#B7791F";
+const MATCH_DIFF = "#378ADD";
+
 // Backstop for anything unguarded that throws during render inside the modal —
 // the app has no global error boundary, so without this a render throw blanks
 // the whole PWA. Scoped to the modal body only, so it can't swallow errors
@@ -48,7 +81,7 @@ class ModalErrorBoundary extends Component {
   render() {
     if (this.state.failed) {
       return (
-        <div style={{ fontSize: 12, color: "#A32D2D", background: "#FCEBEB", border: "1px solid #F09595", borderRadius: 8, padding: "10px 12px" }}>
+        <div style={{ fontSize: 12, color: "var(--danger)", background: "var(--danger-bg)", border: "1px solid var(--danger-border)", borderRadius: 8, padding: "10px 12px" }}>
           Something went wrong rendering this step — close and retry.
         </div>
       );
@@ -82,6 +115,9 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
   const [templateSource, setTemplateSource] = useState(null); // 'saved' | 'auto'
   const [showEditor, setShowEditor] = useState(false);
   const fileRef = useRef(null);
+  // The modal panel is --card, so that is the surface the preview amounts and
+  // the audit chips are actually read against.
+  const cardSurface = useSurface("--card");
 
   const manual = accounts.filter(isManualAccount);
   const plaid = accounts.filter(a => !isManualAccount(a));
@@ -349,7 +385,7 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
     width: "92vw", maxWidth: 540, maxHeight: "88vh", display: "flex", flexDirection: "column", overflow: "hidden",
   };
   const sectionLabel = { fontSize: 11, fontWeight: 600, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".05em", marginBottom: 8 };
-  const selStyle = { fontSize: 13, fontFamily: "inherit", color: "var(--text)", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8, padding: "8px 10px", outline: "none", width: "100%" };
+  const selStyle = { fontSize: 13, fontFamily: "inherit", color: "var(--text)", background: "var(--input-bg)", border: "1px solid var(--border)", borderRadius: 8, padding: "8px 10px", outline: "none", width: "100%" };
 
   return (
     <div className="overlay" onClick={busy ? undefined : onClose}>
@@ -397,7 +433,7 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                   </div>
                 )}
                 {(analysis?.error || pdfApplyError) && (
-                  <div style={{ fontSize: 12, color: "#A32D2D", marginTop: 8 }}>{analysis?.error || pdfApplyError}</div>
+                  <div style={{ fontSize: 12, color: "var(--danger)", marginTop: 8 }}>{analysis?.error || pdfApplyError}</div>
                 )}
                 {pdfAdvisory && (
                   <div style={{ marginTop: 8, fontSize: 12, color: "var(--muted)", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8, padding: "10px 12px", lineHeight: 1.5 }}>
@@ -422,9 +458,9 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                   </div>
                   <div style={{
                     fontSize: 12, borderRadius: 8, padding: "9px 12px", lineHeight: 1.5,
-                    background: pdfApplied?.layoutSuspect ? "#FCEBEB" : "var(--bg)",
-                    border: `1px solid ${pdfApplied?.layoutSuspect ? "#F09595" : "var(--border)"}`,
-                    color: pdfApplied?.layoutSuspect ? "#A32D2D" : "var(--muted)",
+                    background: pdfApplied?.layoutSuspect ? "var(--danger-bg)" : "var(--bg)",
+                    border: `1px solid ${pdfApplied?.layoutSuspect ? "var(--danger-border)" : "var(--border)"}`,
+                    color: pdfApplied?.layoutSuspect ? "var(--danger)" : "var(--muted)",
                   }}>
                     {pdfApplied?.layoutSuspect
                       ? "Couldn't read this statement with the saved layout — the bank may have changed its format. Open “Adjust columns” and re-confirm."
@@ -484,8 +520,12 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                           {["checking", "savings", "credit"].map(st => (
                             <button key={st} onClick={() => setNewSubtype(st)}
                               style={{ flex: 1, padding: "8px 0", borderRadius: 8, fontFamily: "inherit", fontSize: 12, fontWeight: 600, cursor: "pointer",
-                                background: newSubtype === st ? "#7F77DD22" : "var(--bg)", color: newSubtype === st ? "#7F77DD" : "var(--muted)",
-                                border: `1px solid ${newSubtype === st ? "#7F77DD" : "var(--border)"}` }}>
+                                // Accent tint, derived from the token so it re-tints in dark mode. If a browser
+                                // can't do color-mix the fill just drops out — the accent text + border still
+                                // show which subtype is selected.
+                                background: newSubtype === st ? "color-mix(in srgb, var(--accent) 14%, transparent)" : "var(--bg)",
+                                color: newSubtype === st ? "var(--accent)" : "var(--muted)",
+                                border: `1px solid ${newSubtype === st ? "var(--accent)" : "var(--border)"}` }}>
                               {st === "credit" ? "Credit card" : st[0].toUpperCase() + st.slice(1)}
                             </button>
                           ))}
@@ -496,7 +536,7 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                             : "Savings outflows never count as spending in Trends; pick Checking for a day-to-day account."}
                         </div>
                         {plaid.length > 0 && (
-                          <div style={{ fontSize: 11, color: "#8A6D1F", background: "#FDF6E3", border: "1px solid #E8D9A8", borderRadius: 8, padding: "8px 10px", lineHeight: 1.5 }}>
+                          <div style={{ fontSize: 11, color: "var(--warn)", background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 8, padding: "8px 10px", lineHeight: 1.5 }}>
                             Only for an account that <strong>isn't</strong> already connected. If this statement belongs to one of your
                             connected accounts, pick it above instead — importing it here would count every transaction twice.
                           </div>
@@ -505,7 +545,7 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                     )}
 
                     {mixedSource && (
-                      <div style={{ marginTop: 10, fontSize: 12, color: "#A32D2D", background: "#FCEBEB", border: "1px solid #F09595", borderRadius: 8, padding: "10px 12px", lineHeight: 1.5 }}>
+                      <div style={{ marginTop: 10, fontSize: 12, color: "var(--danger)", background: "var(--danger-bg)", border: "1px solid var(--danger-border)", borderRadius: 8, padding: "10px 12px", lineHeight: 1.5 }}>
                         {legacySource
                           ? <>This account already holds imported transactions from before the app started recording which format they
                             came from. If they came from a {incomingSource === "pdf" ? "CSV" : "PDF"}, importing this
@@ -558,11 +598,11 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                               <span>{r.date}</span>
                               <span>·</span>
                               <span>{r.mapped_category}</span>
-                              {r.isTransfer && <span style={{ background: "#88878022", color: "#888780", borderRadius: 10, padding: "1px 6px", fontWeight: 600 }}>transfer</span>}
-                              {r.isDuplicate && <span style={{ background: "#88878022", color: "#888780", borderRadius: 10, padding: "1px 6px", fontWeight: 600 }}>already imported</span>}
+                              {r.isTransfer && <span style={{ background: "var(--bg)", color: "var(--muted)", borderRadius: 10, padding: "1px 6px", fontWeight: 600 }}>transfer</span>}
+                              {r.isDuplicate && <span style={{ background: "var(--bg)", color: "var(--muted)", borderRadius: 10, padding: "1px 6px", fontWeight: 600 }}>already imported</span>}
                             </div>
                           </div>
-                          <div style={{ fontSize: 12, fontFamily: "'DM Mono',monospace", fontWeight: 500, flexShrink: 0, color: r.amount < 0 ? "#1D9E75" : "var(--text)" }}>
+                          <div style={{ fontSize: 12, fontFamily: "'DM Mono',monospace", fontWeight: 500, flexShrink: 0, color: r.amount < 0 ? readableInk(MONEY_IN, cardSurface) : "var(--text)" }}>
                             {money(r.amount)}
                           </div>
                         </div>
@@ -588,7 +628,7 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
               )}
 
               {error && (
-                <div style={{ fontSize: 12, color: "#A32D2D", background: "#FCEBEB", border: "1px solid #F09595", borderRadius: 8, padding: "10px 12px", marginTop: 8 }}>{error}</div>
+                <div style={{ fontSize: 12, color: "var(--danger)", background: "var(--danger-bg)", border: "1px solid var(--danger-border)", borderRadius: 8, padding: "10px 12px", marginTop: 8 }}>{error}</div>
               )}
             </>
           )}
@@ -598,15 +638,15 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
         {/* Footer */}
         <div style={{ display: "flex", gap: 8, padding: "14px 20px", borderTop: "1px solid var(--border)" }}>
           {result ? (
-            <button onClick={onClose} style={{ flex: 1, padding: "10px 0", borderRadius: 8, border: "none", background: "#7F77DD", color: "#fff", fontFamily: "inherit", fontSize: 14, fontWeight: 500, cursor: "pointer" }}>Done</button>
+            <button onClick={onClose} style={{ flex: 1, padding: "10px 0", borderRadius: 8, border: "none", background: "var(--accent)", color: "var(--accent-text)", fontFamily: "inherit", fontSize: 14, fontWeight: 500, cursor: "pointer" }}>Done</button>
           ) : targetIsPlaid ? (
             // Comparison mode inserts nothing — only a close action.
-            <button onClick={onClose} style={{ flex: 1, padding: "10px 0", borderRadius: 8, border: "none", background: "#7F77DD", color: "#fff", fontFamily: "inherit", fontSize: 14, fontWeight: 500, cursor: "pointer" }}>Close (nothing imported)</button>
+            <button onClick={onClose} style={{ flex: 1, padding: "10px 0", borderRadius: 8, border: "none", background: "var(--accent)", color: "var(--accent-text)", fontFamily: "inherit", fontSize: 14, fontWeight: 500, cursor: "pointer" }}>Close (nothing imported)</button>
           ) : (
             <>
               <button onClick={onClose} disabled={busy} className="ibtn" style={{ flex: 1, justifyContent: "center", opacity: busy ? .5 : 1 }}>Cancel</button>
               <button onClick={confirm} disabled={!canConfirm}
-                style={{ flex: 2, padding: "10px 0", borderRadius: 8, border: "none", background: "#7F77DD", color: "#fff", fontFamily: "inherit", fontSize: 14, fontWeight: 500, cursor: canConfirm ? "pointer" : "default", opacity: canConfirm ? 1 : .5 }}>
+                style={{ flex: 2, padding: "10px 0", borderRadius: 8, border: "none", background: "var(--accent)", color: "var(--accent-text)", fontFamily: "inherit", fontSize: 14, fontWeight: 500, cursor: canConfirm ? "pointer" : "default", opacity: canConfirm ? 1 : .5 }}>
                 {busy ? "Importing…" : `Import ${newRows.length || ""} transaction${newRows.length !== 1 ? "s" : ""}`}
               </button>
             </>
@@ -691,6 +731,13 @@ function ManualMapper({ fileText, onApply, amountSign, setAmountSign, selStyle, 
 // Comparison-mode audit. Reconciles the CSV against Plaid-synced rows and shows
 // four buckets. Inserts nothing. Kept compact + mobile-first; each list caps at
 // 50 rows with a "+N more" line so a big month doesn't blow up the modal.
+//
+// The bucket hues (MONEY_IN / SYNC_GAP / AMOUNT_DIFF, plus the --muted token for
+// the neutral one) are a STATUS palette, one hue per bucket, drawn as a dot + a
+// tinted chip. They are not theme tokens — the buckets must stay distinguishable
+// from each other — so instead of hoping a fixed hue "holds up" on both
+// surfaces, each is contrast-corrected at render against the surface it sits on
+// (chip → --card, section dot → --bg).
 const RECON_CAP = 50;
 
 function ReconRow({ left, sub, amount, amountNote }) {
@@ -709,12 +756,15 @@ function ReconRow({ left, sub, amount, amountNote }) {
 }
 
 function ReconSection({ title, hint, color, count, children }) {
+  // Hook before the early return — the section header paints --bg, so the dot
+  // is corrected against --bg, not against the card behind it.
+  const bgSurface = useSurface("--bg");
   if (!count) return null;
   return (
     <div style={{ marginBottom: 12, border: "1px solid var(--border)", borderRadius: 10, overflow: "hidden" }}>
       <div style={{ padding: "9px 12px", background: "var(--bg)" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <span style={{ width: 7, height: 7, borderRadius: "50%", background: color, flexShrink: 0 }} />
+          <span style={{ width: 7, height: 7, borderRadius: "50%", background: markColor(color, bgSurface), flexShrink: 0 }} />
           <span style={{ fontSize: 12, fontWeight: 600 }}>{title}</span>
           <span style={{ fontSize: 11, color: "var(--muted)" }}>· {count}</span>
         </div>
@@ -726,6 +776,13 @@ function ReconSection({ title, hint, color, count, children }) {
 }
 
 function Reconciliation({ recon, loading, sectionLabel }) {
+  // Hooks before the early returns. The chips sit on the modal panel (--card).
+  // The neutral "Plaid-only" bucket takes its hue from the --muted TOKEN read at
+  // runtime rather than the #888780 literal it used to hardcode — that literal
+  // was light mode's --muted value verbatim, so it stayed a light-mode grey on a
+  // dark card. As a token it adapts, and still reads as the neutral of the four.
+  const cardSurface = useSurface("--card");
+  const neutralHue = useSurface("--muted");
   if (loading) {
     return <div style={{ marginBottom: 10 }}><div style={sectionLabel}>Comparing against Plaid…</div>
       <div style={{ fontSize: 12, color: "var(--muted)" }}>Reconciling the CSV against what's already synced — nothing will be imported.</div></div>;
@@ -735,11 +792,17 @@ function Reconciliation({ recon, loading, sectionLabel }) {
   const cleanMatched = recon.matched.filter(m => !m.dateMismatch && !m.categoryMismatch).length;
   const flaggedMatched = recon.matched.filter(m => m.dateMismatch || m.categoryMismatch);
 
-  const chip = (label, n, color) => (
-    <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 11, fontWeight: 600, background: color + "22", color, borderRadius: 20, padding: "3px 9px" }}>
-      <span style={{ width: 5, height: 5, borderRadius: "50%", background: color }} />{n} {label}
-    </span>
-  );
+  // chipStyle's default tintAlpha (0.1333 = 0x22/255) reproduces the old
+  // `color + "22"` tint exactly on the light card, then derives a label ink and
+  // a dot that clear 4.5:1 / 3:1 against that tint on whichever surface is live.
+  const chip = (label, n, color) => {
+    const s = chipStyle(color, cardSurface);
+    return (
+      <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 11, fontWeight: 600, background: s.bg, color: s.ink, borderRadius: 20, padding: "3px 9px" }}>
+        <span style={{ width: 5, height: 5, borderRadius: "50%", background: s.dot }} />{n} {label}
+      </span>
+    );
+  };
 
   return (
     <div style={{ marginBottom: 10 }}>
@@ -748,20 +811,20 @@ function Reconciliation({ recon, loading, sectionLabel }) {
         <div style={{ fontSize: 11, color: "var(--muted)" }}>{c.csvTotal} in file · {c.plaidTotal} synced</div>
       </div>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 12 }}>
-        {chip("matched", c.matched, "#1D9E75")}
-        {chip("sync gap" + (c.csvOnly !== 1 ? "s" : ""), c.csvOnly, "#D85A30")}
-        {chip("amount diff" + (c.amountMismatches !== 1 ? "s" : ""), c.amountMismatches, "#B7791F")}
-        {chip("Plaid-only", c.plaidOnly, "#888780")}
+        {chip("matched", c.matched, MONEY_IN)}
+        {chip("sync gap" + (c.csvOnly !== 1 ? "s" : ""), c.csvOnly, SYNC_GAP)}
+        {chip("amount diff" + (c.amountMismatches !== 1 ? "s" : ""), c.amountMismatches, AMOUNT_DIFF)}
+        {chip("Plaid-only", c.plaidOnly, neutralHue)}
       </div>
 
-      <ReconSection title="In your statement, missing from Plaid" hint="Possible sync gaps — Plaid may not have picked these up." color="#D85A30" count={recon.csvOnly.length}>
+      <ReconSection title="In your statement, missing from Plaid" hint="Possible sync gaps — Plaid may not have picked these up." color={SYNC_GAP} count={recon.csvOnly.length}>
         {recon.csvOnly.slice(0, RECON_CAP).map((r, i) => (
           <ReconRow key={i} left={r.description} sub={r.date} amount={money(r.amount)} />
         ))}
         {recon.csvOnly.length > RECON_CAP && <div style={{ fontSize: 11, color: "var(--muted)", textAlign: "center", padding: "6px 0" }}>+{recon.csvOnly.length - RECON_CAP} more</div>}
       </ReconSection>
 
-      <ReconSection title="Amount differs" hint="Same merchant a few days apart, different amount — likely the same transaction (a tip, a pending vs posted change)." color="#B7791F" count={recon.amountMismatches.length}>
+      <ReconSection title="Amount differs" hint="Same merchant a few days apart, different amount — likely the same transaction (a tip, a pending vs posted change)." color={AMOUNT_DIFF} count={recon.amountMismatches.length}>
         {recon.amountMismatches.slice(0, RECON_CAP).map((m, i) => (
           <ReconRow key={i} left={m.csv.description}
             sub={`CSV ${m.csv.date} · Plaid ${m.plaid.date}`}
@@ -770,14 +833,14 @@ function Reconciliation({ recon, loading, sectionLabel }) {
         ))}
       </ReconSection>
 
-      <ReconSection title="Synced by Plaid, not in your statement" hint="Pending, timing, or simply not in this export yet." color="#888780" count={recon.plaidOnly.length}>
+      <ReconSection title="Synced by Plaid, not in your statement" hint="Pending, timing, or simply not in this export yet." color={neutralHue} count={recon.plaidOnly.length}>
         {recon.plaidOnly.slice(0, RECON_CAP).map((r, i) => (
           <ReconRow key={i} left={r.description || r.merchant_name || "Transaction"} sub={`${r.date}${r.pending ? " · pending" : ""}`} amount={money(r.amount)} />
         ))}
         {recon.plaidOnly.length > RECON_CAP && <div style={{ fontSize: 11, color: "var(--muted)", textAlign: "center", padding: "6px 0" }}>+{recon.plaidOnly.length - RECON_CAP} more</div>}
       </ReconSection>
 
-      <ReconSection title="Matched, with differences" hint="Paired by amount + date, but the date or category disagrees." color="#378ADD" count={flaggedMatched.length}>
+      <ReconSection title="Matched, with differences" hint="Paired by amount + date, but the date or category disagrees." color={MATCH_DIFF} count={flaggedMatched.length}>
         {flaggedMatched.slice(0, RECON_CAP).map((m, i) => (
           <ReconRow key={i} left={m.csv.description}
             sub={[m.dateMismatch ? `date ${m.csv.date}→${m.plaid.date}` : null,

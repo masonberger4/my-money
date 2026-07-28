@@ -46,6 +46,9 @@ entry once shipped.
 
 | File | Role |
 |---|---|
+| `src/ui.css` | The ONLY place theme-token values live: `:root` light + a `prefers-color-scheme: dark` block (--bg/--card/--text/--muted/--border/--accent/--accent-text/--danger*/--warn*/--input-bg/--track/--shadow/--overlay), plus the font `@import` (must stay line 1), the `*` reset, keyframes, and the shared `.card`/`.tab`/`.ibtn` classes. Global so the pre-Dashboard screens get them. |
+| `src/theme.js` | Theme selection + application: localStorage pref (`mm:theme`), `resolveTheme`, `applyTheme` (sets `<html data-theme>` + syncs the `theme-color` metas), `subscribeTheme`/`subscribeSystemTheme`, `readToken` (runtime token read), `initTheme` (called from main.jsx), and the `useTheme` hook the header toggle uses. |
+| `src/paletteContrast.js` | Pure, zero imports: WCAG math + `readableInk`/`markColor`/`chipStyle`, which hold hue fixed and bisect lightness to guarantee 4.5:1 / 3:1 against a given surface. Never throws (runs during render). Covered by `test/paletteContrast.test.js`. |
 | `src/components/Dashboard.jsx` | Almost the entire UI — single file, inline styles, tabs: overview/categories/transactions/accounts/trends/recurring/ask. Shared mini-components: `Pill`, `Swatch`, `EditName`, `Sk` (skeleton), `Donut`. |
 | `src/dataAdapter.js` | All Supabase reads + shapes consumed by Dashboard. Keep return shapes stable. Also holds the CSV-import writes (`findOrCreateManualInstitution`, `createManualAccount`, `getExistingTxIds`, `importCsvTransactions`, `isManualAccount`), the comparison-mode read `getAccountTransactionsInRange`, and re-exports the cash-flow helpers (`markInternalTransfers`/`cashIncome`/`cashSpending`) from `cashFlow.js` so existing importers/harnesses keep working. |
 | `src/cashFlow.js` | The Trends cash-flow model (see Conventions), extracted pure: `markInternalTransfers` + `maxMatchTransfers` (Kuhn's), `cashIncome`/`cashSpending`, account-type predicates. Zero imports — plain-Node importable; covered by `test/cashFlow.test.js` incl. the brute-force matching parity check. |
@@ -94,9 +97,37 @@ playwright-core screenshot (`executablePath:'/opt/pw-browsers/chromium'`,
 
 ## Conventions
 
-- Dashboard style: compact inline-styled JSX, CSS vars (--bg, --card, --text,
-  --muted, --border), dark mode via prefers-color-scheme, accent #7F77DD.
+- Dashboard style: compact inline-styled JSX, CSS vars, accent #7F77DD.
   Mobile-first: verify at 390px; tab bar scrolls horizontally.
+- **Theme selection**: Auto/Light/Dark toggle in the header. The preference is
+  `mm:theme` in **localStorage, NOT the `settings` table** — `settings` is
+  household-shared under one login, so storing it there would flip the other
+  person's phone; localStorage also reads synchronously, which is what lets
+  index.html apply the theme pre-paint instead of flashing. **Device/visual
+  prefs go in localStorage; account-level prefs go in `settings`.** No stored
+  value ⇒ no `data-theme` ⇒ follow the OS. Every storage access is try/caught
+  (Safari private mode throws on access). `src/theme.js` owns it; index.html
+  carries a deliberate 3-line duplicate of read+apply that must stay in sync.
+- **Theme tokens live ONLY in `src/ui.css`.** Never redeclare a token value in a
+  component and never set one as an inline style — an inline custom property on
+  a subtree root beats even `!important` on `:root` (that was the dark-mode bug).
+  Use tokens, not literals, for anything themed. Two exceptions that must stay
+  hardcoded and be changed in lockstep with `--bg`: index.html's `theme-color`
+  metas and its pre-paint `html/body` background (parsed before CSS loads).
+- `ACCOUNT_COLORS` / `DEFAULT_COLORS` (Dashboard.jsx) are **data, not theme** —
+  user-overridable colors persisted in `settings`. Never tokenize them and
+  **never change their stored hex values**. Same for the `#1D9E75`/`#D85A30`
+  good/bad status pair and CsvImport/PdfTemplateEditor's bucket + role hues.
+  What IS theme-dependent is how they **render**: `src/paletteContrast.js`
+  holds hue fixed and moves lightness until the color clears 4.5:1 (text) or
+  3:1 (marks) against the surface it actually sits on — which also covers the
+  arbitrary colors the Swatch picker can produce, as a second fixed palette
+  could not. Pass the surface read from the token at runtime (`readToken`), and
+  re-read it on theme change or chips keep the old theme's contrast. Two things
+  deliberately NOT corrected: the Swatch fill (it's the color picker — it must
+  show the stored value truthfully) and the Donut's slice separation (the
+  palette maps several categories to one hex, so adjacent slices can be a
+  literal 1:1 — a `--card` stroke separates them instead).
 - Amounts follow Plaid: **positive = money out, negative = money in**.
 - Effective category = `user_category || mapped_category` (user override wins).
 - "Transfers and card payments" and "Return" (credit-card negatives) are never
@@ -202,7 +233,19 @@ playwright-core screenshot (`executablePath:'/opt/pw-browsers/chromium'`,
   real iPhone.
 
 ## Pending branches
-_(none)_
+
+- `claude/ultracode-refactoring-review-a2tm5f` — **dark mode + Auto/Light/Dark
+  toggle + render-time palette contrast**. Awaiting Mason's preview review.
+  Notable: the app had NEVER rendered dark (inline CSS vars on Dashboard's root
+  div shadowed the `:root` dark rule); `src/ui.css` now owns the tokens and the
+  shared classes, so Login/EmptyState/LinkAccount also pick up `.card`/`.ibtn`
+  for the first time. Two pre-existing bugs fixed on the way: the Trends 6-month
+  bars collapsed to 4px stubs (% height against an auto-height flex parent), and
+  the Transactions "All accounts" chip asked for `var(--muted)22`, which is not a
+  color, so its active tint never painted. Light mode is otherwise a pixel no-op
+  EXCEPT where contrast correction deliberately changes it (e.g. the amber
+  "approaching budget" bar was 1.20:1 on the light track — invisible — and now
+  renders as legible dark gold).
 
 ## Roadmap
 

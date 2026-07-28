@@ -14,16 +14,16 @@ function ConfigErrorScreen() {
         alignItems: 'center',
         justifyContent: 'center',
         padding: 24,
-        background: '#F7F6F2',
-        color: '#1a1a18',
+        background: 'var(--bg)',
+        color: 'var(--text)',
         fontFamily: "'DM Sans','Helvetica Neue',sans-serif",
       }}
     >
       <div
         style={{
           maxWidth: 480,
-          background: '#FFFFFF',
-          border: '1px solid #F09595',
+          background: 'var(--card)',
+          border: '1px solid var(--danger-border)',
           borderRadius: 14,
           padding: 24,
         }}
@@ -31,7 +31,7 @@ function ConfigErrorScreen() {
         <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 10 }}>
           App configuration error
         </div>
-        <div style={{ fontSize: 13, lineHeight: 1.6, color: '#5a5a56' }}>
+        <div style={{ fontSize: 13, lineHeight: 1.6, color: 'var(--text)' }}>
           {configError}
         </div>
       </div>
