@@ -115,3 +115,65 @@ test('the classifier fallback is the honest unknown, not a real category', () =>
   // …while a merchant we DO recognise as shopping still says so.
   assert.equal(guessCategory('NORDSTROM RACK #12'), 'Shopping and gear');
 });
+
+// --- The overlap guard -------------------------------------------------------
+//
+// This is the property the whole "rebuild history from statements" feature
+// rests on, and it had NO coverage at all. `csv:` and `sfin:` dedup ids live in
+// separate namespaces and cannot see each other, so a single row imported on or
+// after the feed's coverage start is a duplicate that nothing downstream can
+// detect — it just silently doubles that transaction in every total.
+
+const OVERLAP_HEADER = 'Date,Description,Debit,Credit';
+const OVERLAP_LINES = [
+  '3/1/2026,PRE FEED A,10.00,',   // before the boundary  -> importable
+  '3/2/2026,PRE FEED B,20.00,',   // before the boundary  -> importable
+  '3/3/2026,BOUNDARY DAY,30.00,', // ON the boundary      -> the feed owns it
+  '3/4/2026,POST FEED,40.00,',    // after the boundary   -> the feed owns it
+];
+const overlapAnalysis = opts =>
+  analyzeCsv([OVERLAP_HEADER, ...OVERLAP_LINES].join('\n'), opts);
+
+test('the boundary day belongs to the FEED — on-or-after is overlap, the day before is not', () => {
+  const { rows } = overlapAnalysis({ overlapFrom: '2026-03-03' });
+  const byDesc = Object.fromEntries(rows.map(r => [r.description, r.isOverlap]));
+  assert.equal(byDesc['PRE FEED B'], false, 'the day before the boundary must stay importable');
+  assert.equal(byDesc['BOUNDARY DAY'], true, 'the boundary day itself belongs to the feed');
+  assert.equal(byDesc['POST FEED'], true);
+});
+
+test('no overlapFrom (manual account, or a feed that has delivered nothing) flags nothing', () => {
+  const { rows } = overlapAnalysis({});
+  assert.ok(rows.every(r => r.isOverlap === false));
+  assert.equal(rows.length, OVERLAP_LINES.length);
+});
+
+// The insert set the modal actually writes. If this ever includes a row dated
+// on or after the boundary, money is being double-counted.
+test('the importable set never contains a row on or after the boundary', () => {
+  for (const boundary of ['2026-03-01', '2026-03-03', '2026-03-05']) {
+    const { rows } = overlapAnalysis({ overlapFrom: boundary });
+    const importable = rows.filter(r => !r.isDuplicate && !r.isOverlap);
+    for (const r of importable) {
+      assert.ok(r.date < boundary, `${r.description} (${r.date}) must not import at ${boundary}`);
+    }
+  }
+});
+
+// A row can be BOTH inside the feed's coverage and a re-import of one we already
+// inserted. The dedup id must not depend on the overlap flag, or re-importing
+// the same statement after the feed catches up would mint fresh ids and insert
+// second copies of rows the first import already wrote.
+test('overlap does not perturb the dedup id — re-import still dedups', () => {
+  const plain = overlapAnalysis({});
+  const guarded = overlapAnalysis({ overlapFrom: '2026-03-02' });
+  assert.deepEqual(
+    guarded.rows.map(r => r.plaid_tx_id),
+    plain.rows.map(r => r.plaid_tx_id)
+  );
+  const reimport = overlapAnalysis({
+    overlapFrom: '2026-03-02',
+    existingIds: new Set(plain.rows.map(r => r.plaid_tx_id)),
+  });
+  assert.ok(reimport.rows.every(r => r.isDuplicate));
+});

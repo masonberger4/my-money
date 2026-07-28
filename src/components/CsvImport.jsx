@@ -139,6 +139,11 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
   // what statement import is for now that Plaid is being retired.
   const plaid = accounts.filter(a => !isManualAccount(a) && !isSimpleFinAccount(a));
   const targetIsPlaid = target !== "new" && plaid.some(a => a.id === target);
+  // Every account fed by something other than this importer — i.e. anything a
+  // statement could ALREADY be covered by. Deliberately "not manual" rather
+  // than "is SimpleFIN", so a feed we don't recognise still triggers the
+  // duplicate-account warning below; erring toward warning is the safe side.
+  const fedAccounts = accounts.filter(a => !isManualAccount(a));
   const targetIsSimpleFin = target !== "new" && simplefin.some(a => a.id === target);
   const targetAcct = target !== "new" ? accounts.find(a => a.id === target) : null;
 
@@ -587,7 +592,19 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                             ? "Card purchases count as spending by category; refunds and payments never count as income."
                             : "Savings outflows never count as spending in Trends; pick Checking for a day-to-day account."}
                         </div>
-                        {plaid.length > 0 && (
+                        {/* Gated on FED accounts, not on `plaid`. `plaid` is
+                            "neither manual nor SimpleFIN", which went
+                            permanently empty the moment the last Plaid item was
+                            unlinked — so this warning silently stopped
+                            rendering at exactly the point it started mattering
+                            most. It guards the one double-count the overlap
+                            guard structurally cannot see: that guard protects
+                            the account you PICKED, while this is about picking
+                            the wrong one. Importing a BECU statement onto a new
+                            manual account while BECU is SimpleFIN-fed doubles
+                            every total in the period, and no dedup id can
+                            catch it across two accounts. */}
+                        {fedAccounts.length > 0 && (
                           <div style={{ fontSize: 11, color: "var(--warn)", background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 8, padding: "8px 10px", lineHeight: 1.5 }}>
                             Only for an account that <strong>isn't</strong> already connected. If this statement belongs to one of your
                             connected accounts, pick it above instead — importing it here would count every transaction twice.

@@ -468,15 +468,16 @@ const MANUAL_INSTITUTION_NAME = 'Imported';
 const MANUAL_ACCOUNT_PREFIX = 'manual:';
 // Mirrors SFIN_PREFIX in api/_lib/simplefin.js — that module is server-only
 // (it handles bank credentials), so the browser gets its own copy of the one
-// string it needs.
-const SIMPLEFIN_ACCOUNT_PREFIX = 'sfin:';
+// string it needs. It prefixes BOTH ids the feed writes: accounts.plaid_account_id
+// and transactions.plaid_tx_id — hence the un-suffixed name.
+const SIMPLEFIN_PREFIX = 'sfin:';
 
 // A SimpleFIN-fed account. Matters to the UI for two reasons: its type was
 // GUESSED from the account name (SimpleFIN sends none) so it must be
 // correctable by hand, and it arrives hidden until it's been compared against
 // the Plaid copy of the same bank.
 export function isSimpleFinAccount(a) {
-  return String(a?.plaid_account_id || '').startsWith(SIMPLEFIN_ACCOUNT_PREFIX);
+  return String(a?.plaid_account_id || '').startsWith(SIMPLEFIN_PREFIX);
 }
 
 // The is_manual / source columns land with the CSV-import migration. Previews
@@ -610,13 +611,26 @@ export async function getExistingTxIds(accountId) {
 // coverage starts. CSV history imported on or after this date would be a second
 // copy of transactions the feed already supplies: `csv:` and `sfin:` dedup ids
 // live in different namespaces and cannot see each other, so nothing downstream
-// would catch the duplication. Returns null when the account has no rows yet.
+// would catch the duplication. Returns null when the FEED has no rows yet.
+//
+// The `sfin:` filter is load-bearing, not a tidy-up. Without it the query
+// returns the earliest row of ANY origin, so the first successful backfill moves
+// the boundary back onto the `csv:` rows it just inserted — and every later
+// statement is then 100% "overlap", importing nothing, with no error to explain
+// why. That silently breaks rebuilding history one statement at a time, which is
+// the whole point of the feature.
+//
+// Filtering on `plaid_tx_id` rather than `source` is deliberate too: the id
+// prefix is written unconditionally, whereas `source` degrades to the legacy
+// `'plaid'` default whenever the column is absent (see `txHaveSource` in
+// api/sync.js and `transactionsHaveSource` here).
 export async function getEarliestTransactionDate(accountId) {
   if (!accountId) return null;
   const { data, error } = await supabase
     .from('transactions')
     .select('date')
     .eq('account_id', accountId)
+    .like('plaid_tx_id', `${SIMPLEFIN_PREFIX}%`)
     .order('date', { ascending: true })
     .limit(1);
   if (error) throw error;
