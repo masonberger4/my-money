@@ -290,6 +290,11 @@ export function baseHash(dateIso, amount, normDesc) {
 //   existingIds   — Set of plaid_tx_id already in the DB for the target account
 //                   (used to flag duplicates; empty for a brand-new account).
 //   rules         — learned merchant→category rules (see category_rules).
+//   overlapFrom   — ISO date where a live feed's own coverage begins. Rows on
+//                   or after it are flagged isOverlap and must NOT be imported:
+//                   csv: and sfin: dedup ids are different namespaces and can't
+//                   see each other, so importing across the boundary silently
+//                   double-counts every transaction in the overlap.
 //
 // Each built row carries display fields (rawDebit/rawCredit/rawDate) for the
 // preview and the final insert-shape fields (date, amount, description, …).
@@ -301,6 +306,7 @@ export function buildRows(rows, opts = {}) {
     amountSign = 'in_positive',
     existingIds = new Set(),
     rules = null,
+    overlapFrom = null,
   } = opts;
   if (!columns) throw new Error('buildRows requires a column mapping');
 
@@ -399,6 +405,8 @@ export function buildRows(rows, opts = {}) {
       rawCredit,
       isTransfer: !!raw_category,
       isDuplicate: existingIds.has(plaid_tx_id) || seenId.has(plaid_tx_id),
+      // Inside the live feed's coverage — the feed already has this period.
+      isOverlap: !!overlapFrom && dateIso >= overlapFrom,
     });
     seenId.add(plaid_tx_id);
   }
@@ -428,7 +436,7 @@ export function toInsertRow(built) {
 // One-call convenience used by the UI: raw text → detection + built rows.
 // Returns { header, columns, rows, skipped, needsManualMapping }.
 // ---------------------------------------------------------------------------
-export function analyzeCsv(text, { existingIds = new Set(), manualColumns = null, amountSign = 'in_positive', rules = null } = {}) {
+export function analyzeCsv(text, { existingIds = new Set(), manualColumns = null, amountSign = 'in_positive', rules = null, overlapFrom = null } = {}) {
   const rows = parseCsv(text);
   const detected = manualColumns
     ? { headerIndex: manualColumns.headerIndex ?? -1, columns: manualColumns }
@@ -449,6 +457,7 @@ export function analyzeCsv(text, { existingIds = new Set(), manualColumns = null
     existingIds,
     amountSign,
     rules,
+    overlapFrom,
   });
   return {
     parsedRowCount: rows.length,

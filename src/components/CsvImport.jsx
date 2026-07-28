@@ -1,17 +1,23 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { analyzeCsv, toInsertRow, parseCsv, reconcileCsv, csvDateRange } from "../csvImport.js";
-import { createManualAccount, importCsvTransactions, getExistingTxIds, getAccountTransactionsInRange, isManualAccount, getCategoryRules } from "../dataAdapter.js";
+import { createManualAccount, importCsvTransactions, getExistingTxIds, getAccountTransactionsInRange, isManualAccount, isSimpleFinAccount, getCategoryRules, getEarliestTransactionDate } from "../dataAdapter.js";
 
-// CSV import — a file-picker action on the Accounts tab, in two modes chosen by
-// the target account:
-//  • STANDALONE (Phase 1) — target is a new/existing MANUAL account: pick a
-//    bank CSV → preview the exact rows → confirm → real transactions land on a
-//    non-Plaid account. No DB write before Confirm; the preview greys out rows a
-//    prior import already inserted (stable csv:… id) so re-imports are safe.
-//  • COMPARISON (Phase 2) — target is a PLAID-LINKED account: insert NOTHING
-//    (that's the double-count trap). Reconcile the CSV against what Plaid
-//    already synced and show a read-only audit — sync gaps, pending/timing, and
-//    amount/date/category mismatches on matched pairs.
+// CSV import — a file-picker action on the Accounts tab, in three modes chosen
+// by the target account:
+//  • STANDALONE — target is a new/existing MANUAL account: pick a bank CSV →
+//    preview the exact rows → confirm → real transactions land on a non-feed
+//    account. No DB write before Confirm; the preview greys out rows a prior
+//    import already inserted (stable csv:… id) so re-imports are safe.
+//  • HISTORY BACKFILL — target is a SIMPLEFIN account. SimpleFIN only reaches
+//    back so far, and with Plaid retired a CSV is the only way to recover older
+//    transactions. Rows dated on or after the account's earliest synced
+//    transaction are EXCLUDED: `csv:` and `sfin:` dedup ids are separate
+//    namespaces that cannot see each other, so importing across that boundary
+//    would double-count with nothing downstream able to notice.
+//  • COMPARISON — target is a PLAID-LINKED account: insert NOTHING (that's the
+//    double-count trap). Reconcile the CSV against what Plaid already synced
+//    and show a read-only audit — sync gaps, pending/timing, and amount/date/
+//    category mismatches on matched pairs. Goes away with Plaid.
 
 // Pad an ISO date by ±days so the Plaid fetch covers the CSV's period plus the
 // date-drift window on both ends. Explicit UTC math — never new Date(string).
@@ -42,6 +48,10 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
   // Learned merchant rules, so an import agrees with what the household has
   // already taught the classifier instead of re-deriving from keywords alone.
   const [rules, setRules] = useState(null);
+  // Where the SimpleFIN feed's own coverage starts for the target account.
+  // Rows on/after it must not be imported — see getEarliestTransactionDate.
+  const [coverageStart, setCoverageStart] = useState(null);
+  const [coverageLoading, setCoverageLoading] = useState(false);
   const [loadingIds, setLoadingIds] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
@@ -51,19 +61,36 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
   const fileRef = useRef(null);
 
   const manual = accounts.filter(isManualAccount);
-  const plaid = accounts.filter(a => !isManualAccount(a));
+  const simplefin = accounts.filter(isSimpleFinAccount);
+  // "Plaid" here means a live feed we can only RECONCILE against, never import
+  // into. SimpleFIN accounts get their own mode below: history predating the
+  // feed is exactly what CSV import is for now that Plaid is being retired.
+  const plaid = accounts.filter(a => !isManualAccount(a) && !isSimpleFinAccount(a));
   const targetIsPlaid = target !== "new" && plaid.some(a => a.id === target);
+  const targetIsSimpleFin = target !== "new" && simplefin.some(a => a.id === target);
   const targetAcct = target !== "new" ? accounts.find(a => a.id === target) : null;
 
   // Parse + build rows. Small files → cheap to recompute on every change.
   const analysis = useMemo(() => {
     if (!fileText) return null;
     try {
-      return analyzeCsv(fileText, { existingIds, manualColumns: manualCols, amountSign, rules });
+      return analyzeCsv(fileText, { existingIds, manualColumns: manualCols, amountSign, rules, overlapFrom: coverageStart });
     } catch (e) {
       return { error: e.message, rows: [], skipped: [], needsManualMapping: false };
     }
-  }, [fileText, existingIds, manualCols, amountSign, rules]);
+  }, [fileText, existingIds, manualCols, amountSign, rules, coverageStart]);
+
+  // Where the live feed's coverage begins, for the overlap guard.
+  useEffect(() => {
+    if (!targetIsSimpleFin) { setCoverageStart(null); return; }
+    let cancelled = false;
+    setCoverageLoading(true);
+    getEarliestTransactionDate(target)
+      .then(d => { if (!cancelled) setCoverageStart(d); })
+      .catch(err => { console.error("coverage lookup failed", err); if (!cancelled) setCoverageStart(null); })
+      .finally(() => { if (!cancelled) setCoverageLoading(false); });
+    return () => { cancelled = true; };
+  }, [target, targetIsSimpleFin]);
 
   // Learned merchant rules, loaded once — analyzeCsv re-runs when they arrive.
   useEffect(() => {
@@ -78,6 +105,8 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
   // Plaid target (comparison mode, no insert) → none.
   useEffect(() => {
     if (target === "new" || targetIsPlaid) { setExistingIds(new Set()); return; }
+    // SimpleFIN targets included: a re-run of the same history file must grey
+    // out rather than double-insert (csv: ids are content-hashed and stable).
     let cancelled = false;
     setLoadingIds(true);
     getExistingTxIds(target)
@@ -120,14 +149,17 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
   }
 
   const rows = analysis?.rows || [];
-  const newRows = rows.filter(r => !r.isDuplicate);
-  const dupCount = rows.length - newRows.length;
+  const overlapCount = rows.filter(r => r.isOverlap).length;
+  // Overlap rows are excluded from the import, not merely flagged: the feed
+  // already has that period and the two id namespaces can't dedup each other.
+  const newRows = rows.filter(r => !r.isDuplicate && !r.isOverlap);
+  const dupCount = rows.filter(r => r.isDuplicate && !r.isOverlap).length;
   const skipped = analysis?.skipped || [];
   const preview = rows.slice(0, 200);
 
   const canConfirm =
     !!analysis && !analysis.needsManualMapping && !analysis.error && !busy && !loadingIds &&
-    !targetIsPlaid && newRows.length > 0 &&
+    !targetIsPlaid && !coverageLoading && newRows.length > 0 &&
     (target !== "new" || newName.trim().length > 0);
 
   async function confirm() {
@@ -225,6 +257,11 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                           {manual.map(a => <option key={a.id} value={a.id}>{a.nickname || a.name}{a.subtype ? ` · ${a.subtype}` : ""}</option>)}
                         </optgroup>
                       )}
+                      {simplefin.length > 0 && (
+                        <optgroup label="SimpleFIN accounts — add history from before the feed">
+                          {simplefin.map(a => <option key={a.id} value={a.id}>{a.nickname || a.name}</option>)}
+                        </optgroup>
+                      )}
                       {plaid.length > 0 && (
                         <optgroup label="Plaid-linked — compare (reconcile, nothing imported)">
                           {plaid.map(a => <option key={a.id} value={a.id}>{a.nickname || a.name}{a.mask ? ` ··${a.mask}` : ""}</option>)}
@@ -265,14 +302,33 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                     <Reconciliation recon={recon} loading={reconLoading} sectionLabel={sectionLabel} />
                   )}
 
-                  {/* 3 — Preview (standalone: new/manual target) */}
+                  {/* SimpleFIN history backfill: the overlap guard. */}
+                  {targetIsSimpleFin && (
+                    <div style={{
+                      fontSize: 11, lineHeight: 1.6, marginBottom: 12, borderRadius: 8, padding: "10px 12px",
+                      color: overlapCount > 0 ? "#8A6A16" : "var(--muted)",
+                      background: overlapCount > 0 ? "#FDF4E0" : "var(--bg)",
+                      border: overlapCount > 0 ? "1px solid #E9CE8A" : "1px solid transparent",
+                    }}>
+                      {coverageLoading ? "Checking where this account's feed starts…"
+                        : !coverageStart ? <>This account has no synced transactions yet, so the whole file will import.</>
+                        : <>
+                            SimpleFIN covers this account from <strong>{coverageStart}</strong>.
+                            {overlapCount > 0
+                              ? <> <strong>{overlapCount}</strong> row{overlapCount !== 1 ? "s" : ""} on or after that date {overlapCount !== 1 ? "are" : "is"} excluded — the feed already has {overlapCount !== 1 ? "them" : "it"}, and imported copies carry a different id, so nothing downstream would catch the duplication.</>
+                              : <> Every row in this file predates it, so there's nothing to exclude.</>}
+                          </>}
+                    </div>
+                  )}
+
+                  {/* 3 — Preview (standalone: new/manual/SimpleFIN-history target) */}
                   {!targetIsPlaid && (
                   <div style={{ marginBottom: 10 }}>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
                       <div style={sectionLabel}>3 · Preview</div>
                       <div style={{ fontSize: 11, color: "var(--muted)" }}>
-                        {loadingIds ? "checking for duplicates…" : (
-                          <><strong style={{ color: "var(--text)" }}>{newRows.length}</strong> new{dupCount > 0 && <> · {dupCount} duplicate</>}</>
+                        {loadingIds || coverageLoading ? "checking…" : (
+                          <><strong style={{ color: "var(--text)" }}>{newRows.length}</strong> new{dupCount > 0 && <> · {dupCount} duplicate</>}{overlapCount > 0 && <> · {overlapCount} after the feed starts</>}</>
                         )}
                       </div>
                     </div>
@@ -283,10 +339,10 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                         <div key={r.plaid_tx_id + i} style={{
                           display: "flex", alignItems: "center", gap: 10, padding: "8px 12px",
                           borderBottom: i < preview.length - 1 ? "1px solid var(--border)" : "none",
-                          opacity: r.isDuplicate ? .4 : 1,
+                          opacity: r.isDuplicate || r.isOverlap ? .4 : 1,
                         }}>
                           <div style={{ flex: 1, minWidth: 0 }}>
-                            <div style={{ fontSize: 12, fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", textDecoration: r.isDuplicate ? "line-through" : "none" }}>
+                            <div style={{ fontSize: 12, fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", textDecoration: r.isDuplicate || r.isOverlap ? "line-through" : "none" }}>
                               {r.description}
                             </div>
                             <div style={{ fontSize: 10, color: "var(--muted)", marginTop: 2, display: "flex", gap: 5, flexWrap: "wrap", alignItems: "center" }}>

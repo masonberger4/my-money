@@ -74,7 +74,7 @@ entry once shipped.
 | `src/txClassify.js` | Learned-rule matching (`merchantKey`, `matchLearnedRule`) + the shared descriptor→category rule table + internal-transfer tagging (`guessCategory`, `transferRawCategory`, `classifyDescription`), validated against `ERA_CATEGORIES` at load. Lifted out of `csvImport.js` when SimpleFIN became a second caller: both feeds get a descriptor and no category, so both derive `mapped_category` at WRITE time from this one table. Pure JS — imported by server code too. |
 | `api/_lib/simplefin.js` | SimpleFIN protocol layer: setup-token decode, claim POST, access-URL split (creds → Authorization header), the `/accounts` GET, and `normalizeAccountSet` (reads BOTH wire shapes). Also `inferAccountType`, `normalizeBalance`, the sign flip, and the env knobs. Server-only — handles bank credentials. |
 | `src/components/SimpleFinConnect.jsx` | Accounts-tab modal replacing Plaid Link: link banks at SimpleFIN Bridge → paste the setup token → claim + first sync. Shows connection status and a disconnect action. |
-| `src/components/CsvImport.jsx` | Accounts-tab import modal, two modes by target: **standalone** (manual target) file → preview (greyed dupes) → confirm; **comparison** (Plaid-linked target) read-only reconciliation audit, inserts nothing. Writes via dataAdapter's `createManualAccount`/`importCsvTransactions`; reads Plaid rows via `getAccountTransactionsInRange`. |
+| `src/components/CsvImport.jsx` | Accounts-tab import modal, **three** modes by target: **standalone** (manual target) file → preview (greyed dupes) → confirm; **history backfill** (SimpleFIN target) imports only rows predating the feed's coverage — see the overlap guard in Conventions; **comparison** (Plaid-linked target) read-only audit, inserts nothing. |
 | `src/plaidClient.js` | Client → api/ fetch wrappers (JWT attached). |
 | `src/sync.js` | Single-flight wrapper triggering server sync. |
 | `src/db.js` | getSetting/setSetting on the Supabase `settings` table (dashboard prefs: colors, names, custom categories, `asst:model`/`asst:effort`). |
@@ -147,6 +147,13 @@ playwright-core screenshot (`executablePath:'/opt/pw-browsers/chromium'`,
   from a confident answer: 46% of a realistic merchant corpus landed there.
   Now the unknown is visible and sized. Don't reintroduce a real category as
   the fallback.
+- **CSV history must never overlap a live feed.** `csv:` and `sfin:` dedup ids
+  are separate namespaces and cannot see each other, so a CSV covering dates the
+  feed already has double-counts every transaction in the overlap, with nothing
+  downstream able to catch it. Importing into a SimpleFIN account excludes every
+  row dated on or after that account's earliest synced transaction
+  (`getEarliestTransactionDate` → `overlapFrom` → `isOverlap`). The boundary day
+  itself belongs to the feed. This is what makes "rebuild history from CSV" safe.
 - **Categorization precedence at WRITE time:** learned rule (`category_rules`)
   → keyword table (`src/txClassify.js`) → `Uncategorized`. At READ time
   `user_category` still wins over all of it. Learned rules do NOT override the

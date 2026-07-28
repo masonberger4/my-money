@@ -692,6 +692,23 @@ export async function getExistingTxIds(accountId) {
   return ids;
 }
 
+// The earliest transaction a live feed has for an account — i.e. where its
+// coverage starts. CSV history imported on or after this date would be a second
+// copy of transactions the feed already supplies: `csv:` and `sfin:` dedup ids
+// live in different namespaces and cannot see each other, so nothing downstream
+// would catch the duplication. Returns null when the account has no rows yet.
+export async function getEarliestTransactionDate(accountId) {
+  if (!accountId) return null;
+  const { data, error } = await supabase
+    .from('transactions')
+    .select('date')
+    .eq('account_id', accountId)
+    .order('date', { ascending: true })
+    .limit(1);
+  if (error) throw error;
+  return data?.[0]?.date || null;
+}
+
 // Raw transactions on one account within a date range, for CSV reconciliation
 // (comparison mode, Phase 2). Returns the columns reconcileCsv compares — not
 // the shaped toTxShape form — scoped to the CSV's period so a one-month CSV
