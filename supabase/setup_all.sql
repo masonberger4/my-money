@@ -15,14 +15,18 @@
 -- Drops everything created by the migrations.
 -- Use during development when you want a clean slate.
 -- Does NOT delete users from auth.users — do that in the Auth UI.
--- WARNING: this also drops plaid_tokens. You'd need to re-link every
--- institution through Plaid Link afterwards.
+-- WARNING: this also drops simplefin_access. You'd need to re-claim a setup
+-- token at SimpleFIN Bridge (Accounts → ⚡ SimpleFIN) afterwards.
 
 drop publication if exists supabase_realtime;
 create publication supabase_realtime;
 
 drop table if exists budgets cascade;
 drop table if exists settings cascade;
+-- Plaid is gone (20260728000002), but this wipe list must still name
+-- plaid_tokens: a project created by an OLDER version of this file has the
+-- table, and dropping institutions with CASCADE would only take its foreign
+-- key, leaving an orphaned table full of stale access tokens behind.
 drop table if exists plaid_tokens cascade;
 drop table if exists simplefin_access cascade;
 drop table if exists category_rules cascade;
@@ -400,6 +404,13 @@ alter table transactions
   add constraint transactions_account_plaid_tx_unique unique (account_id, plaid_tx_id);
 
 -- ---- plaid_tokens (service_role only) ---------------------------------------
+-- NOTE: replayed for fidelity, then dropped again by MIGRATION 10 below — the
+-- same pattern as pull_jobs/mfa_prompts above, which MIGRATION 2 removes. A
+-- fresh install does NOT end up with this table. What it DOES end up with, and
+-- what must survive, are the two renames just above: accounts.plaid_account_id
+-- and transactions.plaid_tx_id are the adapter-agnostic external-id columns
+-- every feed writes: 'sfin:', 'csv:' (BOTH CSV and PDF -- there is no 'pdf:'
+-- namespace; transactions.source tells those apart) and 'manual:'.
 create table plaid_tokens (
   institution_id uuid primary key references institutions(id) on delete cascade,
   access_token text not null,
@@ -549,6 +560,49 @@ create policy category_rules_all on category_rules
   using (household_id = current_household_id())
   with check (household_id = current_household_id());
 
+-- ============ MIGRATION 10: remove plaid ============
+-- See supabase/migrations/20260728000002_remove_plaid.sql for the full
+-- rationale and for the ordering rule that matters on LIVE data (that file is
+-- pasted AFTER the code deploy, not before — it drops, it doesn't add).
+-- Here it is just the tail of the replay: undo the Plaid-shaped parts of
+-- MIGRATION 2. accounts.plaid_account_id and transactions.plaid_tx_id are NOT
+-- Plaid-shaped despite the names and are deliberately left alone.
+
+drop table if exists plaid_tokens;
+
+alter table institutions drop column if exists plaid_credential_key;
+alter table institutions drop column if exists plaid_item_id;
+
+-- 'needs_reauth' was a Plaid-only status (api/sync.js set it on
+-- ITEM_LOGIN_REQUIRED). Nothing can write or clear it now, so it leaves the
+-- allowed set. Drop by name first so this file stays re-runnable, then sweep
+-- any differently-named check that still permits the value.
+alter table institutions drop constraint if exists institutions_status_check;
+
+do $$
+declare
+  c text;
+begin
+  for c in
+    select con.conname
+    from pg_constraint con
+    join pg_class rel on rel.oid = con.conrelid
+    join pg_namespace nsp on nsp.oid = rel.relnamespace
+    where nsp.nspname = 'public'
+      and rel.relname = 'institutions'
+      and con.contype = 'c'
+      and pg_get_constraintdef(con.oid) like '%needs_reauth%'
+  loop
+    execute format('alter table public.institutions drop constraint %I', c);
+  end loop;
+end $$;
+
+update institutions set status = 'error' where status = 'needs_reauth';
+
+alter table institutions
+  add constraint institutions_status_check
+  check (status in ('active', 'disabled', 'error'));
+
 -- ============ AUTO-CREATE HOUSEHOLD ============
 -- Links the household to the first (usually only) auth user. If you haven't
 -- created the user yet, this is skipped — create the user and re-run the
@@ -577,6 +631,7 @@ end $$;
 do $$
 declare
   missing text[] := '{}';
+  stale   text[] := '{}';
 begin
   if to_regclass('public.budgets') is null then
     missing := array_append(missing, 'budgets table (20260720)');
@@ -617,11 +672,60 @@ begin
   if to_regclass('public.category_rules') is null then
     missing := array_append(missing, 'category_rules table (20260728)');
   end if;
+
+  -- The two adapter-agnostic external-id columns. Plaid-named, NOT Plaid-owned:
+  -- every feed writes them ('sfin:', 'csv:', 'manual:') and they carry
+  -- the upsert conflict targets that make a re-pull idempotent. Asserted PRESENT
+  -- so a future "finish the Plaid cleanup" edit that drops them fails here
+  -- instead of silently breaking every sync and import.
+  if not exists (select 1 from information_schema.columns
+      where table_schema = 'public' and table_name = 'transactions'
+        and column_name = 'plaid_tx_id') then
+    missing := array_append(missing, 'transactions.plaid_tx_id (20260606) — adapter-agnostic, must never be dropped');
+  end if;
+  if not exists (select 1 from information_schema.columns
+      where table_schema = 'public' and table_name = 'accounts'
+        and column_name = 'plaid_account_id') then
+    missing := array_append(missing, 'accounts.plaid_account_id (20260606) — adapter-agnostic, must never be dropped');
+  end if;
+
+  -- ---- ABSENCE assertions (20260728000002_remove_plaid) --------------------
+  -- Everything above asks "is it there?". Plaid removal is a DROP migration, so
+  -- these ask the opposite: if any of them still exists, this file replayed the
+  -- Plaid blocks without replaying the removal that undoes them.
+  if to_regclass('public.plaid_tokens') is not null then
+    stale := array_append(stale, 'plaid_tokens table still exists (20260728000002)');
+  end if;
+  if exists (select 1 from information_schema.columns
+      where table_schema = 'public' and table_name = 'institutions'
+        and column_name = 'plaid_credential_key') then
+    stale := array_append(stale, 'institutions.plaid_credential_key still exists (20260728000002)');
+  end if;
+  if exists (select 1 from information_schema.columns
+      where table_schema = 'public' and table_name = 'institutions'
+        and column_name = 'plaid_item_id') then
+    stale := array_append(stale, 'institutions.plaid_item_id still exists (20260728000002)');
+  end if;
+  if exists (
+    select 1 from pg_constraint con
+    join pg_class rel on rel.oid = con.conrelid
+    join pg_namespace nsp on nsp.oid = rel.relnamespace
+    where nsp.nspname = 'public' and rel.relname = 'institutions'
+      and con.contype = 'c'
+      and pg_get_constraintdef(con.oid) like '%needs_reauth%'
+  ) then
+    stale := array_append(stale, e'institutions.status still permits \'needs_reauth\' (20260728000002)');
+  end if;
+
   if array_length(missing, 1) > 0 then
     raise exception 'setup_all.sql is out of sync with migrations/: missing %',
       array_to_string(missing, ', ');
   end if;
-  raise notice 'Schema check passed: all migrations present.';
+  if array_length(stale, 1) > 0 then
+    raise exception 'setup_all.sql is out of sync with migrations/: not removed: %',
+      array_to_string(stale, ', ');
+  end if;
+  raise notice 'Schema check passed: all migrations present, Plaid artifacts removed.';
 end $$;
 
 select (select count(*) > 0 from household_members) as household_linked;

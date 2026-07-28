@@ -461,7 +461,8 @@ export async function getCashFlow({ num_periods = 6 } = {}) {
 // authenticated client: the *_all RLS policies allow it because household_id
 // resolves from the column default current_household_id() (never sent from the
 // client — same pattern as setBudget/setSetting). api/sync.js never touches
-// these rows: the manual institution has no plaid_tokens and status='disabled',
+// these rows: the manual institution is status='disabled' and has no SimpleFIN
+  // org id,
 // so it's skipped entirely.
 
 const MANUAL_INSTITUTION_NAME = 'Imported';
