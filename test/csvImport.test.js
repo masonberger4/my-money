@@ -11,6 +11,7 @@ import {
   CSV_TX_ID_PREFIX,
 } from '../src/csvImport.js';
 import { TRANSFER_CATEGORY, FALLBACK_CATEGORY } from '../src/categoryMap.js';
+import { pullWasClean } from '../src/sync.js';
 
 // --- parseCsv: the quoted/embedded-comma cases its own comment names --------
 
@@ -224,4 +225,46 @@ test('importPlan tolerates junk instead of throwing during render', () => {
   for (const junk of [undefined, null, 'nope', 42, {}]) {
     assert.equal(importPlan(junk).verdict, 'empty');
   }
+});
+
+// --- pullWasClean: "did the sync actually read the feed?" --------------------
+//
+// This gates whether statement import will insert rows over dates a later pull
+// re-fetches. runSync RESOLVES on a failed pull (api/sync.js answers 200 with a
+// per-result error so one broken bank doesn't fail the whole request), so
+// "the promise didn't reject" is not evidence of anything.
+
+test('pullWasClean rejects every shape a failed pull resolves with', () => {
+  // A thrown pull — api/sync.js catches it and pushes an error result.
+  assert.equal(pullWasClean({ results: [{ institution: 'SimpleFIN', error: 'HTTP 403' }], failures: [{ error: 'HTTP 403' }] }), false);
+  // A PARTIAL per-bank failure: no error key at all, just warnings.
+  assert.equal(pullWasClean({ results: [{ institution: 'SimpleFIN', warnings: ['Bank X: auth failed'] }], failures: [] }), false);
+  // The once-an-hour throttle.
+  assert.equal(pullWasClean({ results: [{ institution: 'SimpleFIN', skipped: 'throttled' }], failures: [] }), false);
+  // No access URL at all — syncSimpleFin returns [].
+  assert.equal(pullWasClean({ results: [], failures: [] }), false);
+  // Junk / absent.
+  for (const junk of [undefined, {}, { results: null }, { results: 'nope' }]) {
+    assert.equal(pullWasClean(junk), false, JSON.stringify(junk));
+  }
+});
+
+test('pullWasClean accepts a genuinely clean pull', () => {
+  assert.equal(
+    pullWasClean({ results: [{ institution: 'SimpleFIN', institutions: 2, accounts: 4, transactions: 137 }], failures: [] }),
+    true
+  );
+  // An empty `warnings` array is still clean — api/sync.js omits the key
+  // entirely when there are none, but don't make the caller depend on that.
+  assert.equal(pullWasClean({ results: [{ institution: 'SimpleFIN', warnings: [] }], failures: [] }), true);
+});
+
+// One broken bank blocks import for ALL accounts, and that is correct rather
+// than over-cautious: last_pulled_at lives on simplefin_access (one row per
+// ACCESS URL, covering every bank) and only advances when the whole pull is
+// error-free. So an unrelated bank's failure still means the next pull reaches
+// back FIRST_PULL_DAYS for everything — the same unsafe window.
+test('a partial failure is unclean even for accounts on a healthy bank', () => {
+  const partial = { results: [{ institution: 'SimpleFIN', accounts: 6, transactions: 40, warnings: ['Chase: auth failed'] }], failures: [] };
+  assert.equal(pullWasClean(partial), false);
 });

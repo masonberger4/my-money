@@ -4,7 +4,7 @@ import { analyzeCsv, toInsertRow, parseCsv, reconcileCsv, csvDateRange, buildRow
 import { applyTemplate, autoDetectTemplate, defaultTemplate, rowTotals, TEMPLATE_VERSION } from "../pdfImport.js";
 import { createManualAccount, importCsvTransactions, getExistingTxIds, getAccountTransactionsInRange, isManualAccount, isSimpleFinAccount, getCategoryRules, getFeedCoverageStart } from "../dataAdapter.js";
 import { getSetting, setSetting } from "../db.js";
-import { runSync } from "../sync.js";
+import { runSync, pullWasClean } from "../sync.js";
 import { chipStyle, markColor, readableInk } from "../paletteContrast.js";
 import { readToken, subscribeTheme } from "../theme.js";
 import PdfTemplateEditor from "./PdfTemplateEditor.jsx";
@@ -516,7 +516,20 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
     setSyncState("running");
     setError(null);
     try {
-      await runSync({ force: true });
+      // `runSync` RESOLVES on a failed pull — api/sync.js answers 200 with a
+      // per-result error so the dashboard can show a broken bank without the
+      // whole request failing. So awaiting it proves nothing, and the comment
+      // below used to be a lie: the catch never fired for a feed failure, and
+      // syncState flipped to "done" on a pull that read nothing. That mattered
+      // because "done" is what lets boundaryState go unsynced -> ok and
+      // overlapFrom become today − 30. A failed pull also leaves
+      // `last_pulled_at` untouched, so the next good pull reaches back 730 days
+      // — straight over whatever had just been imported into that window.
+      if (!pullWasClean(await runSync({ force: true }))) {
+        setSyncState("failed");
+        setError("Couldn't read the feed just now, so there's no safe boundary to import against. Try again in a minute.");
+        return;
+      }
       setSyncState("done");
       setCoverageNonce(n => n + 1);
       if (onImported) onImported();
@@ -844,14 +857,14 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                   )}
 
                   {auditShown && (
-                    <Reconciliation recon={recon} loading={reconLoading} sectionLabel={sectionLabel} step={previewShown ? 4 : 3} />
+                    <Reconciliation recon={recon} loading={reconLoading} sectionLabel={sectionLabel} step={3} />
                   )}
 
                   {/* Preview — only when something can actually be inserted. */}
                   {previewShown && (
                   <div style={{ marginBottom: 10 }}>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-                      <div style={sectionLabel}>3 · Preview</div>
+                      <div style={sectionLabel}>{auditShown ? 4 : 3} · Preview</div>
                       <div style={{ fontSize: 11, color: "var(--muted)" }}>
                         {loadingIds || coverageLoading ? "checking…" : (
                           <><strong style={{ color: "var(--text)" }}>{newRows.length}</strong> new{dupCount > 0 && <> · {dupCount} duplicate</>}{overlapCount > 0 && <> · {overlapCount} compared instead</>}</>

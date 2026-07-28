@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { claimSimpleFinToken, getSimpleFinStatus, disconnectSimpleFin, restoreSimpleFinInstitution } from "../apiClient.js";
-import { runSync } from "../sync.js";
+import { runSync, pullWasClean } from "../sync.js";
 
 // SimpleFIN connect — the modal behind "⚡ Connect with SimpleFIN", reachable
 // from the Accounts tab, the first-run empty state and the floating button.
@@ -96,7 +96,17 @@ export default function SimpleFinConnect({ onClose, onConnected }) {
     setStep("syncing");
     let warning = claimed.warning || null;
     try {
-      await runSync({ force: true });
+      // runSync RESOLVES on a failed pull — api/sync.js answers 200 carrying a
+      // per-result error. Awaiting it is not evidence the feed was read, and
+      // reporting an unqualified success here would tell the user to go and
+      // review accounts that were never created.
+      const outcome = await runSync({ force: true });
+      if (!pullWasClean(outcome)) {
+        const detail = (outcome?.failures || []).map(f => f.error).filter(Boolean).join("; ");
+        warning = detail
+          ? `Connected, but the first sync didn't finish: ${detail}`
+          : "Connected, but the first sync didn't finish";
+      }
     } catch (err) {
       console.error("simplefin first sync failed", err);
       warning = describeError(err, "Connected, but the first sync didn't finish");

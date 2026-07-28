@@ -326,13 +326,17 @@ async function pullOneAccessUrl(supabase, householdId, accessRow, { force, categ
         available_balance: available,
         currency: acct.currency,
         last_balance_at: acct.balanceDate || now.toISOString(),
-        // Hidden on arrival, on purpose. While SimpleFIN runs ALONGSIDE Plaid,
-        // a bank connected to both would otherwise land its transactions twice
-        // and silently double every total in the dashboard. Hidden accounts are
-        // fully browsable in the Accounts tab but excluded from spending,
-        // trends and totals, so the two feeds can be compared before switching
-        // over. Unhiding is a deliberate, one-tap act — and `hidden` is
-        // user-owned, so no later sync re-hides it.
+        // Hidden on arrival, on purpose. The original reason — a bank fed by
+        // both Plaid and SimpleFIN would land its transactions twice — died
+        // with Plaid. The surviving reason is sharper: SimpleFIN sends no
+        // account type, so it is GUESSED from the account name a few lines up,
+        // and `isCheckingAccount` reads that guess to decide whether an
+        // account's outflows count as household spending. A card mistaken for
+        // a checking account turns every purchase into spending. Hidden
+        // accounts are fully browsable in the Accounts tab but excluded from
+        // spending, trends and totals, so unhiding is the deliberate act that
+        // CONFIRMS the type — and `hidden` is user-owned, so no later sync
+        // re-hides it.
         hidden: true,
       });
     }
