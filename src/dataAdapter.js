@@ -1,6 +1,11 @@
 import { supabase } from './supabaseClient.js';
 import { isTransferCategory, applyAccountRules, UNCATEGORIZED } from './categoryMap.js';
 import { merchantKey, matchLearnedRule } from './txClassify.js';
+import { markInternalTransfers, cashIncome, cashSpending } from './cashFlow.js';
+
+// Re-export the pure cash-flow model (src/cashFlow.js) so existing importers
+// and the CSV-import dry-run harness keep working.
+export { markInternalTransfers, cashIncome, cashSpending } from './cashFlow.js';
 
 function pad2(n) {
   return String(n).padStart(2, '0');
@@ -76,58 +81,6 @@ async function getTransactionsBetween(start, end) {
   return rows;
 }
 
-// Mark both legs of a transfer between the household's own deposit accounts
-// (BECU checking ↔ savings) as `_internal` so cash-flow totals skip them.
-// A Plaid TRANSFER_OUT on one depository account pairs with a TRANSFER_IN on a
-// *different* depository account of the same amount within a few days (legs
-// often post on different days). Restricting to TRANSFER_IN/OUT legs and to
-// depository↔depository leaves real income (an unmatched deposit that merely
-// arrives tagged TRANSFER_IN) and credit-card payments (checking → credit,
-// which IS cash leaving checking) counted.
-const INTERNAL_MATCH_WINDOW_DAYS = 4;
-
-function dayNumber(iso) {
-  const [y, m, d] = (iso || '').split('-').map(Number);
-  return Date.UTC(y, (m || 1) - 1, d || 1) / 86400000;
-}
-
-// Exported so the CSV-import dry-run harness can verify washing against the
-// real logic (a personal↔joint transfer pair cancels across CSV + Plaid legs).
-export function markInternalTransfers(rows) {
-  const outs = [];
-  const insByAmount = new Map();
-  for (const t of rows) {
-    if (t.excluded || t.accounts?.type !== 'depository') continue;
-    const raw = (t.raw_category || '').toUpperCase();
-    if (t.amount > 0 && raw.startsWith('TRANSFER_OUT')) {
-      outs.push(t);
-    } else if (t.amount < 0 && raw.startsWith('TRANSFER_IN')) {
-      const key = (-t.amount).toFixed(2);
-      if (!insByAmount.has(key)) insByAmount.set(key, []);
-      insByAmount.get(key).push(t);
-    }
-  }
-  outs.sort((a, b) => (a.date < b.date ? -1 : 1));
-  for (const out of outs) {
-    const candidates = insByAmount.get(out.amount.toFixed(2));
-    if (!candidates) continue;
-    let best = null;
-    let bestGap = Infinity;
-    for (const cand of candidates) {
-      if (cand._internal || cand.account_id === out.account_id) continue;
-      const gap = Math.abs(dayNumber(cand.date) - dayNumber(out.date));
-      if (gap <= INTERNAL_MATCH_WINDOW_DAYS && gap < bestGap) {
-        best = cand;
-        bestGap = gap;
-      }
-    }
-    if (best) {
-      best._internal = true;
-      out._internal = true;
-    }
-  }
-}
-
 function getMonthTransactions(year, month) {
   const { start, end } = monthBounds(year, month);
   return getTransactionsBetween(start, end);
@@ -148,58 +101,6 @@ function sumSpending(txs) {
   for (const t of txs) {
     if (t.excluded || isLoanAccount(t)) continue;
     if (t.amount > 0 && !isTransferCategory(effectiveCategory(t))) total += t.amount;
-  }
-  return total;
-}
-
-// --- Trends cash flow (joint-budget view) ------------------------------------
-// The Trends "income vs spending" chart measures cash moving through the
-// household's *joint* accounts, treated as one budget:
-//   income   = money arriving in the joint checking OR savings accounts
-//   spending = money leaving the joint checking account (expenses are paid from
-//              checking; money leaving savings is never an expense)
-// Transfers between the joint checking and joint savings wash out
-// (markInternalTransfers), so moving money to savings isn't "spending" and
-// moving it back isn't "income". Money the household moves in from its own
-// *personal* accounts (not connected to Plaid) has no matching leg to wash
-// against, so it counts as income — deliberate: with only the joint accounts
-// synced, funding the joint budget from a personal account is the closest thing
-// to measurable income (real paychecks land in the un-connected personal
-// accounts). Credit-card *purchases* are not counted here — the card *payment*
-// that leaves checking is (that's the cash actually spent). This is deliberately
-// different from the Categories tab / Overview headline (sumSpending above),
-// which break spending down by what was purchased so per-category budgets work.
-function isHouseholdDepository(t) {
-  // Any connected depository account (checking or savings) — the joint budget.
-  return t.accounts?.type === 'depository';
-}
-
-function isCheckingAccount(t) {
-  // Depository and not the savings pot. Lenient on subtype so a null/oddly
-  // typed primary account still counts; only "savings" is treated as separate.
-  return t.accounts?.type === 'depository' && t.accounts?.subtype !== 'savings';
-}
-
-// Expenses are paid from checking only; savings outflows are not spending.
-// Exported for the CSV-import dry-run harness (see markInternalTransfers).
-export function cashSpending(txs) {
-  let total = 0;
-  for (const t of txs) {
-    if (t.excluded || t._internal) continue;
-    if (isCheckingAccount(t) && t.amount > 0) total += t.amount;
-  }
-  return total;
-}
-
-// Income is money into either joint account (checking or savings). Savings is
-// included so income that arrives via savings — money moved in from a personal
-// account — is not missed.
-// Exported for the CSV-import dry-run harness (see markInternalTransfers).
-export function cashIncome(txs) {
-  let total = 0;
-  for (const t of txs) {
-    if (t.excluded || t._internal) continue;
-    if (isHouseholdDepository(t) && t.amount < 0) total += Math.abs(t.amount);
   }
   return total;
 }
@@ -471,11 +372,7 @@ export async function getRecurringCandidates({ months = 6 } = {}) {
   return { transactions: rows.map(toTxShape) };
 }
 
-// Cross-month search over description/merchant via ilike. The
-// transaction-editing branch adds a user_description column; until its
-// migration lands, querying that column errors, so we try with it once and
-// fall back (and remember) if the database doesn't have it yet.
-let searchHasUserDescription = true;
+// Cross-month search over description/merchant/user_description via ilike.
 
 function ilikePattern(q) {
   // PostgREST's .or() parser treats commas/parens/quotes as syntax — strip
@@ -491,24 +388,18 @@ export async function searchTransactions(query, { limit = 200 } = {}) {
   if (q.length < 2) return { transactions: [], hasMore: false };
   const pat = ilikePattern(q);
 
-  const run = withUserDesc => {
-    const ors = [`description.ilike.${pat}`, `merchant_name.ilike.${pat}`];
-    if (withUserDesc) ors.push(`user_description.ilike.${pat}`);
-    return supabase
-      .from('transactions')
-      .select(`${TX_COLUMNS}, accounts!inner(hidden, type, subtype)`)
-      .eq('accounts.hidden', false)
-      .or(ors.join(','))
-      .order('date', { ascending: false })
-      .limit(limit + 1);
-  };
-
-  let { data, error } = await run(searchHasUserDescription);
-  if (error && searchHasUserDescription) {
-    // Column not there yet (pre-transaction-editing schema): retry without.
-    searchHasUserDescription = false;
-    ({ data, error } = await run(false));
-  }
+  const ors = [
+    `description.ilike.${pat}`,
+    `merchant_name.ilike.${pat}`,
+    `user_description.ilike.${pat}`,
+  ];
+  const { data, error } = await supabase
+    .from('transactions')
+    .select(`${TX_COLUMNS}, accounts!inner(hidden, type, subtype)`)
+    .eq('accounts.hidden', false)
+    .or(ors.join(','))
+    .order('date', { ascending: false })
+    .limit(limit + 1);
   if (error) throw error;
 
   for (const t of data) {
@@ -646,17 +537,22 @@ export async function findOrCreateManualInstitution() {
   return data.id;
 }
 
-// Create one manual account. subtype is 'checking' or 'savings' (drives the
-// Trends checking-vs-savings split). Returns the inserted account row.
+// Create one manual account. kind is 'checking' | 'savings' | 'credit'.
+// checking/savings are depository (and drive the Trends checking-vs-savings
+// split); 'credit' is a credit-card account, for a card whose statements are
+// only available as CSV/PDF — its purchases count as spending by category and
+// applyAccountRules turns its negatives into "Return" (never income), exactly
+// like a Plaid-linked card. Returns the inserted account row.
 export async function createManualAccount({ name, subtype = 'checking' }) {
   const institutionId = await findOrCreateManualInstitution();
   const plaidAccountId = MANUAL_ACCOUNT_PREFIX + makeUuid();
+  const isCredit = subtype === 'credit';
   const base = {
     institution_id: institutionId,
     plaid_account_id: plaidAccountId,
     name: (name || 'Imported account').trim(),
-    type: 'depository',
-    subtype: subtype === 'savings' ? 'savings' : 'checking',
+    type: isCredit ? 'credit' : 'depository',
+    subtype: isCredit ? 'credit card' : subtype === 'savings' ? 'savings' : 'checking',
   };
 
   const attempt = async withFlag => {
@@ -674,22 +570,40 @@ export async function createManualAccount({ name, subtype = 'checking' }) {
 }
 
 // plaid_tx_ids already stored for an account, so the preview can grey out rows
-// a prior import already inserted. Empty for a brand-new account.
+// a prior import already inserted, plus which sources those rows came from.
+// The dedup id hashes the description, and a bank's CSV and PDF word the same
+// transaction differently — so feeding one account from both formats
+// double-inserts. The caller warns when the sources would be mixed.
+// Returns { ids: Set, sources: Set }. Empty for a brand-new account.
 export async function getExistingTxIds(accountId) {
   const ids = new Set();
-  if (!accountId) return ids;
+  const sources = new Set();
+  if (!accountId) return { ids, sources };
   const page = 1000;
+  let selectCols = transactionsHaveSource ? 'plaid_tx_id, source' : 'plaid_tx_id';
   for (let from = 0; ; from += page) {
-    const { data, error } = await supabase
+    let { data, error } = await supabase
       .from('transactions')
-      .select('plaid_tx_id')
+      .select(selectCols)
       .eq('account_id', accountId)
       .range(from, from + page - 1);
+    if (error && selectCols !== 'plaid_tx_id' && isMissingColumnError(error, 'source')) {
+      transactionsHaveSource = false;
+      selectCols = 'plaid_tx_id';
+      ({ data, error } = await supabase
+        .from('transactions')
+        .select(selectCols)
+        .eq('account_id', accountId)
+        .range(from, from + page - 1));
+    }
     if (error) throw error;
-    for (const r of data) ids.add(r.plaid_tx_id);
+    for (const r of data) {
+      ids.add(r.plaid_tx_id);
+      if (r.source) sources.add(r.source);
+    }
     if (data.length < page) break;
   }
-  return ids;
+  return { ids, sources };
 }
 
 // The earliest transaction a live feed has for an account — i.e. where its
@@ -738,7 +652,7 @@ export async function getAccountTransactionsInRange(accountId, start, end) {
 // place instead of duplicating; user-owned columns (user_category, excluded,
 // user_description) are omitted from the payload so those edits survive the
 // re-import, exactly like Plaid syncs. Returns the number of rows written.
-export async function importCsvTransactions(accountId, rows) {
+export async function importCsvTransactions(accountId, rows, source = 'csv') {
   if (!accountId) throw new Error('importCsvTransactions requires an account id');
   if (!rows || rows.length === 0) return 0;
 
@@ -748,7 +662,7 @@ export async function importCsvTransactions(accountId, rows) {
     const slice = rows.slice(i, i + batchSize).map(r => ({ ...r, account_id: accountId }));
 
     const attempt = async withSource => {
-      const payload = withSource ? slice.map(r => ({ ...r, source: 'csv' })) : slice;
+      const payload = withSource ? slice.map(r => ({ ...r, source })) : slice;
       return supabase
         .from('transactions')
         .upsert(payload, { onConflict: 'account_id,plaid_tx_id' });

@@ -7,8 +7,11 @@
 drop publication if exists supabase_realtime;
 create publication supabase_realtime;
 
+drop table if exists budgets cascade;
 drop table if exists settings cascade;
 drop table if exists plaid_tokens cascade;
+drop table if exists simplefin_access cascade;
+drop table if exists category_rules cascade;
 drop table if exists mfa_prompts cascade;
 drop table if exists pull_jobs cascade;
 drop table if exists pending_items cascade;

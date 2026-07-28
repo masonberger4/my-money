@@ -16,12 +16,12 @@
 // So a purchase (Debit) lands positive and a deposit (Credit) lands negative.
 
 // The descriptor→category rule table and the internal-transfer tagging moved to
-// src/txClassify.js when the SimpleFIN sync became a second caller (it also gets
-// a descriptor and no category). Re-exported here so this module's public
-// surface is unchanged.
+// src/txClassify.js when the SimpleFIN sync became a second caller (it also
+// gets a descriptor and no category). Re-exported here so this module's public
+// surface — which test/csvImport.test.js imports from — is unchanged.
 import { guessCategory, transferRawCategory } from './txClassify.js';
 
-export { guessCategory, invalidRuleCategories } from './txClassify.js';
+export { guessCategory, transferRawCategory, invalidRuleCategories } from './txClassify.js';
 
 // ---------------------------------------------------------------------------
 // CSV tokenizer — a small state machine so quoted fields (embedded commas,
@@ -243,6 +243,7 @@ function isValidYmd(y, m, d) {
 }
 
 // ---------------------------------------------------------------------------
+
 // Dedup id. plaid_tx_id = 'csv:' + fnv1a64(date|amount|normDesc) + ':' + ordinal
 // where ordinal counts how many EARLIER rows in this same file share the hash —
 // used only to keep genuinely identical (date, amount, description) rows
@@ -250,6 +251,8 @@ function isValidYmd(y, m, d) {
 // the next export can prepend rows and shift every position, and folding that
 // in would re-hash every transaction and break idempotent re-import.
 // ---------------------------------------------------------------------------
+export const CSV_TX_ID_PREFIX = 'csv:';
+
 export function normalizeDescription(desc) {
   return String(desc ?? '')
     .trim()
@@ -378,7 +381,7 @@ export function buildRows(rows, opts = {}) {
     const hash = baseHash(dateIso, amount, normDesc);
     const ordinal = seenHash.get(hash) || 0;
     seenHash.set(hash, ordinal + 1);
-    const plaid_tx_id = `csv:${hash}:${ordinal}`;
+    const plaid_tx_id = `${CSV_TX_ID_PREFIX}${hash}:${ordinal}`;
 
     const raw_category = transferRawCategory(rawDesc, amount);
     // Learned merchant rules apply here too, or a merchant taught from a synced
@@ -468,9 +471,6 @@ export function analyzeCsv(text, { existingIds = new Set(), manualColumns = null
     needsManualMapping: false,
   };
 }
-
-export const MANUAL_INSTITUTION_NAME = 'Imported';
-export const CSV_TX_ID_PREFIX = 'csv:';
 
 // ===========================================================================
 // Reconciliation (Comparison mode — Phase 2). When the import target is a

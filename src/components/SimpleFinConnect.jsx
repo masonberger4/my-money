@@ -163,7 +163,7 @@ export default function SimpleFinConnect({ onClose, onConnected }) {
           ) : (
             <>
               {status.migration_pending && (
-                <div style={{ fontSize: 12, color: "#8A6A16", background: "#FDF4E0", border: "1px solid #E9CE8A", borderRadius: 8, padding: "10px 12px", marginBottom: 16, lineHeight: 1.5 }}>
+                <div style={{ fontSize: 12, color: "var(--warn)", background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 8, padding: "10px 12px", marginBottom: 16, lineHeight: 1.5 }}>
                   The SimpleFIN tables aren't in the database yet. Run the
                   {" "}<code>20260724000001_simplefin.sql</code> migration in the Supabase SQL editor first.
                 </div>
@@ -174,6 +174,11 @@ export default function SimpleFinConnect({ onClose, onConnected }) {
                 <div style={sectionLabel}>Status</div>
                 <div style={{ background: "var(--bg)", borderRadius: 10, padding: "12px 14px" }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, fontWeight: 600 }}>
+                    {/* The one literal left in this file: a status dot is a
+                        non-text mark (3:1), and this green measures 3.13:1 on
+                        --bg light and 5.23:1 dark, so it clears on both without
+                        pulling paletteContrast into a modal that has no other
+                        palette colours. */}
                     <span style={{ width: 8, height: 8, borderRadius: 4, background: connected ? "#1D9E75" : "var(--muted)", flexShrink: 0 }} />
                     {connected ? "Connected" : "Not connected"}
                   </div>
@@ -188,7 +193,7 @@ export default function SimpleFinConnect({ onClose, onConnected }) {
                     </div>
                   )}
                   {status.last_error && (
-                    <div style={{ fontSize: 11, color: "#A32D2D", marginTop: 8, lineHeight: 1.5 }}>
+                    <div style={{ fontSize: 11, color: "var(--danger)", marginTop: 8, lineHeight: 1.5 }}>
                       Last feed message: {status.last_error}
                     </div>
                   )}
@@ -230,7 +235,7 @@ export default function SimpleFinConnect({ onClose, onConnected }) {
                     Trends), compare its transactions against the Plaid copy, then unhide it.
                   </div>
                   {result.warning && (
-                    <div style={{ fontSize: 11, color: "#8A6A16", background: "#FDF4E0", border: "1px solid #E9CE8A", borderRadius: 8, padding: "10px 12px", marginTop: 14, lineHeight: 1.5, textAlign: "left" }}>
+                    <div style={{ fontSize: 11, color: "var(--warn)", background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 8, padding: "10px 12px", marginTop: 14, lineHeight: 1.5, textAlign: "left" }}>
                       {result.warning} — the connection is saved and retries on its own, so the
                       accounts will appear on the next sync.
                     </div>
@@ -286,14 +291,14 @@ export default function SimpleFinConnect({ onClose, onConnected }) {
               )}
 
               {error && (
-                <div style={{ fontSize: 12, color: "#A32D2D", background: "#FCEBEB", border: "1px solid #F09595", borderRadius: 8, padding: "10px 12px", marginTop: 12, lineHeight: 1.5 }}>
+                <div style={{ fontSize: 12, color: "var(--danger)", background: "var(--danger-bg)", border: "1px solid var(--danger-border)", borderRadius: 8, padding: "10px 12px", marginTop: 12, lineHeight: 1.5 }}>
                   {error}
                 </div>
               )}
 
               {connected && !result && (
                 <button onClick={disconnect} disabled={busy}
-                  style={{ marginTop: 16, width: "100%", padding: "8px 0", borderRadius: 8, border: "1px solid #F09595", background: "none", color: "#A32D2D", fontFamily: "inherit", fontSize: 12, fontWeight: 500, cursor: busy ? "default" : "pointer", opacity: busy ? .6 : 1 }}>
+                  style={{ marginTop: 16, width: "100%", padding: "8px 0", borderRadius: 8, border: "1px solid var(--danger-border)", background: "none", color: "var(--danger)", fontFamily: "inherit", fontSize: 12, fontWeight: 500, cursor: busy ? "default" : "pointer", opacity: busy ? .6 : 1 }}>
                   Stop syncing from SimpleFIN…
                 </button>
               )}
@@ -303,12 +308,12 @@ export default function SimpleFinConnect({ onClose, onConnected }) {
 
         <div style={{ display: "flex", gap: 8, padding: "14px 20px", borderTop: "1px solid var(--border)" }}>
           {result ? (
-            <button onClick={onClose} style={{ flex: 1, padding: "10px 0", borderRadius: 8, border: "none", background: "#7F77DD", color: "#fff", fontFamily: "inherit", fontSize: 14, fontWeight: 500, cursor: "pointer" }}>Done</button>
+            <button onClick={onClose} style={{ flex: 1, padding: "10px 0", borderRadius: 8, border: "none", background: "var(--accent)", color: "var(--accent-text)", fontFamily: "inherit", fontSize: 14, fontWeight: 500, cursor: "pointer" }}>Done</button>
           ) : (
             <>
               <button onClick={onClose} disabled={busy} className="ibtn" style={{ flex: 1, justifyContent: "center", opacity: busy ? .5 : 1 }}>Cancel</button>
               <button onClick={connect} disabled={busy || !token.trim()}
-                style={{ flex: 2, padding: "10px 0", borderRadius: 8, border: "none", background: "#7F77DD", color: "#fff", fontFamily: "inherit", fontSize: 14, fontWeight: 500, cursor: busy || !token.trim() ? "default" : "pointer", opacity: busy || !token.trim() ? .5 : 1 }}>
+                style={{ flex: 2, padding: "10px 0", borderRadius: 8, border: "none", background: "var(--accent)", color: "var(--accent-text)", fontFamily: "inherit", fontSize: 14, fontWeight: 500, cursor: busy || !token.trim() ? "default" : "pointer", opacity: busy || !token.trim() ? .5 : 1 }}>
                 {step === "claiming" ? "Claiming…" : step === "syncing" ? "Fetching accounts…" : "Connect"}
               </button>
             </>

@@ -14,13 +14,12 @@
 // mapped_category (dataAdapter reads it straight through as the effective
 // category). Order matters — first match wins, most specific first.
 
-import { ERA_CATEGORIES, UNCATEGORIZED } from './categoryMap.js';
+// One definition of each constant, in categoryMap. Unmatched merchants land in
+// FALLBACK_CATEGORY, which IS UNCATEGORIZED — a real category as the fallback
+// made an unrecognised merchant indistinguishable from a confident answer.
+import { ERA_CATEGORIES, UNCATEGORIZED, TRANSFER_CATEGORY, FALLBACK_CATEGORY } from './categoryMap.js';
 
-export const TRANSFER_CATEGORY = 'Transfers and card payments';
-// Unmatched merchants land in UNCATEGORIZED, NOT in a real category. The old
-// fallback was "Shopping and gear", which made an unrecognised merchant
-// indistinguishable from a confident answer and quietly inflated that bucket.
-export const FALLBACK_CATEGORY = UNCATEGORIZED;
+export { TRANSFER_CATEGORY, FALLBACK_CATEGORY };
 
 // ---------------------------------------------------------------------------
 // Card payments vs. purchases.

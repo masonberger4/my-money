@@ -1,23 +1,32 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { analyzeCsv, toInsertRow, parseCsv, reconcileCsv, csvDateRange } from "../csvImport.js";
+import { Component, useEffect, useMemo, useRef, useState } from "react";
+import { analyzeCsv, toInsertRow, parseCsv, reconcileCsv, csvDateRange, buildRows } from "../csvImport.js";
+import { applyTemplate, autoDetectTemplate, defaultTemplate, rowTotals, TEMPLATE_VERSION } from "../pdfImport.js";
 import { createManualAccount, importCsvTransactions, getExistingTxIds, getAccountTransactionsInRange, isManualAccount, isSimpleFinAccount, getCategoryRules, getEarliestTransactionDate } from "../dataAdapter.js";
+import { getSetting, setSetting } from "../db.js";
+import { chipStyle, markColor, readableInk } from "../paletteContrast.js";
+import { readToken, subscribeTheme } from "../theme.js";
+import PdfTemplateEditor from "./PdfTemplateEditor.jsx";
 
-// CSV import — a file-picker action on the Accounts tab, in three modes chosen
-// by the target account:
+// Statement import — a file-picker action on the Accounts tab, accepting a bank
+// CSV or a PDF statement. A PDF is turned into the same cell grid a CSV
+// produces (see pdfImport.js) by a per-account TEMPLATE the user confirms once
+// in the visual editor, so everything below this point is shared by both.
+//
+// Three modes, chosen by the target account:
 //  • STANDALONE — target is a new/existing MANUAL account: pick a bank CSV →
 //    preview the exact rows → confirm → real transactions land on a non-feed
 //    account. No DB write before Confirm; the preview greys out rows a prior
 //    import already inserted (stable csv:… id) so re-imports are safe.
 //  • HISTORY BACKFILL — target is a SIMPLEFIN account. SimpleFIN only reaches
-//    back so far, and with Plaid retired a CSV is the only way to recover older
-//    transactions. Rows dated on or after the account's earliest synced
-//    transaction are EXCLUDED: `csv:` and `sfin:` dedup ids are separate
-//    namespaces that cannot see each other, so importing across that boundary
-//    would double-count with nothing downstream able to notice.
+//    back so far, so a statement is the only way to recover older transactions.
+//    Rows dated on or after the account's earliest synced transaction are
+//    EXCLUDED: `csv:`/`pdf:` and `sfin:` dedup ids are separate namespaces that
+//    cannot see each other, so importing across that boundary would
+//    double-count with nothing downstream able to notice.
 //  • COMPARISON — target is a PLAID-LINKED account: insert NOTHING (that's the
-//    double-count trap). Reconcile the CSV against what Plaid already synced
-//    and show a read-only audit — sync gaps, pending/timing, and amount/date/
-//    category mismatches on matched pairs. Goes away with Plaid.
+//    double-count trap). Reconcile against what Plaid already synced and show a
+//    read-only audit — sync gaps, pending/timing, and amount/date/category
+//    mismatches on matched pairs. Goes away with Plaid.
 
 // Pad an ISO date by ±days so the Plaid fetch covers the CSV's period plus the
 // date-drift window on both ends. Explicit UTC math — never new Date(string).
@@ -36,6 +45,57 @@ function money(n) {
 
 const ROLE_LABELS = { date: "Date", description: "Description", debit: "Debit", credit: "Credit", amount: "Amount (signed)" };
 
+// Read a theme surface at RUNTIME from src/ui.css — never hardcode a token
+// value here — and re-read it whenever the theme is applied, so these colours
+// follow a FORCED theme (the header toggle) exactly as they follow the OS one.
+// "" is the deliberate fallback: paletteContrast reads an unparseable surface as
+// "no surface to reason about" and hands the colour back untouched, i.e. exactly
+// today's rendering, rather than throwing during render.
+function useSurface(token) {
+  const [value, setValue] = useState(() => readToken(token, ""));
+  useEffect(() => {
+    const read = () => setValue(readToken(token, ""));
+    read();
+    return subscribeTheme(read);
+  }, [token]);
+  return value;
+}
+
+// The good/money-in green and the comparison-bucket hues are DATA — a status
+// palette, not theme tokens: the four buckets have to stay tellable apart from
+// each other, and #1D9E75/#D85A30 are the app-wide good/bad pair whose STORED
+// values must not change. What changed is how they are RENDERED — every one is
+// now contrast-corrected at render against the surface it actually sits on, so
+// the same hex stays legible on the near-white card and the near-black one.
+// Measured: this fixes LIGHT mode too, not just dark — the audit chips drew the
+// raw hue as text on its own 13% tint and came in at 2.92–3.29:1 on the white
+// card (all four buckets), and the money-in amount was 3.39:1. Now >= 4.5:1 in
+// both themes, with the light-mode tint itself unchanged to the byte.
+const MONEY_IN = "#1D9E75";     // also the "matched" bucket
+const SYNC_GAP = "#D85A30";
+const AMOUNT_DIFF = "#B7791F";
+const MATCH_DIFF = "#378ADD";
+
+// Backstop for anything unguarded that throws during render inside the modal —
+// the app has no global error boundary, so without this a render throw blanks
+// the whole PWA. Scoped to the modal body only, so it can't swallow errors
+// elsewhere in the app.
+class ModalErrorBoundary extends Component {
+  constructor(props) { super(props); this.state = { failed: false }; }
+  static getDerivedStateFromError() { return { failed: true }; }
+  componentDidCatch(err, info) { console.error("import modal render failed", err, info); }
+  render() {
+    if (this.state.failed) {
+      return (
+        <div style={{ fontSize: 12, color: "var(--danger)", background: "var(--danger-bg)", border: "1px solid var(--danger-border)", borderRadius: 8, padding: "10px 12px" }}>
+          Something went wrong rendering this step — close and retry.
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 export default function CsvImport({ accounts = [], onClose, onImported }) {
   const [fileName, setFileName] = useState(null);
   const [fileText, setFileText] = useState(null);
@@ -45,6 +105,7 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
   const [newName, setNewName] = useState("");
   const [newSubtype, setNewSubtype] = useState("checking");
   const [existingIds, setExistingIds] = useState(new Set());
+  const [existingSources, setExistingSources] = useState(new Set());
   // Learned merchant rules, so an import agrees with what the household has
   // already taught the classifier instead of re-deriving from keywords alone.
   const [rules, setRules] = useState(null);
@@ -55,30 +116,71 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
   const [loadingIds, setLoadingIds] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
+  const [pdfAdvisory, setPdfAdvisory] = useState(null); // non-fatal guidance, not the terminal error slot
   const [result, setResult] = useState(null);
   const [recon, setRecon] = useState(null);
   const [reconLoading, setReconLoading] = useState(false);
+  const [fileKind, setFileKind] = useState("csv"); // "csv" | "pdf"
+  const [pdfPages, setPdfPages] = useState(null);
+  const [pdfTemplate, setPdfTemplate] = useState(null);
+  const [pdfAutoTemplate, setPdfAutoTemplate] = useState(null);
+  const [pdfBusy, setPdfBusy] = useState(false);
+  const [templateSource, setTemplateSource] = useState(null); // 'saved' | 'auto'
+  const [showEditor, setShowEditor] = useState(false);
   const fileRef = useRef(null);
+  // The modal panel is --card, so that is the surface the preview amounts and
+  // the audit chips are actually read against.
+  const cardSurface = useSurface("--card");
 
   const manual = accounts.filter(isManualAccount);
   const simplefin = accounts.filter(isSimpleFinAccount);
   // "Plaid" here means a live feed we can only RECONCILE against, never import
-  // into. SimpleFIN accounts get their own mode below: history predating the
-  // feed is exactly what CSV import is for now that Plaid is being retired.
+  // into. SimpleFIN gets its own mode: history predating the feed is exactly
+  // what statement import is for now that Plaid is being retired.
   const plaid = accounts.filter(a => !isManualAccount(a) && !isSimpleFinAccount(a));
   const targetIsPlaid = target !== "new" && plaid.some(a => a.id === target);
   const targetIsSimpleFin = target !== "new" && simplefin.some(a => a.id === target);
   const targetAcct = target !== "new" ? accounts.find(a => a.id === target) : null;
 
-  // Parse + build rows. Small files → cheap to recompute on every change.
-  const analysis = useMemo(() => {
-    if (!fileText) return null;
+  // Apply the PDF template → the same cell grid a CSV yields. Guarded like the
+  // CSV parse below: this runs during render, and the app has no error
+  // boundary, so an unexpected throw here would blank the whole PWA instead of
+  // showing a message.
+  // Derived, not stored: returning the error from the memo means it clears
+  // itself as soon as the inputs change. Setting state from inside a memo would
+  // leave a one-off failure stuck on screen for the rest of the session.
+  const { applied: pdfApplied, error: pdfApplyError } = useMemo(() => {
+    if (!(fileKind === "pdf" && pdfPages && pdfTemplate)) return { applied: null, error: null };
     try {
+      return { applied: applyTemplate(pdfPages, pdfTemplate), error: null };
+    } catch (e) {
+      console.error("applyTemplate failed", e);
+      return { applied: null, error: `Couldn't read this statement with these columns: ${e.message || e}` };
+    }
+  }, [fileKind, pdfPages, pdfTemplate]);
+
+  // The auto-detect advisory has done its job once the hand-set columns parse
+  // rows — leaving it up next to a working preview reads as a problem.
+  useEffect(() => {
+    if (pdfAdvisory && pdfApplied?.grid?.length) setPdfAdvisory(null);
+  }, [pdfAdvisory, pdfApplied]);
+
+  // Parse + build rows. Small files → cheap to recompute on every change.
+  // Both sources converge on buildRows, so the preview, dedup, categories,
+  // insert and comparison audit are identical for CSV and PDF.
+  const analysis = useMemo(() => {
+    try {
+      if (fileKind === "pdf") {
+        if (!pdfApplied) return null;
+        const { rows, skipped } = buildRows(pdfApplied.grid, { ...pdfApplied.buildOpts, existingIds, rules, overlapFrom: coverageStart });
+        return { rows, skipped, needsManualMapping: false, parsedRowCount: pdfApplied.grid.length };
+      }
+      if (!fileText) return null;
       return analyzeCsv(fileText, { existingIds, manualColumns: manualCols, amountSign, rules, overlapFrom: coverageStart });
     } catch (e) {
       return { error: e.message, rows: [], skipped: [], needsManualMapping: false };
     }
-  }, [fileText, existingIds, manualCols, amountSign, rules, coverageStart]);
+  }, [fileKind, pdfApplied, fileText, existingIds, manualCols, amountSign, rules, coverageStart]);
 
   // Where the live feed's coverage begins, for the overlap guard.
   useEffect(() => {
@@ -92,7 +194,7 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
     return () => { cancelled = true; };
   }, [target, targetIsSimpleFin]);
 
-  // Learned merchant rules, loaded once — analyzeCsv re-runs when they arrive.
+  // Learned merchant rules, loaded once — the analysis re-runs when they land.
   useEffect(() => {
     let cancelled = false;
     getCategoryRules()
@@ -104,17 +206,34 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
   // Load the target account's existing ids so dupes grey out. New account or a
   // Plaid target (comparison mode, no insert) → none.
   useEffect(() => {
-    if (target === "new" || targetIsPlaid) { setExistingIds(new Set()); return; }
-    // SimpleFIN targets included: a re-run of the same history file must grey
-    // out rather than double-insert (csv: ids are content-hashed and stable).
+    if (target === "new" || targetIsPlaid) { setExistingIds(new Set()); setExistingSources(new Set()); return; }
     let cancelled = false;
     setLoadingIds(true);
     getExistingTxIds(target)
-      .then(ids => { if (!cancelled) setExistingIds(ids); })
-      .catch(() => { if (!cancelled) setExistingIds(new Set()); })
+      .then(({ ids, sources }) => { if (!cancelled) { setExistingIds(ids); setExistingSources(sources); } })
+      .catch(() => { if (!cancelled) { setExistingIds(new Set()); setExistingSources(new Set()); } })
       .finally(() => { if (!cancelled) setLoadingIds(false); });
     return () => { cancelled = true; };
   }, [target, targetIsPlaid]);
+
+  // A bank words the same transaction differently in its CSV and its PDF, so
+  // the dedup hash differs and feeding one account both formats double-inserts.
+  // Warn when the account already holds rows from the other format.
+  const incomingSource = fileKind === "pdf" ? "pdf" : "csv";
+  const targetIsManual = target !== "new" && !targetIsPlaid;
+  // Every row on a manual account arrived through an import, so its `source` is
+  // the format it came from — or 'plaid', the column default, if it predates
+  // the source column (sync never writes to a manual account, so that value
+  // can't mean anything else here). Treat ANY value that isn't the incoming
+  // format as a conflict, including that legacy one: we can't tell which format
+  // those rows came from, and guessing wrong double-counts them permanently.
+  // A SimpleFIN account legitimately holds 'simplefin' rows alongside imported
+  // history, so its own feed rows are not a format conflict — without this
+  // exemption the backfill mode would block itself on every SimpleFIN account.
+  // CSV-vs-PDF mixing is still caught, on SimpleFIN targets too.
+  const importedSources = [...existingSources].filter(s => !(targetIsSimpleFin && s === "simplefin"));
+  const mixedSource = (targetIsManual || targetIsSimpleFin) && importedSources.some(s => s !== incomingSource);
+  const legacySource = mixedSource && !importedSources.some(s => s === "csv" || s === "pdf");
 
   // Comparison mode: when the target is Plaid-linked, reconcile the CSV against
   // what Plaid already synced over the CSV's date range (± the drift window).
@@ -126,27 +245,137 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
     if (!min || !max) { setRecon({ counts: { matched: 0, csvOnly: 0, plaidOnly: 0, amountMismatches: 0 }, matched: [], amountMismatches: [], csvOnly: [], plaidOnly: [] }); return; }
     let cancelled = false;
     setReconLoading(true);
-    getAccountTransactionsInRange(target, padIso(min, -7), padIso(max, 7))
-      .then(plaidRows => { if (!cancelled) setRecon(reconcileCsv(csvRows, plaidRows)); })
-      .catch(e => { if (!cancelled) { console.error("reconcile failed", e); setError(e.message || "Couldn't load Plaid transactions to compare."); setRecon(null); } })
-      .finally(() => { if (!cancelled) setReconLoading(false); });
-    return () => { cancelled = true; };
+    // Debounced. Dragging a column edge in the PDF template editor re-derives
+    // the rows on every pointermove, and without this each one would fire
+    // another query at the database.
+    const handle = setTimeout(() => {
+      getAccountTransactionsInRange(target, padIso(min, -7), padIso(max, 7))
+        .then(plaidRows => { if (!cancelled) setRecon(reconcileCsv(csvRows, plaidRows)); })
+        .catch(e => { if (!cancelled) { console.error("reconcile failed", e); setError(e.message || "Couldn't load Plaid transactions to compare."); setRecon(null); } })
+        .finally(() => { if (!cancelled) setReconLoading(false); });
+    }, 350);
+    return () => { cancelled = true; clearTimeout(handle); };
   }, [target, targetIsPlaid, csvRows]);
+
+  // A statement is well under a megabyte. Reading a huge file would be held
+  // several times over in memory (the ArrayBuffer, pdf.js's copy, and its
+  // internal transfer), and on a phone that kills the whole app rather than
+  // surfacing an error — so refuse it up front with a clear message.
+  const MAX_FILE_BYTES = 25 * 1024 * 1024;
 
   async function onFile(e) {
     const f = e.target.files?.[0];
     if (!f) return;
+    if (f.size > MAX_FILE_BYTES) {
+      setFileName(f.name);
+      setFileText(null);
+      setPdfPages(null);
+      setPdfAdvisory(null);
+      setError(
+        `That file is ${(f.size / 1024 / 1024).toFixed(0)}MB, which is too large to read safely on a phone. ` +
+        `Bank statements are normally well under 5MB — check you picked the right file.`
+      );
+      return;
+    }
     setError(null);
+    setPdfAdvisory(null);
     setResult(null);
     setManualCols(null);
     setFileName(f.name);
+    setPdfPages(null);
+    setPdfTemplate(null);
+    setPdfAutoTemplate(null);
+    setTemplateSource(null);
+    setShowEditor(false);
+
+    const isPdf = /\.pdf$/i.test(f.name) || f.type === "application/pdf";
+    if (!isPdf) {
+      setFileKind("csv");
+      try {
+        setFileText(await f.text());
+      } catch {
+        setError("Couldn't read that file.");
+      }
+      return;
+    }
+
+    setFileKind("pdf");
+    setFileText(null);
+    setPdfBusy(true);
+    // Named so a failure says WHICH step broke — the difference between
+    // "your browser can't run the PDF reader" and "we couldn't read the
+    // layout" matters, and a bare message from a phone is impossible to act on.
+    let stage = "loading the PDF reader";
     try {
-      const text = await f.text();
-      setFileText(text);
-    } catch {
-      setError("Couldn't read that file.");
+      // pdf.js is ~1MB and only loaded here, the first time a PDF is opened.
+      const { extractPdfPages } = await import("../pdfExtract.js");
+      stage = "reading the file";
+      const buf = await f.arrayBuffer();
+      stage = "extracting text from the PDF";
+      const { pages, hasTextLayer, pageCount, truncated } = await extractPdfPages(buf);
+      if (truncated) {
+        // Never import part of a statement without saying so.
+        setError(
+          `This PDF has ${pageCount} pages and only the first ${pages.length} were read. ` +
+          `Anything after that would be missing — split the file if you need the rest.`
+        );
+      }
+      if (!hasTextLayer) {
+        setError(
+          "This PDF has no text layer — it looks like a scan or photo of a statement. " +
+          "Reading it would need OCR, which isn't supported. Download the CSV export instead if your bank offers one."
+        );
+        return;
+      }
+      setPdfPages(pages);
+      stage = "detecting the statement layout";
+      const auto = autoDetectTemplate(pages);
+      setPdfAutoTemplate(auto);
+      if (!auto) {
+        // Advisory, not the terminal error slot — the user can still fix the
+        // columns by hand, and this must clear once they do.
+        setPdfAdvisory("Couldn't find a transaction table in this PDF automatically — set the columns by hand below.");
+        setPdfTemplate(defaultTemplate());
+        setShowEditor(true);
+      } else {
+        setPdfTemplate(auto);
+        setTemplateSource("auto");
+      }
+    } catch (err) {
+      console.error(`pdf import failed while ${stage}`, err);
+      const detail = [err?.name, err?.message || String(err)].filter(Boolean).join(": ");
+      setError(`Couldn't read that PDF — it failed while ${stage}. ${detail}`);
+    } finally {
+      setPdfBusy(false);
     }
   }
+
+  // A template the user already taught for THIS account wins over auto-detect.
+  // Switching to an account without one must fall back to auto-detect rather
+  // than silently keeping the previous account's layout.
+  useEffect(() => {
+    if (fileKind !== "pdf" || !pdfPages) return;
+    let cancelled = false;
+    const useAuto = () => {
+      if (cancelled || !pdfAutoTemplate) return;
+      setPdfTemplate(pdfAutoTemplate);
+      setTemplateSource("auto");
+    };
+    if (target === "new") { useAuto(); return; }
+    getSetting(`pdftpl:${target}`)
+      .then(raw => {
+        if (cancelled) return;
+        const saved = raw ? JSON.parse(raw) : null;
+        if (saved && saved.version === TEMPLATE_VERSION) {
+          setPdfTemplate(saved);
+          setTemplateSource("saved");
+        } else {
+          useAuto();
+        }
+      })
+      .catch(() => useAuto());
+    return () => { cancelled = true; };
+  }, [fileKind, pdfPages, target, pdfAutoTemplate]);
 
   const rows = analysis?.rows || [];
   const overlapCount = rows.filter(r => r.isOverlap).length;
@@ -157,9 +386,12 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
   const skipped = analysis?.skipped || [];
   const preview = rows.slice(0, 200);
 
+  // mixedSource BLOCKS rather than warns: the app has no way to delete
+  // transactions, so importing a second format into the same account would
+  // permanently double-count it until someone runs SQL against the database.
   const canConfirm =
     !!analysis && !analysis.needsManualMapping && !analysis.error && !busy && !loadingIds &&
-    !targetIsPlaid && !coverageLoading && newRows.length > 0 &&
+    !targetIsPlaid && !mixedSource && !coverageLoading && newRows.length > 0 &&
     (target !== "new" || newName.trim().length > 0);
 
   async function confirm() {
@@ -175,8 +407,17 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
         accountName = acct.name;
       }
       const payload = newRows.map(toInsertRow);
-      const written = await importCsvTransactions(accountId, payload);
-      setResult({ written, dupCount, skipped: skipped.length, accountName });
+      const written = await importCsvTransactions(accountId, payload, incomingSource);
+      // Remember the PDF layout for this account so the next statement from the
+      // same bank is read without teaching it again.
+      if (fileKind === "pdf" && pdfTemplate) {
+        try {
+          await setSetting(`pdftpl:${accountId}`, JSON.stringify({ ...pdfTemplate, version: TEMPLATE_VERSION }));
+        } catch (e) {
+          console.warn("could not save the PDF layout template", e);
+        }
+      }
+      setResult({ written, dupCount, skipped: skipped.length, accountName, savedTemplate: fileKind === "pdf" });
       if (onImported) onImported();
     } catch (e) {
       console.error("csv import failed", e);
@@ -191,19 +432,20 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
     width: "92vw", maxWidth: 540, maxHeight: "88vh", display: "flex", flexDirection: "column", overflow: "hidden",
   };
   const sectionLabel = { fontSize: 11, fontWeight: 600, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".05em", marginBottom: 8 };
-  const selStyle = { fontSize: 13, fontFamily: "inherit", color: "var(--text)", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8, padding: "8px 10px", outline: "none", width: "100%" };
+  const selStyle = { fontSize: 13, fontFamily: "inherit", color: "var(--text)", background: "var(--input-bg)", border: "1px solid var(--border)", borderRadius: 8, padding: "8px 10px", outline: "none", width: "100%" };
 
   return (
     <div className="overlay" onClick={busy ? undefined : onClose}>
       <div onClick={e => e.stopPropagation()} style={panelStyle}>
         {/* Header */}
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "18px 20px", borderBottom: "1px solid var(--border)" }}>
-          <div style={{ fontSize: 15, fontWeight: 600 }}>Import transactions from CSV</div>
+          <div style={{ fontSize: 15, fontWeight: 600 }}>Import transactions</div>
           <button onClick={onClose} disabled={busy} className="nbtn" title="Close" style={{ opacity: busy ? .4 : 1 }}>×</button>
         </div>
 
         {/* Body */}
         <div style={{ padding: "16px 20px", overflowY: "auto" }}>
+          <ModalErrorBoundary>
           {result ? (
             <div style={{ textAlign: "center", padding: "12px 0" }}>
               <div style={{ fontSize: 34, marginBottom: 8 }}>✓</div>
@@ -213,40 +455,93 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
               <div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.6 }}>
                 into <strong style={{ color: "var(--text)" }}>{result.accountName}</strong>.<br />
                 {result.dupCount > 0 && <>Skipped {result.dupCount} already-imported row{result.dupCount !== 1 ? "s" : ""}. </>}
-                {result.skipped > 0 && <>Ignored {result.skipped} unreadable/zero row{result.skipped !== 1 ? "s" : ""}.</>}
+                {result.skipped > 0 && <>Ignored {result.skipped} unreadable/zero row{result.skipped !== 1 ? "s" : ""}. </>}
+                {result.savedTemplate && <><br />The statement layout was saved — next month's PDF reads automatically.</>}
               </div>
             </div>
           ) : (
             <>
               {/* 1 — File */}
               <div style={{ marginBottom: 18 }}>
-                <div style={sectionLabel}>1 · Choose a CSV file</div>
-                <input ref={fileRef} type="file" accept=".csv,text/csv,text/plain" onChange={onFile}
+                <div style={sectionLabel}>1 · Choose a statement file</div>
+                <input ref={fileRef} type="file" accept=".csv,.pdf,text/csv,text/plain,application/pdf" onChange={onFile}
                   style={{ display: "none" }} />
-                <button className="ibtn" onClick={() => fileRef.current?.click()} style={{ fontSize: 13 }}>
-                  {fileName ? "Choose a different file" : "Choose file…"}
+                <button className="ibtn" onClick={() => fileRef.current?.click()} style={{ fontSize: 13 }} disabled={pdfBusy}>
+                  {pdfBusy ? "Reading PDF…" : fileName ? "Choose a different file" : "Choose CSV or PDF…"}
                 </button>
                 {fileName && (
                   <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 8 }}>
                     {fileName}
+                    {fileKind === "pdf" && pdfPages && <> · {pdfPages.length} page{pdfPages.length !== 1 ? "s" : ""}</>}
                     {analysis && !analysis.needsManualMapping && !analysis.error && (
                       <> · <strong style={{ color: "var(--text)" }}>{rows.length}</strong> transaction{rows.length !== 1 ? "s" : ""} found
                         {skipped.length > 0 && <> · {skipped.length} skipped</>}</>
                     )}
                   </div>
                 )}
-                {analysis?.error && (
-                  <div style={{ fontSize: 12, color: "#A32D2D", marginTop: 8 }}>{analysis.error}</div>
+                {(analysis?.error || pdfApplyError) && (
+                  <div style={{ fontSize: 12, color: "var(--danger)", marginTop: 8 }}>{analysis?.error || pdfApplyError}</div>
+                )}
+                {pdfAdvisory && (
+                  <div style={{ marginTop: 8, fontSize: 12, color: "var(--muted)", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8, padding: "10px 12px", lineHeight: 1.5 }}>
+                    {pdfAdvisory}
+                  </div>
                 )}
               </div>
 
               {/* 1b — Manual column mapping fallback (non-BECU / undetected header) */}
-              {fileText && analysis?.needsManualMapping && (
+              {fileKind === "csv" && fileText && analysis?.needsManualMapping && (
                 <ManualMapper fileText={fileText} onApply={setManualCols} amountSign={amountSign} setAmountSign={setAmountSign} selStyle={selStyle} sectionLabel={sectionLabel} />
               )}
 
+              {/* 1c — PDF layout template: auto-detected or previously taught. */}
+              {fileKind === "pdf" && pdfPages && pdfTemplate && (
+                <div style={{ marginBottom: 18 }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 8 }}>
+                    <div style={sectionLabel}>Statement layout</div>
+                    <button className="ibtn" style={{ fontSize: 11 }} onClick={() => setShowEditor(s => !s)}>
+                      {showEditor ? "Done adjusting" : "Adjust columns"}
+                    </button>
+                  </div>
+                  <div style={{
+                    fontSize: 12, borderRadius: 8, padding: "9px 12px", lineHeight: 1.5,
+                    background: pdfApplied?.layoutSuspect ? "var(--danger-bg)" : "var(--bg)",
+                    border: `1px solid ${pdfApplied?.layoutSuspect ? "var(--danger-border)" : "var(--border)"}`,
+                    color: pdfApplied?.layoutSuspect ? "var(--danger)" : "var(--muted)",
+                  }}>
+                    {pdfApplied?.layoutSuspect
+                      ? "Couldn't read this statement with the saved layout — the bank may have changed its format. Open “Adjust columns” and re-confirm."
+                      : (() => {
+                        const t = rowTotals(rows);
+                        return (
+                          <>
+                            {templateSource === "saved"
+                              ? <>Using the layout you saved for this account. </>
+                              : <>Layout detected automatically. </>}
+                            <strong style={{ color: "var(--text)" }}>{rows.length}</strong> transactions read,
+                            totalling <strong style={{ color: "var(--text)" }}>{money(t.out)} out</strong>
+                            {t.in > 0 && <> and <strong style={{ color: "var(--text)" }}>{money(t.in)} in</strong></>}.
+                            <br />Compare those totals with the ones printed on your statement — if they match, the whole
+                            statement was read correctly.
+                          </>
+                        );
+                      })()}
+                  </div>
+                  {showEditor && (
+                    <div style={{ marginTop: 12 }}>
+                      <PdfTemplateEditor pages={pdfPages} template={pdfTemplate} onChange={setPdfTemplate} rowCount={rows.length} />
+                      {pdfAutoTemplate && (
+                        <button className="ibtn" style={{ fontSize: 11 }} onClick={() => { setPdfTemplate(pdfAutoTemplate); setTemplateSource("auto"); }}>
+                          Reset to auto-detected
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
               {/* 2 — Target account */}
-              {fileText && analysis && !analysis.needsManualMapping && !analysis.error && (
+              {(fileKind === "pdf" ? !!pdfApplied : !!fileText) && analysis && !analysis.needsManualMapping && !analysis.error && (
                 <>
                   <div style={{ marginBottom: 18 }}>
                     <div style={sectionLabel}>2 · Import into</div>
@@ -274,25 +569,50 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                         <input value={newName} onChange={e => setNewName(e.target.value)} placeholder="Account name (e.g. Mason Checking)"
                           style={{ ...selStyle, fontSize: 16 }} autoFocus />
                         <div style={{ display: "flex", gap: 8 }}>
-                          {["checking", "savings"].map(st => (
+                          {["checking", "savings", "credit"].map(st => (
                             <button key={st} onClick={() => setNewSubtype(st)}
                               style={{ flex: 1, padding: "8px 0", borderRadius: 8, fontFamily: "inherit", fontSize: 12, fontWeight: 600, cursor: "pointer",
-                                background: newSubtype === st ? "#7F77DD22" : "var(--bg)", color: newSubtype === st ? "#7F77DD" : "var(--muted)",
-                                border: `1px solid ${newSubtype === st ? "#7F77DD" : "var(--border)"}` }}>
-                              {st[0].toUpperCase() + st.slice(1)}
+                                // Accent tint, derived from the token so it re-tints in dark mode. If a browser
+                                // can't do color-mix the fill just drops out — the accent text + border still
+                                // show which subtype is selected.
+                                background: newSubtype === st ? "color-mix(in srgb, var(--accent) 14%, transparent)" : "var(--bg)",
+                                color: newSubtype === st ? "var(--accent)" : "var(--muted)",
+                                border: `1px solid ${newSubtype === st ? "var(--accent)" : "var(--border)"}` }}>
+                              {st === "credit" ? "Credit card" : st[0].toUpperCase() + st.slice(1)}
                             </button>
                           ))}
                         </div>
                         <div style={{ fontSize: 11, color: "var(--muted)" }}>
-                          Savings outflows never count as spending in Trends; pick Checking for a day-to-day account.
+                          {newSubtype === "credit"
+                            ? "Card purchases count as spending by category; refunds and payments never count as income."
+                            : "Savings outflows never count as spending in Trends; pick Checking for a day-to-day account."}
                         </div>
+                        {plaid.length > 0 && (
+                          <div style={{ fontSize: 11, color: "var(--warn)", background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 8, padding: "8px 10px", lineHeight: 1.5 }}>
+                            Only for an account that <strong>isn't</strong> already connected. If this statement belongs to one of your
+                            connected accounts, pick it above instead — importing it here would count every transaction twice.
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {mixedSource && (
+                      <div style={{ marginTop: 10, fontSize: 12, color: "var(--danger)", background: "var(--danger-bg)", border: "1px solid var(--danger-border)", borderRadius: 8, padding: "10px 12px", lineHeight: 1.5 }}>
+                        {legacySource
+                          ? <>This account already holds imported transactions from before the app started recording which format they
+                            came from. If they came from a {incomingSource === "pdf" ? "CSV" : "PDF"}, importing this
+                            {incomingSource === "pdf" ? " PDF" : " CSV"} would add every transaction a second time — banks word the same
+                            transaction differently in the two formats, so the duplicate check can't see it. Import into a new account instead.</>
+                          : <>This account already holds transactions imported from {incomingSource === "pdf" ? "a CSV" : "a PDF"}. Banks word
+                            the same transaction differently in the two formats, so importing both would add each transaction twice. Stick to
+                            one format per account, or create a separate account for this one.</>}
                       </div>
                     )}
 
                     {targetIsPlaid && (
                       <div style={{ marginTop: 10, fontSize: 12, color: "var(--muted)", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8, padding: "10px 12px", lineHeight: 1.5 }}>
-                        This account already syncs via Plaid. Nothing will be imported — the CSV is compared against what Plaid synced
-                        to surface sync gaps, pending/timing differences, and amount mismatches.
+                        This account already syncs via Plaid. Nothing will be imported — your statement is compared against what
+                        Plaid synced, to surface sync gaps, pending/timing differences, and amount mismatches.
                       </div>
                     )}
                   </div>
@@ -306,9 +626,9 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                   {targetIsSimpleFin && (
                     <div style={{
                       fontSize: 11, lineHeight: 1.6, marginBottom: 12, borderRadius: 8, padding: "10px 12px",
-                      color: overlapCount > 0 ? "#8A6A16" : "var(--muted)",
-                      background: overlapCount > 0 ? "#FDF4E0" : "var(--bg)",
-                      border: overlapCount > 0 ? "1px solid #E9CE8A" : "1px solid transparent",
+                      color: overlapCount > 0 ? "var(--warn)" : "var(--muted)",
+                      background: overlapCount > 0 ? "var(--warn-bg)" : "var(--bg)",
+                      border: `1px solid ${overlapCount > 0 ? "var(--warn-border)" : "transparent"}`,
                     }}>
                       {coverageLoading ? "Checking where this account's feed starts…"
                         : !coverageStart ? <>This account has no synced transactions yet, so the whole file will import.</>
@@ -321,7 +641,7 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                     </div>
                   )}
 
-                  {/* 3 — Preview (standalone: new/manual/SimpleFIN-history target) */}
+                  {/* 3 — Preview (standalone / SimpleFIN-history target) */}
                   {!targetIsPlaid && (
                   <div style={{ marginBottom: 10 }}>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
@@ -349,11 +669,11 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                               <span>{r.date}</span>
                               <span>·</span>
                               <span>{r.mapped_category}</span>
-                              {r.isTransfer && <span style={{ background: "#88878022", color: "#888780", borderRadius: 10, padding: "1px 6px", fontWeight: 600 }}>transfer</span>}
-                              {r.isDuplicate && <span style={{ background: "#88878022", color: "#888780", borderRadius: 10, padding: "1px 6px", fontWeight: 600 }}>already imported</span>}
+                              {r.isTransfer && <span style={{ background: "var(--bg)", color: "var(--muted)", borderRadius: 10, padding: "1px 6px", fontWeight: 600 }}>transfer</span>}
+                              {r.isDuplicate && <span style={{ background: "var(--bg)", color: "var(--muted)", borderRadius: 10, padding: "1px 6px", fontWeight: 600 }}>already imported</span>}
                             </div>
                           </div>
-                          <div style={{ fontSize: 12, fontFamily: "'DM Mono',monospace", fontWeight: 500, flexShrink: 0, color: r.amount < 0 ? "#1D9E75" : "var(--text)" }}>
+                          <div style={{ fontSize: 12, fontFamily: "'DM Mono',monospace", fontWeight: 500, flexShrink: 0, color: r.amount < 0 ? readableInk(MONEY_IN, cardSurface) : "var(--text)" }}>
                             {money(r.amount)}
                           </div>
                         </div>
@@ -379,24 +699,25 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
               )}
 
               {error && (
-                <div style={{ fontSize: 12, color: "#A32D2D", background: "#FCEBEB", border: "1px solid #F09595", borderRadius: 8, padding: "10px 12px", marginTop: 8 }}>{error}</div>
+                <div style={{ fontSize: 12, color: "var(--danger)", background: "var(--danger-bg)", border: "1px solid var(--danger-border)", borderRadius: 8, padding: "10px 12px", marginTop: 8 }}>{error}</div>
               )}
             </>
           )}
+          </ModalErrorBoundary>
         </div>
 
         {/* Footer */}
         <div style={{ display: "flex", gap: 8, padding: "14px 20px", borderTop: "1px solid var(--border)" }}>
           {result ? (
-            <button onClick={onClose} style={{ flex: 1, padding: "10px 0", borderRadius: 8, border: "none", background: "#7F77DD", color: "#fff", fontFamily: "inherit", fontSize: 14, fontWeight: 500, cursor: "pointer" }}>Done</button>
+            <button onClick={onClose} style={{ flex: 1, padding: "10px 0", borderRadius: 8, border: "none", background: "var(--accent)", color: "var(--accent-text)", fontFamily: "inherit", fontSize: 14, fontWeight: 500, cursor: "pointer" }}>Done</button>
           ) : targetIsPlaid ? (
             // Comparison mode inserts nothing — only a close action.
-            <button onClick={onClose} style={{ flex: 1, padding: "10px 0", borderRadius: 8, border: "none", background: "#7F77DD", color: "#fff", fontFamily: "inherit", fontSize: 14, fontWeight: 500, cursor: "pointer" }}>Close (nothing imported)</button>
+            <button onClick={onClose} style={{ flex: 1, padding: "10px 0", borderRadius: 8, border: "none", background: "var(--accent)", color: "var(--accent-text)", fontFamily: "inherit", fontSize: 14, fontWeight: 500, cursor: "pointer" }}>Close (nothing imported)</button>
           ) : (
             <>
               <button onClick={onClose} disabled={busy} className="ibtn" style={{ flex: 1, justifyContent: "center", opacity: busy ? .5 : 1 }}>Cancel</button>
               <button onClick={confirm} disabled={!canConfirm}
-                style={{ flex: 2, padding: "10px 0", borderRadius: 8, border: "none", background: "#7F77DD", color: "#fff", fontFamily: "inherit", fontSize: 14, fontWeight: 500, cursor: canConfirm ? "pointer" : "default", opacity: canConfirm ? 1 : .5 }}>
+                style={{ flex: 2, padding: "10px 0", borderRadius: 8, border: "none", background: "var(--accent)", color: "var(--accent-text)", fontFamily: "inherit", fontSize: 14, fontWeight: 500, cursor: canConfirm ? "pointer" : "default", opacity: canConfirm ? 1 : .5 }}>
                 {busy ? "Importing…" : `Import ${newRows.length || ""} transaction${newRows.length !== 1 ? "s" : ""}`}
               </button>
             </>
@@ -481,6 +802,13 @@ function ManualMapper({ fileText, onApply, amountSign, setAmountSign, selStyle, 
 // Comparison-mode audit. Reconciles the CSV against Plaid-synced rows and shows
 // four buckets. Inserts nothing. Kept compact + mobile-first; each list caps at
 // 50 rows with a "+N more" line so a big month doesn't blow up the modal.
+//
+// The bucket hues (MONEY_IN / SYNC_GAP / AMOUNT_DIFF, plus the --muted token for
+// the neutral one) are a STATUS palette, one hue per bucket, drawn as a dot + a
+// tinted chip. They are not theme tokens — the buckets must stay distinguishable
+// from each other — so instead of hoping a fixed hue "holds up" on both
+// surfaces, each is contrast-corrected at render against the surface it sits on
+// (chip → --card, section dot → --bg).
 const RECON_CAP = 50;
 
 function ReconRow({ left, sub, amount, amountNote }) {
@@ -499,12 +827,15 @@ function ReconRow({ left, sub, amount, amountNote }) {
 }
 
 function ReconSection({ title, hint, color, count, children }) {
+  // Hook before the early return — the section header paints --bg, so the dot
+  // is corrected against --bg, not against the card behind it.
+  const bgSurface = useSurface("--bg");
   if (!count) return null;
   return (
     <div style={{ marginBottom: 12, border: "1px solid var(--border)", borderRadius: 10, overflow: "hidden" }}>
       <div style={{ padding: "9px 12px", background: "var(--bg)" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <span style={{ width: 7, height: 7, borderRadius: "50%", background: color, flexShrink: 0 }} />
+          <span style={{ width: 7, height: 7, borderRadius: "50%", background: markColor(color, bgSurface), flexShrink: 0 }} />
           <span style={{ fontSize: 12, fontWeight: 600 }}>{title}</span>
           <span style={{ fontSize: 11, color: "var(--muted)" }}>· {count}</span>
         </div>
@@ -516,6 +847,13 @@ function ReconSection({ title, hint, color, count, children }) {
 }
 
 function Reconciliation({ recon, loading, sectionLabel }) {
+  // Hooks before the early returns. The chips sit on the modal panel (--card).
+  // The neutral "Plaid-only" bucket takes its hue from the --muted TOKEN read at
+  // runtime rather than the #888780 literal it used to hardcode — that literal
+  // was light mode's --muted value verbatim, so it stayed a light-mode grey on a
+  // dark card. As a token it adapts, and still reads as the neutral of the four.
+  const cardSurface = useSurface("--card");
+  const neutralHue = useSurface("--muted");
   if (loading) {
     return <div style={{ marginBottom: 10 }}><div style={sectionLabel}>Comparing against Plaid…</div>
       <div style={{ fontSize: 12, color: "var(--muted)" }}>Reconciling the CSV against what's already synced — nothing will be imported.</div></div>;
@@ -525,33 +863,39 @@ function Reconciliation({ recon, loading, sectionLabel }) {
   const cleanMatched = recon.matched.filter(m => !m.dateMismatch && !m.categoryMismatch).length;
   const flaggedMatched = recon.matched.filter(m => m.dateMismatch || m.categoryMismatch);
 
-  const chip = (label, n, color) => (
-    <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 11, fontWeight: 600, background: color + "22", color, borderRadius: 20, padding: "3px 9px" }}>
-      <span style={{ width: 5, height: 5, borderRadius: "50%", background: color }} />{n} {label}
-    </span>
-  );
+  // chipStyle's default tintAlpha (0.1333 = 0x22/255) reproduces the old
+  // `color + "22"` tint exactly on the light card, then derives a label ink and
+  // a dot that clear 4.5:1 / 3:1 against that tint on whichever surface is live.
+  const chip = (label, n, color) => {
+    const s = chipStyle(color, cardSurface);
+    return (
+      <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 11, fontWeight: 600, background: s.bg, color: s.ink, borderRadius: 20, padding: "3px 9px" }}>
+        <span style={{ width: 5, height: 5, borderRadius: "50%", background: s.dot }} />{n} {label}
+      </span>
+    );
+  };
 
   return (
     <div style={{ marginBottom: 10 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
         <div style={sectionLabel}>3 · Comparison audit</div>
-        <div style={{ fontSize: 11, color: "var(--muted)" }}>{c.csvTotal} CSV · {c.plaidTotal} synced</div>
+        <div style={{ fontSize: 11, color: "var(--muted)" }}>{c.csvTotal} in file · {c.plaidTotal} synced</div>
       </div>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 12 }}>
-        {chip("matched", c.matched, "#1D9E75")}
-        {chip("sync gap" + (c.csvOnly !== 1 ? "s" : ""), c.csvOnly, "#D85A30")}
-        {chip("amount diff" + (c.amountMismatches !== 1 ? "s" : ""), c.amountMismatches, "#B7791F")}
-        {chip("Plaid-only", c.plaidOnly, "#888780")}
+        {chip("matched", c.matched, MONEY_IN)}
+        {chip("sync gap" + (c.csvOnly !== 1 ? "s" : ""), c.csvOnly, SYNC_GAP)}
+        {chip("amount diff" + (c.amountMismatches !== 1 ? "s" : ""), c.amountMismatches, AMOUNT_DIFF)}
+        {chip("Plaid-only", c.plaidOnly, neutralHue)}
       </div>
 
-      <ReconSection title="In your CSV, missing from Plaid" hint="Possible sync gaps — Plaid may not have picked these up." color="#D85A30" count={recon.csvOnly.length}>
+      <ReconSection title="In your statement, missing from Plaid" hint="Possible sync gaps — Plaid may not have picked these up." color={SYNC_GAP} count={recon.csvOnly.length}>
         {recon.csvOnly.slice(0, RECON_CAP).map((r, i) => (
           <ReconRow key={i} left={r.description} sub={r.date} amount={money(r.amount)} />
         ))}
         {recon.csvOnly.length > RECON_CAP && <div style={{ fontSize: 11, color: "var(--muted)", textAlign: "center", padding: "6px 0" }}>+{recon.csvOnly.length - RECON_CAP} more</div>}
       </ReconSection>
 
-      <ReconSection title="Amount differs" hint="Same merchant a few days apart, different amount — likely the same transaction (a tip, a pending vs posted change)." color="#B7791F" count={recon.amountMismatches.length}>
+      <ReconSection title="Amount differs" hint="Same merchant a few days apart, different amount — likely the same transaction (a tip, a pending vs posted change)." color={AMOUNT_DIFF} count={recon.amountMismatches.length}>
         {recon.amountMismatches.slice(0, RECON_CAP).map((m, i) => (
           <ReconRow key={i} left={m.csv.description}
             sub={`CSV ${m.csv.date} · Plaid ${m.plaid.date}`}
@@ -560,14 +904,14 @@ function Reconciliation({ recon, loading, sectionLabel }) {
         ))}
       </ReconSection>
 
-      <ReconSection title="Synced by Plaid, not in your CSV" hint="Pending, timing, or simply not in this export yet." color="#888780" count={recon.plaidOnly.length}>
+      <ReconSection title="Synced by Plaid, not in your statement" hint="Pending, timing, or simply not in this export yet." color={neutralHue} count={recon.plaidOnly.length}>
         {recon.plaidOnly.slice(0, RECON_CAP).map((r, i) => (
           <ReconRow key={i} left={r.description || r.merchant_name || "Transaction"} sub={`${r.date}${r.pending ? " · pending" : ""}`} amount={money(r.amount)} />
         ))}
         {recon.plaidOnly.length > RECON_CAP && <div style={{ fontSize: 11, color: "var(--muted)", textAlign: "center", padding: "6px 0" }}>+{recon.plaidOnly.length - RECON_CAP} more</div>}
       </ReconSection>
 
-      <ReconSection title="Matched, with differences" hint="Paired by amount + date, but the date or category disagrees." color="#378ADD" count={flaggedMatched.length}>
+      <ReconSection title="Matched, with differences" hint="Paired by amount + date, but the date or category disagrees." color={MATCH_DIFF} count={flaggedMatched.length}>
         {flaggedMatched.slice(0, RECON_CAP).map((m, i) => (
           <ReconRow key={i} left={m.csv.description}
             sub={[m.dateMismatch ? `date ${m.csv.date}→${m.plaid.date}` : null,
@@ -577,7 +921,7 @@ function Reconciliation({ recon, loading, sectionLabel }) {
       </ReconSection>
 
       <div style={{ fontSize: 11, color: "var(--muted)", background: "var(--bg)", borderRadius: 8, padding: "8px 10px", lineHeight: 1.5 }}>
-        {cleanMatched} of {c.csvTotal} CSV rows matched cleanly. Nothing was imported — this account stays Plaid-synced.
+        {cleanMatched} of {c.csvTotal} statement rows matched cleanly. Nothing was imported — this account stays Plaid-synced.
       </div>
     </div>
   );

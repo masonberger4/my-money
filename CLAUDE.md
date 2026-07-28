@@ -66,15 +66,23 @@ entry once shipped.
 
 | File | Role |
 |---|---|
+| `src/ui.css` | The ONLY place theme-token values live: `:root` light + a `prefers-color-scheme: dark` block (--bg/--card/--text/--muted/--border/--accent/--accent-text/--danger*/--warn*/--input-bg/--track/--shadow/--overlay), plus the font `@import` (must stay line 1), the `*` reset, keyframes, and the shared `.card`/`.tab`/`.ibtn` classes. Global so the pre-Dashboard screens get them. |
+| `src/theme.js` | Theme selection + application: localStorage pref (`mm:theme`), `resolveTheme`, `applyTheme` (sets `<html data-theme>` + syncs the `theme-color` metas), `subscribeTheme`/`subscribeSystemTheme`, `readToken` (runtime token read), `initTheme` (called from main.jsx), and the `useTheme` hook the header toggle uses. |
+| `src/paletteContrast.js` | Pure, zero imports: WCAG math + `readableInk`/`markColor`/`chipStyle`, which hold hue fixed and bisect lightness to guarantee 4.5:1 / 3:1 against a given surface. Never throws (runs during render). Covered by `test/paletteContrast.test.js`. |
 | `src/components/Dashboard.jsx` | Almost the entire UI — single file, inline styles, tabs: overview/categories/transactions/accounts/trends/recurring/ask. Shared mini-components: `Pill`, `Swatch`, `EditName`, `Sk` (skeleton), `Donut`. |
-| `src/dataAdapter.js` | All Supabase reads + shapes consumed by Dashboard; the Trends cash-flow model lives here (see Conventions). Keep return shapes stable. Also holds the CSV-import writes (`findOrCreateManualInstitution`, `createManualAccount`, `getExistingTxIds`, `importCsvTransactions`, `isManualAccount`), the comparison-mode read `getAccountTransactionsInRange`, and exports the cash-flow helpers (`markInternalTransfers`/`cashIncome`/`cashSpending`) for the dry-run harness. |
-| `src/categoryMap.js` | Plaid category → app category mapping; `applyAccountRules` (credit-card negatives → "Return", excluded from income); `UNCATEGORIZED` + `isBudgetableCategory`; pure JS, imported by server code too. `ERA_CATEGORIES` is the taxonomy source of truth (no "Housing"/"Income" member; `Uncategorized` IS one). |
-| `src/csvImport.js` | Pure CSV-import core (no React/Supabase): `parseCsv`, `detectHeader`, `parseMoney`/`parseDate`, transfer flagging, dedup `plaid_tx_id` hashing, `buildRows`/`analyzeCsv`. Also the comparison-mode core: `reconcileCsv` (max-matching audit), `descSimilarity`, `csvDateRange`. Testable in isolation. |
-| `src/accountBalance.js` | `isDebtAccount` / `displayBalance` — the stored-positive → displayed-negative rule for credit and loan balances. Pure JS; imported by both Dashboard.jsx and the server-side assistant context. |
+| `src/dataAdapter.js` | All Supabase reads + shapes consumed by Dashboard. Keep return shapes stable. Also holds the CSV/PDF-import writes (`findOrCreateManualInstitution`, `createManualAccount`, `getExistingTxIds`, `importCsvTransactions`, `isManualAccount`), the comparison-mode read `getAccountTransactionsInRange`, the backfill boundary `getEarliestTransactionDate`, the learned-rule CRUD (`getCategoryRules`/`setCategoryRule`/`applyCategoryRuleToHistory`/`deleteCategoryRule`), the SimpleFIN predicates (`isSimpleFinAccount`, `ACCOUNT_TYPES`/`ACCOUNT_SUBTYPES`), and re-exports the cash-flow helpers (`markInternalTransfers`/`cashIncome`/`cashSpending`) from `cashFlow.js` so existing importers/harnesses keep working. |
+| `src/cashFlow.js` | The Trends cash-flow model (see Conventions), extracted pure: `markInternalTransfers` + `maxMatchTransfers` (Kuhn's), `cashIncome`/`cashSpending`, account-type predicates. Zero imports — plain-Node importable; covered by `test/cashFlow.test.js` incl. the brute-force matching parity check. |
+| `src/categoryMap.js` | Plaid category → app category mapping; `applyAccountRules` (credit-card negatives → "Return", excluded from income); `UNCATEGORIZED`/`FALLBACK_CATEGORY` + `isBudgetableCategory`; pure JS, imported by server code too. `ERA_CATEGORIES` is the taxonomy source of truth (no "Housing"/"Income" member; `Uncategorized` IS one). |
+| `src/csvImport.js` | Pure CSV-import core (no React/Supabase): `parseCsv`, `detectHeader`, `parseMoney`/`parseDate`, transfer flagging, dedup `plaid_tx_id` hashing, `buildRows`/`analyzeCsv` (both take `rules` + `overlapFrom`). Re-exports `guessCategory`/`transferRawCategory`/`invalidRuleCategories` from `txClassify.js`, which now owns the rule table. Also the comparison-mode core: `reconcileCsv` (max-matching audit), `descSimilarity`, `csvDateRange`. Testable in isolation. |
 | `src/txClassify.js` | Learned-rule matching (`merchantKey`, `matchLearnedRule`) + the shared descriptor→category rule table + internal-transfer tagging (`guessCategory`, `transferRawCategory`, `classifyDescription`), validated against `ERA_CATEGORIES` at load. Lifted out of `csvImport.js` when SimpleFIN became a second caller: both feeds get a descriptor and no category, so both derive `mapped_category` at WRITE time from this one table. Pure JS — imported by server code too. |
+| `src/accountBalance.js` | `isDebtAccount` / `displayBalance` — the stored-positive → displayed-negative rule for credit and loan balances. Pure JS; imported by both Dashboard.jsx and the server-side assistant context. |
 | `api/_lib/simplefin.js` | SimpleFIN protocol layer: setup-token decode, claim POST, access-URL split (creds → Authorization header), the `/accounts` GET, and `normalizeAccountSet` (reads BOTH wire shapes). Also `inferAccountType`, `normalizeBalance`, the sign flip, and the env knobs. Server-only — handles bank credentials. |
-| `src/components/SimpleFinConnect.jsx` | Accounts-tab modal replacing Plaid Link: link banks at SimpleFIN Bridge → paste the setup token → claim + first sync. Shows connection status and a disconnect action. |
-| `src/components/CsvImport.jsx` | Accounts-tab import modal, **three** modes by target: **standalone** (manual target) file → preview (greyed dupes) → confirm; **history backfill** (SimpleFIN target) imports only rows predating the feed's coverage — see the overlap guard in Conventions; **comparison** (Plaid-linked target) read-only audit, inserts nothing. |
+| `src/components/SimpleFinConnect.jsx` | Accounts-tab modal replacing Plaid Link: link banks at SimpleFIN Bridge → paste the setup token → claim + first sync. Shows connection status, a disconnect action, and Restore for removed banks. |
+| `src/components/CsvImport.jsx` | Accounts-tab import modal for **CSV *and* PDF**, **three** modes by target: **standalone** (manual target) file → preview (greyed dupes) → confirm; **history backfill** (SimpleFIN target) imports only rows predating the feed's coverage — see the overlap guard in Conventions; **comparison** (Plaid-linked target) read-only reconciliation audit, inserts nothing. Writes via dataAdapter's `createManualAccount`/`importCsvTransactions`; reads Plaid rows via `getAccountTransactionsInRange`. |
+| `src/pdfImport.js` | Pure PDF-statement parsing core (no pdf.js/React/Supabase): text runs → lines → columns → **the same cell grid `buildRows` consumes**. Template auto-detect (`autoDetectTemplate`), `applyTemplate`, month-name dates + year inference from the statement period, `normalizeDebitCredit`, `defaultTemplate` (the fallback the modal seeds the editor with). Testable in Node. |
+| `src/pdfExtract.js` | The only file that touches pdf.js. Lazy `import()` (keeps ~1.8MB out of the main bundle) of the **legacy** build, bundled locally (no CDN, CSP/offline-safe). Runs the parser on the **main thread** via `globalThis.pdfjsWorker` so `src/pdfPolyfills.js` is in scope for it (a Worker has its own globals). |
+| `src/pdfPolyfills.js` | Feature-detected polyfills pdf.js needs on iOS Safari — **`ReadableStream` async iteration** (the load-bearing one; see Gotchas), plus `.at` and `structuredClone` for genuinely old devices. |
+| `src/components/PdfTemplateEditor.jsx` | Visual "teach it once" editor: renders the statement from its own text runs, draggable column boundaries, per-column role selectors, live parsed-row count. Saved per account as `pdftpl:<accountId>` in `settings`. |
 | `src/plaidClient.js` | Client → api/ fetch wrappers (JWT attached). |
 | `src/sync.js` | Single-flight wrapper triggering server sync. |
 | `src/db.js` | getSetting/setSetting on the Supabase `settings` table (dashboard prefs: colors, names, custom categories, `asst:model`/`asst:effort`). |
@@ -82,7 +90,8 @@ entry once shipped.
 | `api/_lib/plaid.js` | Credential list parsing + capacity picker. |
 | `api/_lib/supabase.js` | Service-role client + `requireUser` (JWT → householdId). |
 | `supabase/migrations/` | Ordered SQL migrations (additive-only on live data). |
-| `supabase/setup_all.sql` | One-paste fresh install — **DESTRUCTIVE, wipes all tables. Never run on live data. Never re-generate to include new migrations without that warning.** |
+| `supabase/setup_all.sql` | One-paste fresh install — **DESTRUCTIVE, wipes all tables. Never run on live data. Never re-generate to include new migrations without that warning.** Convenience snapshot only — `migrations/` is the source of truth; ends with a column-level self-check that raises if it drifts behind migrations. |
+| `test/` | `npm test` — Node's built-in `node --test`, zero deps. Covers the pure cores only: cashFlow (incl. brute-force max-matching parity), csvImport parsing/dedup-id idempotency, category rules. Run before pushing. |
 
 ## Development workflow
 
@@ -106,14 +115,43 @@ migrations in order, test triggers/RLS). UI — mock harness: a tiny Vite app
 rendering `Dashboard.jsx` with `resolve.alias` **full-match** regexes
 (`/^.*\/dataAdapter\.js$/`) swapping dataAdapter/sync/db/plaidClient for mocks;
 playwright-core screenshot (`executablePath:'/opt/pw-browsers/chromium'`,
-390×844). Screenshot new UI before pushing. Build:
+390×844). Screenshot new UI before pushing. Tests (checked in, not gitignored):
+`npm test` (node --test over `test/`). Build:
 `VITE_SUPABASE_URL=https://placeholder.supabase.co VITE_SUPABASE_ANON_KEY=placeholder npm run build`.
 
 ## Conventions
 
-- Dashboard style: compact inline-styled JSX, CSS vars (--bg, --card, --text,
-  --muted, --border), dark mode via prefers-color-scheme, accent #7F77DD.
+- Dashboard style: compact inline-styled JSX, CSS vars, accent #7F77DD.
   Mobile-first: verify at 390px; tab bar scrolls horizontally.
+- **Theme selection**: Auto/Light/Dark toggle in the header. The preference is
+  `mm:theme` in **localStorage, NOT the `settings` table** — `settings` is
+  household-shared under one login, so storing it there would flip the other
+  person's phone; localStorage also reads synchronously, which is what lets
+  index.html apply the theme pre-paint instead of flashing. **Device/visual
+  prefs go in localStorage; account-level prefs go in `settings`.** No stored
+  value ⇒ no `data-theme` ⇒ follow the OS. Every storage access is try/caught
+  (Safari private mode throws on access). `src/theme.js` owns it; index.html
+  carries a deliberate 3-line duplicate of read+apply that must stay in sync.
+- **Theme tokens live ONLY in `src/ui.css`.** Never redeclare a token value in a
+  component and never set one as an inline style — an inline custom property on
+  a subtree root beats even `!important` on `:root` (that was the dark-mode bug).
+  Use tokens, not literals, for anything themed. Two exceptions that must stay
+  hardcoded and be changed in lockstep with `--bg`: index.html's `theme-color`
+  metas and its pre-paint `html/body` background (parsed before CSS loads).
+- `ACCOUNT_COLORS` / `DEFAULT_COLORS` (Dashboard.jsx) are **data, not theme** —
+  user-overridable colors persisted in `settings`. Never tokenize them and
+  **never change their stored hex values**. Same for the `#1D9E75`/`#D85A30`
+  good/bad status pair and CsvImport/PdfTemplateEditor's bucket + role hues.
+  What IS theme-dependent is how they **render**: `src/paletteContrast.js`
+  holds hue fixed and moves lightness until the color clears 4.5:1 (text) or
+  3:1 (marks) against the surface it actually sits on — which also covers the
+  arbitrary colors the Swatch picker can produce, as a second fixed palette
+  could not. Pass the surface read from the token at runtime (`readToken`), and
+  re-read it on theme change or chips keep the old theme's contrast. Two things
+  deliberately NOT corrected: the Swatch fill (it's the color picker — it must
+  show the stored value truthfully) and the Donut's slice separation (the
+  palette maps several categories to one hex, so adjacent slices can be a
+  literal 1:1 — a `--card` stroke separates them instead).
 - Amounts follow Plaid: **positive = money out, negative = money in**. SimpleFIN
   is the opposite (positive = money *in*) and its amounts arrive as numeric
   *strings* ("-05.50" is real), so `api/_lib/simplefin.js` parses then negates.
@@ -206,6 +244,15 @@ playwright-core screenshot (`executablePath:'/opt/pw-browsers/chromium'`,
     tight — matching a depository→credit leg would wrongly wash out card
     payments (which `cashSpending` must count) and unmatched real-income
     deposits. Needs `raw_category` + `subtype` (both queried).
+    Pairing is a **maximum bipartite matching** (Kuhn's, in `maxMatchTransfers`,
+    per equal-amount bucket) — NOT greedy nearest-partner, which could give an
+    early leg the nearer partner and strand a later pair outside the window,
+    leaving a real transfer counted and inflating income AND spending equally
+    (net unaffected). Verified maximum against brute force — that check is now a
+    permanent seeded test in `test/cashFlow.test.js`. Inputs are sorted
+    before matching so the same data always washes the same pairs. The whole
+    model lives in `src/cashFlow.js` (pure, zero imports); dataAdapter
+    re-exports the helpers.
   - **Cash flow section** = net per month (income − spending), diverging bars.
   - Trends spending can legitimately differ from the Overview headline —
     different questions. Abandoned attempts (same-day/same-amount wash; blanket
@@ -224,9 +271,12 @@ playwright-core screenshot (`executablePath:'/opt/pw-browsers/chromium'`,
 - **Recurring** — client-side subscription detection (`src/recurring.js`, pure).
 - **Search** — cross-month `ilike` search (`searchTransactions`).
 - **Assistant** — "Ask" tab, Claude spending Q&A (`api/assistant.js` +
-  `api/_lib/spendingContext.js`), read-only, model/effort selectable.
+  `api/_lib/spendingContext.js`), read-only, model/effort selectable. The
+  context honors user edits: skips `excluded` rows, prefers `user_category` /
+  `user_description` — keep any change to it deterministic (byte-stable output
+  per DB state) or prompt caching stops hitting.
 - **Trends joint-budget cash-flow + Cash flow section** (see Conventions).
-- **CSV import** — Accounts-tab modal, two modes by target account
+- **CSV import** — Accounts-tab modal, modes by target account
   (`src/csvImport.js` pure core + `src/components/CsvImport.jsx`; migration
   `20260722000001_csv_import.sql` adds `accounts.is_manual` + `transactions.source`,
   additive `not null default`). **Standalone** (manual target): parse a bank CSV
@@ -240,41 +290,100 @@ playwright-core screenshot (`executablePath:'/opt/pw-browsers/chromium'`,
   pending-timing / amount·date·category mismatches. No cash-flow change (imported
   depository rows flow through `getCashFlow`; personal↔joint transfers wash across
   CSV+Plaid legs). The importer degrades gracefully if the two columns are absent.
+  A third mode, **history backfill** into a SimpleFIN account, shipped with the
+  SimpleFIN merge below.
+- **Internal-transfer max-matching** — `markInternalTransfers` pairs transfer
+  legs with a maximum bipartite matching instead of greedy nearest-partner (see
+  Conventions). Only affects two same-amount transfers made 2–5 days apart whose
+  legs drift 2–3 days — i.e. cross-bank personal↔joint ACH, which CSV/PDF import
+  made reachable; same-day BECU sweeps were already matched correctly, so most
+  months' figures don't move at all.
+- **Dark mode + Auto/Light/Dark toggle + render-time palette contrast** — the
+  app had NEVER rendered dark: inline CSS vars on Dashboard's root div shadowed
+  the `:root` dark rule (an inline custom property beats even `!important` on an
+  ancestor). `src/ui.css` now owns the tokens AND the shared `.card`/`.tab`/
+  `.ibtn` classes, which were trapped in Dashboard's `<style>` — so Login /
+  EmptyState / LinkAccount, which render before Dashboard mounts, are styled for
+  the first time. Header toggle + `src/theme.js` (see Conventions);
+  `src/paletteContrast.js` keeps category colors legible in both themes from the
+  same stored hexes. Three latent bugs fixed on the way: the Trends 6-month bars
+  collapsed to 4px stubs (% height against an auto-height flex parent), the
+  "All accounts" chip asked for `var(--muted)22` (not a color, so its active tint
+  never painted), and the Donut's `opacity:.9` ate the contrast correction.
+  Light mode is a pixel no-op EXCEPT where contrast correction deliberately
+  changes it — the amber "approaching budget" bar was 1.20:1 on the light track
+  (invisible) and now renders as legible dark gold. Known and deliberate:
+  `--light-muted` #888780 is 3.61:1 on the card, so light-mode small labels still
+  fail AA while their dark counterparts pass — a palette decision, not a bug.
+- **PDF statement import** — the same modal accepts a PDF, for accounts whose
+  statements are only downloadable that way. No per-bank code: `src/pdfExtract.js`
+  (lazy pdf.js) yields positioned text runs, and a **template** the user confirms
+  once in `PdfTemplateEditor` (drag column edges, label each column) turns them
+  into the **same cell grid `buildRows` consumes** — so dedup, categories, the
+  preview, the standalone insert and the comparison audit are reused unchanged.
+  Templates save per account as `pdftpl:<accountId>` in `settings` and re-apply to
+  later statements; rows are selected by SHAPE inside a text-anchored region and
+  no page/y coordinate is stored, so a template survives the table moving next
+  month. Month-name dates resolve from the statement period (Dec→Jan wrap
+  handled); card statements use the POSTED date to match Plaid. Adds a manual
+  **credit-card** account type and tags rows `source='csv'|'pdf'`. No migration.
+  Verified on real statements (Capital One 112 rows with totals matching the
+  statement exactly; NewRez mortgage 7 rows across a page-split table) and on a
+  real iPhone.
+- **SimpleFIN feed (migration phases 1–2)** — a second bank feed running
+  alongside Plaid, built to replace it (~$15/yr flat vs Plaid's per-Item
+  billing). `api/_lib/simplefin.js` (protocol) + a second pass in `api/sync.js`
+  + `api/simplefin-claim.js` / `simplefin-status.js` + the
+  `SimpleFinConnect.jsx` modal; migration `20260724000001_simplefin.sql`
+  (`simplefin_access` table + `institutions.simplefin_org_id`). Feed
+  discriminator, hidden-on-arrival accounts, the two-watermark throttle, the
+  both-wire-shapes reader, the SSRF-safe claim, and the balance-sign rule are all
+  in Architecture / Conventions. **Phase 3 (diff, then retire Plaid bank by
+  bank) is the next task**, not something this merge did.
+- **Account-type editor** — SimpleFIN sends no type, so it's guessed from the
+  account name and then user-owned; the Accounts tab can correct it, and
+  crossing the debt boundary forces a re-sync so the stored balance sign follows.
+- **Classifier rebuild** — `src/txClassify.js` now owns the descriptor→category
+  table for BOTH feeds (SimpleFIN and CSV/PDF derive `mapped_category` at write
+  time from it). `Uncategorized` replaced 'Shopping and gear' as the fallback,
+  which took the fallback rate on a realistic merchant corpus from 46% to 7% and
+  made the size of the unknown visible instead of silently inflating a real
+  category; five categories that no rule could ever reach gained rules; and two
+  guards stop a card PURCHASE ever being read as a card payment (see
+  Conventions) — before them "Capital One Travel" and "Discover Tire and Auto"
+  vanished from every total.
+- **Learned merchant rules** — correcting a transaction offers "always
+  categorize this merchant as X", which writes a `category_rules` row
+  (migration `20260728000001_category_rules.sql`) and optionally re-labels past
+  transactions. Rules beat the keyword table at write time but never override
+  the transfer / card-payment guards.
 
 ## Pending branches
 
-- `claude/simplefin-build-start-ijj2fa` — **SimpleFIN migration phase 2**
-  (SimpleFIN feed alongside Plaid). Migration to paste at merge:
-  `supabase/migrations/20260724000001_simplefin.sql` (additive: `simplefin_access`
-  table + `institutions.simplefin_org_id`). No new env vars are required —
-  `SIMPLEFIN_*` knobs in `.env.example` are all optional. After merge: connect
-  at Accounts → ⚡ SimpleFIN, then do the phase-3 diff (below) before unhiding
-  anything.
+None — `claude/simplefin-build-start-ijj2fa` merged. Both of its migrations
+(`20260724000001_simplefin.sql`, `20260728000001_category_rules.sql`) were
+pasted into Supabase before the merge and are live.
 
 ## Roadmap
 
 **Next: SimpleFIN phase 3** — diff SimpleFIN against Plaid on the joint BECU
 accounts, then unhide + retire the Plaid Items bank by bank (spec below; phases
-1–2 are **built**, pending branch above). **Then: Debt tracker** —
-**balance-only + hand-entered APR** under SimpleFIN (spec below; the `loan` sync
-fix that unblocks it is already on main). Later (discussed, not committed): net worth over time,
-auto-categorization rules, cash-flow forecast, savings goals, CSV/PDF export,
-sign-out button. **`accounts.available_balance` holds three
-conventions** — SimpleFIN's raw feed value when it sends `available-balance`,
-the *normalized* balance when it doesn't (`api/sync.js`'s `?? balance`
-fallback), and Plaid's "available credit" for cards. Invisible today (nothing
-renders it) but it surfaces the moment the Debt view shows utilization; sort it
-out then, and never run it through `displayBalance` — for a card it means
-available *credit*, not a debt. **`markInternalTransfers` max-matching** — the greedy
-nearest-gap matcher can strand one of two interleaved equal-amount transfer
-pairs whose legs drift across the 4-day window, leaving a genuine internal
-transfer counted (inflates Trends `cashIncome` AND `cashSpending` by the same
-amount, so monthly **net** is unaffected). CSV import's cross-bank personal↔joint
-legs (drift 1–3 days) make it more reachable — replace with earliest-unused-in
-ordering or a small bipartite max-matching. (Surfaced by the CSV adversarial
-pass; deliberately NOT changed there — cash-flow model changes were out of scope.)
+1–2 are **merged**), followed by **phase 4: remove Plaid entirely** — Mason has
+decided the end state is SimpleFIN + CSV/PDF import only. **Then: Debt tracker**
+— **balance-only + hand-entered APR** under SimpleFIN (spec below). (CSV/PDF
+import — the permanent coverage floor for the off-Plaid plan — the
+`markInternalTransfers` max-matching fix, and auto-categorization rules
+(learned merchant rules) are **shipped**; see Merged features.) Later
+(discussed, not committed): net worth over time, cash-flow forecast, savings
+goals, CSV/PDF export, sign-out button. **`accounts.available_balance` holds
+three conventions** — SimpleFIN's raw feed value when it sends
+`available-balance`, the *normalized* balance when it doesn't (`api/sync.js`'s
+`?? balance` fallback), and Plaid's "available credit" for cards. Invisible
+today (nothing renders it) but it surfaces the moment the Debt view shows
+utilization; sort it out then, and never run it through `displayBalance` — for a
+card it means available *credit*, not a debt.
 
-### Off-Plaid: SimpleFIN migration — phases 1–2 BUILT, phase 3 next
+### Off-Plaid: SimpleFIN migration — phases 1–2 SHIPPED, phase 3 next
 Decision (settled): replace Plaid with **SimpleFIN Bridge** as the bank feed —
 ~$15/yr flat (no per-product / Item-slot billing), read-only, daily refresh,
 **serverless-friendly (no daemon)**. Coverage verified for all household
@@ -282,10 +391,11 @@ institutions incl. NewRez / Launch / Jenius. The plan is capped at
 **SimpleFIN + CSV import + (optional) email-alert cron**.
 
 Phases: 1. **CSV import** — permanent coverage floor. **SHIPPED** (Merged
-features). 2. **SimpleFIN alongside Plaid** — **BUILT** (pending branch above).
+features). 2. **SimpleFIN alongside Plaid** — **SHIPPED** (Merged features).
 3. **Diff, then migrate bank by bank** ← *next*. 4. **Remove Plaid** code paths
 and `PLAID_*` env once nothing depends on them, then rewrite the Architecture
-feed bullets → SimpleFIN only.
+feed bullets → SimpleFIN only. Mason has **decided** phase 4 happens: the end
+state is SimpleFIN + CSV/PDF import, no Plaid.
 
 **Phase 3 — what's left.** Connect at Accounts → ⚡ SimpleFIN. Accounts land
 hidden, so nothing moves until they're checked. For each bank: (a) confirm the
@@ -507,6 +617,30 @@ tracker is the liability half of the future net-worth feature — the
   your first account" screen (see App.jsx count handling).
 - iOS PWA: apple-touch-icon must be PNG; service worker (`public/sw.js`) never
   caches `/api/*`; bump its CACHE_VERSION when changing it.
+- **pdf.js must be the LEGACY build** (`pdfjs-dist/legacy/build/…`). The modern
+  bundle calls `Map.prototype.getOrInsertComputed`, which current Chromium and
+  iOS Safari don't have — it throws "getOrInsertComputed is not a function" on a
+  real device (caught only because the harness drives a real browser). Load it
+  with a dynamic `import()` so it stays out of the main bundle.
+- **Safari has no `ReadableStream` async iteration** — and pdf.js's
+  `getTextContent()` does `for await (const v of readableStream)`, so on EVERY
+  iPhone (not just old ones) reading a PDF died with JavaScriptCore's
+  "undefined is not a function (near '…i of t…')". `src/pdfPolyfills.js` fills
+  it in. The tell: `getDocument` succeeds and `getTextContent` throws. Don't
+  mistake this for an old-iOS problem — it isn't version-dependent. Emulate it
+  locally by `delete ReadableStream.prototype[Symbol.asyncIterator]`.
+- Anything that runs during **render** must be try/caught — the app has **no
+  React error boundary** except `ModalErrorBoundary` inside `CsvImport.jsx`,
+  which backstops only the import-modal body. Outside the modal a render throw
+  still blanks the whole PWA instead of showing a message.
+- A bank words the same transaction differently in its CSV and its PDF, so the
+  dedup hash differs: importing both formats into ONE manual account
+  double-inserts. `transactions.source` records `'csv'|'pdf'` and the importer
+  warns on a mix — one format per account.
+- A mortgage/loan statement's rows are loan accounting (suspense-account
+  postings, reversals), not household spending, and the real payment is already
+  in cash flow via the checking feed. Those belong to the future Debt tracker —
+  don't import them onto a depository account.
 - One Claude session per line of work, branched from current main — two sessions
   off different bases once regressed production (the "iphone-app" incident).
 - If pushes stop deploying and GitHub API calls 503, check githubstatus.com

@@ -21,8 +21,11 @@
 drop publication if exists supabase_realtime;
 create publication supabase_realtime;
 
+drop table if exists budgets cascade;
 drop table if exists settings cascade;
 drop table if exists plaid_tokens cascade;
+drop table if exists simplefin_access cascade;
+drop table if exists category_rules cascade;
 drop table if exists mfa_prompts cascade;
 drop table if exists pull_jobs cascade;
 drop table if exists pending_items cascade;
@@ -434,6 +437,118 @@ create policy settings_all on settings
 alter table accounts add column nickname text;
 alter table accounts add column color text;
 
+-- ============ MIGRATION 4: transaction editing ============
+-- Migration 4: user edits on transactions.
+-- user_category: manual override of the Plaid-derived mapped_category.
+--   Effective category everywhere = coalesce(user_category, mapped_category).
+-- excluded: removes the transaction from spending/income totals and charts
+--   (still visible, dimmed, in transaction lists).
+-- Plaid syncs never overwrite these — api/sync.js upserts omit both columns.
+
+alter table transactions add column user_category text;
+alter table transactions add column excluded boolean not null default false;
+
+-- ============ MIGRATION 5: transaction rename ============
+-- User-supplied display name for a transaction. Overrides merchant_name /
+-- description everywhere in the UI. For bank descriptors that arrive masked
+-- (e.g. "******* ******" from some Amazon card processors).
+-- Plaid sync upserts omit it, so renames survive re-syncs.
+
+alter table transactions add column user_description text;
+
+-- ============ MIGRATION 6: budgets ============
+-- Per-category monthly budgets.
+-- One row per (household, category); monthly_limit is the dollar cap for a
+-- calendar month. No row = no budget for that category. Same RLS pattern as
+-- the settings table.
+
+create table budgets (
+  household_id uuid not null default current_household_id() references households(id) on delete cascade,
+  category text not null,
+  monthly_limit numeric(12, 2) not null,
+  updated_at timestamptz not null default now(),
+  primary key (household_id, category)
+);
+
+alter table budgets enable row level security;
+
+create policy budgets_all on budgets
+  for all to authenticated
+  using (household_id = current_household_id())
+  with check (household_id = current_household_id());
+
+-- ============ MIGRATION 7: csv import ============
+-- accounts.is_manual: marks accounts created by CSV import rather than Plaid.
+--   Belt-and-suspenders only: what actually keeps manual data safe from sync is
+--   that the manual institution has no plaid_tokens row AND its status is
+--   'disabled', so api/sync.js skips it either way.
+-- transactions.source: 'plaid' (default, from api/sync.js) or 'csv'/'pdf'
+--   (the importer). Lets a future undo/filter tell imported rows apart.
+
+alter table accounts add column if not exists is_manual boolean not null default false;
+
+alter table transactions add column if not exists source text not null default 'plaid';
+
+-- ============ MIGRATION 8: simplefin ============
+-- See supabase/migrations/20260724000001_simplefin.sql for the full rationale.
+-- simplefin_access holds the claimed access URL, which embeds HTTP Basic
+-- credentials for the household's banks — so it gets the plaid_tokens
+-- treatment: RLS enabled with ZERO policies (service_role only). household_id
+-- has NO default on purpose: every write happens from api/ under service_role,
+-- where current_household_id() is NULL, so a forgotten value fails loudly
+-- instead of writing an orphan row.
+
+create table if not exists simplefin_access (
+  id uuid primary key default gen_random_uuid(),
+  household_id uuid not null references households(id) on delete cascade,
+  access_url text not null,
+  last_pulled_at timestamptz,      -- data watermark; advanced only on success
+  last_attempt_at timestamptz,     -- throttle; stamped before the request
+  last_error text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (household_id, access_url)
+);
+
+alter table simplefin_access enable row level security;
+
+drop trigger if exists simplefin_access_touch_updated_at on simplefin_access;
+create trigger simplefin_access_touch_updated_at
+  before update on simplefin_access
+  for each row execute function touch_updated_at();
+
+-- institutions.simplefin_org_id doubles as the FEED DISCRIMINATOR:
+--   null     => Plaid-fed (or the manual "Imported" institution)
+--   not null => SimpleFIN-fed, skipped by the Plaid pass in api/sync.js
+alter table institutions add column if not exists simplefin_org_id text;
+
+create unique index if not exists institutions_household_simplefin_org_idx
+  on institutions (household_id, simplefin_org_id)
+  where simplefin_org_id is not null;
+
+-- ============ MIGRATION 9: learned category rules ============
+-- See supabase/migrations/20260728000001_category_rules.sql. Written by the
+-- CLIENT (the confirm in the transaction sheet), so it takes the
+-- budgets/settings RLS shape rather than the service_role-only shape above.
+
+create table if not exists category_rules (
+  household_id uuid not null default current_household_id() references households(id) on delete cascade,
+  merchant_key text not null,
+  category text not null,
+  source text not null default 'user',
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  primary key (household_id, merchant_key)
+);
+
+alter table category_rules enable row level security;
+
+drop policy if exists category_rules_all on category_rules;
+create policy category_rules_all on category_rules
+  for all to authenticated
+  using (household_id = current_household_id())
+  with check (household_id = current_household_id());
+
 -- ============ AUTO-CREATE HOUSEHOLD ============
 -- Links the household to the first (usually only) auth user. If you haven't
 -- created the user yet, this is skipped — create the user and re-run the
@@ -456,10 +571,57 @@ begin
 end $$;
 
 -- ============ FINAL CHECK ============
-select
-  (select count(*) from information_schema.tables
-    where table_schema = 'public'
-      and table_name in ('households','household_members','institutions',
-                         'accounts','transactions','plaid_tokens','settings'))
-    as tables_created_of_7,
-  (select count(*) > 0 from household_members) as household_linked;
+-- Asserts the schema matches ALL migrations in supabase/migrations/ — raises
+-- (instead of printing a wrong-but-green count) if this file drifts behind.
+-- When adding a migration here, extend these assertions to cover it.
+do $$
+declare
+  missing text[] := '{}';
+begin
+  if to_regclass('public.budgets') is null then
+    missing := array_append(missing, 'budgets table (20260720)');
+  end if;
+  if not exists (select 1 from information_schema.columns
+      where table_schema = 'public' and table_name = 'transactions'
+        and column_name = 'user_category') then
+    missing := array_append(missing, 'transactions.user_category (20260715)');
+  end if;
+  if not exists (select 1 from information_schema.columns
+      where table_schema = 'public' and table_name = 'transactions'
+        and column_name = 'user_description') then
+    missing := array_append(missing, 'transactions.user_description (20260717)');
+  end if;
+  if not exists (select 1 from information_schema.columns
+      where table_schema = 'public' and table_name = 'transactions'
+        and column_name = 'source') then
+    missing := array_append(missing, 'transactions.source (20260722)');
+  end if;
+  if not exists (select 1 from information_schema.columns
+      where table_schema = 'public' and table_name = 'accounts'
+        and column_name = 'is_manual') then
+    missing := array_append(missing, 'accounts.is_manual (20260722)');
+  end if;
+  if to_regclass('public.simplefin_access') is null then
+    missing := array_append(missing, 'simplefin_access table (20260724)');
+  end if;
+  if not exists (select 1 from information_schema.columns
+      where table_schema = 'public' and table_name = 'simplefin_access'
+        and column_name = 'last_attempt_at') then
+    missing := array_append(missing, 'simplefin_access.last_attempt_at (20260724)');
+  end if;
+  if not exists (select 1 from information_schema.columns
+      where table_schema = 'public' and table_name = 'institutions'
+        and column_name = 'simplefin_org_id') then
+    missing := array_append(missing, 'institutions.simplefin_org_id (20260724)');
+  end if;
+  if to_regclass('public.category_rules') is null then
+    missing := array_append(missing, 'category_rules table (20260728)');
+  end if;
+  if array_length(missing, 1) > 0 then
+    raise exception 'setup_all.sql is out of sync with migrations/: missing %',
+      array_to_string(missing, ', ');
+  end if;
+  raise notice 'Schema check passed: all migrations present.';
+end $$;
+
+select (select count(*) > 0 from household_members) as household_linked;

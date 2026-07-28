@@ -29,9 +29,20 @@ export const ERA_CATEGORIES = [
   'Uncategorized',
 ];
 
-const TRANSFER_CATEGORY = 'Transfers and card payments';
-const RETURN_CATEGORY = 'Return';
+// Exported so csvImport/txClassify and the tests share one definition rather
+// than each keeping a copy that can drift.
+export const TRANSFER_CATEGORY = 'Transfers and card payments';
+export const RETURN_CATEGORY = 'Return';
 export const UNCATEGORIZED = 'Uncategorized';
+
+// The classifier's fallback. It is UNCATEGORIZED, not 'Shopping and gear' —
+// that was the whole point of introducing Uncategorized, and this alias exists
+// only so csvImport/txClassify and test/csvImport.test.js name one thing.
+// Note test/csvImport.test.js asserts guessCategory(x) === FALLBACK_CATEGORY,
+// which is SYMBOLIC: it proves they agree, not what the value is. The explicit
+// value assertion in that file is what stops a silent revert to a real
+// category. Don't remove either.
+export const FALLBACK_CATEGORY = UNCATEGORIZED;
 
 // Categories that exist for bookkeeping rather than budgeting. A budget on
 // "Uncategorized" would be a budget on the classifier's ignorance.

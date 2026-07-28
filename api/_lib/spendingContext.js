@@ -33,12 +33,16 @@ export async function buildSpendingContext(householdId) {
   // budget. That became a real problem when SimpleFIN started landing a second,
   // hidden copy of the household's ledger alongside the Plaid one — half the
   // assistant's context would have been rows it then threw away.
+  //
+  // The user's EDITS come along too (user_category / user_description /
+  // excluded): the assistant must describe the household's data as the
+  // household has curated it, not as the feed delivered it.
   const visibleIds = visible.map(a => a.id);
   let txs = [];
   if (visibleIds.length) {
     const { data, error: txErr } = await supabase
       .from('transactions')
-      .select('account_id, date, amount, merchant_name, description, mapped_category')
+      .select('account_id, date, amount, merchant_name, description, mapped_category, user_category, user_description, excluded')
       .eq('household_id', householdId)
       .in('account_id', visibleIds)
       .gte('date', sinceStr)
@@ -50,10 +54,12 @@ export async function buildSpendingContext(householdId) {
 
   // Loan-account debits are loan payments, not purchases — the cash that paid
   // them already counts on its way out of checking (mirrors sumSpending).
+  // Excluded transactions are the user saying "don't count this"; honour it.
   const loanIds = new Set(visible.filter(a => a.type === 'loan').map(a => a.id));
-  const usable = txs.filter(t => !loanIds.has(t.account_id));
+  const usable = txs.filter(t => !loanIds.has(t.account_id) && !t.excluded);
   for (const t of usable) {
-    t.mapped_category = applyAccountRules(
+    // Effective category: the user's override wins over the account rules.
+    t.mapped_category = t.user_category || applyAccountRules(
       t.mapped_category,
       t.amount,
       acctById.get(t.account_id)?.type
@@ -99,7 +105,7 @@ export async function buildSpendingContext(householdId) {
   for (const t of usable) {
     const a = acctById.get(t.account_id);
     const acctLabel = a?.nickname || `${a?.name || 'Account'}${a?.mask ? ` ··${a.mask}` : ''}`;
-    const name = t.merchant_name || t.description || 'Card transaction';
+    const name = t.user_description || t.merchant_name || t.description || 'Card transaction';
     lines.push(
       `${t.date} | ${acctLabel} | ${name} | ${t.mapped_category || 'Uncategorized'} | $${Number(t.amount).toFixed(2)}`
     );
