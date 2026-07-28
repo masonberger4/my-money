@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { supabase, configError } from './supabaseClient.js';
 import Dashboard from './components/Dashboard.jsx';
-import LinkAccount from './components/LinkAccount.jsx';
+import AddAccount from './components/AddAccount.jsx';
 import EmptyState from './components/EmptyState.jsx';
 import Login from './components/Login.jsx';
 
@@ -120,7 +120,7 @@ export default function App() {
           zIndex: 50,
         }}
       >
-        <LinkAccount onLinked={handleLinked} />
+        <AddAccount onLinked={handleLinked} />
       </div>
     </>
   );

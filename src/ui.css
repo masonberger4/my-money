@@ -149,3 +149,28 @@
 .ibtn { background: none; border: 1px solid var(--border); border-radius: 8px; padding: 5px 12px; font-family: inherit; font-size: 12px; font-weight: 500; color: var(--muted); cursor: pointer; display: inline-flex; align-items: center; gap: 5px; transition: all .15s; }
 .ibtn:hover { color: var(--text); border-color: var(--text); }
 .ibtn:disabled { opacity: .35; cursor: default; }
+
+/* Modal chrome + list primitives. These lived in a <style> block inside
+   Dashboard.jsx until Plaid removal, which was survivable only because every
+   modal was rendered BY Dashboard. Onboarding now opens SimpleFinConnect and
+   the statement importer from EmptyState, where Dashboard never mounts — and
+   an undefined .overlay is not a styling nit: the backdrop, the fixed
+   positioning and the z-index all vanish, so a 92vw panel lays itself out
+   inside a 360px card, the page scrolls sideways, and tapping outside no
+   longer closes anything.
+
+   This is the same trap as the dark-mode incident, where .card/.tab/.ibtn were
+   trapped in that same block. Anything a pre-Dashboard screen can render
+   belongs here. */
+.nbtn { background: var(--card); border: 1px solid var(--border); border-radius: 8px; width: 30px; height: 30px; display: flex; align-items: center; justify-content: center; cursor: pointer; font-size: 16px; transition: all .15s; line-height: 1; }
+.nbtn:hover:not(:disabled) { border-color: var(--text); }
+.nbtn:disabled { opacity: .3; cursor: default; }
+
+.overlay { position: fixed; inset: 0; background: var(--overlay); display: flex; align-items: center; justify-content: center; z-index: 100; }
+.modal { background: var(--card); border-radius: 16px; padding: 24px; width: 320px; border: 1px solid var(--border); }
+
+.tx { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--border); }
+.tx:last-child { border-bottom: none; }
+
+.bar-bg { flex: 1; height: 5px; background: var(--track); border-radius: 3px; overflow: hidden; }
+.bar-fill { height: 100%; border-radius: 3px; transition: width .5s ease; }

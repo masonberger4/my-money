@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { getOverview, getSpending, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES, setCategoryRule, applyCategoryRuleToHistory } from "../dataAdapter.js";
 import { merchantKey } from "../txClassify.js";
 import { detectRecurring } from "../recurring.js";
-import { unlinkInstitution, askAssistant } from "../plaidClient.js";
+import { unlinkInstitution, askAssistant } from "../apiClient.js";
 import { ERA_CATEGORIES, UNCATEGORIZED, isBudgetableCategory } from "../categoryMap.js";
 import { displayBalance, isDebtAccount as isDebtType } from "../accountBalance.js";
 import { runSync } from "../sync.js";
@@ -620,18 +620,6 @@ export default function Dashboard({ refreshTick = 0 }) {
   return (
     <div style={{fontFamily:"'DM Sans','Helvetica Neue',sans-serif",background:"var(--bg)",minHeight:"100vh",
       color:"var(--text)"}}>
-      <style>{`
-        .nbtn{background:var(--card);border:1px solid var(--border);border-radius:8px;width:30px;height:30px;display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:16px;transition:all .15s;line-height:1;}
-        .nbtn:hover:not(:disabled){border-color:var(--text);}
-        .nbtn:disabled{opacity:.3;cursor:default;}
-        .tx{display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--border);}
-        .tx:last-child{border-bottom:none;}
-        .overlay{position:fixed;inset:0;background:var(--overlay);display:flex;align-items:center;justify-content:center;z-index:100;}
-        .modal{background:var(--card);border-radius:16px;padding:24px;width:320px;border:1px solid var(--border);}
-        .bar-bg{flex:1;height:5px;background:var(--track);border-radius:3px;overflow:hidden;}
-        .bar-fill{height:100%;border-radius:3px;transition:width .5s ease;}
-      `}</style>
-
       <div style={{maxWidth:720,margin:"0 auto",padding:"24px 16px"}}>
 
         {/* Header */}
@@ -664,6 +652,22 @@ export default function Dashboard({ refreshTick = 0 }) {
         </div>
 
         {error&&<div style={{background:"var(--danger-bg)",border:"1px solid var(--danger-border)",borderRadius:10,padding:"12px 16px",fontSize:13,color:"var(--danger)",marginBottom:14}}>{error}</div>}
+
+        {/* Everything is hidden — which is what a brand-new SimpleFIN connect
+            looks like. New accounts arrive hidden:true (their TYPE is a guess,
+            and unhiding is the deliberate confirm), and getOverview filters on
+            hidden:false — so the first thing a successful connect shows is a
+            dashboard of em-dashes and an empty donut, with nothing on screen
+            explaining why. Under Plaid this could never happen: those accounts
+            arrived visible. Without this line the app looks broken at exactly
+            the moment it just worked. */}
+        {!loading&&accounts.length>0&&accounts.every(a=>a.hidden)&&(
+          <div style={{background:"var(--warn-bg)",border:"1px solid var(--warn-border)",borderRadius:10,padding:"12px 16px",fontSize:13,color:"var(--warn)",marginBottom:14,lineHeight:1.5}}>
+            Your {accounts.length===1?"account is":"accounts are"} hidden until you've checked
+            {accounts.length===1?" its":" their"} type — that's what decides whether spending counts.
+            {" "}<button onClick={()=>setTab("accounts")} style={{background:"none",border:"none",padding:0,font:"inherit",color:"inherit",textDecoration:"underline",cursor:"pointer"}}>Review and unhide</button>.
+          </div>
+        )}
 
         {/* Summary */}
         <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10,marginBottom:14}}>

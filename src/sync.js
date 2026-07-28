@@ -1,4 +1,4 @@
-import { runServerSync } from './plaidClient.js';
+import { runServerSync } from './apiClient.js';
 
 // The sync itself runs server-side (api/sync.js): the server holds the Plaid
 // access tokens and the SimpleFIN access URL, and writes accounts/transactions

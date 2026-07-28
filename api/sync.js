@@ -1,4 +1,3 @@
-import { getPlaidClient } from './_lib/plaid.js';
 import { getServiceClient, requireUser } from './_lib/supabase.js';
 import {
   fetchAccountSet,
@@ -12,7 +11,6 @@ import {
   MIN_PULL_MINUTES,
   INCLUDE_PENDING,
 } from './_lib/simplefin.js';
-import { mapPlaidCategory } from '../src/categoryMap.js';
 import { classifyDescription } from '../src/txClassify.js';
 
 // depository + credit fund the spending/cash-flow views; loan lets linked
@@ -59,124 +57,6 @@ export function isMissingTableError(error, table) {
   if (!blob.includes(String(table).toLowerCase())) return false;
   if (error.code === 'PGRST205' || error.code === '42P01') return true;
   return /could not find the table|relation .* does not exist/.test(blob);
-}
-
-// =============================================================================
-// Plaid
-// =============================================================================
-
-function mapAccountRow(account, institutionId, householdId) {
-  return {
-    household_id: householdId,
-    institution_id: institutionId,
-    plaid_account_id: account.account_id,
-    name: account.name || '',
-    official_name: account.official_name || '',
-    type: account.type || 'other',
-    subtype: account.subtype || '',
-    mask: account.mask || '',
-    current_balance: account.balances?.current ?? null,
-    available_balance: account.balances?.available ?? null,
-    currency: account.balances?.iso_currency_code || 'USD',
-    last_balance_at: new Date().toISOString(),
-  };
-}
-
-function mapTransactionRow(tx, accountUuid, householdId) {
-  const primary = tx.personal_finance_category?.primary || '';
-  const detailed = tx.personal_finance_category?.detailed || '';
-  return {
-    household_id: householdId,
-    account_id: accountUuid,
-    plaid_tx_id: tx.transaction_id,
-    date: tx.date,
-    amount: tx.amount,
-    merchant_name: tx.merchant_name || '',
-    description: tx.name || '',
-    raw_category: detailed || primary,
-    mapped_category: mapPlaidCategory(primary, detailed),
-    pending: !!tx.pending,
-    pulled_at: new Date().toISOString(),
-  };
-}
-
-async function syncOneInstitution(supabase, inst, accessToken, householdId) {
-  const plaid = getPlaidClient(inst.plaid_credential_key);
-
-  let cursor = inst.sync_state?.cursor || null;
-  let added = [];
-  let modified = [];
-  let removed = [];
-  let accounts = [];
-  let hasMore = true;
-  let safety = 0;
-
-  while (hasMore) {
-    if (safety++ > 50) {
-      console.warn('[sync] pagination safety break for institution', inst.id);
-      break;
-    }
-    const request = { access_token: accessToken };
-    if (cursor) request.cursor = cursor;
-    const resp = (await plaid.transactionsSync(request)).data;
-    added = added.concat(resp.added || []);
-    modified = modified.concat(resp.modified || []);
-    removed = removed.concat(resp.removed || []);
-    if (resp.accounts) accounts = resp.accounts;
-    cursor = resp.next_cursor || cursor;
-    hasMore = !!resp.has_more;
-  }
-
-  const accountRows = accounts
-    .filter(a => ALLOWED_TYPES.has(a.type))
-    .map(a => mapAccountRow(a, inst.id, householdId));
-  if (accountRows.length) {
-    const { error } = await supabase
-      .from('accounts')
-      .upsert(accountRows, { onConflict: 'institution_id,plaid_account_id' });
-    if (error) throw error;
-  }
-
-  // Transactions reference accounts by our UUID, not Plaid's account_id.
-  const { data: accountList, error: mapErr } = await supabase
-    .from('accounts')
-    .select('id, plaid_account_id')
-    .eq('institution_id', inst.id);
-  if (mapErr) throw mapErr;
-  const accountUuids = new Map(accountList.map(a => [a.plaid_account_id, a.id]));
-
-  const txRows = [...added, ...modified]
-    .filter(tx => accountUuids.has(tx.account_id))
-    .map(tx => mapTransactionRow(tx, accountUuids.get(tx.account_id), householdId));
-  if (txRows.length) {
-    const { error } = await supabase
-      .from('transactions')
-      .upsert(txRows, { onConflict: 'account_id,plaid_tx_id' });
-    if (error) throw error;
-  }
-
-  const removedIds = removed.map(r => r.transaction_id).filter(Boolean);
-  if (removedIds.length) {
-    const { error } = await supabase
-      .from('transactions')
-      .delete()
-      .in('plaid_tx_id', removedIds)
-      .in('account_id', [...accountUuids.values()]);
-    if (error) throw error;
-  }
-
-  const { error: instErr } = await supabase
-    .from('institutions')
-    .update({
-      sync_state: { cursor },
-      last_successful_pull_at: new Date().toISOString(),
-      status: 'active',
-      last_error: null,
-    })
-    .eq('id', inst.id);
-  if (instErr) throw instErr;
-
-  return { added: added.length, modified: modified.length, removed: removedIds.length };
 }
 
 // =============================================================================
@@ -689,70 +569,18 @@ export default async function handler(req, res) {
   try {
     const supabase = getServiceClient();
 
-    // simplefin_org_id is the feed discriminator; select it defensively so a
-    // deploy that lands before its migration still syncs Plaid normally.
-    let institutions;
-    let instErr;
-    ({ data: institutions, error: instErr } = await supabase
-      .from('institutions')
-      .select('id, name, plaid_credential_key, sync_state, status, simplefin_org_id')
-      .eq('household_id', user.householdId)
-      .neq('status', 'disabled'));
-    if (instErr && isMissingColumnError(instErr, 'simplefin_org_id')) {
-      ({ data: institutions, error: instErr } = await supabase
-        .from('institutions')
-        .select('id, name, plaid_credential_key, sync_state, status')
-        .eq('household_id', user.householdId)
-        .neq('status', 'disabled'));
-    }
-    if (instErr) throw instErr;
-
-    // Plaid-fed institutions only. A SimpleFIN-fed one has no plaid_tokens row,
-    // so without this it would report a bogus "no access token" every sync.
-    const plaidInstitutions = institutions.filter(i => !i.simplefin_org_id);
-
-    // Guard the empty list: a household that has moved entirely to SimpleFIN
-    // has no Plaid institutions left to look tokens up for.
-    const tokenByInst = new Map();
-    if (plaidInstitutions.length) {
-      const { data: tokens, error: tokenErr } = await supabase
-        .from('plaid_tokens')
-        .select('institution_id, access_token')
-        .in('institution_id', plaidInstitutions.map(i => i.id));
-      if (tokenErr) throw tokenErr;
-      for (const t of tokens || []) tokenByInst.set(t.institution_id, t.access_token);
-    }
-
+    // ONE pass now: SimpleFIN. The institutions/plaid_tokens lookup and the
+    // per-institution Plaid loop that used to run first are gone with Plaid, and
+    // with them the reason this handler read `institutions` at all — the
+    // SimpleFIN pass resolves its own institutions from the org ids in the feed
+    // response (see resolveOrgInstitutions), because one access URL covers every
+    // bank and the org list is only knowable after the pull.
+    //
+    // The try/catch stays. It no longer protects a second feed from this one,
+    // but it is what converts a thrown SimpleFIN error into a 200 carrying a
+    // per-result error, which is the shape src/sync.js expects; letting it throw
+    // would surface as a bare 500 with nothing to show the user.
     const results = [];
-    for (const inst of plaidInstitutions) {
-      const accessToken = tokenByInst.get(inst.id);
-      if (!accessToken) {
-        results.push({ institution: inst.name, error: 'no access token' });
-        continue;
-      }
-      try {
-        const counts = await syncOneInstitution(supabase, inst, accessToken, user.householdId);
-        results.push({ institution: inst.name, ...counts });
-      } catch (err) {
-        const plaidCode = err?.response?.data?.error_code;
-        const needsReauth = plaidCode === 'ITEM_LOGIN_REQUIRED';
-        console.error('[sync] failed for institution', inst.id, plaidCode || err);
-        await supabase
-          .from('institutions')
-          .update({
-            status: needsReauth ? 'needs_reauth' : 'error',
-            last_error: plaidCode || err.message || 'Unknown error',
-          })
-          .eq('id', inst.id);
-        results.push({
-          institution: inst.name,
-          error: plaidCode || err.message || 'Unknown error',
-          needs_reauth: needsReauth,
-        });
-      }
-    }
-
-    // A SimpleFIN failure must never take the Plaid results down with it.
     try {
       results.push(...(await syncSimpleFin(supabase, user.householdId, { force })));
     } catch (err) {

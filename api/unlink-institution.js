@@ -1,4 +1,3 @@
-import { getPlaidClient } from './_lib/plaid.js';
 import { getServiceClient, requireUser } from './_lib/supabase.js';
 
 export default async function handler(req, res) {
@@ -19,7 +18,7 @@ export default async function handler(req, res) {
     let instErr;
     ({ data: inst, error: instErr } = await supabase
       .from('institutions')
-      .select('id, name, plaid_credential_key, household_id, simplefin_org_id')
+      .select('id, name, household_id, simplefin_org_id')
       .eq('id', institution_id)
       .eq('household_id', user.householdId)
       .maybeSingle());
@@ -27,7 +26,7 @@ export default async function handler(req, res) {
     if (instErr && (instErr.code === 'PGRST204' || instErr.code === '42703')) {
       ({ data: inst, error: instErr } = await supabase
         .from('institutions')
-        .select('id, name, plaid_credential_key, household_id')
+        .select('id, name, household_id')
         .eq('id', institution_id)
         .eq('household_id', user.householdId)
         .maybeSingle());
@@ -57,40 +56,34 @@ export default async function handler(req, res) {
         .eq('id', inst.id);
       if (disableErr) throw disableErr;
 
-      return res.status(200).json({ ok: true, plaid_removed: false, disabled: true });
+      return res.status(200).json({ ok: true, disabled: true });
     }
 
-    const { data: token } = await supabase
-      .from('plaid_tokens')
-      .select('access_token')
-      .eq('institution_id', inst.id)
-      .maybeSingle();
-
-    // Remove the Item on Plaid's side first — this frees the free-tier slot
-    // and stops the bank connection. If Plaid already considers it gone
-    // (expired, previously removed), proceed with local deletion anyway.
-    let plaidRemoved = false;
-    if (token?.access_token) {
-      try {
-        const plaid = getPlaidClient(inst.plaid_credential_key);
-        await plaid.itemRemove({ access_token: token.access_token });
-        plaidRemoved = true;
-      } catch (err) {
-        console.warn(
-          'itemRemove failed (continuing with local delete)',
-          err?.response?.data?.error_code || err.message
-        );
-      }
+    // Everything else is a MANUAL institution — the "Imported" row CSV/PDF
+    // import creates. With Plaid gone that is the only other kind there is.
+    //
+    // Gated on the org id being ABSENT rather than merely falsy, which is not
+    // pedantry: this path hard-deletes and cascades away every account and
+    // transaction beneath it, and the branch above tests `if
+    // (inst.simplefin_org_id)`. An empty-string org id — a shape we never write
+    // but could read back from a hand-edited row — is falsy, so it would fall
+    // past the SimpleFIN branch and have its data deleted by a route the user
+    // pressed expecting a reversible disconnect. Unknown shapes stop here.
+    const isManualInstitution = inst.simplefin_org_id === null || inst.simplefin_org_id === undefined;
+    if (!isManualInstitution) {
+      return res.status(400).json({ error: 'Unrecognised institution feed; refusing to delete' });
     }
 
-    // Cascades: accounts, transactions, plaid_tokens.
+    // Cascades: accounts, and their transactions. Unlike the SimpleFIN branch
+    // there is no tombstone to keep — nothing recreates a manual institution, so
+    // deleting the row is the whole operation.
     const { error: delErr } = await supabase
       .from('institutions')
       .delete()
       .eq('id', inst.id);
     if (delErr) throw delErr;
 
-    return res.status(200).json({ ok: true, plaid_removed: plaidRemoved });
+    return res.status(200).json({ ok: true, deleted: true });
   } catch (err) {
     console.error('unlink-institution error', err?.response?.data || err);
     return res

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { claimSimpleFinToken, getSimpleFinStatus, disconnectSimpleFin, restoreSimpleFinInstitution } from "../plaidClient.js";
+import { claimSimpleFinToken, getSimpleFinStatus, disconnectSimpleFin, restoreSimpleFinInstitution } from "../apiClient.js";
 import { runSync } from "../sync.js";
 
 // SimpleFIN connect — the Accounts-tab modal that replaces Plaid Link.
