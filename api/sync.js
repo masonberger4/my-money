@@ -189,6 +189,24 @@ async function syncOneInstitution(supabase, inst, accessToken, householdId) {
 // out into institutions (per SimpleFIN org), accounts and transactions.
 // =============================================================================
 
+// The household's learned merchant→category rules, as a plain object for
+// classifyDescription. Read under service_role (RLS bypassed). Returns {} when
+// the migration hasn't been pasted yet — categorization simply falls back to
+// the keyword table, which is exactly the old behavior.
+async function loadCategoryRules(supabase, householdId) {
+  const { data, error } = await supabase
+    .from('category_rules')
+    .select('merchant_key, category')
+    .eq('household_id', householdId);
+  if (error) {
+    if (isMissingTableError(error, 'category_rules')) return {};
+    throw error;
+  }
+  const rules = {};
+  for (const r of data || []) rules[r.merchant_key] = r.category;
+  return rules;
+}
+
 // Read the household's stored access URLs. Returns null — not an error — when
 // the SimpleFIN migration hasn't been pasted yet.
 async function loadAccessRows(supabase, householdId) {
@@ -250,7 +268,7 @@ async function resolveOrgInstitutions(supabase, householdId, orgs) {
   return byKey;
 }
 
-async function pullOneAccessUrl(supabase, householdId, accessRow, { force }) {
+async function pullOneAccessUrl(supabase, householdId, accessRow, { force, categoryRules }) {
   const now = new Date();
   const lastPulled = accessRow.last_pulled_at ? new Date(accessRow.last_pulled_at) : null;
   // Throttle on the last ATTEMPT, not the last success — otherwise a broken
@@ -490,7 +508,14 @@ async function pullOneAccessUrl(supabase, householdId, accessRow, { force }) {
             : tx.description;
         // The account type is what stops a card PURCHASE from being read as a
         // card PAYMENT and dropped from spending entirely (see txClassify.js).
-        const { raw_category, mapped_category } = classifyDescription(descriptor, tx.amount, acctType);
+        // `rules` is the household's learned merchant memory — without it here,
+        // every corrected merchant would revert to Uncategorized on the next pull.
+        const { raw_category, mapped_category } = classifyDescription(
+          descriptor,
+          tx.amount,
+          acctType,
+          categoryRules
+        );
         txRows.push({
           household_id: householdId,
           account_id: accountUuid,
@@ -623,10 +648,12 @@ async function syncSimpleFin(supabase, householdId, { force }) {
   const accessRows = await loadAccessRows(supabase, householdId);
   if (accessRows === null || accessRows.length === 0) return [];
 
+  const categoryRules = await loadCategoryRules(supabase, householdId);
+
   const results = [];
   for (const row of accessRows) {
     try {
-      results.push(await pullOneAccessUrl(supabase, householdId, row, { force }));
+      results.push(await pullOneAccessUrl(supabase, householdId, row, { force, categoryRules }));
     } catch (err) {
       const message = err?.message || 'Unknown error';
       console.error('[sync:simplefin] pull failed', err);

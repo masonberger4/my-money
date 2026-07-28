@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { analyzeCsv, toInsertRow, parseCsv, reconcileCsv, csvDateRange } from "../csvImport.js";
-import { createManualAccount, importCsvTransactions, getExistingTxIds, getAccountTransactionsInRange, isManualAccount } from "../dataAdapter.js";
+import { createManualAccount, importCsvTransactions, getExistingTxIds, getAccountTransactionsInRange, isManualAccount, getCategoryRules } from "../dataAdapter.js";
 
 // CSV import — a file-picker action on the Accounts tab, in two modes chosen by
 // the target account:
@@ -39,6 +39,9 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
   const [newName, setNewName] = useState("");
   const [newSubtype, setNewSubtype] = useState("checking");
   const [existingIds, setExistingIds] = useState(new Set());
+  // Learned merchant rules, so an import agrees with what the household has
+  // already taught the classifier instead of re-deriving from keywords alone.
+  const [rules, setRules] = useState(null);
   const [loadingIds, setLoadingIds] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
@@ -56,11 +59,20 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
   const analysis = useMemo(() => {
     if (!fileText) return null;
     try {
-      return analyzeCsv(fileText, { existingIds, manualColumns: manualCols, amountSign });
+      return analyzeCsv(fileText, { existingIds, manualColumns: manualCols, amountSign, rules });
     } catch (e) {
       return { error: e.message, rows: [], skipped: [], needsManualMapping: false };
     }
-  }, [fileText, existingIds, manualCols, amountSign]);
+  }, [fileText, existingIds, manualCols, amountSign, rules]);
+
+  // Learned merchant rules, loaded once — analyzeCsv re-runs when they arrive.
+  useEffect(() => {
+    let cancelled = false;
+    getCategoryRules()
+      .then(r => { if (!cancelled) setRules(r); })
+      .catch(err => { console.error("category rules unavailable", err); if (!cancelled) setRules({}); });
+    return () => { cancelled = true; };
+  }, []);
 
   // Load the target account's existing ids so dupes grey out. New account or a
   // Plaid target (comparison mode, no insert) → none.

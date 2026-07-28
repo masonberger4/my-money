@@ -289,6 +289,7 @@ export function baseHash(dateIso, amount, normDesc) {
 //                   default: positive = deposit) or 'out_positive'.
 //   existingIds   — Set of plaid_tx_id already in the DB for the target account
 //                   (used to flag duplicates; empty for a brand-new account).
+//   rules         — learned merchant→category rules (see category_rules).
 //
 // Each built row carries display fields (rawDebit/rawCredit/rawDate) for the
 // preview and the final insert-shape fields (date, amount, description, …).
@@ -299,6 +300,7 @@ export function buildRows(rows, opts = {}) {
     columns,
     amountSign = 'in_positive',
     existingIds = new Set(),
+    rules = null,
   } = opts;
   if (!columns) throw new Error('buildRows requires a column mapping');
 
@@ -373,7 +375,9 @@ export function buildRows(rows, opts = {}) {
     const plaid_tx_id = `csv:${hash}:${ordinal}`;
 
     const raw_category = transferRawCategory(rawDesc, amount);
-    const mapped_category = guessCategory(rawDesc);
+    // Learned merchant rules apply here too, or a merchant taught from a synced
+    // transaction would still import Uncategorized from a CSV.
+    const mapped_category = guessCategory(rawDesc, { rules });
 
     built.push({
       // insert-shape (mirrors api/sync.js mapTransactionRow; household_id is
@@ -424,7 +428,7 @@ export function toInsertRow(built) {
 // One-call convenience used by the UI: raw text → detection + built rows.
 // Returns { header, columns, rows, skipped, needsManualMapping }.
 // ---------------------------------------------------------------------------
-export function analyzeCsv(text, { existingIds = new Set(), manualColumns = null, amountSign = 'in_positive' } = {}) {
+export function analyzeCsv(text, { existingIds = new Set(), manualColumns = null, amountSign = 'in_positive', rules = null } = {}) {
   const rows = parseCsv(text);
   const detected = manualColumns
     ? { headerIndex: manualColumns.headerIndex ?? -1, columns: manualColumns }
@@ -444,6 +448,7 @@ export function analyzeCsv(text, { existingIds = new Set(), manualColumns = null
     columns: detected.columns,
     existingIds,
     amountSign,
+    rules,
   });
   return {
     parsedRowCount: rows.length,

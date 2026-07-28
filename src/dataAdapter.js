@@ -1,5 +1,6 @@
 import { supabase } from './supabaseClient.js';
 import { isTransferCategory, applyAccountRules, UNCATEGORIZED } from './categoryMap.js';
+import { merchantKey, matchLearnedRule } from './txClassify.js';
 
 function pad2(n) {
   return String(n).padStart(2, '0');
@@ -342,6 +343,93 @@ export async function getAccountTransactions(accountId, { limit = 500 } = {}) {
     transactions: data.slice(0, limit).map(toTxShape),
     hasMore,
   };
+}
+
+// --- Learned merchant rules --------------------------------------------------
+// The household's own merchant→category memory (see the category_rules
+// migration). Read as a plain object so it can be handed straight to
+// guessCategory/classifyDescription. Tolerates the table not existing yet:
+// previews share the production database, so this has to work before the
+// migration is pasted.
+let hasCategoryRules = true;
+
+export async function getCategoryRules() {
+  if (!hasCategoryRules) return {};
+  const { data, error } = await supabase.from('category_rules').select('merchant_key, category');
+  if (error) {
+    if (error.code === 'PGRST205' || error.code === '42P01') {
+      hasCategoryRules = false;
+      return {};
+    }
+    throw error;
+  }
+  const rules = {};
+  for (const r of data || []) rules[r.merchant_key] = r.category;
+  return rules;
+}
+
+// Teach a merchant. household_id fills in from its column default — never send
+// it from the client (same pattern as setBudget/setSetting).
+export async function setCategoryRule(descriptor, category) {
+  const key = merchantKey(descriptor);
+  if (!key) throw new Error('Cannot learn a rule from an empty description');
+  const { error } = await supabase
+    .from('category_rules')
+    .upsert({ merchant_key: key, category, updated_at: new Date().toISOString() },
+            { onConflict: 'household_id,merchant_key' });
+  if (error) throw error;
+  return key;
+}
+
+export async function deleteCategoryRule(merchantKeyValue) {
+  const { error } = await supabase.from('category_rules').delete().eq('merchant_key', merchantKeyValue);
+  if (error) throw error;
+}
+
+// Apply a freshly-taught rule to history. Writes `mapped_category` only, so a
+// per-transaction `user_category` override always still wins — this changes
+// what the classifier *would* have said, not what the user decided.
+//
+// dryRun counts the matches without writing, so the confirm can say how many
+// past transactions it is about to touch.
+export async function applyCategoryRuleToHistory(descriptor, category, { dryRun = false } = {}) {
+  const key = merchantKey(descriptor);
+  if (!key) return 0;
+
+  // The match is on the NORMALIZED descriptor, which SQL can't reproduce, so
+  // candidates are narrowed server-side with ilike on the first token and the
+  // exact rule applied here.
+  const firstToken = key.split(' ')[0];
+  const pat = `%${firstToken.replace(/([\\%_])/g, '\\$1')}%`;
+
+  const matches = [];
+  const page = 1000;
+  for (let from = 0; ; from += page) {
+    const { data, error } = await supabase
+      .from('transactions')
+      .select('id, description, merchant_name, mapped_category')
+      .or(`description.ilike.${pat},merchant_name.ilike.${pat}`)
+      .range(from, from + page - 1);
+    if (error) throw error;
+    for (const t of data) {
+      // Classify on the same string the write path uses.
+      const descriptors = [t.merchant_name, t.description].filter(Boolean);
+      const hit = descriptors.some(d => matchLearnedRule(d, { [key]: category }));
+      if (hit && t.mapped_category !== category) matches.push(t.id);
+    }
+    if (data.length < page) break;
+  }
+  if (dryRun || matches.length === 0) return matches.length;
+
+  const batch = 200;
+  for (let i = 0; i < matches.length; i += batch) {
+    const { error } = await supabase
+      .from('transactions')
+      .update({ mapped_category: category })
+      .in('id', matches.slice(i, i + batch));
+    if (error) throw error;
+  }
+  return matches.length;
 }
 
 // Budgets: one monthly dollar limit per category. No row = no budget.

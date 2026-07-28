@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { getOverview, getSpending, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES } from "../dataAdapter.js";
+import { getOverview, getSpending, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES, setCategoryRule, applyCategoryRuleToHistory } from "../dataAdapter.js";
+import { merchantKey } from "../txClassify.js";
 import { detectRecurring } from "../recurring.js";
 import { unlinkInstitution, askAssistant } from "../plaidClient.js";
 import { ERA_CATEGORIES, UNCATEGORIZED, isBudgetableCategory } from "../categoryMap.js";
@@ -344,6 +345,49 @@ export default function Dashboard({ refreshTick = 0 }) {
   const [selTx,setSelTx]=useState(null);
   const [importing,setImporting]=useState(false);
   const [connectingSfin,setConnectingSfin]=useState(false);
+
+  // Learned merchant rules: after a manual recategorization, offer to remember
+  // the merchant so the correction survives the next sync/import.
+  const [learnPrompt,setLearnPrompt]=useState(null); // {descriptor,key,category,count}
+  const [learnedNote,setLearnedNote]=useState(null);
+  const [learning,setLearning]=useState(false);
+  // Clear the prompt when a different transaction is opened.
+  useEffect(()=>{setLearnPrompt(null);setLearnedNote(null);},[selTx?.id]);
+
+  // The string the classifier actually sees at write time — merchant_name is
+  // SimpleFIN's `payee`, description its raw descriptor. Must match the write
+  // path or a taught rule wouldn't fire on the next pull.
+  const txDescriptor=useCallback(t=>t?(t.merchant_name||t.description||""):"",[]);
+
+  async function offerToLearn(category){
+    if(!selTx)return;
+    const descriptor=txDescriptor(selTx);
+    const key=merchantKey(descriptor);
+    if(!key)return;
+    let count=0;
+    try{ count=await applyCategoryRuleToHistory(descriptor,category,{dryRun:true}); }
+    catch(err){ console.error("rule preview failed",err); }
+    setLearnPrompt({descriptor,key,category,count});
+  }
+
+  async function learnMerchant(){
+    if(!learnPrompt)return;
+    setLearning(true);
+    try{
+      await setCategoryRule(learnPrompt.descriptor,learnPrompt.category);
+      const n=await applyCategoryRuleToHistory(learnPrompt.descriptor,learnPrompt.category);
+      setLearnPrompt(null);
+      setLearnedNote(`Remembered — ${learnPrompt.key} is ${getName(learnPrompt.category)}${n>0?`, and ${n} past transaction${n!==1?"s":""} updated`:""}.`);
+      await reloadData(year,month);
+    }catch(err){
+      console.error("learning the merchant failed",err);
+      setLearnPrompt(null);
+      setLearnedNote(null);
+      window.alert(`Couldn't save that rule: ${err.message||err}`);
+    }finally{
+      setLearning(false);
+    }
+  }
 
   // Optimistic transaction edit: update every local copy immediately,
   // persist, then refresh totals in the background.
@@ -1184,7 +1228,7 @@ export default function Dashboard({ refreshTick = 0 }) {
               {allCats.map(cat=>{
                 const active=selTx.category===cat;
                 return (
-                  <button key={cat} onClick={()=>saveTx({user_category:cat===selTx.auto_category?null:cat})}
+                  <button key={cat} onClick={()=>{const next=cat===selTx.auto_category?null:cat;saveTx({user_category:next});setLearnedNote(null);if(next)offerToLearn(next);else setLearnPrompt(null);}}
                     style={{fontSize:11,fontWeight:600,padding:"5px 10px",borderRadius:20,fontFamily:"inherit",cursor:"pointer",
                       background:active?getColor(cat)+"22":"var(--bg)",color:active?getColor(cat):"var(--muted)",
                       border:`1px solid ${active?getColor(cat):"var(--border)"}`,transition:"all .15s"}}>
@@ -1198,6 +1242,28 @@ export default function Dashboard({ refreshTick = 0 }) {
                 style={{background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",fontSize:11,color:"var(--muted)",textDecoration:"underline",padding:0,marginBottom:6}}>
                 Reset to automatic ({getName(selTx.auto_category)})
               </button>
+            )}
+
+            {/* Teach the merchant. Without this, correcting a transaction fixes
+                exactly one row and the same merchant lands in Uncategorized
+                again next month — Plaid used to absorb that invisibly. */}
+            {learnPrompt&&(
+              <div style={{marginTop:10,background:"var(--bg)",borderRadius:8,padding:"10px 12px"}}>
+                <div style={{fontSize:11,color:"var(--text)",lineHeight:1.5,marginBottom:8}}>
+                  Always categorize <strong>{learnPrompt.key}</strong> as <strong>{getName(learnPrompt.category)}</strong>?
+                  {learnPrompt.count>0&&<> Also updates {learnPrompt.count} past transaction{learnPrompt.count!==1?"s":""}.</>}
+                </div>
+                <div style={{display:"flex",gap:8}}>
+                  <button onClick={()=>setLearnPrompt(null)} className="ibtn" style={{flex:1,justifyContent:"center",fontSize:11}}>Just this one</button>
+                  <button onClick={learnMerchant} disabled={learning}
+                    style={{flex:1,padding:"6px 0",borderRadius:8,border:"none",background:"#7F77DD",color:"#fff",fontFamily:"inherit",fontSize:11,fontWeight:600,cursor:learning?"default":"pointer",opacity:learning?.6:1}}>
+                    {learning?"Saving…":"Always"}
+                  </button>
+                </div>
+              </div>
+            )}
+            {learnedNote&&(
+              <div style={{marginTop:10,fontSize:11,color:"#1D9E75",lineHeight:1.5}}>{learnedNote}</div>
             )}
 
             <div style={{borderTop:"1px solid var(--border)",margin:"12px 0"}}/>

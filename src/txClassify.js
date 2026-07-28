@@ -131,16 +131,67 @@ const CATEGORY_RULES = RAW_RULES.filter(([, cat]) => {
   return false;
 });
 
-// opts: { accountType, amount } — both optional. Without them the transfer
-// rules apply as before, which is right for CSV imports (always depository).
+// ---------------------------------------------------------------------------
+// Learned merchant rules (the `category_rules` table).
+//
+// The keyword table can't know that "Rudys Columbia City" is a barbershop. A
+// correction teaches it once and every later import/sync agrees.
+// ---------------------------------------------------------------------------
+
+// Normalized merchant identity. Store numbers and reference digits are noise —
+// "SAFEWAY #1234" and "SAFEWAY 8892" are the same merchant — but real words are
+// not, so "COSTCO GAS" and "COSTCO WHSE" must stay distinct. Keeps every
+// non-numeric token, drops the numeric ones.
+export function merchantKey(descriptor) {
+  return String(descriptor ?? '')
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, ' ')
+    .trim()
+    .split(' ')
+    .filter(t => t && !/^\d+$/.test(t))
+    .join(' ');
+}
+
+// rules: Map (or plain object) of merchantKey → category.
+// Matches exactly, or on a whole-token prefix so a rule learned as "RUDYS"
+// covers "RUDYS COLUMBIA CITY" without a rule on "COSTCO" swallowing
+// "COSTCO GAS" — the prefix must end at a token boundary, and longer (more
+// specific) rules win over shorter ones.
+export function matchLearnedRule(descriptor, rules) {
+  if (!rules) return null;
+  const key = merchantKey(descriptor);
+  if (!key) return null;
+  const get = k => (rules instanceof Map ? rules.get(k) : rules[k]);
+
+  const exact = get(key);
+  if (exact) return exact;
+
+  const keys = rules instanceof Map ? [...rules.keys()] : Object.keys(rules);
+  let best = null;
+  for (const rk of keys) {
+    if (rk && key.startsWith(rk + ' ') && (!best || rk.length > best.length)) best = rk;
+  }
+  return best ? get(best) : null;
+}
+
+// opts: { accountType, amount, rules } — all optional. Without accountType and
+// amount the transfer rules apply as before, which is right for CSV imports
+// (always depository).
 export function guessCategory(description, opts = {}) {
   const d = String(description ?? '');
-  const { accountType, amount } = opts;
+  const { accountType, amount, rules } = opts;
 
   if (!isCardPurchase(accountType, amount)) {
     if (TRANSFER_RE.test(d)) return TRANSFER_CATEGORY;
     if (looksLikeCardPayment(d)) return TRANSFER_CATEGORY;
   }
+  // Learned rules beat the keyword table — they are the household's own
+  // knowledge, and they exist precisely because the table got it wrong. They do
+  // NOT beat the transfer guards above: those protect spending totals, and a
+  // rule that made card payments count as spending would be a footgun.
+  const learned = matchLearnedRule(d, rules);
+  if (learned) return learned;
+
   for (const [re, cat] of CATEGORY_RULES) {
     if (re.test(d)) return cat;
   }
@@ -173,9 +224,9 @@ export function transferRawCategory(description, amount, accountType) {
 // category columns api/sync.js and the CSV importer both write. accountType is
 // optional but should be passed whenever it is known — it is what stops a card
 // purchase from being mistaken for a card payment and dropped from spending.
-export function classifyDescription(description, amount, accountType) {
+export function classifyDescription(description, amount, accountType, rules) {
   return {
     raw_category: transferRawCategory(description, amount, accountType),
-    mapped_category: guessCategory(description, { accountType, amount }),
+    mapped_category: guessCategory(description, { accountType, amount, rules }),
   };
 }

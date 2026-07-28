@@ -71,7 +71,7 @@ entry once shipped.
 | `src/categoryMap.js` | Plaid category → app category mapping; `applyAccountRules` (credit-card negatives → "Return", excluded from income); `UNCATEGORIZED` + `isBudgetableCategory`; pure JS, imported by server code too. `ERA_CATEGORIES` is the taxonomy source of truth (no "Housing"/"Income" member; `Uncategorized` IS one). |
 | `src/csvImport.js` | Pure CSV-import core (no React/Supabase): `parseCsv`, `detectHeader`, `parseMoney`/`parseDate`, transfer flagging, dedup `plaid_tx_id` hashing, `buildRows`/`analyzeCsv`. Also the comparison-mode core: `reconcileCsv` (max-matching audit), `descSimilarity`, `csvDateRange`. Testable in isolation. |
 | `src/accountBalance.js` | `isDebtAccount` / `displayBalance` — the stored-positive → displayed-negative rule for credit and loan balances. Pure JS; imported by both Dashboard.jsx and the server-side assistant context. |
-| `src/txClassify.js` | The shared descriptor→category rule table + internal-transfer tagging (`guessCategory`, `transferRawCategory`, `classifyDescription`), validated against `ERA_CATEGORIES` at load. Lifted out of `csvImport.js` when SimpleFIN became a second caller: both feeds get a descriptor and no category, so both derive `mapped_category` at WRITE time from this one table. Pure JS — imported by server code too. |
+| `src/txClassify.js` | Learned-rule matching (`merchantKey`, `matchLearnedRule`) + the shared descriptor→category rule table + internal-transfer tagging (`guessCategory`, `transferRawCategory`, `classifyDescription`), validated against `ERA_CATEGORIES` at load. Lifted out of `csvImport.js` when SimpleFIN became a second caller: both feeds get a descriptor and no category, so both derive `mapped_category` at WRITE time from this one table. Pure JS — imported by server code too. |
 | `api/_lib/simplefin.js` | SimpleFIN protocol layer: setup-token decode, claim POST, access-URL split (creds → Authorization header), the `/accounts` GET, and `normalizeAccountSet` (reads BOTH wire shapes). Also `inferAccountType`, `normalizeBalance`, the sign flip, and the env knobs. Server-only — handles bank credentials. |
 | `src/components/SimpleFinConnect.jsx` | Accounts-tab modal replacing Plaid Link: link banks at SimpleFIN Bridge → paste the setup token → claim + first sync. Shows connection status and a disconnect action. |
 | `src/components/CsvImport.jsx` | Accounts-tab import modal, two modes by target: **standalone** (manual target) file → preview (greyed dupes) → confirm; **comparison** (Plaid-linked target) read-only reconciliation audit, inserts nothing. Writes via dataAdapter's `createManualAccount`/`importCsvTransactions`; reads Plaid rows via `getAccountTransactionsInRange`. |
@@ -147,6 +147,16 @@ playwright-core screenshot (`executablePath:'/opt/pw-browsers/chromium'`,
   from a confident answer: 46% of a realistic merchant corpus landed there.
   Now the unknown is visible and sized. Don't reintroduce a real category as
   the fallback.
+- **Categorization precedence at WRITE time:** learned rule (`category_rules`)
+  → keyword table (`src/txClassify.js`) → `Uncategorized`. At READ time
+  `user_category` still wins over all of it. Learned rules do NOT override the
+  transfer/card-payment guards — those protect spending totals, and a rule that
+  made card payments count as spending would be a footgun. Both write paths
+  (SimpleFIN sync and CSV import) must pass `rules`, or a corrected merchant
+  reverts on the next pull. `merchantKey` drops numeric tokens only, so
+  "SAFEWAY #1234" and "SAFEWAY 8892" collapse but "COSTCO GAS" and
+  "COSTCO WHSE" stay distinct; matching is exact or whole-token prefix,
+  longest rule wins.
 - **A card PURCHASE can never be classified as a card payment.** "Transfers and
   card payments" is excluded from spending, so a false positive there deletes
   money from every total silently. Two guards in `src/txClassify.js`: an issuer
