@@ -216,6 +216,23 @@ playwright-core screenshot (`executablePath:'/opt/pw-browsers/chromium'`,
   legs drift 2–3 days — i.e. cross-bank personal↔joint ACH, which CSV/PDF import
   made reachable; same-day BECU sweeps were already matched correctly, so most
   months' figures don't move at all.
+- **Dark mode + Auto/Light/Dark toggle + render-time palette contrast** — the
+  app had NEVER rendered dark: inline CSS vars on Dashboard's root div shadowed
+  the `:root` dark rule (an inline custom property beats even `!important` on an
+  ancestor). `src/ui.css` now owns the tokens AND the shared `.card`/`.tab`/
+  `.ibtn` classes, which were trapped in Dashboard's `<style>` — so Login /
+  EmptyState / LinkAccount, which render before Dashboard mounts, are styled for
+  the first time. Header toggle + `src/theme.js` (see Conventions);
+  `src/paletteContrast.js` keeps category colors legible in both themes from the
+  same stored hexes. Three latent bugs fixed on the way: the Trends 6-month bars
+  collapsed to 4px stubs (% height against an auto-height flex parent), the
+  "All accounts" chip asked for `var(--muted)22` (not a color, so its active tint
+  never painted), and the Donut's `opacity:.9` ate the contrast correction.
+  Light mode is a pixel no-op EXCEPT where contrast correction deliberately
+  changes it — the amber "approaching budget" bar was 1.20:1 on the light track
+  (invisible) and now renders as legible dark gold. Known and deliberate:
+  `--light-muted` #888780 is 3.61:1 on the card, so light-mode small labels still
+  fail AA while their dark counterparts pass — a palette decision, not a bug.
 - **PDF statement import** — the same modal accepts a PDF, for accounts whose
   statements are only downloadable that way. No per-bank code: `src/pdfExtract.js`
   (lazy pdf.js) yields positioned text runs, and a **template** the user confirms
@@ -233,19 +250,7 @@ playwright-core screenshot (`executablePath:'/opt/pw-browsers/chromium'`,
   real iPhone.
 
 ## Pending branches
-
-- `claude/ultracode-refactoring-review-a2tm5f` — **dark mode + Auto/Light/Dark
-  toggle + render-time palette contrast**. Awaiting Mason's preview review.
-  Notable: the app had NEVER rendered dark (inline CSS vars on Dashboard's root
-  div shadowed the `:root` dark rule); `src/ui.css` now owns the tokens and the
-  shared classes, so Login/EmptyState/LinkAccount also pick up `.card`/`.ibtn`
-  for the first time. Two pre-existing bugs fixed on the way: the Trends 6-month
-  bars collapsed to 4px stubs (% height against an auto-height flex parent), and
-  the Transactions "All accounts" chip asked for `var(--muted)22`, which is not a
-  color, so its active tint never painted. Light mode is otherwise a pixel no-op
-  EXCEPT where contrast correction deliberately changes it (e.g. the amber
-  "approaching budget" bar was 1.20:1 on the light track — invisible — and now
-  renders as legible dark gold).
+_(none)_
 
 ## Roadmap
 
