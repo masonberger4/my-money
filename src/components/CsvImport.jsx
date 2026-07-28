@@ -1,8 +1,9 @@
 import { Component, useEffect, useMemo, useRef, useState } from "react";
-import { analyzeCsv, toInsertRow, parseCsv, reconcileCsv, csvDateRange, buildRows } from "../csvImport.js";
+import { analyzeCsv, toInsertRow, parseCsv, reconcileCsv, csvDateRange, buildRows, importPlan } from "../csvImport.js";
 import { applyTemplate, autoDetectTemplate, defaultTemplate, rowTotals, TEMPLATE_VERSION } from "../pdfImport.js";
-import { createManualAccount, importCsvTransactions, getExistingTxIds, getAccountTransactionsInRange, isManualAccount, isSimpleFinAccount, getCategoryRules, getEarliestTransactionDate } from "../dataAdapter.js";
+import { createManualAccount, importCsvTransactions, getExistingTxIds, getAccountTransactionsInRange, isManualAccount, isSimpleFinAccount, getCategoryRules, getFeedCoverageStart } from "../dataAdapter.js";
 import { getSetting, setSetting } from "../db.js";
+import { runSync } from "../sync.js";
 import { chipStyle, markColor, readableInk } from "../paletteContrast.js";
 import { readToken, subscribeTheme } from "../theme.js";
 import PdfTemplateEditor from "./PdfTemplateEditor.jsx";
@@ -12,29 +13,43 @@ import PdfTemplateEditor from "./PdfTemplateEditor.jsx";
 // produces (see pdfImport.js) by a per-account TEMPLATE the user confirms once
 // in the visual editor, so everything below this point is shared by both.
 //
-// Three modes, chosen by the target account:
-//  • STANDALONE — target is a new/existing MANUAL account: pick a bank CSV →
-//    preview the exact rows → confirm → real transactions land on a non-feed
-//    account. No DB write before Confirm; the preview greys out rows a prior
-//    import already inserted (stable csv:… id) so re-imports are safe.
-//  • HISTORY BACKFILL — target is a SIMPLEFIN account. SimpleFIN only reaches
-//    back so far, so a statement is the only way to recover older transactions.
-//    Rows dated on or after the account's earliest synced transaction are
-//    EXCLUDED: `csv:`/`pdf:` and `sfin:` dedup ids are separate namespaces that
-//    cannot see each other, so importing across that boundary would
-//    double-count with nothing downstream able to notice.
-//  • COMPARISON — target is a PLAID-LINKED account: insert NOTHING (that's the
-//    double-count trap). Reconcile against what Plaid already synced and show a
-//    read-only audit — sync gaps, pending/timing, and amount/date/category
-//    mismatches on matched pairs. Goes away with Plaid.
+// TWO SECTIONS, chosen by WHERE THE FILE'S ROWS FALL — not by the target.
+//
+// Until Plaid was removed the target answered the question: manual accounts got
+// an insert, Plaid accounts got a read-only audit. Every account is now either
+// manual or SimpleFIN-fed, and a fed account is a legitimate target for both
+// "fill in history the feed never had" and "check this statement against the
+// feed". So the file decides (see importPlan in csvImport.js):
+//
+//  • rows BEFORE the feed's coverage  -> imported (a backfill)
+//  • rows ON OR AFTER it              -> compared, never inserted
+//  • a file that straddles            -> both, on their respective slices
+//
+// The one control is a "Compare only" override, which can only ever move
+// TOWARDS not-inserting. A manual account has no feed, so it has no boundary and
+// always imports; an account we can't classify can only be compared.
+//
+// WHY THE BOUNDARY IS ABSOLUTE: `csv:`/`pdf:` and `sfin:` dedup ids are separate
+// namespaces that cannot see each other. A row imported over a date the feed
+// already covers is a duplicate nothing downstream can detect — it just silently
+// doubles that transaction in every total, forever.
 
-// Pad an ISO date by ±days so the Plaid fetch covers the CSV's period plus the
-// date-drift window on both ends. Explicit UTC math — never new Date(string).
+// Pad an ISO date by ±days so the feed fetch covers the statement's period plus
+// the date-drift window on both ends. Explicit UTC math — never new Date(string).
 function padIso(iso, days) {
   const [y, m, d] = String(iso).split("-").map(Number);
   const t = Date.UTC(y, m - 1, d) + days * 86400000;
   const dt = new Date(t);
   return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, "0")}-${String(dt.getUTCDate()).padStart(2, "0")}`;
+}
+
+// Today as an ISO date, in UTC — matching how transactions.date is stored and
+// how padIso arithmetic works. Deliberately not toLocaleDateString: a phone in
+// UTC−7 would otherwise call it "yesterday" all evening and shift the derived
+// feed boundary by a day.
+function todayIso() {
+  const d = new Date();
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
 }
 
 function money(n) {
@@ -110,9 +125,16 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
   // already taught the classifier instead of re-deriving from keywords alone.
   const [rules, setRules] = useState(null);
   // Where the SimpleFIN feed's own coverage starts for the target account.
-  // Rows on/after it must not be imported — see getEarliestTransactionDate.
+  // Rows on/after it must not be imported — see getFeedCoverageStart.
   const [coverageStart, setCoverageStart] = useState(null);
   const [coverageLoading, setCoverageLoading] = useState(false);
+  // A lookup that FAILED, as distinct from a feed that has delivered nothing.
+  const [coverageError, setCoverageError] = useState(false);
+  // Bumped to re-run the coverage lookup after a sync from inside this modal.
+  const [coverageNonce, setCoverageNonce] = useState(0);
+  // The user's explicit "don't import, just compare" override.
+  const [compareOnly, setCompareOnly] = useState(false);
+  const [syncState, setSyncState] = useState("idle"); // idle | running | done | failed
   const [loadingIds, setLoadingIds] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
@@ -134,18 +156,70 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
 
   const manual = accounts.filter(isManualAccount);
   const simplefin = accounts.filter(isSimpleFinAccount);
-  // "Plaid" here means a live feed we can only RECONCILE against, never import
-  // into. SimpleFIN gets its own mode: history predating the feed is exactly
-  // what statement import is for now that Plaid is being retired.
-  const plaid = accounts.filter(a => !isManualAccount(a) && !isSimpleFinAccount(a));
-  const targetIsPlaid = target !== "new" && plaid.some(a => a.id === target);
+  // Neither manual nor SimpleFIN. Normally empty now that Plaid is gone, but
+  // reachable from a hand-edited row or a half-applied migration. Its dedup
+  // namespace is unknown, so it can only ever be COMPARED against, never
+  // imported into.
+  const other = accounts.filter(a => !isManualAccount(a) && !isSimpleFinAccount(a));
   // Every account fed by something other than this importer — i.e. anything a
   // statement could ALREADY be covered by. Deliberately "not manual" rather
   // than "is SimpleFIN", so a feed we don't recognise still triggers the
   // duplicate-account warning below; erring toward warning is the safe side.
   const fedAccounts = accounts.filter(a => !isManualAccount(a));
-  const targetIsSimpleFin = target !== "new" && simplefin.some(a => a.id === target);
+
+  // Target classification, stated POSITIVELY. The old code derived
+  // `targetIsManual = !targetIsPlaid`, which quietly became true for every
+  // SimpleFIN account the moment the last Plaid item was unlinked — a
+  // derivation that survives only as long as the thing it negates exists.
+  // `targetIsUnknown` is the fail-closed branch that used to be provided
+  // accidentally by `plaid` catching everything unrecognised.
   const targetAcct = target !== "new" ? accounts.find(a => a.id === target) : null;
+  const targetIsExisting = !!targetAcct;
+  const targetIsSimpleFin = !!targetAcct && isSimpleFinAccount(targetAcct);
+  const targetIsManual = !!targetAcct && isManualAccount(targetAcct);
+  const targetIsUnknown = targetIsExisting && !targetIsManual && !targetIsSimpleFin;
+
+  // Switching target resets the override. Carrying an INSERTING state across
+  // accounts is the mis-tap that permanently doubles money; carrying a
+  // non-inserting one is harmless, but one rule is easier to reason about than
+  // two. Deliberately NOT reset on file change — auditing several statements in
+  // a row against the same account is a real flow.
+  useEffect(() => {
+    setCompareOnly(false);
+    setSyncState("idle");
+  }, [target]);
+
+  // Mirrors OVERLAP_DAYS in api/_lib/simplefin.js: every pull after the first
+  // starts at last_pulled_at minus this, so that tail can still arrive.
+  const FEED_LOOKBACK_DAYS = 30;
+
+  // Which of the five states the feed boundary is in. Only 'ok' permits an
+  // import into a fed account.
+  const boundaryState =
+    !targetIsSimpleFin ? "n/a"
+    : coverageLoading ? "loading"
+    : coverageError ? "error"
+    : coverageStart ? "ok"
+    : syncState === "running" ? "loading"
+    : syncState === "done" ? "ok"      // pulled just now and the feed really is empty here
+    : "unsynced";
+
+  // The date on/after which rows belong to the feed.
+  //
+  // The `today − 30` case is the one that needed the most care. When a fresh
+  // pull returns nothing for an account, it is tempting to conclude the feed has
+  // no claim on any date and unlock the whole file. That is wrong in a way that
+  // costs money: FIRST_PULL_DAYS defaults to 730, so a not-yet-synced account is
+  // about to receive up to two years of history, and even a synced-but-empty one
+  // keeps a live 30-day tail because subsequent pulls re-read that window. So an
+  // empty feed yields a boundary of today − 30 rather than no boundary at all,
+  // and a never-synced account gets no boundary and no import until it is
+  // synced — the button says so.
+  const overlapFrom =
+    !targetIsSimpleFin ? null
+    : coverageStart ? coverageStart
+    : boundaryState === "ok" ? padIso(todayIso(), -FEED_LOOKBACK_DAYS)
+    : null;
 
   // Apply the PDF template → the same cell grid a CSV yields. Guarded like the
   // CSV parse below: this runs during render, and the app has no error
@@ -177,27 +251,69 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
     try {
       if (fileKind === "pdf") {
         if (!pdfApplied) return null;
-        const { rows, skipped } = buildRows(pdfApplied.grid, { ...pdfApplied.buildOpts, existingIds, rules, overlapFrom: coverageStart });
+        const { rows, skipped } = buildRows(pdfApplied.grid, { ...pdfApplied.buildOpts, existingIds, rules, overlapFrom });
         return { rows, skipped, needsManualMapping: false, parsedRowCount: pdfApplied.grid.length };
       }
       if (!fileText) return null;
-      return analyzeCsv(fileText, { existingIds, manualColumns: manualCols, amountSign, rules, overlapFrom: coverageStart });
+      return analyzeCsv(fileText, { existingIds, manualColumns: manualCols, amountSign, rules, overlapFrom });
     } catch (e) {
       return { error: e.message, rows: [], skipped: [], needsManualMapping: false };
     }
-  }, [fileKind, pdfApplied, fileText, existingIds, manualCols, amountSign, rules, coverageStart]);
+  }, [fileKind, pdfApplied, fileText, existingIds, manualCols, amountSign, rules, overlapFrom]);
+
+  // These MUST stay above the reconciliation effect below.
+  //
+  // A useEffect's dependency array is evaluated during render, at the call site.
+  // Referencing a `const` declared further down the component body throws a
+  // ReferenceError from CsvImport's own body — and ModalErrorBoundary is
+  // rendered BY that body, so it cannot catch it. The result is not a broken
+  // modal, it is a blank PWA. These derivations used to live ~150 lines below
+  // the effect, which was survivable only because nothing down there was in its
+  // deps yet.
+  const plan = useMemo(
+    () => importPlan(
+      analysis && !analysis.needsManualMapping && !analysis.error ? analysis.rows : [],
+      { overlapFrom }
+    ),
+    [analysis, overlapFrom]
+  );
+  const { verdict, newRows, overlapRows, dupCount, overlapCount } = plan;
+  const rows = analysis?.rows || [];
+  const skipped = analysis?.skipped || [];
+  const preview = rows.slice(0, 200);
+
+  // An unknown target can only be compared. `compareOnly` is the user's
+  // override. `verdict === 'audit'` is the file's own answer: every row is
+  // already inside the feed's coverage, so there is nothing to insert.
+  const auditOnly = targetIsUnknown || compareOnly || verdict === "audit";
+  const previewShown = !auditOnly;
+  const auditShown = targetIsExisting && (auditOnly || overlapCount > 0);
+  // In the straddle case audit ONLY the in-coverage slice. Feeding the whole
+  // file would dump every pre-coverage row into the "missing from the feed"
+  // bucket, where the feed has nothing by definition — turning a clean backfill
+  // into a screen full of false gaps.
+  const auditRows = auditOnly ? rows : overlapRows;
 
   // Where the live feed's coverage begins, for the overlap guard.
+  //
+  // A FAILED lookup must not look like "the feed has nothing here". Both used to
+  // set coverageStart to null, and null means no boundary — so a dropped
+  // connection silently opened the guard on a fully-synced account and offered
+  // to import the whole file over the top of it. coverageError keeps them apart.
   useEffect(() => {
-    if (!targetIsSimpleFin) { setCoverageStart(null); return; }
+    if (!targetIsSimpleFin) { setCoverageStart(null); setCoverageError(false); return; }
     let cancelled = false;
+    setCoverageError(false);
     setCoverageLoading(true);
-    getEarliestTransactionDate(target)
+    getFeedCoverageStart(target)
       .then(d => { if (!cancelled) setCoverageStart(d); })
-      .catch(err => { console.error("coverage lookup failed", err); if (!cancelled) setCoverageStart(null); })
+      .catch(err => {
+        console.error("coverage lookup failed", err);
+        if (!cancelled) { setCoverageStart(null); setCoverageError(true); }
+      })
       .finally(() => { if (!cancelled) setCoverageLoading(false); });
     return () => { cancelled = true; };
-  }, [target, targetIsSimpleFin]);
+  }, [target, targetIsSimpleFin, coverageNonce]);
 
   // Learned merchant rules, loaded once — the analysis re-runs when they land.
   useEffect(() => {
@@ -208,10 +324,13 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
     return () => { cancelled = true; };
   }, []);
 
-  // Load the target account's existing ids so dupes grey out. New account or a
-  // Plaid target (comparison mode, no insert) → none.
+  // Load the target account's existing ids so dupes grey out. Loaded for EVERY
+  // existing target now: comparison mode used to skip this because it inserts
+  // nothing, but the same account can now be a backfill target in the same
+  // session, and `isDuplicate` is what makes re-importing a statement
+  // idempotent. Only a brand-new account has nothing to fetch.
   useEffect(() => {
-    if (target === "new" || targetIsPlaid) { setExistingIds(new Set()); setExistingSources(new Set()); return; }
+    if (target === "new") { setExistingIds(new Set()); setExistingSources(new Set()); return; }
     let cancelled = false;
     setLoadingIds(true);
     getExistingTxIds(target)
@@ -219,34 +338,30 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
       .catch(() => { if (!cancelled) { setExistingIds(new Set()); setExistingSources(new Set()); } })
       .finally(() => { if (!cancelled) setLoadingIds(false); });
     return () => { cancelled = true; };
-  }, [target, targetIsPlaid]);
+  }, [target]);
 
   // A bank words the same transaction differently in its CSV and its PDF, so
   // the dedup hash differs and feeding one account both formats double-inserts.
   // Warn when the account already holds rows from the other format.
   const incomingSource = fileKind === "pdf" ? "pdf" : "csv";
-  const targetIsManual = target !== "new" && !targetIsPlaid;
-  // Every row on a manual account arrived through an import, so its `source` is
-  // the format it came from — or 'plaid', the column default, if it predates
-  // the source column (sync never writes to a manual account, so that value
-  // can't mean anything else here). Treat ANY value that isn't the incoming
-  // format as a conflict, including that legacy one: we can't tell which format
-  // those rows came from, and guessing wrong double-counts them permanently.
-  // A SimpleFIN account legitimately holds 'simplefin' rows alongside imported
-  // history, so its own feed rows are not a format conflict — without this
-  // exemption the backfill mode would block itself on every SimpleFIN account.
-  // CSV-vs-PDF mixing is still caught, on SimpleFIN targets too.
-  const importedSources = [...existingSources].filter(s => !(targetIsSimpleFin && s === "simplefin"));
-  const mixedSource = (targetIsManual || targetIsSimpleFin) && importedSources.some(s => s !== incomingSource);
-  const legacySource = mixedSource && !importedSources.some(s => s === "csv" || s === "pdf");
+  // Every row on a MANUAL account arrived through an import, so any source
+  // that isn't the incoming format is a conflict — including the legacy 'plaid'
+  // column default on rows predating the source column, because we cannot tell
+  // which format those came from and guessing wrong double-counts permanently.
+  //
+  // A FED account legitimately holds its own feed rows next to imported
+  // history, so those are not a format conflict; only csv-vs-pdf is.
+  const IMPORT_FORMATS = new Set(["csv", "pdf"]);
+  const importedSources = [...existingSources].filter(s => (targetIsManual ? true : IMPORT_FORMATS.has(s)));
+  const mixedSource = targetIsExisting && importedSources.some(s => s !== incomingSource);
+  const legacySource = targetIsManual && mixedSource && !importedSources.some(s => IMPORT_FORMATS.has(s));
 
-  // Comparison mode: when the target is Plaid-linked, reconcile the CSV against
-  // what Plaid already synced over the CSV's date range (± the drift window).
-  // Inserts nothing — this only reads and audits.
+  // The audit: reconcile the statement against what the account already holds
+  // over the statement's date range (± the drift window). Inserts nothing.
   const csvRows = analysis && !analysis.needsManualMapping && !analysis.error ? analysis.rows : null;
   useEffect(() => {
-    if (!targetIsPlaid || !csvRows) { setRecon(null); return; }
-    const { min, max } = csvDateRange(csvRows);
+    if (!targetIsExisting || !auditShown || !csvRows) { setRecon(null); return; }
+    const { min, max } = csvDateRange(auditRows);
     if (!min || !max) { setRecon({ counts: { matched: 0, csvOnly: 0, plaidOnly: 0, amountMismatches: 0 }, matched: [], amountMismatches: [], csvOnly: [], plaidOnly: [] }); return; }
     let cancelled = false;
     setReconLoading(true);
@@ -255,12 +370,12 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
     // another query at the database.
     const handle = setTimeout(() => {
       getAccountTransactionsInRange(target, padIso(min, -7), padIso(max, 7))
-        .then(plaidRows => { if (!cancelled) setRecon(reconcileCsv(csvRows, plaidRows)); })
-        .catch(e => { if (!cancelled) { console.error("reconcile failed", e); setError(e.message || "Couldn't load Plaid transactions to compare."); setRecon(null); } })
+        .then(existing => { if (!cancelled) setRecon(reconcileCsv(auditRows, existing)); })
+        .catch(e => { if (!cancelled) { console.error("reconcile failed", e); setError(e.message || "Couldn't load this account's transactions to compare."); setRecon(null); } })
         .finally(() => { if (!cancelled) setReconLoading(false); });
     }, 350);
     return () => { cancelled = true; clearTimeout(handle); };
-  }, [target, targetIsPlaid, csvRows]);
+  }, [target, targetIsExisting, auditShown, auditOnly, csvRows]);
 
   // A statement is well under a megabyte. Reading a huge file would be held
   // several times over in memory (the ArrayBuffer, pdf.js's copy, and its
@@ -382,25 +497,58 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
     return () => { cancelled = true; };
   }, [fileKind, pdfPages, target, pdfAutoTemplate]);
 
-  const rows = analysis?.rows || [];
-  const overlapCount = rows.filter(r => r.isOverlap).length;
-  // Overlap rows are excluded from the import, not merely flagged: the feed
-  // already has that period and the two id namespaces can't dedup each other.
-  const newRows = rows.filter(r => !r.isDuplicate && !r.isOverlap);
-  const dupCount = rows.filter(r => r.isDuplicate && !r.isOverlap).length;
-  const skipped = analysis?.skipped || [];
-  const preview = rows.slice(0, 200);
+  // rows / newRows / overlapCount / dupCount / skipped / preview are derived
+  // near the top of the component, above the effects whose dependency arrays
+  // reference them — see the TDZ note there.
+
+  // A never-synced fed account has no boundary yet, so there is nothing to
+  // import safely against. Rather than guess one, pull the feed and look again.
+  async function syncNow() {
+    setSyncState("running");
+    setError(null);
+    try {
+      await runSync({ force: true });
+      setSyncState("done");
+      setCoverageNonce(n => n + 1);
+      if (onImported) onImported();
+    } catch (e) {
+      console.error("sync before import failed", e);
+      // Deliberately does NOT unlock the import. A failed pull tells us nothing
+      // about what the feed holds, and the first pull can reach back two years.
+      setSyncState("failed");
+      setError("Couldn't sync this account, so there's no safe boundary to import against. Try again.");
+    }
+  }
 
   // mixedSource BLOCKS rather than warns: the app has no way to delete
   // transactions, so importing a second format into the same account would
   // permanently double-count it until someone runs SQL against the database.
   const canConfirm =
     !!analysis && !analysis.needsManualMapping && !analysis.error && !busy && !loadingIds &&
-    !targetIsPlaid && !mixedSource && !coverageLoading && newRows.length > 0 &&
+    !auditOnly && !mixedSource &&
+    boundaryState !== "loading" && boundaryState !== "error" && boundaryState !== "unsynced" &&
+    newRows.length > 0 &&
     (target !== "new" || newName.trim().length > 0);
+
+  const needsSyncFirst = boundaryState === "unsynced";
+  const primaryLabel =
+    busy ? "Importing…"
+    : syncState === "running" ? "Syncing…"
+    : needsSyncFirst ? "Sync this account first"
+    : `Import ${newRows.length || ""} transaction${newRows.length !== 1 ? "s" : ""}`;
+  const primaryOn = needsSyncFirst ? syncState !== "running" : canConfirm;
 
   async function confirm() {
     if (!canConfirm) return;
+    // Defence in depth. canConfirm already gates the button, but these are the
+    // two invariants whose violation costs money rather than showing a wrong
+    // screen, and they are cheap to restate right before the write. They throw
+    // inside an async handler, so they land in the catch below as a visible
+    // error — never as a render blank.
+    if (auditOnly) return;
+    if (targetIsSimpleFin && !overlapFrom) {
+      throw new Error("internal: no feed boundary — refusing to import into a fed account");
+    }
     setBusy(true);
     setError(null);
     try {
@@ -412,6 +560,9 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
         accountName = acct.name;
       }
       const payload = newRows.map(toInsertRow);
+      if (overlapFrom && payload.some(r => r.date >= overlapFrom)) {
+        throw new Error("internal: a row on/after the feed boundary reached the insert payload");
+      }
       const written = await importCsvTransactions(accountId, payload, incomingSource);
       // Remember the PDF layout for this account so the next statement from the
       // same bank is read without teaching it again.
@@ -553,18 +704,22 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                     <select value={target} onChange={e => setTarget(e.target.value)} style={selStyle}>
                       <option value="new">➕ New imported account…</option>
                       {manual.length > 0 && (
-                        <optgroup label="Imported accounts (re-import / add)">
+                        <optgroup label="Imported accounts">
                           {manual.map(a => <option key={a.id} value={a.id}>{a.nickname || a.name}{a.subtype ? ` · ${a.subtype}` : ""}</option>)}
                         </optgroup>
                       )}
                       {simplefin.length > 0 && (
-                        <optgroup label="SimpleFIN accounts — add history from before the feed">
-                          {simplefin.map(a => <option key={a.id} value={a.id}>{a.nickname || a.name}</option>)}
+                        <optgroup label="Connected accounts (SimpleFIN)">
+                          {/* Hidden accounts ARE offered: getAccounts has no
+                              hidden filter and backfilling history before
+                              unhiding is a legitimate order of operations. Say
+                              so rather than leave it looking like a bug. */}
+                          {simplefin.map(a => <option key={a.id} value={a.id}>{a.nickname || a.name}{a.hidden ? " · hidden" : ""}</option>)}
                         </optgroup>
                       )}
-                      {plaid.length > 0 && (
-                        <optgroup label="Plaid-linked — compare (reconcile, nothing imported)">
-                          {plaid.map(a => <option key={a.id} value={a.id}>{a.nickname || a.name}{a.mask ? ` ··${a.mask}` : ""}</option>)}
+                      {other.length > 0 && (
+                        <optgroup label="Other accounts — compare only">
+                          {other.map(a => <option key={a.id} value={a.id}>{a.nickname || a.name}{a.mask ? ` ··${a.mask}` : ""}</option>)}
                         </optgroup>
                       )}
                     </select>
@@ -626,46 +781,71 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                       </div>
                     )}
 
-                    {targetIsPlaid && (
-                      <div style={{ marginTop: 10, fontSize: 12, color: "var(--muted)", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8, padding: "10px 12px", lineHeight: 1.5 }}>
-                        This account already syncs via Plaid. Nothing will be imported — your statement is compared against what
-                        Plaid synced, to surface sync gaps, pending/timing differences, and amount mismatches.
+                    {targetIsUnknown && (
+                      <div style={{ marginTop: 10, fontSize: 12, color: "var(--warn)", background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 8, padding: "10px 12px", lineHeight: 1.5 }}>
+                        This account isn't recognised as connected or imported, so nothing can be imported into it — only compared.
+                        Its transactions carry ids from a source this importer can't match against, which means a duplicate would go undetected.
                       </div>
                     )}
                   </div>
 
-                  {/* 3 — Comparison audit (Plaid target) */}
-                  {targetIsPlaid && (
-                    <Reconciliation recon={recon} loading={reconLoading} sectionLabel={sectionLabel} />
-                  )}
-
-                  {/* SimpleFIN history backfill: the overlap guard. */}
+                  {/* The verdict: one sentence saying what this file will do.
+                      Replaces the old coverage paragraph, which said "no synced
+                      transactions yet, so the whole file will import" whenever
+                      the boundary was missing — including when the lookup had
+                      simply FAILED, and including on an account whose first pull
+                      was about to fetch two years of history on top. */}
                   {targetIsSimpleFin && (
                     <div style={{
                       fontSize: 11, lineHeight: 1.6, marginBottom: 12, borderRadius: 8, padding: "10px 12px",
-                      color: overlapCount > 0 ? "var(--warn)" : "var(--muted)",
-                      background: overlapCount > 0 ? "var(--warn-bg)" : "var(--bg)",
-                      border: `1px solid ${overlapCount > 0 ? "var(--warn-border)" : "transparent"}`,
+                      color: boundaryState === "error" ? "var(--danger)" : boundaryState === "unsynced" || overlapCount > 0 ? "var(--warn)" : "var(--muted)",
+                      background: boundaryState === "error" ? "var(--danger-bg)" : boundaryState === "unsynced" || overlapCount > 0 ? "var(--warn-bg)" : "var(--bg)",
+                      border: `1px solid ${boundaryState === "error" ? "var(--danger-border)" : boundaryState === "unsynced" || overlapCount > 0 ? "var(--warn-border)" : "transparent"}`,
                     }}>
-                      {coverageLoading ? "Checking where this account's feed starts…"
-                        : !coverageStart ? <>This account has no synced transactions yet, so the whole file will import.</>
-                        : <>
-                            SimpleFIN covers this account from <strong>{coverageStart}</strong>.
-                            {overlapCount > 0
-                              ? <> <strong>{overlapCount}</strong> row{overlapCount !== 1 ? "s" : ""} on or after that date {overlapCount !== 1 ? "are" : "is"} excluded — the feed already has {overlapCount !== 1 ? "them" : "it"}, and imported copies carry a different id, so nothing downstream would catch the duplication.</>
-                              : <> Every row in this file predates it, so there's nothing to exclude.</>}
-                          </>}
+                      {boundaryState === "loading" ? "Checking what the feed already has…"
+                        : boundaryState === "error" ? <>Couldn't check where this account's feed starts, so importing isn't safe — a statement covering dates the feed already has would count every transaction twice. Close and retry.</>
+                        : boundaryState === "unsynced" ? <>This account hasn't synced yet, so there's no boundary to import against — the first pull reaches back up to two years and would land on top of anything imported now.</>
+                        : !coverageStart ? <>The feed has no transactions for this account. Rows from the last {FEED_LOOKBACK_DAYS} days are still excluded — the next pull can reach back that far.</>
+                        : verdict === "audit" ? <>The feed covers this account from <strong>{overlapFrom}</strong> and every row here is inside that. Nothing will be imported — here's how your statement compares.</>
+                        : verdict === "both" ? <>The feed starts <strong>{overlapFrom}</strong>. The <strong>{newRows.length}</strong> row{newRows.length !== 1 ? "s" : ""} before it will import; the <strong>{overlapCount}</strong> on or after it {overlapCount !== 1 ? "are" : "is"} compared against the feed instead.</>
+                        : <>The feed starts <strong>{overlapFrom}</strong>. Every row in this file predates it, so there's nothing to exclude.</>}
                     </div>
                   )}
 
-                  {/* 3 — Preview (standalone / SimpleFIN-history target) */}
-                  {!targetIsPlaid && (
+                  {/* The single override, and it only ever points AWAY from
+                      inserting. Defaulted to the file's own answer, so on the
+                      common paths it is never touched. */}
+                  {targetIsExisting && !targetIsUnknown && (
+                    <div style={{ marginBottom: 12 }}>
+                      {compareOnly ? (
+                        <button className="ibtn" style={{ width: "100%", justifyContent: "center", minHeight: 44 }} onClick={() => setCompareOnly(false)}>
+                          ← Back to import
+                        </button>
+                      ) : verdict !== "audit" && (
+                        <button
+                          className="ibtn"
+                          style={{ width: "100%", justifyContent: "center", minHeight: 44, opacity: !loadingIds && existingIds.size === 0 ? .45 : 1 }}
+                          disabled={!loadingIds && existingIds.size === 0}
+                          title={!loadingIds && existingIds.size === 0 ? "Nothing on this account to compare against" : ""}
+                          onClick={() => setCompareOnly(true)}>
+                          Compare only — don't import
+                        </button>
+                      )}
+                    </div>
+                  )}
+
+                  {auditShown && (
+                    <Reconciliation recon={recon} loading={reconLoading} sectionLabel={sectionLabel} step={previewShown ? 4 : 3} />
+                  )}
+
+                  {/* Preview — only when something can actually be inserted. */}
+                  {previewShown && (
                   <div style={{ marginBottom: 10 }}>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
                       <div style={sectionLabel}>3 · Preview</div>
                       <div style={{ fontSize: 11, color: "var(--muted)" }}>
                         {loadingIds || coverageLoading ? "checking…" : (
-                          <><strong style={{ color: "var(--text)" }}>{newRows.length}</strong> new{dupCount > 0 && <> · {dupCount} duplicate</>}{overlapCount > 0 && <> · {overlapCount} after the feed starts</>}</>
+                          <><strong style={{ color: "var(--text)" }}>{newRows.length}</strong> new{dupCount > 0 && <> · {dupCount} duplicate</>}{overlapCount > 0 && <> · {overlapCount} compared instead</>}</>
                         )}
                       </div>
                     </div>
@@ -727,15 +907,18 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
         <div style={{ display: "flex", gap: 8, padding: "14px 20px", borderTop: "1px solid var(--border)" }}>
           {result ? (
             <button onClick={onClose} style={{ flex: 1, padding: "10px 0", borderRadius: 8, border: "none", background: "var(--accent)", color: "var(--accent-text)", fontFamily: "inherit", fontSize: 14, fontWeight: 500, cursor: "pointer" }}>Done</button>
-          ) : targetIsPlaid ? (
-            // Comparison mode inserts nothing — only a close action.
+          ) : auditOnly ? (
+            // Nothing to insert — the only action is to close.
             <button onClick={onClose} style={{ flex: 1, padding: "10px 0", borderRadius: 8, border: "none", background: "var(--accent)", color: "var(--accent-text)", fontFamily: "inherit", fontSize: 14, fontWeight: 500, cursor: "pointer" }}>Close (nothing imported)</button>
           ) : (
             <>
-              <button onClick={onClose} disabled={busy} className="ibtn" style={{ flex: 1, justifyContent: "center", opacity: busy ? .5 : 1 }}>Cancel</button>
-              <button onClick={confirm} disabled={!canConfirm}
-                style={{ flex: 2, padding: "10px 0", borderRadius: 8, border: "none", background: "var(--accent)", color: "var(--accent-text)", fontFamily: "inherit", fontSize: 14, fontWeight: 500, cursor: canConfirm ? "pointer" : "default", opacity: canConfirm ? 1 : .5 }}>
-                {busy ? "Importing…" : `Import ${newRows.length || ""} transaction${newRows.length !== 1 ? "s" : ""}`}
+              <button onClick={onClose} disabled={busy || syncState === "running"} className="ibtn" style={{ flex: 1, justifyContent: "center", opacity: busy ? .5 : 1 }}>Cancel</button>
+              {/* On a never-synced fed account the primary action is to SYNC,
+                  not to import — there is no boundary to import against yet, and
+                  inventing one is how you double-count two years of history. */}
+              <button onClick={needsSyncFirst ? syncNow : confirm} disabled={!primaryOn}
+                style={{ flex: 2, padding: "10px 0", borderRadius: 8, border: "none", background: "var(--accent)", color: "var(--accent-text)", fontFamily: "inherit", fontSize: 14, fontWeight: 500, cursor: primaryOn ? "pointer" : "default", opacity: primaryOn ? 1 : .5 }}>
+                {primaryLabel}
               </button>
             </>
           )}
@@ -816,7 +999,12 @@ function ManualMapper({ fileText, onApply, amountSign, setAmountSign, selStyle, 
   );
 }
 
-// Comparison-mode audit. Reconciles the CSV against Plaid-synced rows and shows
+// The audit. Reconciles the statement against what the account already holds
+// and shows
+// NOTE the `plaidOnly` / `plaidTotal` / `plaidDescriptor` keys below come from
+// reconcileCsv and are deliberately NOT renamed: they mean "already on this
+// account", the same adapter-agnostic sense as the plaid_tx_id column, and
+// reconcileCsv has no test coverage to catch a rename going wrong.
 // four buckets. Inserts nothing. Kept compact + mobile-first; each list caps at
 // 50 rows with a "+N more" line so a big month doesn't blow up the modal.
 //
@@ -863,16 +1051,16 @@ function ReconSection({ title, hint, color, count, children }) {
   );
 }
 
-function Reconciliation({ recon, loading, sectionLabel }) {
+function Reconciliation({ recon, loading, sectionLabel, step = 3 }) {
   // Hooks before the early returns. The chips sit on the modal panel (--card).
-  // The neutral "Plaid-only" bucket takes its hue from the --muted TOKEN read at
+  // The neutral "feed-only" bucket takes its hue from the --muted TOKEN read at
   // runtime rather than the #888780 literal it used to hardcode — that literal
   // was light mode's --muted value verbatim, so it stayed a light-mode grey on a
   // dark card. As a token it adapts, and still reads as the neutral of the four.
   const cardSurface = useSurface("--card");
   const neutralHue = useSurface("--muted");
   if (loading) {
-    return <div style={{ marginBottom: 10 }}><div style={sectionLabel}>Comparing against Plaid…</div>
+    return <div style={{ marginBottom: 10 }}><div style={sectionLabel}>Comparing against the feed…</div>
       <div style={{ fontSize: 12, color: "var(--muted)" }}>Reconciling the CSV against what's already synced — nothing will be imported.</div></div>;
   }
   if (!recon) return null;
@@ -895,17 +1083,17 @@ function Reconciliation({ recon, loading, sectionLabel }) {
   return (
     <div style={{ marginBottom: 10 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-        <div style={sectionLabel}>3 · Comparison audit</div>
-        <div style={{ fontSize: 11, color: "var(--muted)" }}>{c.csvTotal} in file · {c.plaidTotal} synced</div>
+        <div style={sectionLabel}>{step} · Comparison audit</div>
+        <div style={{ fontSize: 11, color: "var(--muted)" }}>{c.csvTotal} in file · {c.plaidTotal} already on this account</div>
       </div>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 12 }}>
         {chip("matched", c.matched, MONEY_IN)}
         {chip("sync gap" + (c.csvOnly !== 1 ? "s" : ""), c.csvOnly, SYNC_GAP)}
         {chip("amount diff" + (c.amountMismatches !== 1 ? "s" : ""), c.amountMismatches, AMOUNT_DIFF)}
-        {chip("Plaid-only", c.plaidOnly, neutralHue)}
+        {chip("feed-only", c.plaidOnly, neutralHue)}
       </div>
 
-      <ReconSection title="In your statement, missing from Plaid" hint="Possible sync gaps — Plaid may not have picked these up." color={SYNC_GAP} count={recon.csvOnly.length}>
+      <ReconSection title="In your statement, missing here" hint="Possible sync gaps — the feed may not have picked these up." color={SYNC_GAP} count={recon.csvOnly.length}>
         {recon.csvOnly.slice(0, RECON_CAP).map((r, i) => (
           <ReconRow key={i} left={r.description} sub={r.date} amount={money(r.amount)} />
         ))}
@@ -915,13 +1103,13 @@ function Reconciliation({ recon, loading, sectionLabel }) {
       <ReconSection title="Amount differs" hint="Same merchant a few days apart, different amount — likely the same transaction (a tip, a pending vs posted change)." color={AMOUNT_DIFF} count={recon.amountMismatches.length}>
         {recon.amountMismatches.slice(0, RECON_CAP).map((m, i) => (
           <ReconRow key={i} left={m.csv.description}
-            sub={`CSV ${m.csv.date} · Plaid ${m.plaid.date}`}
+            sub={`statement ${m.csv.date} · feed ${m.plaid.date}`}
             amount={`${money(m.csv.amount)} → ${money(m.plaid.amount)}`}
             amountNote={`${m.amountDiff > 0 ? "+" : ""}${money(m.amountDiff)}`} />
         ))}
       </ReconSection>
 
-      <ReconSection title="Synced by Plaid, not in your statement" hint="Pending, timing, or simply not in this export yet." color={neutralHue} count={recon.plaidOnly.length}>
+      <ReconSection title="On this account, not in your statement" hint="Pending, timing, or simply not in this export yet." color={neutralHue} count={recon.plaidOnly.length}>
         {recon.plaidOnly.slice(0, RECON_CAP).map((r, i) => (
           <ReconRow key={i} left={r.description || r.merchant_name || "Transaction"} sub={`${r.date}${r.pending ? " · pending" : ""}`} amount={money(r.amount)} />
         ))}
@@ -932,13 +1120,13 @@ function Reconciliation({ recon, loading, sectionLabel }) {
         {flaggedMatched.slice(0, RECON_CAP).map((m, i) => (
           <ReconRow key={i} left={m.csv.description}
             sub={[m.dateMismatch ? `date ${m.csv.date}→${m.plaid.date}` : null,
-                  m.categoryMismatch ? `category CSV "${m.csv.mapped_category}" vs Plaid "${m.plaid.user_category || m.plaid.mapped_category}"` : null].filter(Boolean).join(" · ")}
+                  m.categoryMismatch ? `category statement "${m.csv.mapped_category}" vs feed "${m.plaid.user_category || m.plaid.mapped_category}"` : null].filter(Boolean).join(" · ")}
             amount={money(m.csv.amount)} />
         ))}
       </ReconSection>
 
       <div style={{ fontSize: 11, color: "var(--muted)", background: "var(--bg)", borderRadius: 8, padding: "8px 10px", lineHeight: 1.5 }}>
-        {cleanMatched} of {c.csvTotal} statement rows matched cleanly. Nothing was imported — this account stays Plaid-synced.
+        {cleanMatched} of {c.csvTotal} statement rows matched cleanly. Nothing was imported.
       </div>
     </div>
   );

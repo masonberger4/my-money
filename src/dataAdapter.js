@@ -33,7 +33,7 @@ function shiftMonth(year, month, delta) {
 const TX_COLUMNS =
   'id, plaid_tx_id, account_id, date, amount, merchant_name, description, mapped_category, raw_category, user_category, user_description, excluded, pending';
 
-// User override wins over the Plaid-derived category.
+// User override wins over the classifier's answer.
 function effectiveCategory(t) {
   return t.user_category || t.mapped_category || UNCATEGORIZED;
 }
@@ -474,8 +474,8 @@ const SIMPLEFIN_PREFIX = 'sfin:';
 
 // A SimpleFIN-fed account. Matters to the UI for two reasons: its type was
 // GUESSED from the account name (SimpleFIN sends none) so it must be
-// correctable by hand, and it arrives hidden until it's been compared against
-// the Plaid copy of the same bank.
+// correctable by hand, and it arrives hidden — the type guess is exactly what
+// unhiding confirms, and getting it wrong moves the spending totals.
 export function isSimpleFinAccount(a) {
   return String(a?.plaid_account_id || '').startsWith(SIMPLEFIN_PREFIX);
 }
@@ -607,8 +607,8 @@ export async function getExistingTxIds(accountId) {
   return { ids, sources };
 }
 
-// The earliest transaction a live feed has for an account — i.e. where its
-// coverage starts. CSV history imported on or after this date would be a second
+// Where the SimpleFIN feed's own coverage starts for an account: the date of
+// the earliest transaction the FEED delivered. CSV history imported on or after this date would be a second
 // copy of transactions the feed already supplies: `csv:` and `sfin:` dedup ids
 // live in different namespaces and cannot see each other, so nothing downstream
 // would catch the duplication. Returns null when the FEED has no rows yet.
@@ -624,7 +624,7 @@ export async function getExistingTxIds(accountId) {
 // prefix is written unconditionally, whereas `source` degrades to the legacy
 // `'plaid'` default whenever the column is absent (see `txHaveSource` in
 // api/sync.js and `transactionsHaveSource` here).
-export async function getEarliestTransactionDate(accountId) {
+export async function getFeedCoverageStart(accountId) {
   if (!accountId) return null;
   const { data, error } = await supabase
     .from('transactions')

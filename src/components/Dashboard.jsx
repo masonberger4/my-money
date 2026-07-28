@@ -522,10 +522,16 @@ export default function Dashboard({ refreshTick = 0 }) {
   // api/sync.js re-normalizes against the corrected type. `force` skips the
   // once-an-hour throttle. Only on a boundary crossing — credit→loan is free.
   const [retyping,setRetyping]=useState(false);
-  async function saveAccountType(id,fields,prevType){
+  // `fed` = the balance comes from SimpleFIN. Crossing the debt boundary flips
+  // the sign convention the stored balance must follow (positive = owed), and
+  // only the feed can restate it — so a fed account re-syncs. A manual account's
+  // balance was typed in by hand and no pull will ever correct it, so re-syncing
+  // there would burn a SimpleFIN request and, worse, imply the number had been
+  // fixed when nothing touched it.
+  async function saveAccountType(id,fields,prevType,fed){
     const crossed=isDebtType(prevType)!==isDebtType(fields.type);
     await saveAccount(id,fields);
-    if(!crossed)return;
+    if(!crossed||!fed)return;
     setRetyping(true);
     try{
       await runSync({force:true});
@@ -995,12 +1001,21 @@ export default function Dashboard({ refreshTick = 0 }) {
                 :"Hide keeps syncing but drops it from totals · Unlink removes the connection and its data"}
             </div>
 
-            {/* Account type — editable only for feeds that don't send one.
+            {/* Account type — editable everywhere now.
                 SimpleFIN sends no type at all, so it's guessed from the account
                 name on first sync; the checking/savings split drives the Trends
-                cash-flow model, so a wrong guess has to be fixable. Plaid
-                accounts are excluded: their sync re-writes both columns. */}
-            {isSimpleFinAccount(selAcct)&&(
+                cash-flow model, so a wrong guess has to be fixable.
+
+                This used to be SimpleFIN-only, because a Plaid sync re-wrote
+                type and subtype on every pull and an edit there would silently
+                revert. That reason died with Plaid — and it never applied to
+                MANUAL accounts, whose type is set once at creation and then
+                never written again by anything. Leaving them out meant a
+                statement-imported account typed Savings by mistake could never
+                be corrected, and `isCheckingAccount` in cashFlow.js reads
+                exactly that field to decide whether its outflows are household
+                spending. A field that changes the numbers must be fixable. */}
+            {(isSimpleFinAccount(selAcct)||isManualAccount(selAcct))&&(
               <div style={{marginTop:12,background:"var(--bg)",borderRadius:8,padding:"10px 12px"}}>
                 <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em",marginBottom:8}}>Account type</div>
                 <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
@@ -1014,7 +1029,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                     const cs=active?chipOn(TYPE_CHIP,surf.bg):null;
                     return (
                       <button key={t} disabled={retyping}
-                        onClick={()=>saveAccountType(selAcct.id,{type:t,subtype:t==="depository"?(selAcct.subtype==="savings"?"savings":"checking"):t==="credit"?"credit card":"loan"},selAcct.type)}
+                        onClick={()=>saveAccountType(selAcct.id,{type:t,subtype:t==="depository"?(selAcct.subtype==="savings"?"savings":"checking"):t==="credit"?"credit card":"loan"},selAcct.type,isSimpleFinAccount(selAcct))}
                         style={{fontSize:11,fontWeight:600,padding:"5px 10px",borderRadius:20,fontFamily:"inherit",cursor:retyping?"default":"pointer",opacity:retyping?.6:1,
                           background:cs?cs.bg:"var(--card)",color:cs?cs.ink:"var(--muted)",
                           border:`1px solid ${active?markOn(TYPE_CHIP,surf.bg):"var(--border)"}`,transition:"all .15s"}}>

@@ -7,6 +7,7 @@ import {
   invalidRuleCategories,
   transferRawCategory,
   guessCategory,
+  importPlan,
   CSV_TX_ID_PREFIX,
 } from '../src/csvImport.js';
 import { TRANSFER_CATEGORY, FALLBACK_CATEGORY } from '../src/categoryMap.js';
@@ -176,4 +177,51 @@ test('overlap does not perturb the dedup id — re-import still dedups', () => {
     existingIds: new Set(plain.rows.map(r => r.plaid_tx_id)),
   });
   assert.ok(reimport.rows.every(r => r.isDuplicate));
+});
+
+// --- importPlan: which sections the modal shows ------------------------------
+//
+// With Plaid gone, the target account can no longer say whether a file is a
+// backfill or an audit — every account is manual or SimpleFIN-fed, and a fed
+// account is a valid target for both. The file's date range answers it instead.
+
+test('importPlan reads the file against the boundary', () => {
+  const plan = overlapFrom => importPlan(overlapAnalysis({ overlapFrom }).rows, { overlapFrom });
+
+  // Rows run 3/1 .. 3/4.
+  assert.equal(plan('2026-03-10').verdict, 'import', 'entirely before the feed → a pure backfill');
+  assert.equal(plan('2026-03-01').verdict, 'audit', 'entirely inside the feed → nothing to insert');
+  assert.equal(plan('2026-03-03').verdict, 'both', 'straddling → import the old part, audit the rest');
+  assert.equal(plan(null).verdict, 'import', 'no feed (manual account) → always an import');
+  assert.equal(importPlan([], { overlapFrom: null }).verdict, 'empty');
+});
+
+test('importPlan: an audit verdict means an EMPTY insert set', () => {
+  const overlapFrom = '2026-03-01';
+  const { verdict, newRows, overlapCount } = importPlan(
+    overlapAnalysis({ overlapFrom }).rows, { overlapFrom }
+  );
+  assert.equal(verdict, 'audit');
+  assert.equal(newRows.length, 0);
+  assert.equal(overlapCount, OVERLAP_LINES.length);
+});
+
+// THE invariant. A wrong verdict may render a confusing screen; it must never
+// widen what gets written. Asserted across every boundary the fixture can
+// straddle, including both ends.
+test('importPlan: newRows never contains a row on or after the boundary', () => {
+  for (const overlapFrom of ['2026-02-28', '2026-03-01', '2026-03-02', '2026-03-03', '2026-03-04', '2026-03-09']) {
+    const { newRows } = importPlan(overlapAnalysis({ overlapFrom }).rows, { overlapFrom });
+    for (const r of newRows) {
+      assert.ok(r.date < overlapFrom, `${r.description} (${r.date}) must not import at ${overlapFrom}`);
+    }
+  }
+});
+
+test('importPlan tolerates junk instead of throwing during render', () => {
+  // It runs inside a useMemo in CsvImport's body; a throw there is not caught by
+  // ModalErrorBoundary (which that same body renders) and blanks the whole PWA.
+  for (const junk of [undefined, null, 'nope', 42, {}]) {
+    assert.equal(importPlan(junk).verdict, 'empty');
+  }
 });

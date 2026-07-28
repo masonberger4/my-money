@@ -50,78 +50,16 @@ export function isBudgetableCategory(category) {
   return category !== UNCATEGORIZED && category !== TRANSFER_CATEGORY;
 }
 
-const unmappedWarned = new Set();
-
-export function mapPlaidCategory(primary, detailed) {
-  const p = (primary || '').toUpperCase();
-  const d = (detailed || '').toUpperCase();
-
-  switch (p) {
-    case 'FOOD_AND_DRINK':
-      if (d.includes('GROCERIES')) return 'Groceries';
-      if (d.includes('COFFEE')) return 'Coffee and snacks';
-      if (d.includes('RESTAURANT') || d.includes('FAST_FOOD')) return 'Dining out';
-      return 'Dining out';
-
-    case 'TRANSPORTATION':
-      if (d.includes('TAXIS_AND_RIDE_SHARES')) return 'Ride shares';
-      if (d.includes('PUBLIC_TRANSIT')) return 'Public transit';
-      if (
-        d.includes('GAS') ||
-        d.includes('PARKING') ||
-        d.includes('TOLLS') ||
-        d.includes('MAINTENANCE')
-      )
-        return 'Vehicle expenses';
-      if (d.includes('FLIGHT') || d.includes('HOTEL') || d.includes('TRAVEL'))
-        return 'Travel and vacation';
-      return 'Vehicle expenses';
-
-    case 'TRAVEL':
-      return 'Travel and vacation';
-
-    case 'ENTERTAINMENT':
-    case 'RECREATION_SERVICES':
-      return 'Entertainment and subscriptions';
-
-    case 'GENERAL_MERCHANDISE':
-      return 'Shopping and gear';
-
-    case 'PERSONAL_CARE':
-      return 'Health and fitness';
-
-    case 'MEDICAL':
-      return 'Healthcare and pharmacy';
-
-    case 'HOME_IMPROVEMENT':
-      return 'Home maintenance and improvement';
-
-    case 'RENT_AND_UTILITIES':
-      return 'Utilities';
-
-    case 'GOVERNMENT_AND_NON_PROFIT':
-    case 'GENERAL_SERVICES':
-      return 'Cash, checks, and misc';
-
-    case 'TRANSFER_IN':
-    case 'TRANSFER_OUT':
-    case 'LOAN_PAYMENTS':
-    case 'BANK_FEES':
-    case 'INCOME':
-      return TRANSFER_CATEGORY;
-
-    default: {
-      const key = `${p}|${d}`;
-      if (!unmappedWarned.has(key)) {
-        unmappedWarned.add(key);
-        console.warn(`[categoryMap] Unmapped Plaid category: ${key} → "${UNCATEGORIZED}"`);
-      }
-      // Was "Shopping and gear", for the same bad reason the keyword table used
-      // it: an unmapped code is not shopping, it's unknown. Say so.
-      return UNCATEGORIZED;
-    }
-  }
-}
+// mapPlaidCategory lived here until Plaid was removed. It translated Plaid's
+// Personal Finance Category codes (FOOD_AND_DRINK / TRANSPORTATION / …) into
+// this taxonomy, and nothing produces those codes any more: SimpleFIN sends no
+// category at all, and both surviving write paths — the SimpleFIN pass in
+// api/sync.js and CSV/PDF import — derive `mapped_category` from the descriptor
+// via src/txClassify.js instead.
+//
+// Historical rows keep whatever `mapped_category` was written at the time; the
+// function was never called at READ time, so deleting it changes nothing that
+// is already in the database.
 
 export function isTransferCategory(category) {
   return category === TRANSFER_CATEGORY;

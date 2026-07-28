@@ -436,6 +436,43 @@ export function toInsertRow(built) {
 }
 
 // ---------------------------------------------------------------------------
+// What the importer should DO with a parsed file, derived from where its rows
+// fall relative to the feed's coverage.
+//
+// This exists because, with Plaid gone, the target account can no longer answer
+// the question. Every account is now either manual or SimpleFIN-fed, and a fed
+// account is a legitimate target for BOTH "fill in the history the feed never
+// had" (inserts) and "check this statement against the feed" (inserts nothing).
+// Asking the user to pick would be asking them to answer something the file
+// already answers: rows before the boundary can only be backfill, rows on or
+// after it can only be an audit.
+//
+//   'empty'  — nothing parsed
+//   'import' — no boundary, or every row predates it → a pure backfill
+//   'audit'  — every row is inside the feed's coverage → nothing to insert
+//   'both'   — the file straddles the boundary → import the old part, audit the rest
+//
+// SAFETY: `verdict` is advisory — it decides which sections the modal shows and
+// nothing else. The insert set is `newRows`, whose definition is unchanged and
+// depends only on `isOverlap`/`isDuplicate`. So a wrong verdict can render a
+// confusing screen; it structurally cannot widen what gets written.
+export function importPlan(rows = [], { overlapFrom = null } = {}) {
+  const list = Array.isArray(rows) ? rows : [];
+  const overlapRows = list.filter(r => r.isOverlap);
+  const newRows = list.filter(r => !r.isDuplicate && !r.isOverlap);
+  const dupCount = list.filter(r => r.isDuplicate && !r.isOverlap).length;
+
+  let verdict;
+  if (list.length === 0) verdict = 'empty';
+  else if (!overlapFrom) verdict = 'import';
+  else if (overlapRows.length === list.length) verdict = 'audit';
+  else if (overlapRows.length === 0) verdict = 'import';
+  else verdict = 'both';
+
+  return { verdict, newRows, overlapRows, dupCount, overlapCount: overlapRows.length };
+}
+
+// ---------------------------------------------------------------------------
 // One-call convenience used by the UI: raw text → detection + built rows.
 // Returns { header, columns, rows, skipped, needsManualMapping }.
 // ---------------------------------------------------------------------------
