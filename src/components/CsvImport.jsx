@@ -1,4 +1,5 @@
 import { Component, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { analyzeCsv, toInsertRow, parseCsv, reconcileCsv, csvDateRange, buildRows, importPlan } from "../csvImport.js";
 import { applyTemplate, autoDetectTemplate, defaultTemplate, rowTotals, TEMPLATE_VERSION } from "../pdfImport.js";
 import { createManualAccount, importCsvTransactions, getExistingTxIds, getAccountTransactionsInRange, isManualAccount, isSimpleFinAccount, getCategoryRules, getFeedCoverageStart } from "../dataAdapter.js";
@@ -111,6 +112,14 @@ class ModalErrorBoundary extends Component {
   }
 }
 
+// Rendered through a PORTAL to document.body, and that is load-bearing rather
+// than tidy. `position: fixed` is resolved against the nearest ancestor with a
+// transform/filter/perspective — not the viewport — and `.card` carries
+// `animation: fadeIn … both`, whose final keyframe Chromium computes as the
+// IDENTITY MATRIX, not `none`. So any modal rendered from inside a card gets
+// its "full-screen" overlay clipped to that card: measured at 340px wide inside
+// EmptyState, with the backdrop and the outside-tap-to-close going with it.
+// Portalling makes the overlay immune to wherever the caller happens to sit.
 export default function CsvImport({ accounts = [], onClose, onImported }) {
   const [fileName, setFileName] = useState(null);
   const [fileText, setFileText] = useState(null);
@@ -590,7 +599,7 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
   const sectionLabel = { fontSize: 11, fontWeight: 600, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".05em", marginBottom: 8 };
   const selStyle = { fontSize: 13, fontFamily: "inherit", color: "var(--text)", background: "var(--input-bg)", border: "1px solid var(--border)", borderRadius: 8, padding: "8px 10px", outline: "none", width: "100%" };
 
-  return (
+  return createPortal(
     <div className="overlay" onClick={busy ? undefined : onClose}>
       <div onClick={e => e.stopPropagation()} style={panelStyle}>
         {/* Header */}
@@ -925,7 +934,7 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
         </div>
       </div>
     </div>
-  );
+    , document.body);
 }
 
 // Fallback when the header can't be auto-detected: show the first parsed rows

@@ -1,19 +1,22 @@
 import { useCallback, useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import { claimSimpleFinToken, getSimpleFinStatus, disconnectSimpleFin, restoreSimpleFinInstitution } from "../apiClient.js";
 import { runSync } from "../sync.js";
 
-// SimpleFIN connect — the Accounts-tab modal that replaces Plaid Link.
+// SimpleFIN connect — the modal behind "⚡ Connect with SimpleFIN", reachable
+// from the Accounts tab, the first-run empty state and the floating button.
 //
 // There is no SDK and no popup: the user links their banks on SimpleFIN
 // Bridge's own hosted page, copies the setup token it prints, and pastes it
 // here. The server claims a durable access URL from that token and keeps it
 // (api/simplefin-claim.js); the browser never receives it.
 //
-// While SimpleFIN runs ALONGSIDE Plaid, accounts arrive HIDDEN. A bank
-// connected to both feeds would otherwise import every transaction twice and
-// silently double every total, so nothing joins the dashboard until it has been
-// compared and unhidden by hand. That is the whole point of this phase, and the
-// copy below says so.
+// Accounts arrive HIDDEN. The original reason (a bank on both Plaid and
+// SimpleFIN would double-count) died with Plaid; the surviving one is that
+// SimpleFIN sends no account type, so it is INFERRED from the account name.
+// `isCheckingAccount` then decides whether that account's outflows are
+// household spending, so a card guessed as checking silently inflates every
+// total. Unhiding is the deliberate act that confirms the guess.
 
 const BRIDGE_URL = "https://bridge.simplefin.org/";
 
@@ -38,6 +41,14 @@ function relative(iso) {
   return `${Math.round(hrs / 24)}d ago`;
 }
 
+// Rendered through a PORTAL to document.body, and that is load-bearing rather
+// than tidy. `position: fixed` is resolved against the nearest ancestor with a
+// transform/filter/perspective — not the viewport — and `.card` carries
+// `animation: fadeIn … both`, whose final keyframe Chromium computes as the
+// IDENTITY MATRIX, not `none`. So any modal rendered from inside a card gets
+// its "full-screen" overlay clipped to that card: measured at 340px wide inside
+// EmptyState, with the backdrop and the outside-tap-to-close going with it.
+// Portalling makes the overlay immune to wherever the caller happens to sit.
 export default function SimpleFinConnect({ onClose, onConnected }) {
   const [status, setStatus] = useState(null);
   const [token, setToken] = useState("");
@@ -149,7 +160,7 @@ export default function SimpleFinConnect({ onClose, onConnected }) {
 
   const connected = !!status?.connected;
 
-  return (
+  return createPortal(
     <div className="overlay" onClick={busy ? undefined : onClose}>
       <div onClick={e => e.stopPropagation()} style={panelStyle}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "18px 20px", borderBottom: "1px solid var(--border)" }}>
@@ -232,7 +243,7 @@ export default function SimpleFinConnect({ onClose, onConnected }) {
                     <br /><br />
                     On the Accounts tab: open each one, check its <strong style={{ color: "var(--text)" }}>type</strong> is
                     right (SimpleFIN doesn't send one — it's guessed from the name, and the checking/savings split drives
-                    Trends), compare its transactions against the Plaid copy, then unhide it.
+                    Trends), then unhide it.
                   </div>
                   {result.warning && (
                     <div style={{ fontSize: 11, color: "var(--warn)", background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 8, padding: "10px 12px", marginTop: 14, lineHeight: 1.5, textAlign: "left" }}>
@@ -284,8 +295,9 @@ export default function SimpleFinConnect({ onClose, onConnected }) {
 
                   <div style={{ ...note, background: "var(--bg)", borderRadius: 8, padding: "10px 12px" }}>
                     New accounts arrive <strong style={{ color: "var(--text)" }}>hidden</strong> and change nothing until
-                    you unhide them. That's deliberate: while a bank is connected to both Plaid and SimpleFIN, counting
-                    both feeds would double its spending.
+                    you unhide them. SimpleFIN doesn't send an account type, so it's guessed from the name — and a card
+                    mistaken for a checking account turns every purchase into household spending. Check the type on the
+                    account screen, then unhide.
                   </div>
                 </>
               )}
@@ -321,5 +333,5 @@ export default function SimpleFinConnect({ onClose, onConnected }) {
         </div>
       </div>
     </div>
-  );
+    , document.body);
 }
