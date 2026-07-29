@@ -490,37 +490,31 @@ option; that is a decision for Mason, not an automatic upgrade.
   nearly got wrong (a missing assignment must never fall back to the target; the
   walk must have no date clamp) are pinned by named REGRESSION tests.
 
+- **Category drill-in + custom categories unified** — tapping a category's
+  transaction count or amount (Categories tab) or its Spent (Budget tab) opens
+  `CategorySheet`: that month's rows in that category, split into the ones the
+  total is made of and a "Not counted" tail, off the adapter's `counted` flag so
+  the list's sum is the number that was tapped. Custom categories became
+  ordinary rows in the Categories list carrying their own colour into the Budget
+  tab, the donut and every pill (see the Conventions entry); "+ Add category"
+  became the add-and-retire manager. Three optimistic-refresh bugs fixed with
+  it, all the same shape — `reloadData` only refetches the current month, so
+  anything it doesn't reach keeps the pre-edit value on screen while the DB write
+  lands fine: a **category change or rename made from SEARCH** never appeared
+  (`saveTx` never patched `searchRes`, and `merchant_name` is derived, so
+  `toTxShape` gained `auto_description` to recompute it), and **"Always
+  categorize this merchant as X"** appeared not to reach the other transactions
+  (a rule rewrites OTHER rows, so there is no id to patch — `learnMerchant` now
+  refetches the search results and the open account sheet). Alongside those, a
+  **failed** learned-rule dry run was folded into `count = 0`, which renders
+  identically to "nothing to update", and the candidate scan paged an unordered
+  result set treating PostgREST's end-of-range 416 as fatal. See the `saveTx`
+  Gotcha and `test/txClassify.test.js` (first coverage of that path, incl. a
+  REGRESSION test pinning the over-specific-key limit). No migration.
+
 ## Pending branches
 
-**`claude/category-transactions-styling-rd989c`** — category drill-in + custom
-categories unified. No migration, no schema change.
-- Tapping a category's transaction count or amount (Categories tab) or its Spent
-  (Budget tab) opens `CategorySheet`: that month's transactions in that
-  category, split into the ones the total is made of and a "Not counted" tail
-  (excluded / money-in / loan postings). Built from the month's already-loaded
-  rows, so it costs no round trip, and split on the adapter's new `counted`
-  flag, so its sum is the number that was tapped. Rendered BEFORE the
-  transaction sheet so tapping a row stacks that on top and closing it returns
-  to the list.
-- Custom categories are ordinary rows in the Categories list — same swatch,
-  name, count, amount, target and bar — instead of a name-and-colour block at
-  the bottom, and they now carry their own colour into the Budget tab, the donut
-  and every pill (see the Conventions entry). The "+ Add category" sheet became
-  the add-and-retire manager.
-- Also fixes an older bug Mason hit here: **editing a transaction found by
-  SEARCH appeared not to save** (it always did save — see the `saveTx` Gotcha).
-  `toTxShape` gained `auto_description` so the rename can be recomputed locally.
-- And its sibling: **"Always categorize this merchant as X" appeared not to
-  reach the other transactions.** It always did — a learned rule rewrites OTHER
-  rows, which have no id to patch, and only the current month gets refetched, so
-  every relabelled row outside it kept its old category on screen. `learnMerchant`
-  now refetches the search results and the open account sheet too. Same fix
-  shape as the `saveTx` Gotcha, and the reason a rule application can't reuse it:
-  there is no single id. Two smaller ones alongside: a **failed** dry run was
-  folded into `count = 0`, which renders identically to "nothing to update" (the
-  edited row always matches its own rule, so a real 0 is near-impossible — see
-  the note on `applyCategoryRuleToHistory`), and the candidate scan paged an
-  unordered result set with no 416 handling.
+None.
 
 Envelope budgeting merged 2026-07-29; its migration was applied to PROD ahead of
 the merge, so nothing is outstanding there.
