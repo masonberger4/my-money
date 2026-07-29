@@ -21,6 +21,7 @@
 drop publication if exists supabase_realtime;
 create publication supabase_realtime;
 
+drop table if exists budget_months cascade;
 drop table if exists budgets cascade;
 drop table if exists settings cascade;
 -- Plaid is gone (20260728000002), but this wipe list must still name

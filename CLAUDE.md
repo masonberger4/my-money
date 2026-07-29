@@ -407,7 +407,10 @@ playwright-core screenshot (`executablePath:'/opt/pw-browsers/chromium'`,
   `supabase/migrations/20260729000001_budget_envelopes.sql` (additive: one new
   table, three new `budgets` columns, one relaxed NOT NULL). Preview shows the
   Budget tab but no envelope data until it is applied — previews share the PROD
-  database.
+  database. **Paste it at merge time, deploy-adjacent, not days early**: once
+  applied, envelope edits on the preview write NULL-`monthly_limit` rows that
+  the `getBudgets` deployed on main coerces into $0.00 budgets on the other
+  phone's Categories tab (see the migration header).
 
 Phase 4 is fully landed: code merged and deployed, and
 `20260728000002_remove_plaid.sql` **applied on 2026-07-29** after its pre-flight

@@ -45,9 +45,13 @@ export const UNCATEGORIZED = 'Uncategorized';
 export const FALLBACK_CATEGORY = UNCATEGORIZED;
 
 // Categories that exist for bookkeeping rather than budgeting. A budget on
-// "Uncategorized" would be a budget on the classifier's ignorance.
+// "Uncategorized" would be a budget on the classifier's ignorance, and a
+// budget on "Return" would be an envelope whose Spent can never move —
+// Return rows are credit-card negatives, permanently excluded from spending.
 export function isBudgetableCategory(category) {
-  return category !== UNCATEGORIZED && category !== TRANSFER_CATEGORY;
+  return (
+    category !== UNCATEGORIZED && category !== TRANSFER_CATEGORY && category !== RETURN_CATEGORY
+  );
 }
 
 // mapPlaidCategory lived here until Plaid was removed. It translated Plaid's

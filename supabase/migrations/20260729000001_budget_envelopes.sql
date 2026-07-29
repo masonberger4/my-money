@@ -24,6 +24,12 @@
 -- Additive on live data: one new table, three new columns, one relaxed NOT
 -- NULL. Nothing is dropped or rewritten, and existing budget rows keep
 -- working (an existing monthly_limit simply reads as a monthly target).
+--
+-- TIMING: paste at merge time, deploy-adjacent — not days early. Once this
+-- runs, the branch's preview can write budgets rows with a NULL monthly_limit
+-- (rollover/target edits), and the getBudgets DEPLOYED on main coerces NULL
+-- to a $0.00 budget on the Categories tab. Old code never breaks (that is
+-- what additive buys); it just misreads rows only the new code writes.
 
 create table budget_months (
   household_id uuid not null default current_household_id() references households(id) on delete cascade,

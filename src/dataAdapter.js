@@ -362,16 +362,34 @@ export async function applyCategoryRuleToHistory(descriptor, category, { dryRun 
 // Budgets: one monthly dollar limit per category. No row = no budget.
 // RLS scopes reads to the household; household_id fills in server-side via
 // its column default (same as settings) — never send it from the client.
+// `budgets` maps category → MONTHLY target only. A by-date sinking fund's
+// amount is a multi-month TOTAL — handing it to the Categories tab as if it
+// were monthly would inflate the Targets strip and every bar denominator by
+// the un-prorated balance (a "$6,000 by June" fund is not a $6,000/month
+// budget). By-date targets come back separately in `byDate`.
 export async function getBudgets() {
-  const { data, error } = await supabase.from('budgets').select('category, monthly_limit');
+  let { data, error } = await supabase
+    .from('budgets')
+    .select('category, monthly_limit, target_kind, target_date');
+  // Pre-envelope-migration schema has no target_kind/target_date (42703);
+  // every row is a plain monthly target there.
+  if (error && error.code === '42703') {
+    ({ data, error } = await supabase.from('budgets').select('category, monthly_limit'));
+  }
   if (error) throw error;
   const budgets = {};
+  const byDate = {};
   for (const row of data) {
     // A null limit is a category keeping rollover/target settings without a
     // target amount (post-envelope migration) — reads as "no target".
-    if (row.monthly_limit != null) budgets[row.category] = Number(row.monthly_limit);
+    if (row.monthly_limit == null) continue;
+    if (row.target_kind === 'by_date') {
+      byDate[row.category] = { target: Number(row.monthly_limit), date: row.target_date || null };
+    } else {
+      budgets[row.category] = Number(row.monthly_limit);
+    }
   }
-  return { budgets };
+  return { budgets, byDate };
 }
 
 // Sets the category's funding target. Clearing it null-UPDATES the row rather
@@ -521,15 +539,22 @@ export async function setBudgetIncome({ year, month }, amount, { scope = 'month'
 // dashboard's own reload, which is the only moment transactions can have moved
 // (a sync, a CSV/PDF import, a recategorisation, a learned rule applied).
 let spendCache = null;
+// Generation counter: a fetch that was already in flight when the cache was
+// invalidated must not write its (pre-invalidation) result back in — network
+// reordering would otherwise re-poison the cache with pre-edit sums right
+// after a recategorisation or a learned-rule history rewrite.
+let spendGen = 0;
 
 export function invalidateEnvelopeSpending() {
   spendCache = null;
+  spendGen++;
 }
 
 async function getEnvelopeSpending(start, end) {
   const cacheKey = `${start}|${end}`;
   if (spendCache && spendCache.key === cacheKey) return spendCache.spending;
 
+  const gen = spendGen;
   const txs = await getTransactionsBetween(start, end, {
     columns: SPEND_TX_COLUMNS,
     markTransfers: false,
@@ -549,7 +574,7 @@ async function getEnvelopeSpending(start, end) {
   for (const [key, amount] of byKey) {
     spending.push({ category: key.slice(7), month: key.slice(0, 7), spent: amount });
   }
-  spendCache = { key: cacheKey, spending };
+  if (gen === spendGen) spendCache = { key: cacheKey, spending };
   return spending;
 }
 
@@ -619,10 +644,31 @@ export async function setAssigned(category, { year, month }, amount) {
 // ON CONFLICT DO UPDATE touches only those, so setting a rollover flag never
 // clobbers monthly_limit or target_kind, and vice versa (verified against a
 // local Postgres stub).
+//
+// Asymmetric on purpose: rollover=false (non-default) may create a row, but
+// rollover=true first deletes a row that carries nothing else and otherwise
+// UPDATEs — walkEnvelopes lists every budgets row in every month and no UI
+// deletes one, so an idle ⟳ experiment on a never-budgeted category must not
+// pin it to the Budget tab forever.
 export async function setCategoryRollover(category, rollover) {
+  if (rollover) {
+    const { error: delErr } = await supabase
+      .from('budgets')
+      .delete()
+      .eq('category', category)
+      .is('monthly_limit', null)
+      .is('target_date', null);
+    if (delErr && delErr.code !== '42703') throw delErr;
+    const { error } = await supabase
+      .from('budgets')
+      .update({ rollover: true })
+      .eq('category', category);
+    if (error && error.code !== '42703') throw error;
+    return;
+  }
   const { error } = await supabase
     .from('budgets')
-    .upsert({ category, rollover: !!rollover }, { onConflict: 'household_id,category' });
+    .upsert({ category, rollover: false }, { onConflict: 'household_id,category' });
   if (error) throw error;
 }
 

@@ -468,6 +468,9 @@ export default function Dashboard({ refreshTick = 0 }) {
   const [cashFlow,setCashFlow]=useState(null);
   const [accounts,setAccounts]=useState([]);
   const [budgets,setBudgets]=useState({});
+  // By-date sinking funds, kept OUT of `budgets`: their amount is a
+  // multi-month total, not a monthly cap (see getBudgets).
+  const [byDate,setByDate]=useState({});
   // --- Envelope budgeting (Budget tab) ---
   const [envelopes,setEnvelopes]=useState(null);
   const [income,setIncome]=useState(null);
@@ -624,10 +627,12 @@ export default function Dashboard({ refreshTick = 0 }) {
       if(seq!==loadSeq.current)return false;
       setOverview(ov);setSpending(sp);setTransactions(tx);setCashFlow(cf);
       setAccounts(ac.accounts||[]);
-      setBudgets(bu.budgets||{});
       // A completed envelope write may have painted fresher rows while this
-      // reload was in flight — don't overwrite them with a pre-write snapshot.
+      // reload was in flight — don't overwrite them (or the freshly saved
+      // budgets/targets) with a pre-write snapshot.
       if(eseq===envSeq.current){
+        setBudgets(bu.budgets||{});
+        setByDate(bu.byDate||{});
         if(en!==undefined)setEnvelopes(en);
         if(inc!==undefined)setIncome(inc);
       }
@@ -957,7 +962,19 @@ export default function Dashboard({ refreshTick = 0 }) {
         envSeq.current++;
         if(env!==undefined)setEnvelopes(env);
         if(inc!==undefined)setIncome(inc);
-        if(bud!==undefined)setBudgets(bud.budgets||{});
+        if(bud!==undefined){setBudgets(bud.budgets||{});setByDate(bud.byDate||{});}
+      }else{
+        // The user moved months while the write settled. The write still went
+        // to ITS month (the one the number was typed against) — but a reload
+        // for the new month may have read budget_months before this write
+        // committed, leaving the carry short on screen. Re-read the month now
+        // being viewed; envSeq drops anything older.
+        const [cy,cm]=monthRef.current.split("-").map(Number);
+        const fresh=await getEnvelopes({year:cy,month:cm}).catch(()=>undefined);
+        if(fresh!==undefined&&monthRef.current===`${cy}-${cm}`){
+          envSeq.current++;
+          setEnvelopes(fresh);
+        }
       }
     }catch(err){
       console.error(`${what} save failed`,err);
@@ -967,7 +984,12 @@ export default function Dashboard({ refreshTick = 0 }) {
 
   const saveBudget=(category,val)=>runEnvelopeWrite("the target",()=>setBudget(category,val));
   const saveAssigned=(category,val)=>runEnvelopeWrite("the assignment",()=>setAssigned(category,{year,month},val));
-  const saveRollover=(category,next)=>runEnvelopeWrite("the rollover setting",()=>setCategoryRollover(category,next));
+  const saveRollover=(category,next)=>{
+    // The ⟳ is disabled on by-date rows, but the invariant lives here too: a
+    // sinking fund with rollover off would ask for its full share forever.
+    if(!next&&envMap[category]?.targetKind==="by_date"&&envMap[category]?.target!=null)return;
+    return runEnvelopeWrite("the rollover setting",()=>setCategoryRollover(category,next));
+  };
   const saveIncome=(val,scope)=>runEnvelopeWrite("the income",()=>setBudgetIncome({year,month},val,{scope}));
   const doMove=(from,to,amount)=>runEnvelopeWrite("the transfer",()=>moveMoney({from,to,amount},{year,month}));
   const saveTarget=(category,{amount,kind,date})=>runEnvelopeWrite("the target",async()=>{
@@ -1155,7 +1177,14 @@ export default function Dashboard({ refreshTick = 0 }) {
                       {/* No budget on Uncategorized — it would be a budget on
                           the classifier's ignorance, and the number moves as
                           merchants get learned rather than as spending changes. */}
-                      {isBudgetableCategory(c.label)&&<BudgetEdit limit={lim} onSave={v=>saveBudget(c.label,v)}/>}
+                      {isBudgetableCategory(c.label)&&(byDate[c.label]
+                        ?<button onClick={()=>setTab("budget")}
+                            title="Sinking fund — a total to reach by a date, not a monthly cap. Edit it on the Budget tab."
+                            style={{background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",padding:0,
+                              fontSize:11,color:"var(--muted)",flexShrink:0}}>
+                            {fmtAuto(byDate[c.label].target)} by {monthYear(byDate[c.label].date)}
+                          </button>
+                        :<BudgetEdit limit={lim} onSave={v=>saveBudget(c.label,v)}/>)}
                     </div>
                   </div>
                   <div style={{display:"flex",alignItems:"center",gap:8}}>
@@ -1322,8 +1351,11 @@ export default function Dashboard({ refreshTick = 0 }) {
                           title="Move money between this envelope and another"
                           style={{background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",padding:"0 2px",
                             fontSize:13,lineHeight:1,color:"var(--muted)",flexShrink:0}}>⇄</button>
-                        <button onClick={()=>saveRollover(r.category,!r.rollover)} disabled={envBusy}
-                          title={r.rollover?"Leftover rolls into next month — tap to turn off":"Leftover resets each month — tap to roll it over"}
+                        <button onClick={()=>saveRollover(r.category,!r.rollover)}
+                          disabled={envBusy||(r.targetKind==="by_date"&&r.target!=null)}
+                          title={r.targetKind==="by_date"&&r.target!=null
+                            ?"A sinking fund only reaches its date because leftovers carry — rollover stays on while the by-date target exists"
+                            :r.rollover?"Leftover rolls into next month — tap to turn off":"Leftover resets each month — tap to roll it over"}
                           style={{background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",padding:"0 2px",
                             fontSize:13,lineHeight:1,color:r.rollover?"var(--accent)":"var(--border)",flexShrink:0}}>⟳</button>
                       </div>
