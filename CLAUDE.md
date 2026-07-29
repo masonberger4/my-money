@@ -93,7 +93,7 @@ entry once shipped.
 | `api/_lib/supabase.js` | Service-role client + `requireUser` (JWT → householdId). |
 | `supabase/migrations/` | Ordered SQL migrations (additive-only on live data). |
 | `supabase/setup_all.sql` | One-paste fresh install — **DESTRUCTIVE, wipes all tables. Never run on live data. Never re-generate to include new migrations without that warning.** Convenience snapshot only — `migrations/` is the source of truth; ends with a column-level self-check that raises if it drifts behind migrations. |
-| `test/` | `npm test` — Node's built-in `node --test`, zero deps. Covers the pure cores only: cashFlow (incl. brute-force max-matching parity), csvImport parsing/dedup-id idempotency, category rules, envelopes (both walk regressions + by-date targets). Run before pushing. |
+| `test/` | `npm test` — Node's built-in `node --test`, zero deps. Covers the pure cores only: cashFlow (incl. brute-force max-matching parity), csvImport parsing/dedup-id idempotency, category rules, txClassify (learned-rule matching: what collapses, what stays distinct, and the over-specific-key limit), envelopes (both walk regressions + by-date targets). Run before pushing. |
 
 ## Development workflow
 
@@ -234,6 +234,15 @@ playwright-core screenshot (`executablePath:'/opt/pw-browsers/chromium'`,
   "SAFEWAY #1234" and "SAFEWAY 8892" collapse but "COSTCO GAS" and
   "COSTCO WHSE" stay distinct; matching is exact or whole-token prefix,
   longest rule wins.
+  **Known limit, pinned by a REGRESSION test in `test/txClassify.test.js`:** the
+  prefix runs rule→row, so a rule is only general if the descriptor it was
+  taught from was ALREADY the short form. Teach from "COSTCO GAS #0117 SEATTLE
+  WA" and the key becomes `COSTCO GAS SEATTLE WA`, which matches that store and
+  nothing else — not even "COSTCO GAS #0117". Every automatic fix (stem to N
+  tokens, strip a trailing city/state, match both directions) trades false
+  misses for false MERGES, and a confidently wrong category is the failure mode
+  this codebase repeatedly refuses. Left as-is deliberately; letting the user
+  shorten the key in the confirm is the honest fix if it starts to matter.
 - **A card PURCHASE can never be classified as a card payment.** "Transfers and
   card payments" is excluded from spending, so a false positive there deletes
   money from every total silently. Two guards in `src/txClassify.js`: an issuer
@@ -501,6 +510,17 @@ categories unified. No migration, no schema change.
 - Also fixes an older bug Mason hit here: **editing a transaction found by
   SEARCH appeared not to save** (it always did save — see the `saveTx` Gotcha).
   `toTxShape` gained `auto_description` so the rename can be recomputed locally.
+- And its sibling: **"Always categorize this merchant as X" appeared not to
+  reach the other transactions.** It always did — a learned rule rewrites OTHER
+  rows, which have no id to patch, and only the current month gets refetched, so
+  every relabelled row outside it kept its old category on screen. `learnMerchant`
+  now refetches the search results and the open account sheet too. Same fix
+  shape as the `saveTx` Gotcha, and the reason a rule application can't reuse it:
+  there is no single id. Two smaller ones alongside: a **failed** dry run was
+  folded into `count = 0`, which renders identically to "nothing to update" (the
+  edited row always matches its own rule, so a real 0 is near-impossible — see
+  the note on `applyCategoryRuleToHistory`), and the candidate scan paged an
+  unordered result set with no 416 handling.
 
 Envelope budgeting merged 2026-07-29; its migration was applied to PROD ahead of
 the merge, so nothing is outstanding there.

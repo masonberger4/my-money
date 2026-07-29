@@ -875,16 +875,39 @@ export default function Dashboard({ refreshTick = 0 }) {
   // path or a taught rule wouldn't fire on the next pull.
   const txDescriptor=useCallback(t=>t?(t.merchant_name||t.description||""):"",[]);
 
+  // count is a NUMBER when the preview ran, or null when it couldn't — the two
+  // must stay distinguishable. Folding a failure into 0 renders identically to
+  // "nothing to update", which is exactly how a broken preview passed for a
+  // working one: the row being edited always matches its own rule, so a real 0
+  // is only possible when the merchant appears nowhere else.
   async function offerToLearn(category){
     if(!selTx)return;
     const descriptor=txDescriptor(selTx);
     const key=merchantKey(descriptor);
     if(!key)return;
-    let count=0;
+    let count=null,previewError=null;
     try{ count=await applyCategoryRuleToHistory(descriptor,category,{dryRun:true}); }
-    catch(err){ console.error("rule preview failed",err); }
-    setLearnPrompt({descriptor,key,category,count});
+    catch(err){ console.error("rule preview failed",err); previewError=err.message||String(err); }
+    setLearnPrompt({descriptor,key,category,count,previewError});
   }
+
+  // A rule rewrites OTHER transactions, so there is no id to patch and the
+  // optimistic path can't help: the lists reloadData doesn't cover have to be
+  // refetched or the relabelled rows keep their old category on screen — the
+  // "it didn't apply to the others" symptom.
+  const refetchOpenLists=useCallback(async()=>{
+    const q=searchQ.trim();
+    await Promise.all([
+      q.length>=2
+        ? searchTransactions(q).then(setSearchRes).catch(err=>console.error("search refresh failed",err))
+        : Promise.resolve(),
+      selAcct
+        ? getAccountTransactions(selAcct.id)
+            .then(res=>{setAcctTxs(res.transactions);setAcctHasMore(res.hasMore);})
+            .catch(err=>console.error("account list refresh failed",err))
+        : Promise.resolve(),
+    ]);
+  },[searchQ,selAcct]);
 
   async function learnMerchant(){
     if(!learnPrompt)return;
@@ -893,8 +916,13 @@ export default function Dashboard({ refreshTick = 0 }) {
       await setCategoryRule(learnPrompt.descriptor,learnPrompt.category);
       const n=await applyCategoryRuleToHistory(learnPrompt.descriptor,learnPrompt.category);
       setLearnPrompt(null);
-      setLearnedNote(`Remembered — ${learnPrompt.key} is ${getName(learnPrompt.category)}${n>0?`, and ${n} past transaction${n!==1?"s":""} updated`:""}.`);
+      // Say which of the two things happened. "Remembered" alone reads as
+      // success even when nothing was relabelled.
+      setLearnedNote(n>0
+        ? `Remembered — ${learnPrompt.key} is ${getName(learnPrompt.category)}, and ${n} past transaction${n!==1?"s":""} updated.`
+        : `Remembered — ${learnPrompt.key} is ${getName(learnPrompt.category)}. No past transactions needed changing; future ones will use it.`);
       await reloadData(year,month);
+      await refetchOpenLists();
     }catch(err){
       console.error("learning the merchant failed",err);
       setLearnPrompt(null);
@@ -2145,7 +2173,14 @@ export default function Dashboard({ refreshTick = 0 }) {
                 <div style={{fontSize:11,color:"var(--text)",lineHeight:1.5,marginBottom:8}}>
                   Always categorize <strong>{learnPrompt.key}</strong> as <strong>{getName(learnPrompt.category)}</strong>?
                   {learnPrompt.count>0&&<> Also updates {learnPrompt.count} past transaction{learnPrompt.count!==1?"s":""}.</>}
+                  {learnPrompt.count===0&&<> No past transactions match it.</>}
                 </div>
+                {learnPrompt.previewError&&(
+                  <div style={{fontSize:10,color:inkOn("#D85A30",surf.bg),lineHeight:1.5,marginBottom:8}}>
+                    Couldn't check past transactions: {learnPrompt.previewError}. The rule will still be
+                    saved for future transactions.
+                  </div>
+                )}
                 <div style={{display:"flex",gap:8}}>
                   <button onClick={()=>setLearnPrompt(null)} className="ibtn" style={{flex:1,justifyContent:"center",fontSize:11}}>Just this one</button>
                   <button onClick={learnMerchant} disabled={learning}

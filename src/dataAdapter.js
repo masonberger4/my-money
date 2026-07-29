@@ -330,12 +330,29 @@ export async function deleteCategoryRule(merchantKeyValue) {
   if (error) throw error;
 }
 
+// PostgREST answers a Range whose start is past the last row with 416
+// ("Requested range not satisfiable", PGRST103). That is end-of-data, not a
+// failure, and a paging loop that treats it as one dies on any result set whose
+// size is an exact multiple of the page.
+function isRangeExhaustedError(error) {
+  if (!error) return false;
+  return error.code === 'PGRST103' || /range not satisfiable/i.test(error.message || '');
+}
+
 // Apply a freshly-taught rule to history. Writes `mapped_category` only, so a
 // per-transaction `user_category` override always still wins — this changes
 // what the classifier *would* have said, not what the user decided.
 //
 // dryRun counts the matches without writing, so the confirm can say how many
 // past transactions it is about to touch.
+//
+// NOTE for callers: this ALWAYS throws on a real failure and never returns 0 to
+// mean "it didn't work". 0 genuinely means nothing matched — and because the
+// transaction being edited matches its own rule (its descriptor is where the
+// key came from) and only ever has `user_category` rewritten, 0 is impossible
+// unless the merchant truly appears nowhere else under a different
+// mapped_category. Swallowing the throw into a 0 makes a broken preview look
+// exactly like "nothing to update", which is how this failed silently.
 export async function applyCategoryRuleToHistory(descriptor, category, { dryRun = false } = {}) {
   const key = merchantKey(descriptor);
   if (!key) return 0;
@@ -353,7 +370,15 @@ export async function applyCategoryRuleToHistory(descriptor, category, { dryRun 
       .from('transactions')
       .select('id, description, merchant_name, mapped_category')
       .or(`description.ilike.${pat},merchant_name.ilike.${pat}`)
+      // Same tiebreaker reasoning as getTransactionsBetween: paging an
+      // unordered result set can drop or repeat rows across the boundary, and
+      // a dropped row here is a transaction the rule silently fails to fix.
+      .order('id', { ascending: true })
       .range(from, from + page - 1);
+    // Asking for a page that starts past the end is PostgREST's 416, which
+    // supabase-js reports as an error — but it just means "no more rows", and
+    // it happens whenever the match count is an exact multiple of `page`.
+    if (error && isRangeExhaustedError(error)) break;
     if (error) throw error;
     for (const t of data) {
       // Classify on the same string the write path uses.
