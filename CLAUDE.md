@@ -404,13 +404,14 @@ playwright-core screenshot (`executablePath:'/opt/pw-browsers/chromium'`,
   cutover (absorbing the loan-account spending guard into `isSpend()`, the
   theme tokens, and `isBudgetableCategory` — Uncategorized can't be budgeted).
   **Migration to paste at merge:**
-  `supabase/migrations/20260729000001_budget_envelopes.sql` (additive: one new
-  table, three new `budgets` columns, one relaxed NOT NULL). Preview shows the
-  Budget tab but no envelope data until it is applied — previews share the PROD
-  database. **Paste it at merge time, deploy-adjacent, not days early**: once
-  applied, envelope edits on the preview write NULL-`monthly_limit` rows that
-  the `getBudgets` deployed on main coerces into $0.00 budgets on the other
-  phone's Categories tab (see the migration header).
+  `supabase/migrations/20260729000001_budget_envelopes.sql` — **applied to PROD
+  on 2026-07-29, ahead of the merge. Nothing to paste at merge time.** The
+  preview's Budget tab is fully live (previews share the PROD database — edits
+  there are real). Known cross-version quirk until the merge deploys: an
+  envelope edit that creates a settings-only `budgets` row (rollover toggle,
+  by-date target) reads as a $0.00 budget on the *deployed* app's Categories
+  tab, because main's `getBudgets` coerces NULL `monthly_limit` to 0 — cosmetic,
+  self-heals at merge, but argues for merging promptly.
 
 Phase 4 is fully landed: code merged and deployed, and
 `20260728000002_remove_plaid.sql` **applied on 2026-07-29** after its pre-flight
