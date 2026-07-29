@@ -70,9 +70,10 @@ entry once shipped.
 | `src/ui.css` | The ONLY place theme-token values live: `:root` light + a `prefers-color-scheme: dark` block (--bg/--card/--text/--muted/--border/--accent/--accent-text/--danger*/--warn*/--input-bg/--track/--shadow/--overlay), plus the font `@import` (must stay line 1), the `*` reset, keyframes, and the shared `.card`/`.tab`/`.ibtn` classes. Global so the pre-Dashboard screens get them. |
 | `src/theme.js` | Theme selection + application: localStorage pref (`mm:theme`), `resolveTheme`, `applyTheme` (sets `<html data-theme>` + syncs the `theme-color` metas), `subscribeTheme`/`subscribeSystemTheme`, `readToken` (runtime token read), `initTheme` (called from main.jsx), and the `useTheme` hook the header toggle uses. |
 | `src/paletteContrast.js` | Pure, zero imports: WCAG math + `readableInk`/`markColor`/`chipStyle`, which hold hue fixed and bisect lightness to guarantee 4.5:1 / 3:1 against a given surface. Never throws (runs during render). Covered by `test/paletteContrast.test.js`. |
-| `src/components/Dashboard.jsx` | Almost the entire UI — single file, inline styles, tabs: overview/categories/transactions/accounts/trends/recurring/ask. Shared mini-components: `Pill`, `Swatch`, `EditName`, `Sk` (skeleton), `Donut`. |
-| `src/dataAdapter.js` | All Supabase reads + shapes consumed by Dashboard. Keep return shapes stable. Also holds the CSV/PDF-import writes (`findOrCreateManualInstitution`, `createManualAccount`, `getExistingTxIds`, `importCsvTransactions`, `isManualAccount`), the comparison-mode read `getAccountTransactionsInRange`, the backfill boundary `getFeedCoverageStart`, the learned-rule CRUD (`getCategoryRules`/`setCategoryRule`/`applyCategoryRuleToHistory`/`deleteCategoryRule`), the SimpleFIN predicates (`isSimpleFinAccount`, `ACCOUNT_TYPES`/`ACCOUNT_SUBTYPES`), and re-exports the cash-flow helpers (`markInternalTransfers`/`cashIncome`/`cashSpending`) from `cashFlow.js` so existing importers/harnesses keep working. |
+| `src/components/Dashboard.jsx` | Almost the entire UI — single file, inline styles, tabs: overview/categories/**budget**/transactions/accounts/trends/recurring/ask. Shared mini-components: `Pill`, `Swatch`, `EditName`, `Sk` (skeleton), `Donut`; envelope editors `AssignEdit`/`BudgetEdit`/`IncomeEdit` + the `TargetSheet`/`MoveSheet` modals. |
+| `src/dataAdapter.js` | All Supabase reads + shapes consumed by Dashboard. Keep return shapes stable. Also holds the CSV/PDF-import writes (`findOrCreateManualInstitution`, `createManualAccount`, `getExistingTxIds`, `importCsvTransactions`, `isManualAccount`), the comparison-mode read `getAccountTransactionsInRange`, the backfill boundary `getFeedCoverageStart`, the learned-rule CRUD (`getCategoryRules`/`setCategoryRule`/`applyCategoryRuleToHistory`/`deleteCategoryRule`), the SimpleFIN predicates (`isSimpleFinAccount`, `ACCOUNT_TYPES`/`ACCOUNT_SUBTYPES`), the envelope I/O (`getEnvelopes`, `setAssigned`, `setCategoryRollover`, `setTargetKind`, `fundTargets`, `moveMoney`, `getBudgetIncome`/`setBudgetIncome`), and re-exports the pure helpers from `cashFlow.js` and `envelopes.js` so existing importers/harnesses keep working. |
 | `src/cashFlow.js` | The Trends cash-flow model (see Conventions), extracted pure: `markInternalTransfers` + `maxMatchTransfers` (Kuhn's), `cashIncome`/`cashSpending`, account-type predicates. Zero imports — plain-Node importable; covered by `test/cashFlow.test.js` incl. the brute-force matching parity check. |
+| `src/envelopes.js` | The envelope-budgeting model (see Roadmap), pure: `walkEnvelopes` (`available = assigned + carry − spent`), `targetNeed`, `readyToAssign`, `planMove`, month-key helpers. Zero imports — dataAdapter does the I/O and hands it plain arrays. Covered by `test/envelopes.test.js`. |
 | `src/categoryMap.js` | `ERA_CATEGORIES` (the taxonomy source of truth) + `applyAccountRules` (credit-card negatives → "Return", excluded from income); `UNCATEGORIZED`/`FALLBACK_CATEGORY` + `isBudgetableCategory`; pure JS, imported by server code too. No "Housing"/"Income" member; `Uncategorized` IS one. `mapPlaidCategory` was deleted with Plaid — nothing produces those codes now, and it was never called at read time, so historical rows are unaffected. |
 | `src/csvImport.js` | Pure CSV-import core (no React/Supabase): `parseCsv`, `detectHeader`, `parseMoney`/`parseDate`, transfer flagging, dedup `plaid_tx_id` hashing, `buildRows`/`analyzeCsv` (both take `rules` + `overlapFrom`). Re-exports `guessCategory`/`transferRawCategory`/`invalidRuleCategories` from `txClassify.js`, which now owns the rule table. Plus `importPlan` (which sections the modal shows, derived from the file's dates vs the feed boundary) and the audit core: `reconcileCsv` (max-matching), `descSimilarity`, `csvDateRange`. Testable in isolation. |
 | `src/txClassify.js` | Learned-rule matching (`merchantKey`, `matchLearnedRule`) + the shared descriptor→category rule table + internal-transfer tagging (`guessCategory`, `transferRawCategory`, `classifyDescription`), validated against `ERA_CATEGORIES` at load. Lifted out of `csvImport.js` when SimpleFIN became a second caller: both feeds get a descriptor and no category, so both derive `mapped_category` at WRITE time from this one table. Pure JS — imported by server code too. |
@@ -92,7 +93,7 @@ entry once shipped.
 | `api/_lib/supabase.js` | Service-role client + `requireUser` (JWT → householdId). |
 | `supabase/migrations/` | Ordered SQL migrations (additive-only on live data). |
 | `supabase/setup_all.sql` | One-paste fresh install — **DESTRUCTIVE, wipes all tables. Never run on live data. Never re-generate to include new migrations without that warning.** Convenience snapshot only — `migrations/` is the source of truth; ends with a column-level self-check that raises if it drifts behind migrations. |
-| `test/` | `npm test` — Node's built-in `node --test`, zero deps. Covers the pure cores only: cashFlow (incl. brute-force max-matching parity), csvImport parsing/dedup-id idempotency, category rules. Run before pushing. |
+| `test/` | `npm test` — Node's built-in `node --test`, zero deps. Covers the pure cores only: cashFlow (incl. brute-force max-matching parity), csvImport parsing/dedup-id idempotency, category rules, envelopes (both walk regressions + by-date targets). Run before pushing. |
 
 ## Development workflow
 
@@ -229,11 +230,13 @@ playwright-core screenshot (`executablePath:'/opt/pw-browsers/chromium'`,
   by index when `color` is null.
 
 ### Two spending/income models (deliberate — don't "unify" without asking)
-- **Purchase-based** (Categories tab, Overview headline, budgets, "vs last
-  month" delta): `sumSpending` / `getSpending` count what was *bought* by
-  category, excluding Transfers/Return **and every `type === 'loan'` account**
-  (a loan debit is a payment, not a purchase, and the cash already counts on its
-  way out of checking).
+- **Purchase-based** (Categories tab, Overview headline, budgets, the Budget
+  tab's envelopes, "vs last month" delta): `sumSpending` / `getSpending` count
+  what was *bought* by category, excluding Transfers/Return **and every
+  `type === 'loan'` account** (a loan debit is a payment, not a purchase, and
+  the cash already counts on its way out of checking). All of them go through
+  the shared `isSpend()` predicate in `dataAdapter.js` — keep it that way so an
+  envelope's Spent can never disagree with the Categories bar.
 - **Joint-budget cash-flow** (Trends income-vs-spending, 6-mo bars, Cash flow
   section): `getCashFlow`. The connected accounts are two **joint** BECU
   accounts (checking + savings); real paychecks land in three **personal**
@@ -394,7 +397,19 @@ playwright-core screenshot (`executablePath:'/opt/pw-browsers/chromium'`,
 
 ## Pending branches
 
-None. Phase 4 is fully landed: code merged and deployed, and
+- `claude/envelope-budgeting-rebase-jzuoj6` — **envelope budgeting** (YNAB
+  rules 1–3; see the spec in Roadmap). Adds `budget_months`, turns
+  `budgets.monthly_limit` into a funding *target*, and adds a **Budget tab**.
+  Rebased twice: once after CSV/PDF import, again after the SimpleFIN-only
+  cutover (absorbing the loan-account spending guard into `isSpend()`, the
+  theme tokens, and `isBudgetableCategory` — Uncategorized can't be budgeted).
+  **Migration to paste at merge:**
+  `supabase/migrations/20260729000001_budget_envelopes.sql` (additive: one new
+  table, three new `budgets` columns, one relaxed NOT NULL). Preview shows the
+  Budget tab but no envelope data until it is applied — previews share the PROD
+  database.
+
+Phase 4 is fully landed: code merged and deployed, and
 `20260728000002_remove_plaid.sql` **applied on 2026-07-29** after its pre-flight
 fired once (below). Every migration in `supabase/migrations/` is live.
 
@@ -418,7 +433,8 @@ env vars is done.
 
 ## Roadmap
 
-**Next: Debt tracker** — **balance-only + hand-entered APR/min** under SimpleFIN
+**In flight: envelope budgeting** (branch above; spec below). **Then: Debt
+tracker** — **balance-only + hand-entered APR/min** under SimpleFIN
 (spec below). The whole off-Plaid migration is **DONE** — phases 1–4 shipped;
 the app is SimpleFIN + CSV/PDF import with no Plaid anywhere. Later (discussed,
 not committed): net worth over time, cash-flow forecast, savings goals, CSV/PDF
@@ -428,6 +444,110 @@ export, sign-out button. **`accounts.available_balance` holds two conventions**
 Invisible today (nothing renders it) but it surfaces the moment the Debt view
 shows utilization; sort it out then, and never run it through `displayBalance`
 — for a card it means available *credit*, not a debt.
+
+### YNAB envelope budgeting — build spec
+From Jesse Mecham's *Never Worry About Money Again* (YNAB's founder; the method
+is YNAB's Four Rules). The shift it asks of this app: it is a **backward-looking
+tracker** (every tab aggregates already-synced transactions) and YNAB is a
+**forward-looking plan** — real dollars given jobs *before* they're spent.
+
+Rule → status:
+1. **Give Every Dollar a Job** (zero-based, "Ready to Assign") — **built, on
+   hand-entered income.** RTA = `income − Σ assigned`. The feed cannot supply
+   income (see "the income wall"), so the user types it; RTA is hidden entirely
+   when income is unset rather than shown as a confident zero.
+2. **Embrace Your True Expenses** (sinking funds) — **built.** `budgets` rows are
+   funding *targets*: `monthly_limit` + `target_kind` (`monthly` | `by_date`) +
+   `target_date`. `targetNeed()` spreads a by-date target over the months left.
+3. **Roll With the Punches** (carry balances) — **built.** Per-category
+   `rollover` flag; leftovers *and* overspend carry, plus `moveMoney` to cover an
+   overspent envelope from one with room.
+4. **Age Your Money** — **not built.** Needs real *measured* income. Do last.
+
+Shipped shape (branch above):
+- `budget_months(household_id, category, month, assigned)` — the envelope grain.
+  `budgets` keeps one row per category for target + `rollover`; `monthly_limit`
+  is now nullable so a category can carry settings without a target amount.
+- The model is pure in **`src/envelopes.js`** (`walkEnvelopes` / `targetNeed` /
+  `readyToAssign` / `planMove`); `getEnvelopes({year,month})` in dataAdapter is
+  I/O only — it reads the rows, aggregates spending through `isSpend()`, and
+  hands plain arrays in. Returns per-category rows + totals (+ `truncated`).
+  The per-(category, month) spend sums are memoised across envelope writes
+  (`invalidateEnvelopeSpending()` — only the dashboard reload clears it, the
+  one moment transactions can have moved).
+- Writers: `setAssigned`, `setCategoryRollover`, `setTargetKind`, `fundTargets`
+  (bulk "top every target up"), `moveMoney`, `getBudgetIncome`/`setBudgetIncome`.
+  All client-direct via RLS — no `api/` route needed. Verified against a local
+  Postgres stub that a **PostgREST partial upsert does not clobber the columns
+  it omits**, so each writer can send only the columns it owns.
+- Income lives in `settings`, not a new table: `budget:income` is the recurring
+  monthly default and `budget:income:YYYY-MM` overrides one month
+  (**stored as plain strings** — `settings.value` is TEXT). No migration.
+- UI: its own **Budget tab**. Ready-to-Assign strip (editable income, assigned,
+  RTA), "Fund targets", then a row per category — available, a bar of spent
+  against the envelope, the assign editor, rolled/spent, a target chip opening
+  `TargetSheet` (monthly vs by-date), `⇄` opening `MoveSheet`, and the `⟳`
+  rollover toggle. All colors go through the `inkOn`/`markOn`/`chipOn` contrast
+  helpers. The **Categories tab keeps main's shape** — spending measured
+  against the target, no envelope machinery.
+- The Budget tab may navigate up to **12 months ahead** (assigning next month's
+  money before it starts is the point of rule 1); every other tab still stops at
+  the current month, and leaving Budget snaps back.
+
+**Decided — don't relitigate:**
+- **A missing `budget_months` row means `assigned` 0. Never fall back to
+  `monthly_limit`.** Falling back makes every month nobody touched accrue
+  `(limit − spent)` into the carry and manufactures a phantom balance on day
+  one. Assignments only ever come from an explicit user action, so the number on
+  screen always equals the number the walk rolls forward. (Caught in review
+  before it shipped; pinned by a named REGRESSION test in
+  `test/envelopes.test.js`.) A **zero** assignment is likewise not an envelope —
+  `moveMoney` can leave a 0 row behind, and a 0 row must stay equivalent to no
+  row, or the category would start walking from there and turn its earlier
+  ordinary spending into rolled-over debt.
+- **Envelopes use the purchase-based model only** (`isSpend()`, shared with
+  `getSpending`/`sumSpending`, including the loan-account guard). Never
+  `getCashFlow` — mixing the two models double-counts.
+- **`Uncategorized` (and the transfer bucket) can't be budgeted** —
+  `isBudgetableCategory` gates assignments, targets, moves and the picker; its
+  spending still renders read-only so the size of the unknown stays visible.
+- **Overspend carries the category negative.** Real YNAB instead docks next
+  month's Ready to Assign on *cash* overspending and only rolls credit-covered
+  overspend negative. With no cash-vs-credit envelope split, carrying negative
+  is the only coherent choice — a simplification, not fidelity.
+- `assigned` / targets are plain positive dollars, **outside** the
+  `positive = money out` sign convention (only Spent carries the sign).
+- Envelope tables key on the **raw** category label, like `budgets`.
+- **Don't put a date clamp on the walk.** A rolling balance is every assignment
+  and every dollar spent since the envelope opened, so the walk starts at each
+  category's *own* first assignment, however old. A 24-month window was tried
+  and reverted: it froze a long-running sinking fund at a stale balance that
+  drifted further every month. `budget_months` is paginated for the same
+  reason — a row cap would silently drop real dollars. `MAX_WALK_MONTHS` is
+  only a runaway guard on the loop, and tripping it sets `truncated` rather than
+  quietly returning nothing.
+- **RTA income is hand-entered and never carried between months.** With a typed
+  figure, a carry-forward would compound every month the user left blank. One
+  month in, one month out.
+- The walk reads only the columns `isSpend()` needs and **skips
+  `markInternalTransfers`** — envelopes never read `_internal`, and that
+  matching is O(V·E) over a range that grows with the budgeting history.
+- A by-date target **forces rollover on** — a sinking fund only reaches its
+  number because leftovers carry; with rollover off it would ask for the full
+  share forever and never converge.
+
+**The income wall (why Rule 1 is hand-entered):** Ready to Assign needs
+trustworthy income. SimpleFIN syncs only what is linked *and unhidden* (new
+accounts arrive hidden), CSV/PDF import is periodic, and a missed paycheck
+would silently read as less money to budget — so deriving income risks a
+quietly-wrong number in exactly the place that must be trusted. The figure is
+typed in. If every income account proves reliably fed, deriving it becomes an
+option; that is a decision for Mason, not an automatic upgrade.
+
+Follow-ups (not built): Age of Money; scheduled/expected transactions;
+reconciliation; per-month target overrides (a target is currently one setting
+per category, not per month); auto-filling next month's assignments from this
+month's.
 
 ### Off-Plaid: SimpleFIN — COMPLETE (phases 1–4 shipped)
 Decision (settled, executed): **SimpleFIN Bridge** replaced Plaid as the bank
