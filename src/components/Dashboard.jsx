@@ -580,6 +580,9 @@ export default function Dashboard({ refreshTick = 0 }) {
   // first is settling must not silently vanish.
   const envChain=useRef(Promise.resolve());
   const [txAcctFilter,setTxAcctFilter]=useState(null);
+  // The RAW category label (never the dash:names alias — that is what
+  // user_category and every envelope table are keyed by), or null for "all".
+  const [txCatFilter,setTxCatFilter]=useState(null);
   const [searchQ,setSearchQ]=useState("");
   const [searchRes,setSearchRes]=useState(null);
   const [searching,setSearching]=useState(false);
@@ -1034,6 +1037,9 @@ export default function Dashboard({ refreshTick = 0 }) {
       await unlinkInstitution(selAcct.institution_id);
       setSelAcct(null);
       setTxAcctFilter(null);
+      // The removed bank's rows are gone, so a category filter set from them may
+      // now describe nothing.
+      setTxCatFilter(null);
       await reloadData(year,month);
     }catch(err){
       console.error("unlink failed",err);
@@ -1045,12 +1051,20 @@ export default function Dashboard({ refreshTick = 0 }) {
 
   const cats=spending?.groups||[];
   const txs=transactions?.transactions||[];
-  const shownTxs=txAcctFilter?txs.filter(t=>t.account_id===txAcctFilter):txs;
   // While a search is active the Transactions tab renders results across all
-  // months instead of the selected month; account chips still filter them.
+  // months instead of the selected month; the account and category chips still
+  // filter them.
   const searchActive=searchQ.trim().length>=2;
   const searchTxs=searchRes?.transactions||[];
-  const shownSearch=txAcctFilter?searchTxs.filter(t=>t.account_id===txAcctFilter):searchTxs;
+  // Account first, category second, so the category chips can be derived from
+  // the account-filtered rows WITHOUT being narrowed by the category filter —
+  // otherwise picking a category leaves exactly one chip on screen and no way
+  // back. Accounts narrow the offered categories; categories never narrow the
+  // offered accounts.
+  const acctTxsView=txAcctFilter?txs.filter(t=>t.account_id===txAcctFilter):txs;
+  const acctSearchView=txAcctFilter?searchTxs.filter(t=>t.account_id===txAcctFilter):searchTxs;
+  const shownTxs=txCatFilter?acctTxsView.filter(t=>t.category===txCatFilter):acctTxsView;
+  const shownSearch=txCatFilter?acctSearchView.filter(t=>t.category===txCatFilter):acctSearchView;
   const listTxs=searchActive?shownSearch:shownTxs;
   const cfPs=cashFlow?.periods||[];
   const maxCat=cats[0]?.amount||1;
@@ -1068,6 +1082,29 @@ export default function Dashboard({ refreshTick = 0 }) {
   // drill-in sheet lists. Built from the rows already on hand (getTransactions
   // returns the WHOLE month, paginated, uncapped), so tapping a number costs no
   // round trip and the list can't disagree with the transactions tab.
+  // The categories offered as filter chips on the Transactions tab: the ones
+  // actually PRESENT in the rows in view, not the whole taxonomy — 22 built-ins
+  // plus customs would be a wall of chips, most of them dead ends.
+  // `t.category` is already the effective category (dataAdapter's
+  // effectiveCategory falls back to Uncategorized), so there is nothing to
+  // normalize here — re-deriving it is exactly the drift `counted` exists to
+  // prevent.
+  const catChips=useMemo(()=>{
+    const pool=searchActive?acctSearchView:acctTxsView;
+    const present=new Set();
+    for(const t of pool)present.add(t.category);
+    const arr=[...present];
+    // Pin the active filter even when nothing in view matches it (a month
+    // change, an account switch, a narrower search). Auto-clearing a filter the
+    // user set reads as a bug, and the empty state below names the category.
+    if(txCatFilter&&!present.has(txCatFilter))arr.push(txCatFilter);
+    // Alphabetical by DISPLAY name: stable across months, accounts and
+    // keystrokes, which is what makes a horizontally-scrolling row usable. A
+    // count- or amount-ordered row reshuffles under the thumb, and ordering by
+    // outflow would put "Transfers and card payments" first nearly every month.
+    return arr.sort((a,b)=>getName(a).localeCompare(getName(b),undefined,{sensitivity:"base"}));
+  },[acctTxsView,acctSearchView,searchActive,txCatFilter,getName]);
+
   const txsByCategory=useMemo(()=>{
     const m=new Map();
     for(const t of txs){
@@ -1636,14 +1673,65 @@ export default function Dashboard({ refreshTick = 0 }) {
                 })}
               </div>
             )}
+            {/* Category chips. ONE horizontally-scrolling line, not a wrapping
+                row like the accounts above: usable width inside .card at 390px
+                is ~318px and "Home maintenance and improvement" alone is ~230px,
+                so wrapping ~15 of these would bury the list under six rows of
+                chips. Horizontal scroll is already the tab bar's idiom.
+                The `||txCatFilter` in the guard is load-bearing — without it a
+                pool that collapses to one category unmounts the row while the
+                filter is still applied, taking "All categories" with it. */}
+            {(catChips.length>1||txCatFilter)&&(
+              <div style={{display:"flex",gap:6,flexWrap:"nowrap",overflowX:"auto",overflowY:"hidden",
+                marginBottom:12,paddingBottom:2,scrollbarWidth:"none",WebkitOverflowScrolling:"touch"}}>
+                {[{cat:null,label:"All categories",color:null},...catChips.map(c=>({cat:c,label:getName(c),color:getColor(c)}))].map(c=>{
+                  const active=txCatFilter===c.cat;
+                  const cs=c.color?chipOn(c.color,surf.card):null;
+                  // Tapping the ACTIVE chip clears it, so undo never needs a
+                  // scroll back to "All categories" — which can sit off-screen
+                  // here in a way it never does on the wrapping account row.
+                  // That is why this differs from setTxAcctFilter(c.id) above.
+                  //
+                  // Namespaced key: a category label is free text, so a custom
+                  // category named "all" would otherwise collide with the All
+                  // chip. (The account row can key on the bare id — uuids.)
+                  const key=c.cat===null?"all:":"cat:"+c.cat;
+                  return (
+                    <button key={key} title={c.label}
+                      onClick={()=>setTxCatFilter(txCatFilter===c.cat?null:c.cat)}
+                      style={{display:"inline-flex",alignItems:"center",gap:5,fontSize:11,fontWeight:600,flexShrink:0,maxWidth:150,
+                        background:active&&cs?cs.bg:"var(--bg)",color:active?(cs?cs.ink:"var(--text)"):"var(--muted)",
+                        border:`1px solid ${active?(cs?markOn(c.color,surf.card):"var(--text)"):"var(--border)"}`,borderRadius:20,padding:"4px 10px",
+                        cursor:"pointer",fontFamily:"inherit",transition:"all .15s"}}>
+                      {cs&&<span style={{width:6,height:6,borderRadius:"50%",display:"inline-block",flexShrink:0,
+                        background:active?cs.dot:markOn(c.color,surf.bg)}}/>}
+                      <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{c.label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
             {(searchActive?searching:loading)?[1,2,3,4,5].map(i=>(
               <div key={i} style={{display:"flex",gap:12,alignItems:"center",marginBottom:12}}>
                 <Sk w={34} h={34} r={10}/><div style={{flex:1}}><Sk w="65%" h={13}/></div><Sk w={55} h={13}/>
               </div>
             )):listTxs.length===0?(
               <div style={{textAlign:"center",padding:"30px 0",color:"var(--muted)",fontSize:14}}>
-                {searchActive?`No transactions match "${searchQ.trim()}".`
-                  :txAcctFilter?"No transactions for this account this month.":"No transactions for this period."}
+                {/* Always getName — a renamed category must not leak its raw
+                    registry label here. The hasMore case exists so the app never
+                    claims a category has nothing when it only looked at a
+                    truncated page of matches. */}
+                {(()=>{
+                  const cn=txCatFilter?getName(txCatFilter):null;
+                  const q=searchQ.trim();
+                  if(searchActive&&cn&&searchRes?.hasMore)return `No ${cn} transactions in the first 200 matches for "${q}".`;
+                  if(searchActive&&cn)return `No ${cn} transactions match "${q}".`;
+                  if(searchActive)return `No transactions match "${q}".`;
+                  if(cn&&txAcctFilter)return `No ${cn} transactions for this account this month.`;
+                  if(cn)return `No ${cn} transactions this month.`;
+                  if(txAcctFilter)return "No transactions for this account this month.";
+                  return "No transactions for this period.";
+                })()}
               </div>
             ):listTxs.map((t,i)=>{
               const a=acctById(t.account_id);
