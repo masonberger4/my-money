@@ -202,6 +202,13 @@ function toTxShape(t) {
     user_category: t.user_category || null,
     user_description: t.user_description || null,
     excluded: !!t.excluded,
+    // Whether this row is one of the dollars a category bar / envelope Spent is
+    // made of. It rides along rather than being re-derived in the UI so a
+    // category drill-in's own total can never disagree with the number that was
+    // tapped to open it — same reason getEnvelopeSpending aggregates on
+    // isSpend() instead of its own copy of the rule. Every caller of toTxShape
+    // selects accounts.type, which isLoanAccount() needs.
+    counted: isSpend(t),
   };
 }
 

@@ -70,7 +70,7 @@ entry once shipped.
 | `src/ui.css` | The ONLY place theme-token values live: `:root` light + a `prefers-color-scheme: dark` block (--bg/--card/--text/--muted/--border/--accent/--accent-text/--danger*/--warn*/--input-bg/--track/--shadow/--overlay), plus the font `@import` (must stay line 1), the `*` reset, keyframes, and the shared `.card`/`.tab`/`.ibtn` classes. Global so the pre-Dashboard screens get them. |
 | `src/theme.js` | Theme selection + application: localStorage pref (`mm:theme`), `resolveTheme`, `applyTheme` (sets `<html data-theme>` + syncs the `theme-color` metas), `subscribeTheme`/`subscribeSystemTheme`, `readToken` (runtime token read), `initTheme` (called from main.jsx), and the `useTheme` hook the header toggle uses. |
 | `src/paletteContrast.js` | Pure, zero imports: WCAG math + `readableInk`/`markColor`/`chipStyle`, which hold hue fixed and bisect lightness to guarantee 4.5:1 / 3:1 against a given surface. Never throws (runs during render). Covered by `test/paletteContrast.test.js`. |
-| `src/components/Dashboard.jsx` | Almost the entire UI — single file, inline styles, tabs: overview/categories/**budget**/transactions/accounts/trends/recurring/ask. Shared mini-components: `Pill`, `Swatch`, `EditName`, `Sk` (skeleton), `Donut`; envelope editors `AssignEdit`/`BudgetEdit`/`IncomeEdit` + the `TargetSheet`/`MoveSheet` modals. |
+| `src/components/Dashboard.jsx` | Almost the entire UI — single file, inline styles, tabs: overview/categories/**budget**/transactions/accounts/trends/recurring/ask. Shared mini-components: `Pill`, `Swatch`, `EditName`, `Sk` (skeleton), `Donut`, `DrillNum` (the tap-a-number affordance) ; envelope editors `AssignEdit`/`BudgetEdit`/`IncomeEdit` + the `TargetSheet`/`MoveSheet`/`CategorySheet` modals. |
 | `src/dataAdapter.js` | All Supabase reads + shapes consumed by Dashboard. Keep return shapes stable. Also holds the CSV/PDF-import writes (`findOrCreateManualInstitution`, `createManualAccount`, `getExistingTxIds`, `importCsvTransactions`, `isManualAccount`), the comparison-mode read `getAccountTransactionsInRange`, the backfill boundary `getFeedCoverageStart`, the learned-rule CRUD (`getCategoryRules`/`setCategoryRule`/`applyCategoryRuleToHistory`/`deleteCategoryRule`), the SimpleFIN predicates (`isSimpleFinAccount`, `ACCOUNT_TYPES`/`ACCOUNT_SUBTYPES`), the envelope I/O (`getEnvelopes`, `setAssigned`, `setCategoryRollover`, `setTargetKind`, `fundTargets`, `moveMoney`, `getBudgetIncome`/`setBudgetIncome`), and re-exports the pure helpers from `cashFlow.js` and `envelopes.js` so existing importers/harnesses keep working. |
 | `src/cashFlow.js` | The Trends cash-flow model (see Conventions), extracted pure: `markInternalTransfers` + `maxMatchTransfers` (Kuhn's), `cashIncome`/`cashSpending`, account-type predicates. Zero imports — plain-Node importable; covered by `test/cashFlow.test.js` incl. the brute-force matching parity check. |
 | `src/envelopes.js` | The envelope-budgeting model (see Roadmap), pure: `walkEnvelopes` (`available = assigned + carry − spent`), `targetNeed`, `readyToAssign`, `planMove`, month-key helpers. Zero imports — dataAdapter does the I/O and hands it plain arrays. Covered by `test/envelopes.test.js`. |
@@ -188,6 +188,25 @@ playwright-core screenshot (`executablePath:'/opt/pw-browsers/chromium'`,
   `api/_lib/spendingContext.js`, which must match or the Ask tab contradicts the
   screen. `fmtX` renders negatives as −$1,234.56.
 - Effective category = `user_category || mapped_category` (user override wins).
+- **A custom category is a category, not a kind of category.** `dash:cats` is a
+  NAME REGISTRY (so a category with no spending yet can still be offered in the
+  pickers); its `color` is only the seed chosen at creation. **`dash:colors` is
+  the one mutable colour store for every category, built-in or custom** — which
+  is what lets `getColor` answer for both and keeps a custom category the same
+  colour on the Categories tab, the Budget tab, the donut and every pill.
+  (Before this, `getColor` knew nothing about `dash:cats`, so custom categories
+  rendered #888780 grey everywhere except the separate block they were penned
+  into.) Renaming one is a DISPLAY ALIAS in `dash:names`, exactly like renaming
+  a built-in — never a rewrite of the registry name, which is the raw label
+  `user_category`/`budgets`/`budget_months` are all keyed by, and rewriting it
+  orphans every one of them. Adding and retiring live in the "+ Add category"
+  sheet rather than on the rows, because a delete button on some rows and not
+  others is the separation the unified list exists to remove.
+- **`toTxShape` stamps `counted`** = the shared `isSpend()` verdict for that
+  row. Anything that lists transactions behind a total (the category drill-in)
+  must split on it rather than re-deriving the rule, or the list's own sum
+  drifts from the number that was tapped to open it. Same reasoning as
+  `getEnvelopeSpending` aggregating through `isSpend()`.
 - "Transfers and card payments" and "Return" (credit-card negatives) are never
   counted as spending; "Return" is never counted as income.
 - **`Uncategorized` is the fallback, and it is a real taxonomy member.** It IS
@@ -464,8 +483,24 @@ option; that is a decision for Mason, not an automatic upgrade.
 
 ## Pending branches
 
-None. Envelope budgeting merged 2026-07-29; its migration was applied to PROD
-ahead of the merge, so nothing is outstanding.
+**`claude/category-transactions-styling-rd989c`** — category drill-in + custom
+categories unified. No migration, no schema change.
+- Tapping a category's transaction count or amount (Categories tab) or its Spent
+  (Budget tab) opens `CategorySheet`: that month's transactions in that
+  category, split into the ones the total is made of and a "Not counted" tail
+  (excluded / money-in / loan postings). Built from the month's already-loaded
+  rows, so it costs no round trip, and split on the adapter's new `counted`
+  flag, so its sum is the number that was tapped. Rendered BEFORE the
+  transaction sheet so tapping a row stacks that on top and closing it returns
+  to the list.
+- Custom categories are ordinary rows in the Categories list — same swatch,
+  name, count, amount, target and bar — instead of a name-and-colour block at
+  the bottom, and they now carry their own colour into the Budget tab, the donut
+  and every pill (see the Conventions entry). The "+ Add category" sheet became
+  the add-and-retire manager.
+
+Envelope budgeting merged 2026-07-29; its migration was applied to PROD ahead of
+the merge, so nothing is outstanding there.
 
 Phase 4 is fully landed: code merged and deployed, and
 `20260728000002_remove_plaid.sql` **applied on 2026-07-29** after its pre-flight
