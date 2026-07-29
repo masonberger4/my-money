@@ -34,7 +34,8 @@ async function execute(force) {
 // lives on simplefin_access — one row per ACCESS URL, covering every bank — and
 // api/sync.js only advances it when `errors.length === 0` across the whole
 // pull. So one broken bank means the watermark did not move, which means the
-// NEXT pull still reaches back FIRST_PULL_DAYS (730) for everything. Any caller
+// NEXT pull re-requests from the old watermark for everything (clamped to
+// MAX_LOOKBACK_DAYS, ~88 days — the feed's whole reach). Any caller
 // reasoning about "what dates can the feed still deliver?" gets the same answer
 // whichever bank broke.
 //

@@ -218,8 +218,8 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
   // The `today − 30` case is the one that needed the most care. When a fresh
   // pull returns nothing for an account, it is tempting to conclude the feed has
   // no claim on any date and unlock the whole file. That is wrong in a way that
-  // costs money: FIRST_PULL_DAYS defaults to 730, so a not-yet-synced account is
-  // about to receive up to two years of history, and even a synced-but-empty one
+  // costs money: a not-yet-synced account is about to receive the feed's whole
+  // reach (MAX_LOOKBACK_DAYS, ~3 months), and even a synced-but-empty one
   // keeps a live 30-day tail because subsequent pulls re-read that window. So an
   // empty feed yields a boundary of today − 30 rather than no boundary at all,
   // and a never-synced account gets no boundary and no import until it is
@@ -523,8 +523,8 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
       // syncState flipped to "done" on a pull that read nothing. That mattered
       // because "done" is what lets boundaryState go unsynced -> ok and
       // overlapFrom become today − 30. A failed pull also leaves
-      // `last_pulled_at` untouched, so the next good pull reaches back 730 days
-      // — straight over whatever had just been imported into that window.
+      // `last_pulled_at` untouched, so the next good pull reaches back the feed's
+      // full window again — straight over whatever had just been imported.
       if (!pullWasClean(await runSync({ force: true }))) {
         setSyncState("failed");
         setError("Couldn't read the feed just now, so there's no safe boundary to import against. Try again in a minute.");
@@ -536,7 +536,7 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
     } catch (e) {
       console.error("sync before import failed", e);
       // Deliberately does NOT unlock the import. A failed pull tells us nothing
-      // about what the feed holds, and the first pull can reach back two years.
+      // about what the feed holds, and the first pull reaches back ~3 months.
       setSyncState("failed");
       setError("Couldn't sync this account, so there's no safe boundary to import against. Try again.");
     }
@@ -816,7 +816,7 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                       transactions yet, so the whole file will import" whenever
                       the boundary was missing — including when the lookup had
                       simply FAILED, and including on an account whose first pull
-                      was about to fetch two years of history on top. */}
+                      was about to fetch the feed's whole reach on top. */}
                   {targetIsSimpleFin && (
                     <div style={{
                       fontSize: 11, lineHeight: 1.6, marginBottom: 12, borderRadius: 8, padding: "10px 12px",
@@ -826,8 +826,8 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                     }}>
                       {boundaryState === "loading" ? "Checking what the feed already has…"
                         : boundaryState === "error" ? <>Couldn't check where this account's feed starts, so importing isn't safe — a statement covering dates the feed already has would count every transaction twice. Close and retry.</>
-                        : boundaryState === "unsynced" ? <>This account hasn't synced yet, so there's no boundary to import against — the first pull reaches back up to two years and would land on top of anything imported now.</>
-                        : !coverageStart ? <>The feed has no transactions for this account. Rows from the last {FEED_LOOKBACK_DAYS} days are still excluded — the next pull can reach back that far.</>
+                        : boundaryState === "unsynced" ? <>This account hasn't synced yet, so there's no boundary to import against — the first pull reaches back about three months and would land on top of anything imported now.</>
+                        : !coverageStart ? <>The feed has no transactions for this account. Rows from the last {FEED_LOOKBACK_DAYS} days are still excluded — every pull re-reads that window.</>
                         : verdict === "audit" ? <>The feed covers this account from <strong>{overlapFrom}</strong> and every row here is inside that. Nothing will be imported — here's how your statement compares.</>
                         : verdict === "both" ? <>The feed starts <strong>{overlapFrom}</strong>. The <strong>{newRows.length}</strong> row{newRows.length !== 1 ? "s" : ""} before it will import; the <strong>{overlapCount}</strong> on or after it {overlapCount !== 1 ? "are" : "is"} compared against the feed instead.</>
                         : <>The feed starts <strong>{overlapFrom}</strong>. Every row in this file predates it, so there's nothing to exclude.</>}
@@ -937,7 +937,7 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
               <button onClick={onClose} disabled={busy || syncState === "running"} className="ibtn" style={{ flex: 1, justifyContent: "center", opacity: busy ? .5 : 1 }}>Cancel</button>
               {/* On a never-synced fed account the primary action is to SYNC,
                   not to import — there is no boundary to import against yet, and
-                  inventing one is how you double-count two years of history. */}
+                  inventing one is how you double-count months of history. */}
               <button onClick={needsSyncFirst ? syncNow : confirm} disabled={!primaryOn}
                 style={{ flex: 2, padding: "10px 0", borderRadius: 8, border: "none", background: "var(--accent)", color: "var(--accent-text)", fontFamily: "inherit", fontSize: 14, fontWeight: 500, cursor: primaryOn ? "pointer" : "default", opacity: primaryOn ? 1 : .5 }}>
                 {primaryLabel}

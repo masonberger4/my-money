@@ -47,6 +47,41 @@ function envInt(name, fallback) {
 export const FIRST_PULL_DAYS = envInt('SIMPLEFIN_FIRST_PULL_DAYS', 730);
 export const OVERLAP_DAYS = envInt('SIMPLEFIN_OVERLAP_DAYS', 30);
 
+// SimpleFIN serves at most 90 days per request, and says so in the response
+// BODY when you ask for more ("Requested date range exceeds limit of 90 days and
+// was capped."). Asking for more than it serves gains nothing and truncates the
+// response at the old end, so every open-ended request is clamped to just inside
+// that ceiling.
+//
+// FIRST_PULL_DAYS above is deliberately NOT lowered to match. It stays the reach
+// we'd LIKE, so the difference between wanted and served is a coverage shortfall
+// the caller can report — redefining the constant would erase the only signal
+// that older history was never fetched. Statement import is how that history
+// gets in (see CLAUDE.md).
+export const MAX_LOOKBACK_DAYS = envInt('SIMPLEFIN_MAX_LOOKBACK_DAYS', 88);
+
+const DAY_MS = 86400000;
+
+// Pure: clamp an open-ended "since" start to MAX_LOOKBACK_DAYS before `now`.
+// Returns the start to actually request plus whether it had to move, so the
+// caller can report the shortfall instead of silently losing the window.
+export function clampStartDate(startMs, nowMs) {
+  // Accepts the same inputs as toEpochSeconds (Date | ISO string | epoch ms),
+  // because fetchAccountSet's own JSDoc advertises `startDate: Date|iso`. A
+  // string used to fall through as NaN, and the caller then wrapped NaN in a
+  // Date — which buildAccountsUrl drops silently, turning a bounded request into
+  // "every transaction the Bridge holds".
+  const toMs = v =>
+    v instanceof Date ? v.getTime() : typeof v === 'string' ? new Date(v).getTime() : Number(v);
+  const start = toMs(startMs);
+  const now = toMs(nowMs);
+  if (!Number.isFinite(start) || !Number.isFinite(now)) {
+    return { startMs: start, clamped: false };
+  }
+  const floor = now - MAX_LOOKBACK_DAYS * DAY_MS;
+  return start < floor ? { startMs: floor, clamped: true } : { startMs: start, clamped: false };
+}
+
 // SimpleFIN refreshes bank data roughly once a day, so pulling more often than
 // this gains nothing and just leans on the Bridge. The dashboard triggers a
 // sync on every load, so without this a couple of phones would happily make
@@ -325,7 +360,21 @@ export function buildAccountsUrl(base, opts = {}) {
 
 export async function fetchAccountSet(accessUrl, opts = {}) {
   const { base, authorization } = splitAccessUrl(accessUrl);
-  const url = buildAccountsUrl(base, opts);
+  // Clamp here, not at the call sites: there are two open-ended ones (the
+  // incremental pull and the new-account history backfill) and the backfill asks
+  // for FIRST_PULL_DAYS outright, so a clamp applied only to the incremental
+  // path would still let the backfill trip the hard cap and truncate. Callers
+  // that want the shortfall reported use clampStartDate themselves; this is the
+  // backstop that makes it structural.
+  //
+  // Skipped when an explicit endDate is present — that's a bounded window
+  // request, not an open-ended "everything since", and clamping its start would
+  // silently shrink a deliberate range.
+  const clamped =
+    opts.startDate != null && opts.endDate == null
+      ? { ...opts, startDate: new Date(clampStartDate(opts.startDate, Date.now()).startMs) }
+      : opts;
+  const url = buildAccountsUrl(base, clamped);
 
   const res = await withTimeout(
     signal =>
@@ -486,13 +535,145 @@ export function sanitizeFeedMessage(value) {
 
 // v1 `errors` is an array of plain strings. The v2 draft deprecates it in
 // favour of `errlist`, an array of { code, msg, conn_id?, account_id? }.
-function readFeedError(entry) {
-  if (entry == null) return '';
-  if (typeof entry === 'string') return sanitizeFeedMessage(entry);
+//
+// Flattened to one shape that KEEPS the structure classifyFeedMessage needs:
+// `code` (an allowlisted advisory code beats prose matching) and `perBank`
+// (an entry pinned to one connection/account is that bank's problem, whatever
+// its wording). The old version returned only the display string and threw both
+// away, which left text matching as the only possible discriminator.
+function readFeedEntry(entry) {
+  if (entry == null) return null;
+  if (typeof entry === 'string') {
+    const text = sanitizeFeedMessage(entry);
+    return text ? { text, code: '', perBank: false } : null;
+  }
   const msg = sanitizeFeedMessage(entry.msg || entry.message || '');
   const code = sanitizeFeedMessage(entry.code || '');
-  if (msg && code) return `${msg} (${code})`;
-  return msg || code || sanitizeFeedMessage(JSON.stringify(entry));
+  const perBank = !!(entry.conn_id || entry.account_id);
+  const text =
+    msg && code ? `${msg} (${code})` : msg || code || sanitizeFeedMessage(JSON.stringify(entry));
+  return text ? { text, code, perBank } : null;
+}
+
+// ---------------------------------------------------------------------------
+// Feed messages: a broken bank, or a note about the request WE made?
+//
+// SimpleFIN returns both in the same errors/errlist array, and api/sync.js used
+// to count every entry as a bank error. That deadlocked the whole feed: the
+// watermark only advances on an error-free pull, so it stayed NULL, so the next
+// pull asked for the same oversized window, which re-emitted the same notice —
+// forever, while each pull happily wrote hundreds of transactions. It also
+// blocked CSV/PDF import into every SimpleFIN account, because pullWasClean
+// treats any `warnings` as unclean. See the advisory gotcha in CLAUDE.md.
+//
+// Three kinds:
+//   'error'    — a real problem (credentials, billing, a bank that won't
+//                answer). Holds the watermark and blocks statement import.
+//   'advisory' — a note about our request that cost us nothing.
+//   'capped'   — our range was truncated: the data we got is usable, but older
+//                transactions inside the window were never returned. Usable, so
+//                it must not hold the watermark (stalling recovers nothing — the
+//                next pull computes the same start and is served the same
+//                truncated response), but it IS a coverage shortfall to report.
+//
+// Polarity is an ALLOWLIST: only a recognised note is downgraded, so anything
+// SimpleFIN invents next stays an error and fails loudly. A denylist would
+// silently swallow the next unfamiliar real failure.
+// ---------------------------------------------------------------------------
+
+// Matched CONJUNCTIVELY (a range subject AND a limit word) rather than as a
+// fixed phrase, so a rewording still lands. Anchored at neither end on purpose:
+// readFeedEntry appends " (CODE)" and sanitizeFeedMessage truncates at 300
+// chars, so neither the head nor the tail of the original sentence is
+// guaranteed to survive intact.
+const RANGE_SUBJECT_RE = /\bdate range\b|\brange requested\b|\brequested\s+(date\s+)?range\b/i;
+const RANGE_LIMIT_RE = /\b(exceed|exceeds|exceeded|limit|maximum|recommended|cap|capped)\b/i;
+// Past tense only: "was capped" means data was truncated, "may be capped" is a
+// warning about future requests. Getting this ordering wrong is the difference
+// between reporting a real coverage gap and inventing one.
+const CAPPED_RE = /\b(was|were|been)\s+capped\b/i;
+// "…this MAY BE capped" is a warning about future requests, not a report that
+// this one was truncated. Without this exclusion the bare-"capped" test below
+// would read the 45-day advisory as a coverage shortfall and invent a gap.
+const FUTURE_CAP_RE = /\b(may|might|could|will|can|would|shall)\s+be\s+capped\b/i;
+// Wording that means a BANK needs attention. Vetoes the range match, because
+// bank names and feed prose are attacker-ish free text: a real credential
+// failure that happens to quote our request must stay an error.
+// Deliberately generous, because every word added here can only move a message
+// toward 'error' — the fail-safe direction. Two shapes matter especially:
+// SimpleFIN's canonical phrasing is "may need attention", so matching only
+// "needs attention" would miss it; and "authentication failed" shares no prefix
+// with "reauthenticate", so the stem is matched rather than the re- form.
+// Stems carry an explicit \w* — a bare `\bauthenticat\b` cannot match
+// "Authentication", because the trailing word boundary fails against the "ion".
+// That silently let "Authentication error: requested date range exceeds limit of
+// 90 days." classify as 'capped'.
+const REAL_TROUBLE_RE =
+  /\b(reconnect|authenticat\w*|credential\w*|password|login|logged\s+out|need(s|ed)?\s+attention|payment\s+required|subscription|expired|revoked|denied|mfa|multi-?factor|forbidden|unauthoriz\w*|locked|suspend\w*|invalid|rate\s+limit|try\s+again|unavailable|timed?\s*out|error|fail\w*|unable\s+to)\b/i;
+
+// v2 code forms, normalized to A_Z_0_9. An allowlisted code is authoritative:
+// it beats both the per-bank structural veto and the prose tests, because it is
+// SimpleFIN telling us the kind directly.
+const ADVISORY_CODES = new Set(['DATE_RANGE_EXCEEDED', 'DATE_RANGE_RECOMMENDED']);
+const CAPPED_CODES = new Set(['DATE_RANGE_CAPPED', 'DATE_RANGE_TRUNCATED']);
+
+function normalizeCodeKey(value) {
+  return String(value ?? '')
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
+// Accepts a raw feed entry (v1 string or v2 object) or an already-flattened
+// { text, code, perBank }. Returns 'error' | 'advisory' | 'capped'.
+export function classifyFeedMessage(entry) {
+  const e =
+    entry && typeof entry === 'object' && typeof entry.text === 'string'
+      ? entry
+      : readFeedEntry(entry);
+  if (!e) return 'error';
+
+  // Trouble wording is checked FIRST, ahead of the code allowlist. The code
+  // names below are our guess — SimpleFIN publishes no code vocabulary — so they
+  // are the least trustworthy signal in this function and must not outrank the
+  // most trustworthy one. Before this ordering, an entry like
+  // { code: 'DATE_RANGE_EXCEEDED', msg: 'Please reconnect BECU - credentials
+  // expired', conn_id: 'c1' } was downgraded to 'advisory': a revoked-credential
+  // failure that would have advanced the watermark and cleared last_error.
+  if (REAL_TROUBLE_RE.test(e.text)) return 'error';
+
+  // Only the v2 `code` field is matched against the code sets — deliberately NOT
+  // the prose. Falling back to the message text let a per-bank entry whose
+  // wording happened to normalize onto a code key ("Date range capped" with a
+  // conn_id) skip the veto below. A code is SimpleFIN naming the kind outright,
+  // so it may outrank per-bank structure — but not the trouble test above.
+  const codeKey = normalizeCodeKey(e.code);
+  if (codeKey) {
+    if (CAPPED_CODES.has(codeKey)) return 'capped';
+    if (ADVISORY_CODES.has(codeKey)) return 'advisory';
+  }
+
+  if (e.perBank) return 'error';
+  if (!(RANGE_SUBJECT_RE.test(e.text) && RANGE_LIMIT_RE.test(e.text))) return 'error';
+
+  // capped vs advisory. Past-tense "was capped" is unambiguous, but it sits at
+  // the END of the sentence and sanitizeFeedMessage truncates at 300 chars, so
+  // relying on it alone would let a clipped cap notice degrade to 'advisory' —
+  // silently losing a coverage shortfall. The two live messages also differ near
+  // the HEAD, which survives truncation:
+  //   "…exceeds LIMIT of 90 days and was capped."          -> a ceiling truncated us
+  //   "…exceeds RECOMMENDED range of 45 days. …may be capped." -> a suggestion
+  // so `recommended` is checked before the hard-limit words, and a bare limit
+  // statement is read as truncation.
+  if (CAPPED_RE.test(e.text)) return 'capped';
+  // Any other mention of capping that isn't explicitly about FUTURE requests is
+  // read as truncation. Erring toward 'capped' is the safe direction: it reports
+  // a coverage shortfall the user can fill from a statement, whereas erring
+  // toward 'advisory' would silently drop a window the feed never served.
+  if (/\bcapped\b/i.test(e.text) && !FUTURE_CAP_RE.test(e.text)) return 'capped';
+  if (/\brecommended\b/i.test(e.text)) return 'advisory';
+  if (/\b(limit|maximum)\b/i.test(e.text)) return 'capped';
+  return 'advisory';
 }
 
 // Account-type inference. SimpleFIN sends no type/subtype, but the whole
@@ -623,16 +804,34 @@ export function normalizeAccount(account, orgLookup) {
   };
 }
 
-// One shape out, whichever protocol version came in.
-// Returns { errors: string[], accounts: NormalizedAccount[], skipped: number }.
+// One shape out, whichever protocol version came in. Returns
+// { errors, advisories, capped, accounts, skipped } — the three message arrays
+// are split by classifyFeedMessage above, and ONLY `errors` may hold a pull back
+// (see the advisory gotcha in CLAUDE.md).
 export function normalizeAccountSet(json) {
-  const errors = []
+  const entries = []
     // v1 calls it "errors" (plain strings); the v2 draft deprecates that in
-    // favour of "errlist" (objects). readFeedError flattens and sanitizes both.
+    // favour of "errlist" (objects). readFeedEntry flattens and sanitizes both.
     .concat(Array.isArray(json?.errors) ? json.errors : [])
     .concat(Array.isArray(json?.errlist) ? json.errlist : [])
-    .map(readFeedError)
+    .map(readFeedEntry)
     .filter(Boolean);
+
+  const errors = [];
+  const advisories = [];
+  const capped = [];
+  for (const entry of entries) {
+    const kind = classifyFeedMessage(entry);
+    if (kind === 'capped') capped.push(entry.text);
+    else if (kind === 'advisory') advisories.push(entry.text);
+    else {
+      errors.push(entry.text);
+      // Logged verbatim because the allowlist's failure mode IS the production
+      // bug: a benign notice counted as an error stalls the watermark with no
+      // alarm anywhere. This line is where an unfamiliar one shows up.
+      console.warn('[simplefin] feed message treated as a real error: %s', entry.text);
+    }
+  }
 
   // v2 only: orgs live in a top-level connections array joined by conn_id.
   const orgLookup = new Map();
@@ -643,5 +842,11 @@ export function normalizeAccountSet(json) {
   const rawAccounts = Array.isArray(json?.accounts) ? json.accounts : [];
   const accounts = rawAccounts.map(a => normalizeAccount(a, orgLookup)).filter(Boolean);
 
-  return { errors, accounts, skipped: rawAccounts.length - accounts.length };
+  return {
+    errors,
+    advisories,
+    capped,
+    accounts,
+    skipped: rawAccounts.length - accounts.length,
+  };
 }
