@@ -311,7 +311,7 @@ function IncomeEdit({value,isDefault,onSave}) {
 // Rule 2, "Embrace Your True Expenses". A monthly target is topped up every
 // month; a by-date target is a sinking fund — the amount you want to have by a
 // deadline, which the app spreads over the months remaining.
-function TargetSheet({name,row,busy,surf,onSave,onClose}) {
+function TargetSheet({name,row,busy,surf,year,month,onSave,onClose}) {
   const [amount,setAmount]=useState(row?.target!=null?String(row.target):"");
   const [kind,setKind]=useState(row?.targetKind==="by_date"?"by_date":"monthly");
   const [ym,setYm]=useState(row?.targetDate?String(row.targetDate).slice(0,7):"");
@@ -322,9 +322,10 @@ function TargetSheet({name,row,busy,surf,onSave,onClose}) {
   const preview=(()=>{
     if(!valid) return null;
     if(kind==="monthly") return `Tops this category up to ${fmtAuto(n)} every month.`;
+    // Months left count from the month BEING VIEWED, exactly as targetNeed
+    // will — when budgeting ahead, "today" would overstate the runway.
     const [ty,tm]=ym.split("-").map(Number);
-    const nowD=new Date();
-    const left=Math.max(1,(ty-nowD.getFullYear())*12+(tm-(nowD.getMonth()+1))+1);
+    const left=Math.max(1,(ty-year)*12+(tm-month)+1);
     const have=row?.rolledOver||0;
     const per=Math.max(0,(n-have)/left);
     return `${fmtAuto(n)} by ${monthYear(`${ym}-01`)} — about ${fmtAuto(per)} a month for ${left} month${left===1?"":"s"}${have>0?`, on top of the ${fmtAuto(have)} already in it`:""}.`;
@@ -1229,7 +1230,9 @@ export default function Dashboard({ refreshTick = 0 }) {
                 const budgetable=isBudgetableCategory(r.category);
                 const pot=r.assigned+r.rolledOver;
                 const ratio=pot>0?r.spent/pot:0;
-                const over=r.available<0;
+                // An unbudgetable row has no envelope; its available is just
+                // −spent, which must not read as an overspend alarm.
+                const over=budgetable&&r.available<0;
                 const barW=pot>0?Math.min(ratio,1)*100:0;
                 const barColor=markOn(over?OVER_MONEY:ratio>=0.8?"#FAC775":getColor(r.category),surf.track);
                 const need=budgetable?targetNeed(r,{year,month}):0;
@@ -1928,7 +1931,7 @@ export default function Dashboard({ refreshTick = 0 }) {
 
       {/* Funding target (rule 2) */}
       {targetEdit&&(
-        <TargetSheet name={getName(targetEdit)} row={envMap[targetEdit]||{target:budgets[targetEdit]??null}} busy={envBusy} surf={surf}
+        <TargetSheet name={getName(targetEdit)} row={envMap[targetEdit]||{target:budgets[targetEdit]??null}} busy={envBusy} surf={surf} year={year} month={month}
           onClose={()=>setTargetEdit(null)}
           onSave={v=>{const c=targetEdit;setTargetEdit(null);saveTarget(c,v);}}/>
       )}
