@@ -2,10 +2,15 @@ import { supabase } from './supabaseClient.js';
 import { isTransferCategory, applyAccountRules, UNCATEGORIZED } from './categoryMap.js';
 import { merchantKey, matchLearnedRule } from './txClassify.js';
 import { markInternalTransfers, cashIncome, cashSpending } from './cashFlow.js';
+import { walkEnvelopes, monthKey, planMove } from './envelopes.js';
 
 // Re-export the pure cash-flow model (src/cashFlow.js) so existing importers
 // and the CSV-import dry-run harness keep working.
 export { markInternalTransfers, cashIncome, cashSpending } from './cashFlow.js';
+
+// Same deal for the pure envelope model (src/envelopes.js) — Dashboard and any
+// harness import the helpers from one place.
+export { targetNeed, readyToAssign, monthKey, shiftMonthKey } from './envelopes.js';
 
 function pad2(n) {
   return String(n).padStart(2, '0');
@@ -54,7 +59,11 @@ function displayName(t) {
 const ACCOUNT_COLUMNS =
   'id, institution_id, plaid_account_id, name, official_name, nickname, color, mask, type, subtype, current_balance, available_balance, last_balance_at, hidden, institutions(name, display_name)';
 
-async function getTransactionsBetween(start, end) {
+// `columns` / `markTransfers` exist for the envelope walk, which can span
+// years: it needs only the spending predicate's inputs, and never reads
+// `_internal`, so it skips both the wide column list and the O(V·E) transfer
+// matching. Every other caller gets the full rows and the matching as before.
+async function getTransactionsBetween(start, end, { columns = TX_COLUMNS, markTransfers = true } = {}) {
   // RLS scopes every query to the signed-in household automatically.
   // The inner join on accounts drops transactions belonging to hidden
   // accounts from every dashboard view (spending, lists, trends).
@@ -63,11 +72,15 @@ async function getTransactionsBetween(start, end) {
   for (let from = 0; ; from += page) {
     const { data, error } = await supabase
       .from('transactions')
-      .select(`${TX_COLUMNS}, accounts!inner(hidden, type, subtype)`)
+      .select(`${columns}, accounts!inner(hidden, type, subtype)`)
       .eq('accounts.hidden', false)
       .gte('date', start)
       .lte('date', end)
       .order('date', { ascending: false })
+      // Tiebreaker: date alone is not a stable sort, so without it a page
+      // boundary landing inside a run of same-dated rows can drop or repeat
+      // one. Reachable now that the envelope walk can span years.
+      .order('id', { ascending: false })
       .range(from, from + page - 1);
     if (error) throw error;
     rows.push(...data);
@@ -77,9 +90,14 @@ async function getTransactionsBetween(start, end) {
   for (const t of rows) {
     t.mapped_category = applyAccountRules(t.mapped_category, t.amount, t.accounts?.type);
   }
-  markInternalTransfers(rows);
+  if (markTransfers) markInternalTransfers(rows);
   return rows;
 }
+
+// The subset of TX_COLUMNS that isSpend() + effectiveCategory() actually read
+// (plus `id`, which the pagination tiebreaker orders by). isLoanAccount reads
+// accounts.type, which the inner join already selects.
+const SPEND_TX_COLUMNS = 'id, date, amount, mapped_category, user_category, excluded';
 
 function getMonthTransactions(year, month) {
   const { start, end } = monthBounds(year, month);
@@ -96,11 +114,21 @@ function isLoanAccount(t) {
   return t.accounts?.type === 'loan';
 }
 
+// The purchase-based spending test. getSpending(), sumSpending() and the
+// envelope walk all go through this one predicate so a category's "Spent"
+// can never disagree with the bar rendered next to it. Positive = money out;
+// user edits win; transfers/card payments, credit-card returns and loan
+// account postings never count.
+function isSpend(t) {
+  if (t.excluded || isLoanAccount(t)) return false;
+  if (t.amount <= 0) return false;
+  return !isTransferCategory(effectiveCategory(t));
+}
+
 function sumSpending(txs) {
   let total = 0;
   for (const t of txs) {
-    if (t.excluded || isLoanAccount(t)) continue;
-    if (t.amount > 0 && !isTransferCategory(effectiveCategory(t))) total += t.amount;
+    if (isSpend(t)) total += t.amount;
   }
   return total;
 }
@@ -139,10 +167,8 @@ export async function getSpending({ year, month }) {
   let total = 0;
 
   for (const t of txs) {
-    if (t.excluded || isLoanAccount(t)) continue; // see sumSpending
-    if (t.amount <= 0) continue;
+    if (!isSpend(t)) continue;
     const cat = effectiveCategory(t);
-    if (isTransferCategory(cat)) continue;
     if (!buckets.has(cat)) buckets.set(cat, { amount: 0, count: 0 });
     const b = buckets.get(cat);
     b.amount += t.amount;
@@ -340,20 +366,302 @@ export async function getBudgets() {
   const { data, error } = await supabase.from('budgets').select('category, monthly_limit');
   if (error) throw error;
   const budgets = {};
-  for (const row of data) budgets[row.category] = Number(row.monthly_limit);
+  for (const row of data) {
+    // A null limit is a category keeping rollover/target settings without a
+    // target amount (post-envelope migration) — reads as "no target".
+    if (row.monthly_limit != null) budgets[row.category] = Number(row.monthly_limit);
+  }
   return { budgets };
 }
 
+// Sets the category's funding target. Clearing it leaves the row in place
+// with a null limit so the category keeps its rollover / target_date
+// settings; getBudgets() skips null limits, so it still reads as "no target".
 export async function setBudget(category, limit) {
   const n = limit == null || limit === '' ? NaN : Number(limit);
-  if (!Number.isFinite(n) || n <= 0) {
-    const { error } = await supabase.from('budgets').delete().eq('category', category);
+  const monthly_limit = Number.isFinite(n) && n > 0 ? n : null;
+  const { error } = await supabase
+    .from('budgets')
+    .upsert({ category, monthly_limit }, { onConflict: 'household_id,category' });
+  if (!error) return;
+  // `monthly_limit` is NOT NULL until the envelope migration relaxes it, and
+  // previews share the PROD database — so on a preview whose migration hasn't
+  // been pasted yet, clearing a target would fail where it used to work. Fall
+  // back to the old behaviour (drop the row) rather than break it. 23502 is
+  // not_null_violation.
+  if (monthly_limit === null && error.code === '23502') {
+    const { error: delErr } = await supabase.from('budgets').delete().eq('category', category);
+    if (delErr) throw delErr;
+    return;
+  }
+  throw error;
+}
+
+// --- Envelope budgeting (YNAB rules 1–3) -------------------------------------
+// Two tables back this:
+//   budgets       — per category: the funding TARGET (monthly_limit, with
+//                   target_kind/target_date) and the rollover flag.
+//   budget_months — per (category, month): `assigned`, the dollars actually
+//                   given to that category that month.
+//
+//   available(cat, m) = assigned(cat, m) + carry(cat, m-1) - spent(cat, m)
+//
+// carry is the previous month's available for a rolling category and 0 for a
+// non-rolling one. A month with no budget_months row contributes assigned 0 —
+// never the target — so a category cannot accrue a phantom balance out of
+// months nobody actually budgeted. Every assignment comes from an explicit
+// user action, which keeps the number on screen equal to the number the walk
+// rolls forward.
+//
+// The walk itself lives in src/envelopes.js (pure, zero imports, covered by
+// test/envelopes.test.js). Everything below is I/O: read the rows, aggregate
+// spending through the shared isSpend() predicate, hand it to walkEnvelopes().
+
+// Every assignment up to and including the viewed month. Paginated rather
+// than date-clamped: dropping old rows would drop real dollars out of a
+// rollover balance. Ordered by (month, category), which is unique per
+// household, so page boundaries are stable.
+async function getAssignmentsThrough(monthStart) {
+  const rows = [];
+  const page = 1000;
+  for (let from = 0; ; from += page) {
+    const { data, error } = await supabase
+      .from('budget_months')
+      .select('category, month, assigned')
+      .lte('month', monthStart)
+      .order('month', { ascending: true })
+      .order('category', { ascending: true })
+      .range(from, from + page - 1);
+    if (error) throw error;
+    rows.push(...data);
+    if (data.length < page) break;
+  }
+  return rows;
+}
+
+// Household income for a month, for Ready to Assign. Hand-entered: the feed
+// still cannot be trusted for take-home pay (SimpleFIN only syncs what is
+// linked and unhidden, and a missed paycheck would silently read as less to
+// budget). `budget:income` is the recurring default; `budget:income:YYYY-MM`
+// overrides one month. Both live in `settings`, so this needs no migration.
+const INCOME_KEY = 'budget:income';
+
+export async function getBudgetIncome({ year, month }) {
+  const monthKeyStr = `${INCOME_KEY}:${monthKey(year, month)}`;
+  const { data, error } = await supabase
+    .from('settings')
+    .select('key, value')
+    .in('key', [INCOME_KEY, monthKeyStr]);
+  if (error) throw error;
+  const byKey = {};
+  for (const row of data || []) byKey[row.key] = row.value;
+  // settings.value is a TEXT column (see migration 2) — everything stored there
+  // is a string, so read it back as one. An empty string is not a zero.
+  const read = v => {
+    if (v == null || String(v).trim() === '') return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  };
+  const override = read(byKey[monthKeyStr]);
+  const fallback = read(byKey[INCOME_KEY]);
+  return {
+    income: override != null ? override : fallback,
+    isDefault: override == null && fallback != null,
+    monthlyDefault: fallback,
+  };
+}
+
+// `scope: 'month'` sets just this month; `scope: 'default'` sets the recurring
+// amount AND clears this month's override so the new default is what shows.
+export async function setBudgetIncome({ year, month }, amount, { scope = 'month' } = {}) {
+  const raw = amount == null ? '' : String(amount).trim();
+  const n = raw === '' ? null : Number(raw);
+  if (raw !== '' && !Number.isFinite(n)) return;
+  const monthKeyStr = `${INCOME_KEY}:${monthKey(year, month)}`;
+  const key = scope === 'default' ? INCOME_KEY : monthKeyStr;
+  if (n == null) {
+    const { error } = await supabase.from('settings').delete().eq('key', key);
+    if (error) throw error;
+  } else {
+    const { error } = await supabase
+      .from('settings')
+      .upsert({ key, value: String(n) }, { onConflict: 'household_id,key' });
+    if (error) throw error;
+  }
+  if (scope === 'default') {
+    const { error } = await supabase.from('settings').delete().eq('key', monthKeyStr);
+    if (error) throw error;
+  }
+}
+
+// Per-(category, month) spend sums for the walk's range, memoised. The walk's
+// range grows by a month every month and is re-read after every envelope edit,
+// but an envelope edit CANNOT change a transaction — so assigning, moving money
+// or toggling rollover reuses this instead of re-downloading the household's
+// whole budgeting history. invalidateEnvelopeSpending() is called by the
+// dashboard's own reload, which is the only moment transactions can have moved
+// (a sync, a CSV/PDF import, a recategorisation, a learned rule applied).
+let spendCache = null;
+
+export function invalidateEnvelopeSpending() {
+  spendCache = null;
+}
+
+async function getEnvelopeSpending(start, end) {
+  const cacheKey = `${start}|${end}`;
+  if (spendCache && spendCache.key === cacheKey) return spendCache.spending;
+
+  const txs = await getTransactionsBetween(start, end, {
+    columns: SPEND_TX_COLUMNS,
+    markTransfers: false,
+  });
+
+  // Aggregate on the same predicate the Categories bars use, so an envelope's
+  // Spent can never disagree with the bar rendered beside it. Keyed 'YYYY-MM' +
+  // category, sliced at a fixed offset rather than split on a separator —
+  // category labels contain spaces ("Coffee and snacks").
+  const byKey = new Map();
+  for (const t of txs) {
+    if (!isSpend(t)) continue;
+    const key = `${(t.date || '').slice(0, 7)}${effectiveCategory(t)}`;
+    byKey.set(key, (byKey.get(key) || 0) + t.amount);
+  }
+  const spending = [];
+  for (const [key, amount] of byKey) {
+    spending.push({ category: key.slice(7), month: key.slice(0, 7), spent: amount });
+  }
+  spendCache = { key: cacheKey, spending };
+  return spending;
+}
+
+export async function getEnvelopes({ year, month }) {
+  const targetKey = monthKey(year, month);
+
+  const [assignmentRows, settingsRes] = await Promise.all([
+    getAssignmentsThrough(`${targetKey}-01`),
+    supabase.from('budgets').select('category, monthly_limit, rollover, target_kind, target_date'),
+  ]);
+  if (settingsRes.error) throw settingsRes.error;
+
+  // Only fetch transactions back to the earliest month anyone actually assigned
+  // in — the walk cannot use anything older, and this is the query that grows
+  // with the household's budgeting history.
+  let earliestKey = targetKey;
+  for (const row of assignmentRows) {
+    const key = String(row.month).slice(0, 7);
+    if ((Number(row.assigned) || 0) !== 0 && key < earliestKey) earliestKey = key;
+  }
+  const [startYear, startMonth] = earliestKey.split('-').map(Number);
+  const { start } = monthBounds(startYear, startMonth);
+  const { end } = monthBounds(year, month);
+  const spending = await getEnvelopeSpending(start, end);
+
+  const settings = settingsRes.data.map(row => ({
+    category: row.category,
+    target: row.monthly_limit,
+    targetKind: row.target_kind,
+    targetDate: row.target_date,
+    rollover: row.rollover,
+  }));
+
+  return walkEnvelopes({ assignments: assignmentRows, spending, settings, year, month });
+}
+
+// Assigns dollars to a category for one month. Blank or zero removes the
+// assignment entirely (which is what keeps "no row = assigned 0" true).
+// Negative is allowed — that's moving money back out of an envelope.
+export async function setAssigned(category, { year, month }, amount) {
+  const raw = amount == null ? '' : String(amount).trim();
+  const n = raw === '' ? 0 : Number(raw);
+  // A typo ("1-2") must not silently wipe an assignment — only an empty value
+  // clears one. Anything unparseable is ignored.
+  if (!Number.isFinite(n)) return;
+  const monthStart = `${year}-${pad2(month)}-01`;
+  if (n === 0) {
+    const { error } = await supabase
+      .from('budget_months')
+      .delete()
+      .eq('category', category)
+      .eq('month', monthStart);
     if (error) throw error;
     return;
   }
   const { error } = await supabase
+    .from('budget_months')
+    .upsert(
+      { category, month: monthStart, assigned: n, updated_at: new Date().toISOString() },
+      { onConflict: 'household_id,category,month' }
+    );
+  if (error) throw error;
+}
+
+// Rule 3: whether this category's leftover (or overspend) carries forward.
+// Each budgets writer sends only the columns it owns — a PostgREST upsert's
+// ON CONFLICT DO UPDATE touches only those, so setting a rollover flag never
+// clobbers monthly_limit or target_kind, and vice versa (verified against a
+// local Postgres stub).
+export async function setCategoryRollover(category, rollover) {
+  const { error } = await supabase
     .from('budgets')
-    .upsert({ category, monthly_limit: n }, { onConflict: 'household_id,category' });
+    .upsert({ category, rollover: !!rollover }, { onConflict: 'household_id,category' });
+  if (error) throw error;
+}
+
+// Rule 2: 'monthly' funds the target every month; 'by_date' is a sinking fund
+// that should reach the target by `date`.
+export async function setTargetKind(category, kind, date = null) {
+  const target_kind = kind === 'by_date' ? 'by_date' : 'monthly';
+  const { error } = await supabase.from('budgets').upsert(
+    { category, target_kind, target_date: target_kind === 'by_date' ? date : null },
+    { onConflict: 'household_id,category' }
+  );
+  if (error) throw error;
+}
+
+// Rule 3's actual mechanic: cover an overspent category from one with room.
+// Both legs go in ONE upsert so a failure can never leave money duplicated or
+// destroyed. A leg that lands on exactly zero is written as a 0 row rather than
+// deleted — the walk treats a 0 assignment as "no envelope opened here", so the
+// two are equivalent and atomicity is worth more than tidiness.
+export async function moveMoney({ from, to, amount }, { year, month }) {
+  const monthStart = `${year}-${pad2(month)}-01`;
+  const { data, error: readErr } = await supabase
+    .from('budget_months')
+    .select('category, assigned')
+    .eq('month', monthStart)
+    .in('category', [from, to]);
+  if (readErr) throw readErr;
+  const current = {};
+  for (const row of data || []) current[row.category] = Number(row.assigned) || 0;
+
+  const legs = planMove({ from, to, amount, assignedByCategory: current });
+  if (!legs) return;
+
+  const updatedAt = new Date().toISOString();
+  const { error } = await supabase.from('budget_months').upsert(
+    legs.map(l => ({ ...l, month: monthStart, updated_at: updatedAt })),
+    { onConflict: 'household_id,category,month' }
+  );
+  if (error) throw error;
+}
+
+// Bulk-assign for "Fund targets". items: [{ category, amount }]. Amounts are
+// the *new* assigned totals for the month, not deltas.
+export async function fundTargets(items, { year, month }) {
+  const monthStart = `${year}-${pad2(month)}-01`;
+  const updatedAt = new Date().toISOString();
+  const rows = items
+    .filter(i => Number.isFinite(Number(i.amount)) && Number(i.amount) !== 0)
+    .map(i => ({
+      category: i.category,
+      month: monthStart,
+      assigned: Number(i.amount),
+      updated_at: updatedAt,
+    }));
+  if (!rows.length) return;
+  const { error } = await supabase
+    .from('budget_months')
+    .upsert(rows, { onConflict: 'household_id,category,month' });
   if (error) throw error;
 }
 

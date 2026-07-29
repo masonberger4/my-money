@@ -603,6 +603,42 @@ alter table institutions
   add constraint institutions_status_check
   check (status in ('active', 'disabled', 'error'));
 
+-- ============ MIGRATION 11: envelope budgeting ============
+-- budget_months adds the per-(category, month) grain the flat budgets table
+-- lacked: `assigned` is how many real dollars the household gave a category in
+-- that month. A MISSING ROW MEANS assigned 0 — never a fallback to
+-- budgets.monthly_limit, which would manufacture a rolled-over balance out of
+-- months nobody actually budgeted.
+--
+-- budgets keeps one row per category but monthly_limit now means the rule-2
+-- funding *target* rather than a spending cap, and it gains rollover (rule 3),
+-- target_kind ('monthly' | 'by_date') and target_date. monthly_limit becomes
+-- nullable so a category can carry rollover settings without a target amount.
+
+create table budget_months (
+  household_id uuid not null default current_household_id() references households(id) on delete cascade,
+  category text not null,
+  -- Always the first of the month; the check keeps the primary key honest so
+  -- two writers can't create '2026-07-01' and '2026-07-15' for one month.
+  month date not null check (month = date_trunc('month', month)::date),
+  assigned numeric(12, 2) not null default 0,
+  updated_at timestamptz not null default now(),
+  primary key (household_id, category, month)
+);
+
+alter table budget_months enable row level security;
+
+create policy budget_months_all on budget_months
+  for all to authenticated
+  using (household_id = current_household_id())
+  with check (household_id = current_household_id());
+
+alter table budgets add column if not exists rollover boolean not null default true;
+alter table budgets add column if not exists target_kind text not null default 'monthly'
+  check (target_kind in ('monthly', 'by_date'));
+alter table budgets add column if not exists target_date date;
+alter table budgets alter column monthly_limit drop not null;
+
 -- ============ AUTO-CREATE HOUSEHOLD ============
 -- Links the household to the first (usually only) auth user. If you haven't
 -- created the user yet, this is skipped — create the user and re-run the
@@ -671,6 +707,31 @@ begin
   end if;
   if to_regclass('public.category_rules') is null then
     missing := array_append(missing, 'category_rules table (20260728)');
+  end if;
+  if to_regclass('public.budget_months') is null then
+    missing := array_append(missing, 'budget_months table (20260729)');
+  end if;
+  if not exists (select 1 from information_schema.columns
+      where table_schema = 'public' and table_name = 'budgets'
+        and column_name = 'rollover') then
+    missing := array_append(missing, 'budgets.rollover (20260729)');
+  end if;
+  if not exists (select 1 from information_schema.columns
+      where table_schema = 'public' and table_name = 'budgets'
+        and column_name = 'target_kind') then
+    missing := array_append(missing, 'budgets.target_kind (20260729)');
+  end if;
+  if not exists (select 1 from information_schema.columns
+      where table_schema = 'public' and table_name = 'budgets'
+        and column_name = 'target_date') then
+    missing := array_append(missing, 'budgets.target_date (20260729)');
+  end if;
+  -- monthly_limit must be NULLABLE after 20260729 — a category can carry
+  -- rollover settings without a target amount.
+  if exists (select 1 from information_schema.columns
+      where table_schema = 'public' and table_name = 'budgets'
+        and column_name = 'monthly_limit' and is_nullable = 'NO') then
+    missing := array_append(missing, 'budgets.monthly_limit still NOT NULL (20260729)');
   end if;
 
   -- The two adapter-agnostic external-id columns. Plaid-named, NOT Plaid-owned:
