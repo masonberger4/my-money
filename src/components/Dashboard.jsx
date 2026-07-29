@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { getOverview, getSpending, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES, setCategoryRule, applyCategoryRuleToHistory } from "../dataAdapter.js";
+import { getOverview, getSpending, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES, setCategoryRule, applyCategoryRuleToHistory, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, invalidateEnvelopeSpending, isEnvelopeSchemaMissing, targetNeed, readyToAssign, monthKey } from "../dataAdapter.js";
 import { merchantKey } from "../txClassify.js";
 import { detectRecurring } from "../recurring.js";
 import { unlinkInstitution, askAssistant } from "../apiClient.js";
@@ -125,6 +125,28 @@ function fmtX(n) {
   const s = "$"+Math.abs(v).toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2});
   return v < 0 ? "−"+s : s;
 }
+// "$1,234" for whole dollars, "$1,234.56" when there are cents to show.
+function fmtAuto(n) { return Math.round(Number(n)*100)%100===0?fmt(n):fmtX(n); }
+function signed(n) { return `${n>0?"+":""}${fmtAuto(n)}`; }
+// "Jun 2027" from a 'YYYY-MM-DD' target date.
+function monthYear(dateStr) {
+  const [y,m]=String(dateStr||"").slice(0,7).split("-").map(Number);
+  if(!y||!m) return "";
+  return new Date(y,m-1,1).toLocaleString("default",{month:"short",year:"numeric"});
+}
+const MONO={color:"var(--text)",fontFamily:"'DM Mono',monospace"};
+// The semantic money pair (under / over). Always rendered through inkOn/markOn
+// against the actual surface so both themes keep contrast.
+const OK_MONEY="#1D9E75",OVER_MONEY="#D85A30";
+// Keeps a money input to digits with at most one leading "-" and one ".", so
+// a fat-fingered "1-2" or "1.2.3" can never reach the adapter. Negatives are
+// allowed only where pulling money back out is meaningful (an assignment) —
+// never for a target, an income figure or the size of a move.
+function numericish(s,{negative=true}={}) {
+  const neg=negative&&s.trim().startsWith("-");
+  const [whole,...rest]=s.replace(/[^0-9.]/g,"").split(".");
+  return (neg?"-":"")+(rest.length?`${whole}.${rest.join("")}`:whole);
+}
 
 function Sk({w="100%",h=16,r=6}) {
   return <div style={{width:w,height:h,borderRadius:r,background:"var(--border)",animation:"pulse 1.5s ease-in-out infinite"}} />;
@@ -196,8 +218,10 @@ function EditName({name,onSave}) {
   );
 }
 
-// Inline budget editor for a Categories row: shows "/ $400" (or "＋ budget"
-// when unset); tap to edit. Enter/blur saves, empty clears, Escape cancels.
+// Inline funding-target editor for a Categories row: shows "/ $400" (or
+// "＋ target" when unset); tap to edit. Enter/blur saves, empty clears,
+// Escape cancels. The target is what you want to put IN each month (YNAB
+// rule 2) — the dollars actually put in are assigned on the Budget tab.
 function BudgetEdit({limit,onSave}) {
   const [ed,setEd]=useState(false);
   const [val,setVal]=useState(limit!=null?String(limit):"");
@@ -207,18 +231,214 @@ function BudgetEdit({limit,onSave}) {
   function commit(){setEd(false);const t=val.trim();onSave(t===""?null:t);}
   if(ed) return (
     <input ref={ref} value={val} inputMode="decimal" placeholder="$/mo"
-      onChange={e=>setVal(e.target.value.replace(/[^0-9.]/g,""))}
+      onChange={e=>setVal(numericish(e.target.value,{negative:false}))}
       onBlur={commit}
       onKeyDown={e=>{if(e.key==="Enter")commit();if(e.key==="Escape"){setEd(false);setVal(limit!=null?String(limit):"");}}}
       style={{font:"inherit",fontSize:16,width:76,color:"var(--text)",background:"var(--bg)",
         border:"1px solid var(--border)",borderRadius:6,padding:"1px 6px",outline:"none",textAlign:"right"}}/>
   );
   return (
-    <button onClick={()=>setEd(true)} title={limit!=null?"Tap to change the monthly budget":"Set a monthly budget"}
+    <button onClick={()=>setEd(true)} title={limit!=null?"Tap to change the monthly funding target":"Set a monthly funding target"}
       style={{background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",padding:0,
         fontSize:11,color:"var(--muted)",flexShrink:0}}>
-      {limit!=null?`/ ${fmt(limit)}`:"＋ budget"}
+      {limit!=null?`/ ${fmt(limit)}`:"＋ target"}
     </button>
+  );
+}
+
+// Inline editor for the dollars assigned to a category this month — the
+// envelope itself. Same interaction as BudgetEdit, but negatives are allowed
+// so money can be pulled back out of an envelope and given to another.
+function AssignEdit({value,onSave}) {
+  const [ed,setEd]=useState(false);
+  const [val,setVal]=useState(value?String(value):"");
+  const ref=useRef();
+  useEffect(()=>{setVal(value?String(value):"");},[value]);
+  useEffect(()=>{if(ed)ref.current?.select();},[ed]);
+  function commit(){setEd(false);const t=val.trim();onSave(t===""?null:t);}
+  if(ed) return (
+    <input ref={ref} value={val} inputMode="decimal" placeholder="$"
+      onChange={e=>setVal(numericish(e.target.value))}
+      onBlur={commit}
+      onKeyDown={e=>{if(e.key==="Enter")commit();if(e.key==="Escape"){setEd(false);setVal(value?String(value):"");}}}
+      style={{font:"inherit",fontSize:16,width:72,color:"var(--text)",background:"var(--card)",
+        border:"1px solid var(--accent)",borderRadius:6,padding:"1px 6px",outline:"none",textAlign:"right"}}/>
+  );
+  return (
+    <button onClick={()=>setEd(true)} title="Dollars assigned to this category this month"
+      style={{background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",padding:0,
+        fontSize:12,fontWeight:600,color:value?"var(--text)":"var(--accent)",flexShrink:0}}>
+      {value?fmtAuto(value):"＋ assign"}
+    </button>
+  );
+}
+
+// The household's money for the month, typed in by hand. The feed can't answer
+// this trustworthily — a missed paycheck would silently read as less to
+// budget — so Ready to Assign runs on a number the household states (see
+// CLAUDE.md, "the income wall"). Saving offers both scopes because most months
+// repeat and some don't.
+function IncomeEdit({value,isDefault,onSave}) {
+  const [ed,setEd]=useState(false);
+  const [val,setVal]=useState(value!=null?String(value):"");
+  const ref=useRef();
+  useEffect(()=>{setVal(value!=null?String(value):"");},[value]);
+  useEffect(()=>{if(ed)ref.current?.select();},[ed]);
+  function commit(scope){setEd(false);const t=val.trim();onSave(t===""?null:t,scope);}
+  if(ed) return (
+    <span style={{display:"inline-flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
+      <input ref={ref} value={val} inputMode="decimal" placeholder="$"
+        onChange={e=>setVal(numericish(e.target.value,{negative:false}))}
+        onKeyDown={e=>{if(e.key==="Enter")commit("month");if(e.key==="Escape"){setEd(false);setVal(value!=null?String(value):"");}}}
+        style={{font:"inherit",fontSize:16,width:96,color:"var(--text)",background:"var(--card)",
+          border:"1px solid var(--accent)",borderRadius:6,padding:"2px 7px",outline:"none",textAlign:"right"}}/>
+      <button className="ibtn" style={{fontSize:10,padding:"3px 8px"}} onClick={()=>commit("month")}>This month</button>
+      <button className="ibtn" style={{fontSize:10,padding:"3px 8px"}} onClick={()=>commit("default")}>Every month</button>
+    </span>
+  );
+  return (
+    <button onClick={()=>setEd(true)} title="What the household has to budget this month"
+      style={{background:"none",border:"none",cursor:"pointer",padding:0,
+        fontSize:13,fontWeight:600,color:value!=null?"var(--text)":"var(--accent)",fontFamily:"'DM Mono',monospace"}}>
+      {value!=null?fmtAuto(value):"＋ set income"}
+      {value!=null&&<span style={{fontSize:10,fontWeight:500,color:"var(--muted)",fontFamily:"'DM Sans','Helvetica Neue',sans-serif",marginLeft:5}}>
+        {isDefault?"every month":"this month"}
+      </span>}
+    </button>
+  );
+}
+
+// Rule 2, "Embrace Your True Expenses". A monthly target is topped up every
+// month; a by-date target is a sinking fund — the amount you want to have by a
+// deadline, which the app spreads over the months remaining.
+function TargetSheet({name,row,busy,surf,year,month,onSave,onClose}) {
+  const [amount,setAmount]=useState(row?.target!=null?String(row.target):"");
+  const [kind,setKind]=useState(row?.targetKind==="by_date"?"by_date":"monthly");
+  const [ym,setYm]=useState(row?.targetDate?String(row.targetDate).slice(0,7):"");
+  const n=Number(amount);
+  const valid=Number.isFinite(n)&&n>0&&(kind==="monthly"||/^\d{4}-\d{2}$/.test(ym));
+  // Mirrors targetNeed()'s by-date arithmetic so the sheet can't promise a
+  // number the funder won't produce.
+  const preview=(()=>{
+    if(!valid) return null;
+    if(kind==="monthly") return `Tops this category up to ${fmtAuto(n)} every month.`;
+    // Months left count from the month BEING VIEWED, exactly as targetNeed
+    // will — when budgeting ahead, "today" would overstate the runway.
+    const [ty,tm]=ym.split("-").map(Number);
+    const left=Math.max(1,(ty-year)*12+(tm-month)+1);
+    const have=row?.rolledOver||0;
+    const per=Math.max(0,(n-have)/left);
+    return `${fmtAuto(n)} by ${monthYear(`${ym}-01`)} — about ${fmtAuto(per)} a month for ${left} month${left===1?"":"s"}${have>0?`, on top of the ${fmtAuto(have)} already in it`:""}.`;
+  })();
+  return (
+    <div className="overlay" onClick={onClose}>
+      <div className="modal" onClick={e=>e.stopPropagation()}>
+        <div style={{fontSize:16,fontWeight:600,marginBottom:4,color:"var(--text)"}}>Funding target</div>
+        <div style={{fontSize:12,color:"var(--muted)",marginBottom:16}}>{name}</div>
+
+        <div style={{fontSize:12,color:"var(--muted)",marginBottom:6}}>Amount</div>
+        <input value={amount} inputMode="decimal" autoFocus placeholder="0"
+          onChange={e=>setAmount(numericish(e.target.value,{negative:false}))}
+          style={{width:"100%",padding:"9px 12px",borderRadius:8,border:"1px solid var(--border)",background:"var(--input-bg)",
+            color:"var(--text)",fontSize:16,fontFamily:"'DM Mono',monospace",outline:"none",marginBottom:14}}/>
+
+        <div style={{fontSize:12,color:"var(--muted)",marginBottom:8}}>How to fund it</div>
+        <div style={{display:"flex",gap:8,marginBottom:14}}>
+          {[["monthly","Every month"],["by_date","By a date"]].map(([k,label])=>(
+            <button key={k} onClick={()=>setKind(k)}
+              style={{flex:1,padding:"8px 0",borderRadius:8,fontFamily:"inherit",fontSize:12,fontWeight:600,cursor:"pointer",
+                background:kind===k?"var(--accent)":"var(--input-bg)",color:kind===k?"var(--accent-text)":"var(--muted)",
+                border:`1px solid ${kind===k?"var(--accent)":"var(--border)"}`}}>{label}</button>
+          ))}
+        </div>
+
+        {kind==="by_date"&&(<>
+          <div style={{fontSize:12,color:"var(--muted)",marginBottom:6}}>Needed by</div>
+          <input type="month" value={ym} onChange={e=>setYm(e.target.value)}
+            style={{width:"100%",padding:"9px 12px",borderRadius:8,border:"1px solid var(--border)",background:"var(--input-bg)",
+              color:"var(--text)",fontSize:14,fontFamily:"inherit",outline:"none",marginBottom:14}}/>
+        </>)}
+
+        <div style={{fontSize:11,color:"var(--muted)",background:"var(--input-bg)",borderRadius:8,padding:"8px 12px",marginBottom:16,minHeight:16}}>
+          {preview||"Set an amount to see how this will be funded."}
+        </div>
+
+        <div style={{display:"flex",gap:8}}>
+          {row?.target!=null&&(
+            <button className="ibtn" disabled={busy} style={{justifyContent:"center"}}
+              onClick={()=>onSave({amount:"",kind:"monthly",date:null})}>Remove</button>
+          )}
+          <button className="ibtn" style={{flex:1,justifyContent:"center"}} onClick={onClose}>Cancel</button>
+          <button disabled={!valid||busy}
+            onClick={()=>onSave({amount,kind,date:kind==="by_date"?`${ym}-01`:null})}
+            style={{flex:1,padding:"8px 0",borderRadius:8,border:"none",background:"var(--accent)",color:"var(--accent-text)",
+              fontFamily:"inherit",fontSize:14,fontWeight:500,cursor:valid&&!busy?"pointer":"default",opacity:valid&&!busy?1:.5}}>
+            Save
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Rule 3, "Roll With the Punches". Overspending one category is meant to be
+// answered by taking the money from another, not by pretending the plan held.
+function MoveSheet({from,rows,getName,chipFor,busy,surf,onMove,onClose}) {
+  const [to,setTo]=useState("");
+  const [amount,setAmount]=useState("");
+  const src=rows.find(r=>r.category===from);
+  const n=Number(amount);
+  const valid=Number.isFinite(n)&&n>0&&!!to&&to!==from;
+  const after=valid?(src?.available||0)-n:null;
+  const targetRow=rows.find(r=>r.category===to);
+  const overInk=inkOn(OVER_MONEY,surf.card),okInk=inkOn(OK_MONEY,surf.card);
+  return (
+    <div className="overlay" onClick={onClose}>
+      <div className="modal" onClick={e=>e.stopPropagation()} style={{maxHeight:"80vh",overflowY:"auto"}}>
+        <div style={{fontSize:16,fontWeight:600,marginBottom:4,color:"var(--text)"}}>Move money</div>
+        <div style={{fontSize:12,color:"var(--muted)",marginBottom:16}}>
+          Out of {getName(from)} — {fmtAuto(src?.available||0)} available
+        </div>
+
+        <div style={{fontSize:12,color:"var(--muted)",marginBottom:6}}>Amount</div>
+        <input value={amount} inputMode="decimal" autoFocus placeholder="0"
+          onChange={e=>setAmount(numericish(e.target.value,{negative:false}))}
+          style={{width:"100%",padding:"9px 12px",borderRadius:8,border:"1px solid var(--border)",background:"var(--input-bg)",
+            color:"var(--text)",fontSize:16,fontFamily:"'DM Mono',monospace",outline:"none",marginBottom:14}}/>
+
+        <div style={{fontSize:12,color:"var(--muted)",marginBottom:8}}>Into</div>
+        <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:14}}>
+          {rows.filter(r=>r.category!==from).map(r=>{
+            const active=to===r.category;
+            const c=chipFor(r.category,active);
+            return (
+              <button key={r.category} onClick={()=>setTo(r.category)}
+                style={{fontSize:11,fontWeight:600,padding:"5px 10px",borderRadius:20,fontFamily:"inherit",cursor:"pointer",
+                  background:c.bg,color:c.ink,border:`1px solid ${c.border}`,transition:"all .15s"}}>
+                {getName(r.category)}
+                {r.available<0&&<span style={{color:active?c.ink:overInk,marginLeft:5}}>{fmtAuto(r.available)}</span>}
+              </button>
+            );
+          })}
+        </div>
+
+        <div style={{fontSize:11,color:"var(--muted)",background:"var(--input-bg)",borderRadius:8,padding:"8px 12px",marginBottom:16}}>
+          {valid
+            ? <>Leaves {getName(from)} at <strong style={{color:after<0?overInk:"var(--text)"}}>{fmtAuto(after)}</strong>
+                {" "}and brings {getName(to)} to <strong style={{color:(targetRow?.available||0)+n<0?overInk:okInk}}>{fmtAuto((targetRow?.available||0)+n)}</strong>.</>
+            : "Pick an amount and a category to move it into."}
+        </div>
+
+        <div style={{display:"flex",gap:8}}>
+          <button className="ibtn" style={{flex:1,justifyContent:"center"}} onClick={onClose}>Cancel</button>
+          <button disabled={!valid||busy} onClick={()=>onMove(from,to,amount)}
+            style={{flex:1,padding:"8px 0",borderRadius:8,border:"none",background:"var(--accent)",color:"var(--accent-text)",
+              fontFamily:"inherit",fontSize:14,fontWeight:500,cursor:valid&&!busy?"pointer":"default",opacity:valid&&!busy?1:.5}}>
+            Move
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -248,6 +468,27 @@ export default function Dashboard({ refreshTick = 0 }) {
   const [cashFlow,setCashFlow]=useState(null);
   const [accounts,setAccounts]=useState([]);
   const [budgets,setBudgets]=useState({});
+  // By-date sinking funds, kept OUT of `budgets`: their amount is a
+  // multi-month total, not a monthly cap (see getBudgets).
+  const [byDate,setByDate]=useState({});
+  // --- Envelope budgeting (Budget tab) ---
+  const [envelopes,setEnvelopes]=useState(null);
+  const [income,setIncome]=useState(null);
+  // Categories the user has pulled into the Budget tab to start an envelope in,
+  // but hasn't assigned to yet — local only, nothing is written until they do.
+  const [extraEnvCats,setExtraEnvCats]=useState([]);
+  const [targetEdit,setTargetEdit]=useState(null);   // category name
+  const [moveFrom,setMoveFrom]=useState(null);       // category name
+  const [envBusy,setEnvBusy]=useState(false);
+  const [pickingCat,setPickingCat]=useState(false);
+  const monthRef=useRef(`${now.getFullYear()}-${now.getMonth()+1}`);
+  const loadSeq=useRef(0);
+  // Orders the two writers of envelope state (reloadData and runEnvelopeWrite)
+  // against each other; loadSeq alone can't — it only orders reloads.
+  const envSeq=useRef(0);
+  // Envelope writes queue instead of dropping: a second edit made while the
+  // first is settling must not silently vanish.
+  const envChain=useRef(Promise.resolve());
   const [txAcctFilter,setTxAcctFilter]=useState(null);
   const [searchQ,setSearchQ]=useState("");
   const [searchRes,setSearchRes]=useState(null);
@@ -339,16 +580,37 @@ export default function Dashboard({ refreshTick = 0 }) {
   function saveAsstEffort(e){setAsstEffort(e);setSetting("asst:effort",e).catch(()=>{});}
 
   const isCurrent = year===now.getFullYear()&&month===now.getMonth()+1;
-  const canNext = !(year===now.getFullYear()&&month>=now.getMonth()+1);
+  // Every other tab reports on months that have happened, so it stops at the
+  // current one. Budgeting is forward-looking — assigning next month's money
+  // before the month starts is the whole point of rule 1 — so the Budget tab
+  // may look ahead. Leaving it snaps back (see the tab handler), because a
+  // future month is empty everywhere else.
+  const monthsAhead=(year-now.getFullYear())*12+(month-(now.getMonth()+1));
+  const maxAhead=tab==="budget"?12:0;
+  const canNext = monthsAhead<maxAhead;
+  const isFuture = monthsAhead>0;
 
   function prevMonth(){if(month===1){setYear(y=>y-1);setMonth(12);}else setMonth(m=>m-1);}
   function nextMonth(){if(!canNext)return;if(month===12){setYear(y=>y+1);setMonth(1);}else setMonth(m=>m+1);}
+  function goCurrentMonth(){setYear(now.getFullYear());setMonth(now.getMonth()+1);}
 
   const reloadData=useCallback(async(y,m)=>{
     setError(null);
     const cur=y===now.getFullYear()&&m===now.getMonth()+1;
+    // Two month taps in quick succession leave two loads in flight, and nothing
+    // guarantees they resolve in order. Without this, the slower one wins and
+    // paints its month's envelopes under the other month's header — and the
+    // next assignment the user types is then written to the WRONG month, which
+    // rolls forward into every month after it. Same monotonic-sequence guard
+    // the cross-month search already uses.
+    const seq=++loadSeq.current;
+    // The envelope walk reads transactions; this is the moment they may have
+    // moved (a sync, an import, a recategorisation, a learned rule), so drop
+    // the memoised spend sums.
+    invalidateEnvelopeSpending();
+    const eseq=++envSeq.current;
     try{
-      const[ov,sp,tx,cf,ac,bu]=await Promise.all([
+      const[ov,sp,tx,cf,ac,bu,en,inc]=await Promise.all([
         cur?getOverview():Promise.resolve(null),
         getSpending({year:y,month:m}),
         getTransactions({year:y,month:m}),
@@ -356,16 +618,32 @@ export default function Dashboard({ refreshTick = 0 }) {
         getAccounts(),
         // Tolerate the budgets table not existing yet (migration lands at merge).
         getBudgets().catch(()=>({budgets:{}})),
+        // Envelope schema not installed yet -> null (shows the not-set-up
+        // notice). A TRANSIENT failure -> undefined (keep what's on screen) —
+        // otherwise one flaky request would claim the migration never ran.
+        getEnvelopes({year:y,month:m}).catch(e=>isEnvelopeSchemaMissing(e)?null:undefined),
+        getBudgetIncome({year:y,month:m}).catch(()=>undefined),
       ]);
+      if(seq!==loadSeq.current)return false;
       setOverview(ov);setSpending(sp);setTransactions(tx);setCashFlow(cf);
       setAccounts(ac.accounts||[]);
-      setBudgets(bu.budgets||{});
+      // A completed envelope write may have painted fresher rows while this
+      // reload was in flight — don't overwrite them (or the freshly saved
+      // budgets/targets) with a pre-write snapshot.
+      if(eseq===envSeq.current){
+        setBudgets(bu.budgets||{});
+        setByDate(bu.byDate||{});
+        if(en!==undefined)setEnvelopes(en);
+        if(inc!==undefined)setIncome(inc);
+      }
       setRecurring(null); // recompute lazily on next Recurring-tab visit
       setLastUpd(new Date());
     }catch(err){
+      if(seq!==loadSeq.current)return false;
       console.error(err);
       setError("Couldn't load data from local cache.");
     }
+    return true;
   },[]);
 
   const fetchData=useCallback(async(y,m,{sync=false}={})=>{
@@ -374,8 +652,10 @@ export default function Dashboard({ refreshTick = 0 }) {
       try{ await runSync(); }
       catch(err){ console.error("sync failed",err); setError("Bank sync failed. Showing cached data."); }
     }
-    await reloadData(y,m);
-    setLoading(false);
+    const live=await reloadData(y,m);
+    // Don't clear the spinner on behalf of a load that has been superseded —
+    // the newer one is still running.
+    if(live!==false)setLoading(false);
   },[reloadData]);
 
   useEffect(()=>{
@@ -531,7 +811,14 @@ export default function Dashboard({ refreshTick = 0 }) {
   async function saveAccountType(id,fields,prevType,fed){
     const crossed=isDebtType(prevType)!==isDebtType(fields.type);
     await saveAccount(id,fields);
-    if(!crossed||!fed)return;
+    // Any type change can move the account across isLoanAccount(), which sits
+    // inside isSpend() — the memoised envelope spend sums and the fetched
+    // spending state are both stale now, re-sync or not.
+    if(prevType!==fields.type){invalidateEnvelopeSpending();}
+    if(!crossed||!fed){
+      if(prevType!==fields.type)reloadData(year,month);
+      return;
+    }
     setRetyping(true);
     try{
       await runSync({force:true});
@@ -615,13 +902,107 @@ export default function Dashboard({ refreshTick = 0 }) {
   const budgetedTotal=Object.values(budgets).reduce((s,v)=>s+v,0);
   const budgetLeft=budgetedTotal-budgetedSpent;
 
-  async function saveBudget(category,val){
-    const n=val==null||val===""?NaN:Number(val);
-    const next={...budgets};
-    if(!Number.isFinite(n)||n<=0)delete next[category];else next[category]=n;
-    setBudgets(next);
-    try{await setBudget(category,val);}catch(err){console.error("budget save failed",err);}
+  // --- Budget tab (envelopes) -------------------------------------------------
+  // Rows come straight from the walk, which already covers every category that
+  // has an assignment, a target, or spending this month. extraEnvCats are ones
+  // the user has pulled in to start an envelope but not yet assigned to.
+  const envMap={};
+  for(const r of envelopes?.categories||[])envMap[r.category]=r;
+  const envRows=[...(envelopes?.categories||[]),
+    ...extraEnvCats.filter(k=>!envMap[k]).map(k=>({category:k,assigned:0,rolledOver:0,spent:0,
+      available:0,target:budgets[k]??null,targetKind:"monthly",targetDate:null,rollover:true}))];
+  // Uncategorized (and any transfer bucket) is bookkeeping, not a budget — a
+  // budget on it would be a budget on the classifier's ignorance. Its spending
+  // still renders (the size of the unknown stays visible), but it takes no
+  // assignments, targets or moves — so it is also excluded from Fund targets
+  // and the move sheet's destinations.
+  const budgetableRows=envRows.filter(r=>isBudgetableCategory(r.category));
+  // What each targeted category still needs this month to hit its target.
+  const fundNeeds=budgetableRows.map(r=>({row:r,need:targetNeed(r,{year,month})})).filter(x=>x.need>0);
+  const fundTotal=fundNeeds.reduce((s,x)=>s+x.need,0);
+  const rta=envelopes?readyToAssign(income?.income,envelopes.totals):null;
+  // Categories with no envelope yet, offered by the "budget another category"
+  // picker. Custom categories are budgetable too.
+  const allCatNames=[...ERA_CATEGORIES,...customCats.map(c=>c.name).filter(n=>!ERA_CATEGORIES.includes(n))];
+  const unbudgetedCats=allCatNames.filter(c=>isBudgetableCategory(c)&&!envRows.some(r=>r.category===c));
+
+  // Assigning during render is a side effect; the ref has to track the
+  // *committed* month so an in-flight envelope write can tell it landed on a
+  // stale one.
+  useEffect(()=>{monthRef.current=`${year}-${month}`;},[year,month]);
+
+  // Every envelope write goes through here. It re-reads what it wrote rather
+  // than updating state optimistically: a budget that shows a number it failed
+  // to save is worse than one that takes a beat to settle. If the user has
+  // moved to another month meanwhile, the result is dropped rather than shown
+  // under the new month. Writes QUEUE on envChain — the inline editors stay
+  // usable while a save settles, and an edit made in that window must run
+  // after it, not silently vanish.
+  function runEnvelopeWrite(what,fn){
+    const run=envChain.current.then(()=>doEnvelopeWrite(what,fn));
+    envChain.current=run.catch(()=>{});
+    return run;
   }
+  async function doEnvelopeWrite(what,fn){
+    const key=`${year}-${month}`;
+    setEnvBusy(true);setError(null);
+    try{
+      await fn();
+      // The re-read is TOLERANT: the write itself failing must surface, but a
+      // failed refresh must not report a stored change as "wasn't stored" —
+      // that exact false alarm would fire on every pre-migration preview,
+      // where budgets writes succeed and the envelope schema doesn't exist.
+      const[env,inc,bud]=await Promise.all([
+        getEnvelopes({year,month}).catch(e=>isEnvelopeSchemaMissing(e)?null:undefined),
+        getBudgetIncome({year,month}).catch(()=>undefined),
+        getBudgets().catch(()=>undefined),
+      ]);
+      if(monthRef.current===key){
+        // Newer than any reload still in flight from before the write.
+        envSeq.current++;
+        if(env!==undefined)setEnvelopes(env);
+        if(inc!==undefined)setIncome(inc);
+        if(bud!==undefined){setBudgets(bud.budgets||{});setByDate(bud.byDate||{});}
+      }else{
+        // The user moved months while the write settled. The write still went
+        // to ITS month (the one the number was typed against) — but a reload
+        // for the new month may have read budget_months before this write
+        // committed, leaving the carry short on screen. Re-read the month now
+        // being viewed; envSeq drops anything older.
+        const [cy,cm]=monthRef.current.split("-").map(Number);
+        const fresh=await getEnvelopes({year:cy,month:cm}).catch(()=>undefined);
+        if(fresh!==undefined&&monthRef.current===`${cy}-${cm}`){
+          envSeq.current++;
+          setEnvelopes(fresh);
+        }
+      }
+    }catch(err){
+      console.error(`${what} save failed`,err);
+      setError(`Couldn't save ${what} — your change wasn't stored. Check your connection and try again.`);
+    }finally{setEnvBusy(false);}
+  }
+
+  const saveBudget=(category,val)=>runEnvelopeWrite("the target",()=>setBudget(category,val));
+  const saveAssigned=(category,val)=>runEnvelopeWrite("the assignment",()=>setAssigned(category,{year,month},val));
+  const saveRollover=(category,next)=>{
+    // The ⟳ is disabled on by-date rows, but the invariant lives here too: a
+    // sinking fund with rollover off would ask for its full share forever.
+    if(!next&&envMap[category]?.targetKind==="by_date"&&envMap[category]?.target!=null)return;
+    return runEnvelopeWrite("the rollover setting",()=>setCategoryRollover(category,next));
+  };
+  const saveIncome=(val,scope)=>runEnvelopeWrite("the income",()=>setBudgetIncome({year,month},val,{scope}));
+  const doMove=(from,to,amount)=>runEnvelopeWrite("the transfer",()=>moveMoney({from,to,amount},{year,month}));
+  const saveTarget=(category,{amount,kind,date})=>runEnvelopeWrite("the target",async()=>{
+    await setBudget(category,amount);
+    await setTargetKind(category,kind,date);
+    // A sinking fund only reaches its number because each month's leftover
+    // carries. With rollover off, rolledOver is always 0, so targetNeed() would
+    // ask for the full monthly share forever and the fund would never converge —
+    // a by-date target on a non-rolling category is incoherent, not a preference.
+    if(kind==="by_date"&&envMap[category]&&!envMap[category].rollover){
+      await setCategoryRollover(category,true);
+    }
+  });
 
   return (
     <div style={{fontFamily:"'DM Sans','Helvetica Neue',sans-serif",background:"var(--bg)",minHeight:"100vh",
@@ -671,7 +1052,7 @@ export default function Dashboard({ refreshTick = 0 }) {
           <div style={{background:"var(--warn-bg)",border:"1px solid var(--warn-border)",borderRadius:10,padding:"12px 16px",fontSize:13,color:"var(--warn)",marginBottom:14,lineHeight:1.5}}>
             Your {accounts.length===1?"account is":"accounts are"} hidden until you've checked
             {accounts.length===1?" its":" their"} type — that's what decides whether spending counts.
-            {" "}<button onClick={()=>setTab("accounts")} style={{background:"none",border:"none",padding:0,font:"inherit",color:"inherit",textDecoration:"underline",cursor:"pointer"}}>Review and unhide</button>.
+            {" "}<button onClick={()=>{setTab("accounts");if(isFuture)goCurrentMonth();}} style={{background:"none",border:"none",padding:0,font:"inherit",color:"inherit",textDecoration:"underline",cursor:"pointer"}}>Review and unhide</button>.
           </div>
         )}
 
@@ -695,8 +1076,15 @@ export default function Dashboard({ refreshTick = 0 }) {
 
         {/* Tabs */}
         <div style={{display:"flex",gap:3,background:"var(--bg)",borderRadius:24,padding:4,marginBottom:14,border:"1px solid var(--border)",overflowX:"auto"}}>
-          {["overview","categories","transactions","accounts","trends","recurring","ask"].map(t=>(
-            <button key={t} className={`tab${tab===t?" active":""}`} onClick={()=>{setTab(t);if(t!=="accounts")setSelAcct(null);}}>
+          {["overview","categories","budget","transactions","accounts","trends","recurring","ask"].map(t=>(
+            <button key={t} className={`tab${tab===t?" active":""}`}
+              onClick={()=>{
+                setTab(t);
+                if(t!=="accounts")setSelAcct(null);
+                // Only the Budget tab can look into the future; every other tab
+                // would just show an empty month, so leaving snaps back.
+                if(t!=="budget"&&isFuture)goCurrentMonth();
+              }}>
               {t[0].toUpperCase()+t.slice(1)}
             </button>
           ))}
@@ -756,7 +1144,7 @@ export default function Dashboard({ refreshTick = 0 }) {
             </div>
             {budgetCount>0&&!loading&&(
               <div style={{display:"flex",alignItems:"center",gap:8,background:"var(--bg)",borderRadius:10,padding:"10px 14px",marginBottom:16,fontSize:12,flexWrap:"wrap"}}>
-                <span style={{color:"var(--muted)"}}>Budgeted <strong style={{color:"var(--text)",fontFamily:"'DM Mono',monospace"}}>{fmt(budgetedTotal)}</strong></span>
+                <span style={{color:"var(--muted)"}}>Targets <strong style={{color:"var(--text)",fontFamily:"'DM Mono',monospace"}}>{fmt(budgetedTotal)}</strong></span>
                 <span style={{color:"var(--muted)"}}>·</span>
                 <span style={{color:"var(--muted)"}}>Spent <strong style={{color:"var(--text)",fontFamily:"'DM Mono',monospace"}}>{fmt(budgetedSpent)}</strong></span>
                 <span style={{flex:1}}/>
@@ -789,7 +1177,14 @@ export default function Dashboard({ refreshTick = 0 }) {
                       {/* No budget on Uncategorized — it would be a budget on
                           the classifier's ignorance, and the number moves as
                           merchants get learned rather than as spending changes. */}
-                      {isBudgetableCategory(c.label)&&<BudgetEdit limit={lim} onSave={v=>saveBudget(c.label,v)}/>}
+                      {isBudgetableCategory(c.label)&&(byDate[c.label]
+                        ?<button onClick={()=>setTab("budget")}
+                            title="Sinking fund — a total to reach by a date, not a monthly cap. Edit it on the Budget tab."
+                            style={{background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",padding:0,
+                              fontSize:11,color:"var(--muted)",flexShrink:0}}>
+                            {fmtAuto(byDate[c.label].target)} by {monthYear(byDate[c.label].date)}
+                          </button>
+                        :<BudgetEdit limit={lim} onSave={v=>saveBudget(c.label,v)}/>)}
                     </div>
                   </div>
                   <div style={{display:"flex",alignItems:"center",gap:8}}>
@@ -823,10 +1218,171 @@ export default function Dashboard({ refreshTick = 0 }) {
               </>
             )}
             <div style={{marginTop:16,fontSize:11,color:"var(--muted)",background:"var(--bg)",borderRadius:8,padding:"8px 12px"}}>
-              Click a color swatch to change it · Double-click a name to rename it · Tap ＋ budget to set a monthly limit
+              Click a color swatch to change it · Double-click a name to rename it · ＋ target sets what you want to fund each month; the Budget tab is where you put real dollars in
             </div>
           </div>
         )}
+
+        {/* BUDGET (envelopes — YNAB rules 1, 2 and 3) */}
+        {tab==="budget"&&(()=>{
+          const okBg=inkOn(OK_MONEY,surf.bg),overBg=inkOn(OVER_MONEY,surf.bg);
+          const okCard=inkOn(OK_MONEY,surf.card),overCard=inkOn(OVER_MONEY,surf.card);
+          // The walk stamps the month it computed. Until the viewed month's
+          // rows arrive, the previous month's must not render EDITABLE under
+          // the new header — an assignment typed against them would be written
+          // to the new month and roll forward into every month after it.
+          const envCurrent=!!envelopes&&envelopes.month===monthKey(year,month);
+          return (
+          <div className="card">
+            {!envelopes&&!loading&&(
+              <div style={{fontSize:12,color:"var(--muted)",textAlign:"center",padding:"28px 12px",lineHeight:1.6}}>
+                Envelope budgeting isn't set up yet.<br/>
+                Its migration (<code>20260729000001_budget_envelopes.sql</code>) needs to run first.
+              </div>
+            )}
+            {((loading&&!envelopes)||(envelopes&&!envCurrent))&&[1,2,3,4].map(i=><div key={i} style={{marginBottom:14}}><Sk h={14}/></div>)}
+            {envCurrent&&(<>
+              {envelopes.truncated&&(
+                <div style={{background:"var(--danger-bg)",border:"1px solid var(--danger-border)",borderRadius:8,padding:"8px 12px",
+                  fontSize:11,color:"var(--danger)",marginBottom:12}}>
+                  An assignment is dated impossibly far back, so the rollover walk was clamped. These balances may be short.
+                </div>
+              )}
+
+              {/* Ready to Assign — rule 1, on hand-entered income. */}
+              <div style={{background:"var(--bg)",borderRadius:10,padding:"12px 14px",marginBottom:14}}>
+                <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",fontSize:12,marginBottom:8}}>
+                  <span style={{color:"var(--muted)"}}>Income</span>
+                  <IncomeEdit value={income?.income} isDefault={!!income?.isDefault} onSave={saveIncome}/>
+                  <span style={{flex:1}}/>
+                  <span style={{color:"var(--muted)"}}>Assigned <strong style={MONO}>{fmtAuto(envelopes.totals.assigned)}</strong></span>
+                </div>
+                {rta!=null?(
+                  <div style={{display:"flex",alignItems:"baseline",gap:8,flexWrap:"wrap"}}>
+                    <span style={{fontSize:22,fontWeight:600,letterSpacing:"-.02em",fontFamily:"'DM Mono',monospace",
+                      color:rta>0?okBg:rta<0?overBg:"var(--text)"}}>{fmtAuto(Math.abs(rta))}</span>
+                    <span style={{fontSize:12,color:"var(--muted)"}}>
+                      {rta>0?"left to assign":rta<0?"assigned beyond your income":"every dollar has a job"}
+                    </span>
+                  </div>
+                ):(
+                  <div style={{fontSize:11,color:"var(--muted)",lineHeight:1.5}}>
+                    Set your income for the month to see what's left to assign. It's typed in by hand —
+                    the feed can't be trusted to see every paycheck, and a budget built on a partial
+                    number would silently run low.
+                  </div>
+                )}
+                {fundNeeds.length>0&&(
+                  <button className="ibtn" disabled={envBusy}
+                    onClick={()=>runEnvelopeWrite("the targets",()=>fundTargets(
+                      fundNeeds.map(x=>({category:x.row.category,amount:x.row.assigned+x.need})),{year,month}))}
+                    style={{marginTop:11,fontSize:11,width:"100%",justifyContent:"center"}}>
+                    Fund targets · {fmtAuto(fundTotal)} into {fundNeeds.length} categor{fundNeeds.length===1?"y":"ies"}
+                  </button>
+                )}
+              </div>
+
+              {isFuture&&(
+                <div style={{fontSize:11,color:"var(--muted)",background:"var(--bg)",borderRadius:8,padding:"8px 12px",marginBottom:12}}>
+                  Budgeting ahead for {monthLabel(year,month)}. Nothing has been spent yet — balances carry in from
+                  the months before it.
+                </div>
+              )}
+
+              {envRows.length===0&&(
+                <div style={{fontSize:12,color:"var(--muted)",textAlign:"center",padding:"20px 12px",lineHeight:1.6}}>
+                  No envelopes yet. Add a category below and assign it some money.
+                </div>
+              )}
+
+              {envRows.map(r=>{
+                const budgetable=isBudgetableCategory(r.category);
+                const pot=r.assigned+r.rolledOver;
+                const ratio=pot>0?r.spent/pot:0;
+                // An unbudgetable row has no envelope; its available is just
+                // −spent, which must not read as an overspend alarm.
+                const over=budgetable&&r.available<0;
+                const barW=pot>0?Math.min(ratio,1)*100:0;
+                const barColor=markOn(over?OVER_MONEY:ratio>=0.8?"#FAC775":getColor(r.category),surf.track);
+                const need=budgetable?targetNeed(r,{year,month}):0;
+                return (
+                  <div key={r.category} style={{marginBottom:16}}>
+                    <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:5}}>
+                      <Swatch color={getColor(r.category)} onChange={hex=>saveColors({...customColors,[r.category]:hex})}/>
+                      <span style={{fontSize:13,fontWeight:500,color:"var(--text)",minWidth:0,overflow:"hidden",
+                        textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{getName(r.category)}</span>
+                      <span style={{flex:1}}/>
+                      {/* An unbudgetable row has no envelope, so a negative
+                          "available" would be a false alarm — show its spend. */}
+                      <span style={{fontSize:13,fontWeight:600,fontFamily:"'DM Mono',monospace",flexShrink:0,
+                        color:!budgetable?"var(--muted)":over?overCard:r.available>0?okCard:"var(--muted)"}}>
+                        {budgetable?fmtAuto(r.available):fmtAuto(r.spent)}
+                      </span>
+                    </div>
+
+                    <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:5}}>
+                      <div className="bar-bg"><div className="bar-fill" style={{width:barW+"%",background:barColor}}/></div>
+                      <span style={{fontSize:11,width:38,textAlign:"right",flexShrink:0,color:over?overCard:"var(--muted)"}}>
+                        {pot>0?Math.round(ratio*100)+"%":"—"}
+                      </span>
+                    </div>
+
+                    {budgetable?(
+                      <div style={{display:"flex",alignItems:"center",gap:6,fontSize:11,color:"var(--muted)",flexWrap:"wrap"}}>
+                        {r.assigned!==0&&<span>Assigned</span>}
+                        <AssignEdit value={r.assigned} onSave={v=>saveAssigned(r.category,v)}/>
+                        {r.rolledOver!==0&&(<>
+                          <span>·</span>
+                          <span style={{color:r.rolledOver>0?okCard:overCard}}>{signed(r.rolledOver)} rolled</span>
+                        </>)}
+                        {r.spent!==0&&(<><span>·</span><span>{fmtAuto(r.spent)} spent</span></>)}
+                        <span style={{flex:1}}/>
+                        <button onClick={()=>setTargetEdit(r.category)} disabled={envBusy}
+                          title="Set a funding target for this category"
+                          style={{background:"none",border:`1px solid ${r.target!=null?"var(--accent)":"var(--border)"}`,
+                            borderRadius:20,cursor:"pointer",fontFamily:"inherit",padding:"2px 8px",fontSize:10,
+                            color:r.target!=null?"var(--accent)":"var(--muted)",flexShrink:0}}>
+                          {r.target==null?"＋ target"
+                            :r.targetKind==="by_date"?`${fmtAuto(r.target)} by ${monthYear(r.targetDate)}`
+                            :`${fmtAuto(r.target)}/mo`}
+                        </button>
+                        {need>0&&<span style={{color:"var(--accent)",fontSize:10}}>needs {fmtAuto(need)}</span>}
+                        <button onClick={()=>setMoveFrom(r.category)} disabled={envBusy}
+                          title="Move money between this envelope and another"
+                          style={{background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",padding:"0 2px",
+                            fontSize:13,lineHeight:1,color:"var(--muted)",flexShrink:0}}>⇄</button>
+                        <button onClick={()=>saveRollover(r.category,!r.rollover)}
+                          disabled={envBusy||(r.targetKind==="by_date"&&r.target!=null)}
+                          title={r.targetKind==="by_date"&&r.target!=null
+                            ?"A sinking fund only reaches its date because leftovers carry — rollover stays on while the by-date target exists"
+                            :r.rollover?"Leftover rolls into next month — tap to turn off":"Leftover resets each month — tap to roll it over"}
+                          style={{background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",padding:"0 2px",
+                            fontSize:13,lineHeight:1,color:r.rollover?"var(--accent)":"var(--border)",flexShrink:0}}>⟳</button>
+                      </div>
+                    ):(
+                      <div style={{fontSize:11,color:"var(--muted)"}}>
+                        {fmtAuto(r.spent)} spent · can't be budgeted — categorize these transactions to give them an envelope
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+
+              {unbudgetedCats.length>0&&(
+                <button className="ibtn" onClick={()=>setPickingCat(true)}
+                  style={{fontSize:11,width:"100%",justifyContent:"center",marginTop:4}}>
+                  + Budget another category
+                </button>
+              )}
+
+              <div style={{marginTop:16,fontSize:11,color:"var(--muted)",background:"var(--bg)",borderRadius:8,padding:"8px 12px",lineHeight:1.6}}>
+                Tap the amount to assign real dollars · ＋ target is what you want to fund · ⇄ moves money between
+                envelopes · ⟳ carries a category's leftover (or its overspend) into next month
+              </div>
+            </>)}
+          </div>
+          );
+        })()}
 
         {/* TRANSACTIONS */}
         {tab==="transactions"&&(
@@ -1443,6 +1999,47 @@ export default function Dashboard({ refreshTick = 0 }) {
           onClose={()=>setConnectingSfin(false)}
           onConnected={()=>reloadData(year,month)}
         />
+      )}
+
+      {/* Funding target (rule 2) */}
+      {targetEdit&&(
+        <TargetSheet name={getName(targetEdit)} row={envMap[targetEdit]||{target:budgets[targetEdit]??null}} busy={envBusy} surf={surf} year={year} month={month}
+          onClose={()=>setTargetEdit(null)}
+          onSave={v=>{const c=targetEdit;setTargetEdit(null);saveTarget(c,v);}}/>
+      )}
+
+      {/* Move money between envelopes (rule 3) */}
+      {moveFrom&&(
+        <MoveSheet from={moveFrom} rows={budgetableRows} getName={getName} busy={envBusy} surf={surf}
+          chipFor={(cat,active)=>{
+            if(!active)return {bg:"var(--bg)",ink:"var(--muted)",border:"var(--border)"};
+            const c=chipOn(getColor(cat),surf.card);
+            return {bg:c.bg,ink:c.ink,border:c.ink};
+          }}
+          onClose={()=>setMoveFrom(null)}
+          onMove={(f,t,amt)=>{setMoveFrom(null);doMove(f,t,amt);}}/>
+      )}
+
+      {/* Pull a category into the Budget tab so it can be assigned to */}
+      {pickingCat&&(
+        <div className="overlay" onClick={()=>setPickingCat(false)}>
+          <div className="modal" onClick={e=>e.stopPropagation()} style={{maxHeight:"70vh",overflowY:"auto"}}>
+            <div style={{fontSize:16,fontWeight:600,marginBottom:4,color:"var(--text)"}}>Budget another category</div>
+            <div style={{fontSize:12,color:"var(--muted)",marginBottom:16}}>
+              Adds it to this month's budget. Nothing is saved until you assign it money or set a target.
+            </div>
+            <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:18}}>
+              {unbudgetedCats.map(c=>(
+                <button key={c} onClick={()=>{setExtraEnvCats(p=>p.includes(c)?p:[...p,c]);setPickingCat(false);}}
+                  style={{fontSize:11,fontWeight:600,padding:"5px 10px",borderRadius:20,fontFamily:"inherit",cursor:"pointer",
+                    background:"var(--bg)",color:"var(--muted)",border:"1px solid var(--border)"}}>
+                  {getName(c)}
+                </button>
+              ))}
+            </div>
+            <button onClick={()=>setPickingCat(false)} className="ibtn" style={{width:"100%",justifyContent:"center"}}>Cancel</button>
+          </div>
+        </div>
       )}
 
       {/* Add category modal */}
