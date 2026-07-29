@@ -374,15 +374,21 @@ export async function getBudgets() {
   return { budgets };
 }
 
-// Sets the category's funding target. Clearing it leaves the row in place
-// with a null limit so the category keeps its rollover / target_date
-// settings; getBudgets() skips null limits, so it still reads as "no target".
+// Sets the category's funding target. Clearing it null-UPDATES the row rather
+// than deleting it, so a category keeps its rollover / target_date settings;
+// getBudgets() skips null limits, so it still reads as "no target". An UPDATE,
+// not an upsert: clearing a target on a category that never had a budgets row
+// must stay a no-op — an upserted null row would list that category on the
+// Budget tab every month forever, with no UI that ever deletes it.
 export async function setBudget(category, limit) {
   const n = limit == null || limit === '' ? NaN : Number(limit);
   const monthly_limit = Number.isFinite(n) && n > 0 ? n : null;
-  const { error } = await supabase
-    .from('budgets')
-    .upsert({ category, monthly_limit }, { onConflict: 'household_id,category' });
+  const { error } =
+    monthly_limit === null
+      ? await supabase.from('budgets').update({ monthly_limit }).eq('category', category)
+      : await supabase
+          .from('budgets')
+          .upsert({ category, monthly_limit }, { onConflict: 'household_id,category' });
   if (!error) return;
   // `monthly_limit` is NOT NULL until the envelope migration relaxes it, and
   // previews share the PROD database — so on a preview whose migration hasn't
@@ -395,6 +401,19 @@ export async function setBudget(category, limit) {
     return;
   }
   throw error;
+}
+
+// True for the errors that mean the envelope schema has not been installed —
+// a missing table (PGRST205 from PostgREST's schema cache, 42P01 from
+// Postgres) or the budgets columns the migration adds (42703). The dashboard
+// uses this to tell "migration not pasted yet" apart from a transient network
+// failure: only the former should show the not-set-up notice. Same pattern as
+// getCategoryRules above.
+export function isEnvelopeSchemaMissing(error) {
+  return (
+    !!error &&
+    (error.code === 'PGRST205' || error.code === '42P01' || error.code === '42703')
+  );
 }
 
 // --- Envelope budgeting (YNAB rules 1–3) -------------------------------------
@@ -646,12 +665,16 @@ export async function moveMoney({ from, to, amount }, { year, month }) {
 }
 
 // Bulk-assign for "Fund targets". items: [{ category, amount }]. Amounts are
-// the *new* assigned totals for the month, not deltas.
+// the *new* assigned totals for the month, not deltas. A total of exactly ZERO
+// is still written: it can be the funding step that lifts a negative
+// assignment back to zero, and a 0 row is defined as equivalent to no row —
+// filtering it out would leave the negative in place and the category's
+// "needs" chip asking forever.
 export async function fundTargets(items, { year, month }) {
   const monthStart = `${year}-${pad2(month)}-01`;
   const updatedAt = new Date().toISOString();
   const rows = items
-    .filter(i => Number.isFinite(Number(i.amount)) && Number(i.amount) !== 0)
+    .filter(i => Number.isFinite(Number(i.amount)))
     .map(i => ({
       category: i.category,
       month: monthStart,

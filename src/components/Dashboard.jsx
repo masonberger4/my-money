@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { getOverview, getSpending, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES, setCategoryRule, applyCategoryRuleToHistory, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, invalidateEnvelopeSpending, targetNeed, readyToAssign } from "../dataAdapter.js";
+import { getOverview, getSpending, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES, setCategoryRule, applyCategoryRuleToHistory, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, invalidateEnvelopeSpending, isEnvelopeSchemaMissing, targetNeed, readyToAssign, monthKey } from "../dataAdapter.js";
 import { merchantKey } from "../txClassify.js";
 import { detectRecurring } from "../recurring.js";
 import { unlinkInstitution, askAssistant } from "../apiClient.js";
@@ -480,6 +480,12 @@ export default function Dashboard({ refreshTick = 0 }) {
   const [pickingCat,setPickingCat]=useState(false);
   const monthRef=useRef(`${now.getFullYear()}-${now.getMonth()+1}`);
   const loadSeq=useRef(0);
+  // Orders the two writers of envelope state (reloadData and runEnvelopeWrite)
+  // against each other; loadSeq alone can't — it only orders reloads.
+  const envSeq=useRef(0);
+  // Envelope writes queue instead of dropping: a second edit made while the
+  // first is settling must not silently vanish.
+  const envChain=useRef(Promise.resolve());
   const [txAcctFilter,setTxAcctFilter]=useState(null);
   const [searchQ,setSearchQ]=useState("");
   const [searchRes,setSearchRes]=useState(null);
@@ -599,6 +605,7 @@ export default function Dashboard({ refreshTick = 0 }) {
     // moved (a sync, an import, a recategorisation, a learned rule), so drop
     // the memoised spend sums.
     invalidateEnvelopeSpending();
+    const eseq=++envSeq.current;
     try{
       const[ov,sp,tx,cf,ac,bu,en,inc]=await Promise.all([
         cur?getOverview():Promise.resolve(null),
@@ -608,16 +615,22 @@ export default function Dashboard({ refreshTick = 0 }) {
         getAccounts(),
         // Tolerate the budgets table not existing yet (migration lands at merge).
         getBudgets().catch(()=>({budgets:{}})),
-        // Same for the envelope table — null just shows the not-set-up notice.
-        getEnvelopes({year:y,month:m}).catch(()=>null),
-        getBudgetIncome({year:y,month:m}).catch(()=>null),
+        // Envelope schema not installed yet -> null (shows the not-set-up
+        // notice). A TRANSIENT failure -> undefined (keep what's on screen) —
+        // otherwise one flaky request would claim the migration never ran.
+        getEnvelopes({year:y,month:m}).catch(e=>isEnvelopeSchemaMissing(e)?null:undefined),
+        getBudgetIncome({year:y,month:m}).catch(()=>undefined),
       ]);
       if(seq!==loadSeq.current)return false;
       setOverview(ov);setSpending(sp);setTransactions(tx);setCashFlow(cf);
       setAccounts(ac.accounts||[]);
       setBudgets(bu.budgets||{});
-      setEnvelopes(en);
-      setIncome(inc);
+      // A completed envelope write may have painted fresher rows while this
+      // reload was in flight — don't overwrite them with a pre-write snapshot.
+      if(eseq===envSeq.current){
+        if(en!==undefined)setEnvelopes(en);
+        if(inc!==undefined)setIncome(inc);
+      }
       setRecurring(null); // recompute lazily on next Recurring-tab visit
       setLastUpd(new Date());
     }catch(err){
@@ -793,7 +806,14 @@ export default function Dashboard({ refreshTick = 0 }) {
   async function saveAccountType(id,fields,prevType,fed){
     const crossed=isDebtType(prevType)!==isDebtType(fields.type);
     await saveAccount(id,fields);
-    if(!crossed||!fed)return;
+    // Any type change can move the account across isLoanAccount(), which sits
+    // inside isSpend() — the memoised envelope spend sums and the fetched
+    // spending state are both stale now, re-sync or not.
+    if(prevType!==fields.type){invalidateEnvelopeSpending();}
+    if(!crossed||!fed){
+      if(prevType!==fields.type)reloadData(year,month);
+      return;
+    }
     setRetyping(true);
     try{
       await runSync({force:true});
@@ -910,20 +930,35 @@ export default function Dashboard({ refreshTick = 0 }) {
   // than updating state optimistically: a budget that shows a number it failed
   // to save is worse than one that takes a beat to settle. If the user has
   // moved to another month meanwhile, the result is dropped rather than shown
-  // under the new month. envBusy serializes writes so a double-tap can't
-  // interleave two reloads.
-  async function runEnvelopeWrite(what,fn){
-    if(envBusy)return;
+  // under the new month. Writes QUEUE on envChain — the inline editors stay
+  // usable while a save settles, and an edit made in that window must run
+  // after it, not silently vanish.
+  function runEnvelopeWrite(what,fn){
+    const run=envChain.current.then(()=>doEnvelopeWrite(what,fn));
+    envChain.current=run.catch(()=>{});
+    return run;
+  }
+  async function doEnvelopeWrite(what,fn){
     const key=`${year}-${month}`;
     setEnvBusy(true);setError(null);
     try{
       await fn();
+      // The re-read is TOLERANT: the write itself failing must surface, but a
+      // failed refresh must not report a stored change as "wasn't stored" —
+      // that exact false alarm would fire on every pre-migration preview,
+      // where budgets writes succeed and the envelope schema doesn't exist.
       const[env,inc,bud]=await Promise.all([
-        getEnvelopes({year,month}),
-        getBudgetIncome({year,month}),
-        getBudgets(),
+        getEnvelopes({year,month}).catch(e=>isEnvelopeSchemaMissing(e)?null:undefined),
+        getBudgetIncome({year,month}).catch(()=>undefined),
+        getBudgets().catch(()=>undefined),
       ]);
-      if(monthRef.current===key){setEnvelopes(env);setIncome(inc);setBudgets(bud.budgets||{});}
+      if(monthRef.current===key){
+        // Newer than any reload still in flight from before the write.
+        envSeq.current++;
+        if(env!==undefined)setEnvelopes(env);
+        if(inc!==undefined)setIncome(inc);
+        if(bud!==undefined)setBudgets(bud.budgets||{});
+      }
     }catch(err){
       console.error(`${what} save failed`,err);
       setError(`Couldn't save ${what} — your change wasn't stored. Check your connection and try again.`);
@@ -995,7 +1030,7 @@ export default function Dashboard({ refreshTick = 0 }) {
           <div style={{background:"var(--warn-bg)",border:"1px solid var(--warn-border)",borderRadius:10,padding:"12px 16px",fontSize:13,color:"var(--warn)",marginBottom:14,lineHeight:1.5}}>
             Your {accounts.length===1?"account is":"accounts are"} hidden until you've checked
             {accounts.length===1?" its":" their"} type — that's what decides whether spending counts.
-            {" "}<button onClick={()=>setTab("accounts")} style={{background:"none",border:"none",padding:0,font:"inherit",color:"inherit",textDecoration:"underline",cursor:"pointer"}}>Review and unhide</button>.
+            {" "}<button onClick={()=>{setTab("accounts");if(isFuture)goCurrentMonth();}} style={{background:"none",border:"none",padding:0,font:"inherit",color:"inherit",textDecoration:"underline",cursor:"pointer"}}>Review and unhide</button>.
           </div>
         )}
 
@@ -1163,6 +1198,11 @@ export default function Dashboard({ refreshTick = 0 }) {
         {tab==="budget"&&(()=>{
           const okBg=inkOn(OK_MONEY,surf.bg),overBg=inkOn(OVER_MONEY,surf.bg);
           const okCard=inkOn(OK_MONEY,surf.card),overCard=inkOn(OVER_MONEY,surf.card);
+          // The walk stamps the month it computed. Until the viewed month's
+          // rows arrive, the previous month's must not render EDITABLE under
+          // the new header — an assignment typed against them would be written
+          // to the new month and roll forward into every month after it.
+          const envCurrent=!!envelopes&&envelopes.month===monthKey(year,month);
           return (
           <div className="card">
             {!envelopes&&!loading&&(
@@ -1171,8 +1211,8 @@ export default function Dashboard({ refreshTick = 0 }) {
                 Its migration (<code>20260729000001_budget_envelopes.sql</code>) needs to run first.
               </div>
             )}
-            {loading&&!envelopes&&[1,2,3,4].map(i=><div key={i} style={{marginBottom:14}}><Sk h={14}/></div>)}
-            {envelopes&&(<>
+            {((loading&&!envelopes)||(envelopes&&!envCurrent))&&[1,2,3,4].map(i=><div key={i} style={{marginBottom:14}}><Sk h={14}/></div>)}
+            {envCurrent&&(<>
               {envelopes.truncated&&(
                 <div style={{background:"var(--danger-bg)",border:"1px solid var(--danger-border)",borderRadius:8,padding:"8px 12px",
                   fontSize:11,color:"var(--danger)",marginBottom:12}}>
