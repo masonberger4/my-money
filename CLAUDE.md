@@ -279,6 +279,59 @@ playwright-core screenshot (`executablePath:'/opt/pw-browsers/chromium'`,
   support them (Haiku 4.5 predates both — sending them 400s). Requires
   `ANTHROPIC_API_KEY` in Vercel (else the Ask tab shows "not configured").
 
+### Envelope budgeting (decided — don't relitigate)
+The Budget tab's model. `available = assigned + carry − spent`, walked from each
+category's own first assignment; the pure core is `src/envelopes.js`.
+
+- **A missing `budget_months` row means `assigned` 0. Never fall back to
+  `monthly_limit`.** Falling back makes every month nobody touched accrue
+  `(limit − spent)` into the carry and manufactures a phantom balance on day
+  one. Assignments only ever come from an explicit user action, so the number on
+  screen always equals the number the walk rolls forward. (Caught in review
+  before it shipped; pinned by a named REGRESSION test in
+  `test/envelopes.test.js`.) A **zero** assignment is likewise not an envelope —
+  `moveMoney` can leave a 0 row behind, and a 0 row must stay equivalent to no
+  row, or the category would start walking from there and turn its earlier
+  ordinary spending into rolled-over debt.
+- **Envelopes use the purchase-based model only** (`isSpend()`, shared with
+  `getSpending`/`sumSpending`, including the loan-account guard). Never
+  `getCashFlow` — mixing the two models double-counts.
+- **`Uncategorized` (and the transfer bucket) can't be budgeted** —
+  `isBudgetableCategory` gates assignments, targets, moves and the picker; its
+  spending still renders read-only so the size of the unknown stays visible.
+- **Overspend carries the category negative.** Real YNAB instead docks next
+  month's Ready to Assign on *cash* overspending and only rolls credit-covered
+  overspend negative. With no cash-vs-credit envelope split, carrying negative
+  is the only coherent choice — a simplification, not fidelity.
+- `assigned` / targets are plain positive dollars, **outside** the
+  `positive = money out` sign convention (only Spent carries the sign).
+- Envelope tables key on the **raw** category label, like `budgets`.
+- **Don't put a date clamp on the walk.** A rolling balance is every assignment
+  and every dollar spent since the envelope opened, so the walk starts at each
+  category's *own* first assignment, however old. A 24-month window was tried
+  and reverted: it froze a long-running sinking fund at a stale balance that
+  drifted further every month. `budget_months` is paginated for the same
+  reason — a row cap would silently drop real dollars. `MAX_WALK_MONTHS` is
+  only a runaway guard on the loop, and tripping it sets `truncated` rather than
+  quietly returning nothing.
+- **RTA income is hand-entered and never carried between months.** With a typed
+  figure, a carry-forward would compound every month the user left blank. One
+  month in, one month out.
+- The walk reads only the columns `isSpend()` needs and **skips
+  `markInternalTransfers`** — envelopes never read `_internal`, and that
+  matching is O(V·E) over a range that grows with the budgeting history.
+- A by-date target **forces rollover on** — a sinking fund only reaches its
+  number because leftovers carry; with rollover off it would ask for the full
+  share forever and never converge.
+
+**The income wall (why Rule 1 is hand-entered):** Ready to Assign needs
+trustworthy income. SimpleFIN syncs only what is linked *and unhidden* (new
+accounts arrive hidden), CSV/PDF import is periodic, and a missed paycheck
+would silently read as less money to budget — so deriving income risks a
+quietly-wrong number in exactly the place that must be trusted. The figure is
+typed in. If every income account proves reliably fed, deriving it becomes an
+option; that is a decision for Mason, not an automatic upgrade.
+
 ## Merged features (live on main; details in code + PRs)
 
 - **Transaction editing** — detail sheet: recategorize (`user_category`),
@@ -394,24 +447,25 @@ playwright-core screenshot (`executablePath:'/opt/pw-browsers/chromium'`,
   FAILED coverage lookup was indistinguishable from "the feed has nothing", so a
   dropped connection opened the overlap guard on a synced account; a never-synced
   account read as "import everything" when its first pull reaches back 730 days.
+- **Envelope budgeting (YNAB rules 1–3)** — a **Budget tab** that plans forward:
+  `available = assigned + carry − spent`, walked month by month from each
+  category's own first assignment. Ready to Assign on **hand-entered** income
+  (recurring default + per-month override in `settings`; the feed can't see
+  every paycheck — see "the income wall" in the spec history); funding targets
+  that are monthly top-ups or **by-date sinking funds** + "Fund targets";
+  per-category rollover of leftovers *and* overspend + moving money between
+  envelopes in one atomic upsert. Model is pure in `src/envelopes.js`
+  (`test/envelopes.test.js`); `budget_months` is the per-(category, month)
+  grain and `budgets.monthly_limit` becomes a funding target. Migration
+  `20260729000001_budget_envelopes.sql`, **applied to PROD 2026-07-29**. The
+  decided-don't-relitigate list is in Conventions below — the two that were
+  nearly got wrong (a missing assignment must never fall back to the target; the
+  walk must have no date clamp) are pinned by named REGRESSION tests.
 
 ## Pending branches
 
-- `claude/envelope-budgeting-rebase-jzuoj6` — **envelope budgeting** (YNAB
-  rules 1–3; see the spec in Roadmap). Adds `budget_months`, turns
-  `budgets.monthly_limit` into a funding *target*, and adds a **Budget tab**.
-  Rebased twice: once after CSV/PDF import, again after the SimpleFIN-only
-  cutover (absorbing the loan-account spending guard into `isSpend()`, the
-  theme tokens, and `isBudgetableCategory` — Uncategorized can't be budgeted).
-  **Migration to paste at merge:**
-  `supabase/migrations/20260729000001_budget_envelopes.sql` — **applied to PROD
-  on 2026-07-29, ahead of the merge. Nothing to paste at merge time.** The
-  preview's Budget tab is fully live (previews share the PROD database — edits
-  there are real). Known cross-version quirk until the merge deploys: an
-  envelope edit that creates a settings-only `budgets` row (rollover toggle,
-  by-date target) reads as a $0.00 budget on the *deployed* app's Categories
-  tab, because main's `getBudgets` coerces NULL `monthly_limit` to 0 — cosmetic,
-  self-heals at merge, but argues for merging promptly.
+None. Envelope budgeting merged 2026-07-29; its migration was applied to PROD
+ahead of the merge, so nothing is outstanding.
 
 Phase 4 is fully landed: code merged and deployed, and
 `20260728000002_remove_plaid.sql` **applied on 2026-07-29** after its pre-flight
@@ -437,121 +491,20 @@ env vars is done.
 
 ## Roadmap
 
-**In flight: envelope budgeting** (branch above; spec below). **Then: Debt
-tracker** — **balance-only + hand-entered APR/min** under SimpleFIN
+**Next: Debt tracker** — **balance-only + hand-entered APR/min** under SimpleFIN
 (spec below). The whole off-Plaid migration is **DONE** — phases 1–4 shipped;
 the app is SimpleFIN + CSV/PDF import with no Plaid anywhere. Later (discussed,
 not committed): net worth over time, cash-flow forecast, savings goals, CSV/PDF
-export, sign-out button. **`accounts.available_balance` holds two conventions**
+export, sign-out button. **Envelope follow-ups** (the tab is shipped, these are
+not): Age of Money — wants real *measured* income, so it waits on the income
+wall; scheduled/expected transactions; reconciliation; per-month target
+overrides (a target is one setting per category today, not per month);
+auto-filling next month's assignments from this month's. **`accounts.available_balance` holds two conventions**
 — SimpleFIN's raw feed value when it sends `available-balance`, and the
 *normalized* balance when it doesn't (`api/sync.js`'s `?? balance` fallback).
 Invisible today (nothing renders it) but it surfaces the moment the Debt view
 shows utilization; sort it out then, and never run it through `displayBalance`
 — for a card it means available *credit*, not a debt.
-
-### YNAB envelope budgeting — build spec
-From Jesse Mecham's *Never Worry About Money Again* (YNAB's founder; the method
-is YNAB's Four Rules). The shift it asks of this app: it is a **backward-looking
-tracker** (every tab aggregates already-synced transactions) and YNAB is a
-**forward-looking plan** — real dollars given jobs *before* they're spent.
-
-Rule → status:
-1. **Give Every Dollar a Job** (zero-based, "Ready to Assign") — **built, on
-   hand-entered income.** RTA = `income − Σ assigned`. The feed cannot supply
-   income (see "the income wall"), so the user types it; RTA is hidden entirely
-   when income is unset rather than shown as a confident zero.
-2. **Embrace Your True Expenses** (sinking funds) — **built.** `budgets` rows are
-   funding *targets*: `monthly_limit` + `target_kind` (`monthly` | `by_date`) +
-   `target_date`. `targetNeed()` spreads a by-date target over the months left.
-3. **Roll With the Punches** (carry balances) — **built.** Per-category
-   `rollover` flag; leftovers *and* overspend carry, plus `moveMoney` to cover an
-   overspent envelope from one with room.
-4. **Age Your Money** — **not built.** Needs real *measured* income. Do last.
-
-Shipped shape (branch above):
-- `budget_months(household_id, category, month, assigned)` — the envelope grain.
-  `budgets` keeps one row per category for target + `rollover`; `monthly_limit`
-  is now nullable so a category can carry settings without a target amount.
-- The model is pure in **`src/envelopes.js`** (`walkEnvelopes` / `targetNeed` /
-  `readyToAssign` / `planMove`); `getEnvelopes({year,month})` in dataAdapter is
-  I/O only — it reads the rows, aggregates spending through `isSpend()`, and
-  hands plain arrays in. Returns per-category rows + totals (+ `truncated`).
-  The per-(category, month) spend sums are memoised across envelope writes
-  (`invalidateEnvelopeSpending()` — only the dashboard reload clears it, the
-  one moment transactions can have moved).
-- Writers: `setAssigned`, `setCategoryRollover`, `setTargetKind`, `fundTargets`
-  (bulk "top every target up"), `moveMoney`, `getBudgetIncome`/`setBudgetIncome`.
-  All client-direct via RLS — no `api/` route needed. Verified against a local
-  Postgres stub that a **PostgREST partial upsert does not clobber the columns
-  it omits**, so each writer can send only the columns it owns.
-- Income lives in `settings`, not a new table: `budget:income` is the recurring
-  monthly default and `budget:income:YYYY-MM` overrides one month
-  (**stored as plain strings** — `settings.value` is TEXT). No migration.
-- UI: its own **Budget tab**. Ready-to-Assign strip (editable income, assigned,
-  RTA), "Fund targets", then a row per category — available, a bar of spent
-  against the envelope, the assign editor, rolled/spent, a target chip opening
-  `TargetSheet` (monthly vs by-date), `⇄` opening `MoveSheet`, and the `⟳`
-  rollover toggle. All colors go through the `inkOn`/`markOn`/`chipOn` contrast
-  helpers. The **Categories tab keeps main's shape** — spending measured
-  against the target, no envelope machinery.
-- The Budget tab may navigate up to **12 months ahead** (assigning next month's
-  money before it starts is the point of rule 1); every other tab still stops at
-  the current month, and leaving Budget snaps back.
-
-**Decided — don't relitigate:**
-- **A missing `budget_months` row means `assigned` 0. Never fall back to
-  `monthly_limit`.** Falling back makes every month nobody touched accrue
-  `(limit − spent)` into the carry and manufactures a phantom balance on day
-  one. Assignments only ever come from an explicit user action, so the number on
-  screen always equals the number the walk rolls forward. (Caught in review
-  before it shipped; pinned by a named REGRESSION test in
-  `test/envelopes.test.js`.) A **zero** assignment is likewise not an envelope —
-  `moveMoney` can leave a 0 row behind, and a 0 row must stay equivalent to no
-  row, or the category would start walking from there and turn its earlier
-  ordinary spending into rolled-over debt.
-- **Envelopes use the purchase-based model only** (`isSpend()`, shared with
-  `getSpending`/`sumSpending`, including the loan-account guard). Never
-  `getCashFlow` — mixing the two models double-counts.
-- **`Uncategorized` (and the transfer bucket) can't be budgeted** —
-  `isBudgetableCategory` gates assignments, targets, moves and the picker; its
-  spending still renders read-only so the size of the unknown stays visible.
-- **Overspend carries the category negative.** Real YNAB instead docks next
-  month's Ready to Assign on *cash* overspending and only rolls credit-covered
-  overspend negative. With no cash-vs-credit envelope split, carrying negative
-  is the only coherent choice — a simplification, not fidelity.
-- `assigned` / targets are plain positive dollars, **outside** the
-  `positive = money out` sign convention (only Spent carries the sign).
-- Envelope tables key on the **raw** category label, like `budgets`.
-- **Don't put a date clamp on the walk.** A rolling balance is every assignment
-  and every dollar spent since the envelope opened, so the walk starts at each
-  category's *own* first assignment, however old. A 24-month window was tried
-  and reverted: it froze a long-running sinking fund at a stale balance that
-  drifted further every month. `budget_months` is paginated for the same
-  reason — a row cap would silently drop real dollars. `MAX_WALK_MONTHS` is
-  only a runaway guard on the loop, and tripping it sets `truncated` rather than
-  quietly returning nothing.
-- **RTA income is hand-entered and never carried between months.** With a typed
-  figure, a carry-forward would compound every month the user left blank. One
-  month in, one month out.
-- The walk reads only the columns `isSpend()` needs and **skips
-  `markInternalTransfers`** — envelopes never read `_internal`, and that
-  matching is O(V·E) over a range that grows with the budgeting history.
-- A by-date target **forces rollover on** — a sinking fund only reaches its
-  number because leftovers carry; with rollover off it would ask for the full
-  share forever and never converge.
-
-**The income wall (why Rule 1 is hand-entered):** Ready to Assign needs
-trustworthy income. SimpleFIN syncs only what is linked *and unhidden* (new
-accounts arrive hidden), CSV/PDF import is periodic, and a missed paycheck
-would silently read as less money to budget — so deriving income risks a
-quietly-wrong number in exactly the place that must be trusted. The figure is
-typed in. If every income account proves reliably fed, deriving it becomes an
-option; that is a decision for Mason, not an automatic upgrade.
-
-Follow-ups (not built): Age of Money; scheduled/expected transactions;
-reconciliation; per-month target overrides (a target is currently one setting
-per category, not per month); auto-filling next month's assignments from this
-month's.
 
 ### Off-Plaid: SimpleFIN — COMPLETE (phases 1–4 shipped)
 Decision (settled, executed): **SimpleFIN Bridge** replaced Plaid as the bank
