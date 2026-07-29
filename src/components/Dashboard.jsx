@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { getOverview, getSpending, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES, setCategoryRule, applyCategoryRuleToHistory, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, invalidateEnvelopeSpending, isEnvelopeSchemaMissing, targetNeed, readyToAssign, monthKey } from "../dataAdapter.js";
 import { merchantKey } from "../txClassify.js";
 import { detectRecurring } from "../recurring.js";
@@ -442,6 +442,96 @@ function MoveSheet({from,rows,getName,chipFor,busy,surf,onMove,onClose}) {
   );
 }
 
+// The "open the transactions behind this number" affordance, used by both the
+// Categories rows and the Budget envelopes. A dotted underline rather than a
+// hover state: this is a phone-first app, and hover doesn't exist there — the
+// hint has to be visible without a pointer. With nothing to open it renders as
+// plain text, so a dead button never invites a tap.
+function DrillNum({onClick,title,style,children}) {
+  if(!onClick) return <span style={style}>{children}</span>;
+  return (
+    <button onClick={onClick} title={title}
+      style={{background:"none",border:"none",padding:0,font:"inherit",color:"inherit",cursor:"pointer",
+        textDecoration:"underline",textDecorationStyle:"dotted",textDecorationColor:"var(--muted)",
+        textUnderlineOffset:3,...style}}>
+      {children}
+    </button>
+  );
+}
+
+// Every transaction the viewed month has in one category. Opened by tapping a
+// category's transaction count or amount on the Categories tab, or its Spent on
+// the Budget tab.
+//
+// The list is split by `counted` — the flag the adapter stamps from the SAME
+// isSpend() predicate the bars and envelopes aggregate on. So the total printed
+// here is the number that was tapped to open it, by construction, and the rows
+// that are in the category but not in the total (excluded, refunds, loan
+// postings) are still shown rather than silently dropped — "where did the other
+// $40 go" is exactly the question this sheet exists to answer.
+function CategorySheet({name,color,when,rows,surf,getName,acctById,acctLabel,acctColor,onPick,onClose}) {
+  const counted=rows.filter(t=>t.counted);
+  const other=rows.filter(t=>!t.counted);
+  const total=counted.reduce((s,t)=>s+t.amount,0);
+  const c=chipOn(color,surf.card);
+  function row(t,muted){
+    const a=acctById(t.account_id);
+    return (
+      <div key={t.id} className="tx" onClick={()=>onPick(t)} style={{cursor:"pointer",opacity:muted?.55:1}}>
+        <div style={{width:30,height:30,borderRadius:9,background:"var(--bg)",display:"flex",alignItems:"center",
+          justifyContent:"center",fontSize:14,flexShrink:0}}>{TX_ICONS[t.category]||"🛍"}</div>
+        <div style={{flex:1,minWidth:0}}>
+          <div style={{fontSize:13,fontWeight:500,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
+            {t.merchant_name||t.description}
+          </div>
+          <div style={{fontSize:11,color:"var(--muted)",marginTop:2,display:"flex",alignItems:"center",gap:5,flexWrap:"wrap"}}>
+            <span>{t.transaction_date}</span>
+            {a&&<Pill label={acctLabel(a)} color={acctColor(a)} surface={surf.card}/>}
+            {t.excluded&&<Pill label="Excluded" color="#888780" surface={surf.card}/>}
+          </div>
+        </div>
+        <div style={{fontSize:13,fontFamily:"'DM Mono',monospace",fontWeight:500,flexShrink:0}}>{fmtX(t.amount)}</div>
+      </div>
+    );
+  }
+  return (
+    <div className="overlay" onClick={onClose}>
+      <div className="modal" onClick={e=>e.stopPropagation()}
+        style={{width:"min(460px,92vw)",maxHeight:"82vh",overflowY:"auto"}}>
+        <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
+          <span style={{width:10,height:10,borderRadius:3,background:c.dot,flexShrink:0}}/>
+          <span style={{fontSize:16,fontWeight:600,color:"var(--text)",minWidth:0,overflow:"hidden",
+            textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{getName(name)}</span>
+          <span style={{flex:1}}/>
+          <span style={{fontSize:16,fontWeight:600,fontFamily:"'DM Mono',monospace",flexShrink:0}}>{fmtAuto(total)}</span>
+        </div>
+        <div style={{fontSize:12,color:"var(--muted)",marginBottom:14}}>
+          {when} · {counted.length} transaction{counted.length!==1?"s":""}
+        </div>
+
+        {rows.length===0?(
+          <div style={{textAlign:"center",padding:"24px 0",color:"var(--muted)",fontSize:13}}>
+            No transactions in this category this month.
+          </div>
+        ):counted.map(t=>row(t,false))}
+
+        {other.length>0&&(<>
+          <div style={{borderTop:"1px solid var(--border)",margin:"14px 0 10px"}}/>
+          <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",
+            letterSpacing:".05em",marginBottom:4}}>Not counted</div>
+          <div style={{fontSize:10,color:"var(--muted)",lineHeight:1.5,marginBottom:6}}>
+            In this category, but outside the total above — excluded by hand, money coming back in,
+            or posted on a loan account.
+          </div>
+          {other.map(t=>row(t,true))}
+        </>)}
+
+        <button onClick={onClose} className="ibtn" style={{width:"100%",justifyContent:"center",marginTop:16}}>Done</button>
+      </div>
+    </div>
+  );
+}
+
 // `surface` = the token value of whatever the pill sits on (every pill sits on a
 // card today). The tint, the label ink and the dot are all derived from `color`
 // against it, so the same stored colour stays legible in either theme.
@@ -507,6 +597,9 @@ export default function Dashboard({ refreshTick = 0 }) {
   const [addingCat,setAddingCat]=useState(false);
   const [newName,setNewName]=useState("");
   const [newColor,setNewColor]=useState("#7F77DD");
+  // The category whose transactions are being drilled into (raw label), opened
+  // from a Categories row or a Budget envelope.
+  const [catDrill,setCatDrill]=useState(null);
   const [chatMsgs,setChatMsgs]=useState([]);
   const [chatInput,setChatInput]=useState("");
   const [chatBusy,setChatBusy]=useState(false);
@@ -570,12 +663,54 @@ export default function Dashboard({ refreshTick = 0 }) {
     load();
   },[]);
 
-  const getColor=useCallback((cat)=>customColors[cat]||DEFAULT_COLORS[cat]||"#888780",[customColors]);
+  // The custom categories the household has added, as plain names — the same
+  // thing a built-in category is. De-duplicated and trimmed because the list is
+  // free text the user typed.
+  const customCatNames=useMemo(()=>{
+    const seen=new Set(),out=[];
+    for(const c of customCats||[]){
+      const n=(c?.name||"").trim();
+      if(n&&!seen.has(n)){seen.add(n);out.push(n);}
+    }
+    return out;
+  },[customCats]);
+  // The colour picked when a custom category was CREATED. `dash:colors` is the
+  // one mutable colour store for every category, built-in or custom (that's what
+  // makes a custom category's swatch behave like any other), so this is only a
+  // seed — read as a fallback for categories created before that was true, and
+  // written into dash:colors alongside dash:cats for every new one.
+  const customCatColors=useMemo(()=>{
+    const m={};
+    for(const c of customCats||[]){
+      const n=(c?.name||"").trim();
+      if(n&&c.color&&!(n in m))m[n]=c.color;
+    }
+    return m;
+  },[customCats]);
+
+  const getColor=useCallback((cat)=>customColors[cat]||DEFAULT_COLORS[cat]||customCatColors[cat]||"#888780",[customColors,customCatColors]);
   const getName=useCallback((cat)=>customNames[cat]||cat,[customNames]);
 
   async function saveColors(next){setCustomColors(next);try{await setSetting("dash:colors",JSON.stringify(next));}catch{}}
   async function saveNames(next){setCustomNames(next);try{await setSetting("dash:names",JSON.stringify(next));}catch{}}
   async function saveCats(next){setCustomCats(next);try{await setSetting("dash:cats",JSON.stringify(next));}catch{}}
+
+  // Adding a custom category seeds dash:colors too, so from creation onward one
+  // store answers "what colour is this category" for built-in and custom alike
+  // and the row's swatch edits the same place every other row's does.
+  async function addCustomCat(name,color){
+    const n=name.trim();
+    if(!n)return;
+    await Promise.all([
+      customCatNames.includes(n)?Promise.resolve():saveCats([...customCats,{id:Date.now().toString(),name:n,color}]),
+      saveColors({...customColors,[n]:color}),
+    ]);
+  }
+  // Retiring one only takes the name out of the pickers. Its colour, its target
+  // and any transactions already filed under it are keyed by the NAME and stay
+  // exactly where they are — re-adding the same name restores all of it, which
+  // is why this needs no confirmation.
+  function removeCustomCat(id){saveCats(customCats.filter(c=>c.id!==id));}
   function saveAsstModel(m){setAsstModel(m);setSetting("asst:model",m).catch(()=>{});}
   function saveAsstEffort(e){setAsstEffort(e);setSetting("asst:effort",e).catch(()=>{});}
 
@@ -740,16 +875,39 @@ export default function Dashboard({ refreshTick = 0 }) {
   // path or a taught rule wouldn't fire on the next pull.
   const txDescriptor=useCallback(t=>t?(t.merchant_name||t.description||""):"",[]);
 
+  // count is a NUMBER when the preview ran, or null when it couldn't — the two
+  // must stay distinguishable. Folding a failure into 0 renders identically to
+  // "nothing to update", which is exactly how a broken preview passed for a
+  // working one: the row being edited always matches its own rule, so a real 0
+  // is only possible when the merchant appears nowhere else.
   async function offerToLearn(category){
     if(!selTx)return;
     const descriptor=txDescriptor(selTx);
     const key=merchantKey(descriptor);
     if(!key)return;
-    let count=0;
+    let count=null,previewError=null;
     try{ count=await applyCategoryRuleToHistory(descriptor,category,{dryRun:true}); }
-    catch(err){ console.error("rule preview failed",err); }
-    setLearnPrompt({descriptor,key,category,count});
+    catch(err){ console.error("rule preview failed",err); previewError=err.message||String(err); }
+    setLearnPrompt({descriptor,key,category,count,previewError});
   }
+
+  // A rule rewrites OTHER transactions, so there is no id to patch and the
+  // optimistic path can't help: the lists reloadData doesn't cover have to be
+  // refetched or the relabelled rows keep their old category on screen — the
+  // "it didn't apply to the others" symptom.
+  const refetchOpenLists=useCallback(async()=>{
+    const q=searchQ.trim();
+    await Promise.all([
+      q.length>=2
+        ? searchTransactions(q).then(setSearchRes).catch(err=>console.error("search refresh failed",err))
+        : Promise.resolve(),
+      selAcct
+        ? getAccountTransactions(selAcct.id)
+            .then(res=>{setAcctTxs(res.transactions);setAcctHasMore(res.hasMore);})
+            .catch(err=>console.error("account list refresh failed",err))
+        : Promise.resolve(),
+    ]);
+  },[searchQ,selAcct]);
 
   async function learnMerchant(){
     if(!learnPrompt)return;
@@ -758,8 +916,13 @@ export default function Dashboard({ refreshTick = 0 }) {
       await setCategoryRule(learnPrompt.descriptor,learnPrompt.category);
       const n=await applyCategoryRuleToHistory(learnPrompt.descriptor,learnPrompt.category);
       setLearnPrompt(null);
-      setLearnedNote(`Remembered — ${learnPrompt.key} is ${getName(learnPrompt.category)}${n>0?`, and ${n} past transaction${n!==1?"s":""} updated`:""}.`);
+      // Say which of the two things happened. "Remembered" alone reads as
+      // success even when nothing was relabelled.
+      setLearnedNote(n>0
+        ? `Remembered — ${learnPrompt.key} is ${getName(learnPrompt.category)}, and ${n} past transaction${n!==1?"s":""} updated.`
+        : `Remembered — ${learnPrompt.key} is ${getName(learnPrompt.category)}. No past transactions needed changing; future ones will use it.`);
       await reloadData(year,month);
+      await refetchOpenLists();
     }catch(err){
       console.error("learning the merchant failed",err);
       setLearnPrompt(null);
@@ -775,14 +938,24 @@ export default function Dashboard({ refreshTick = 0 }) {
   async function saveTx(fields){
     if(!selTx)return;
     const id=selTx.id;
+    // The two derived fields toTxShape computes have to be recomputed here the
+    // same way, or the row shows the pre-edit value. (`counted` can't be — it
+    // needs the account type, which the shape doesn't carry — but the only
+    // thing reading it is the category drill-in, whose rows come from
+    // `transactions`, which reloadData refetches below.)
     const apply=t=>{
       if(t.id!==id)return t;
       const next={...t,...fields};
       if("user_category" in fields)next.category=fields.user_category||t.auto_category;
+      if("user_description" in fields)next.merchant_name=fields.user_description||t.auto_description;
       return next;
     };
+    // EVERY list holding transaction rows, not just the visible one: reloadData
+    // refreshes only the current month, so search results (cross-month) and the
+    // account sheet are never refetched and the patch is all they get.
     setTransactions(prev=>prev?{...prev,transactions:prev.transactions.map(apply)}:prev);
     setAcctTxs(prev=>prev?prev.map(apply):prev);
+    setSearchRes(prev=>prev?{...prev,transactions:prev.transactions.map(apply)}:prev);
     setSelTx(prev=>prev?apply(prev):prev);
     try{
       await updateTransaction(id,fields);
@@ -891,13 +1064,42 @@ export default function Dashboard({ refreshTick = 0 }) {
   // Donut slices are non-text marks on the card -> 3:1.
   const donutData=cats.slice(0,7).map(c=>({label:getName(c.label),value:c.amount,color:markOn(getColor(c.label),surf.card)}));
 
+  // The viewed month's transactions indexed by effective category — what the
+  // drill-in sheet lists. Built from the rows already on hand (getTransactions
+  // returns the WHOLE month, paginated, uncapped), so tapping a number costs no
+  // round trip and the list can't disagree with the transactions tab.
+  const txsByCategory=useMemo(()=>{
+    const m=new Map();
+    for(const t of txs){
+      const list=m.get(t.category);
+      if(list)list.push(t); else m.set(t.category,[t]);
+    }
+    return m;
+  },[txs]);
+  const drillRows=catDrill?(txsByCategory.get(catDrill)||[]):[];
+  // Only offer the drill-in when there is something behind the number.
+  const openDrill=useCallback(cat=>(txsByCategory.get(cat)||[]).length?()=>setCatDrill(cat):null,[txsByCategory]);
+
   // Budgets read the getSpending() groups (not raw transactions), so when the
   // adapter's effective-category logic changes (transaction-editing branch),
   // budget progress follows automatically. Keys are raw category labels.
   const budgetCount=Object.keys(budgets).length;
-  const catRows=[...cats,
-    ...Object.keys(budgets).filter(k=>!cats.some(c=>c.label===k))
-      .map(k=>({label:k,amount:0,transaction_count:0,percent_of_total:0}))];
+  // One list, one row shape. A custom category is not a different KIND of
+  // category — it is a category — so it sits in the same list as the built-in
+  // ones rather than in a block of its own, and gets the same swatch, name,
+  // count, amount, target and bar. Categories with no spending this month are
+  // listed when someone has deliberately put them in play: a target (monthly or
+  // by-date), or having been created by hand.
+  const catRows=(()=>{
+    const seen=new Set(cats.map(c=>c.label));
+    const rows=[...cats];
+    for(const k of [...Object.keys(budgets),...Object.keys(byDate),...customCatNames]){
+      if(seen.has(k))continue;
+      seen.add(k);
+      rows.push({label:k,amount:0,transaction_count:0,percent_of_total:0});
+    }
+    return rows;
+  })();
   const budgetedSpent=cats.reduce((s,c)=>budgets[c.label]!=null?s+c.amount:s,0);
   const budgetedTotal=Object.values(budgets).reduce((s,v)=>s+v,0);
   const budgetLeft=budgetedTotal-budgetedSpent;
@@ -923,7 +1125,7 @@ export default function Dashboard({ refreshTick = 0 }) {
   const rta=envelopes?readyToAssign(income?.income,envelopes.totals):null;
   // Categories with no envelope yet, offered by the "budget another category"
   // picker. Custom categories are budgetable too.
-  const allCatNames=[...ERA_CATEGORIES,...customCats.map(c=>c.name).filter(n=>!ERA_CATEGORIES.includes(n))];
+  const allCatNames=[...ERA_CATEGORIES,...customCatNames.filter(n=>!ERA_CATEGORIES.includes(n))];
   const unbudgetedCats=allCatNames.filter(c=>isBudgetableCategory(c)&&!envRows.some(r=>r.category===c));
 
   // Assigning during render is a side effect; the ref has to track the
@@ -1170,10 +1372,14 @@ export default function Dashboard({ refreshTick = 0 }) {
                     <div style={{display:"flex",alignItems:"center",gap:8,flex:1,minWidth:0}}>
                       <Swatch color={getColor(c.label)} onChange={hex=>saveColors({...customColors,[c.label]:hex})}/>
                       <EditName name={getName(c.label)} onSave={v=>saveNames({...customNames,[c.label]:v})}/>
-                      <span style={{fontSize:11,color:"var(--muted)",flexShrink:0,marginLeft:4}}>{c.transaction_count} txn{c.transaction_count!==1?"s":""}</span>
+                      <DrillNum onClick={openDrill(c.label)} title={`See the ${getName(c.label)} transactions`}
+                        style={{fontSize:11,color:"var(--muted)",flexShrink:0,marginLeft:4}}>
+                        {c.transaction_count} txn{c.transaction_count!==1?"s":""}
+                      </DrillNum>
                     </div>
                     <div style={{display:"flex",alignItems:"baseline",gap:5,marginLeft:12,flexShrink:0}}>
-                      <span style={{fontSize:13,fontFamily:"'DM Mono',monospace"}}>{fmt(c.amount)}</span>
+                      <DrillNum onClick={openDrill(c.label)} title={`See the ${getName(c.label)} transactions`}
+                        style={{fontSize:13,fontFamily:"'DM Mono',monospace"}}>{fmt(c.amount)}</DrillNum>
                       {/* No budget on Uncategorized — it would be a budget on
                           the classifier's ignorance, and the number moves as
                           merchants get learned rather than as spending changes. */}
@@ -1203,22 +1409,17 @@ export default function Dashboard({ refreshTick = 0 }) {
                 );
               })}
 
-            {customCats.length>0&&(
-              <>
-                <div style={{borderTop:"1px solid var(--border)",margin:"16px 0 12px"}}/>
-                <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em",marginBottom:10}}>Custom categories</div>
-                {customCats.map(c=>(
-                  <div key={c.id} style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
-                    <Swatch color={c.color} onChange={hex=>saveCats(customCats.map(cc=>cc.id===c.id?{...cc,color:hex}:cc))}/>
-                    <EditName name={c.name} onSave={v=>saveCats(customCats.map(cc=>cc.id===c.id?{...cc,name:v}:cc))}/>
-                    <button onClick={()=>saveCats(customCats.filter(cc=>cc.id!==c.id))}
-                      style={{background:"none",border:"none",cursor:"pointer",color:"var(--muted)",fontSize:18,lineHeight:1,padding:"0 2px",flexShrink:0}}>×</button>
-                  </div>
-                ))}
-              </>
-            )}
-            <div style={{marginTop:16,fontSize:11,color:"var(--muted)",background:"var(--bg)",borderRadius:8,padding:"8px 12px"}}>
-              Click a color swatch to change it · Double-click a name to rename it · ＋ target sets what you want to fund each month; the Budget tab is where you put real dollars in
+            {/* Custom categories used to sit in a separate block below this
+                list, name-and-colour only — no count, no amount, no target, and
+                a colour the rest of the app never read (getColor knew nothing
+                about it, so they rendered grey everywhere else). They are
+                ordinary rows in the list above now; adding and retiring them
+                lives in the "+ Add category" sheet, which is what keeps this
+                list one uniform set of rows. */}
+            <div style={{marginTop:16,fontSize:11,color:"var(--muted)",background:"var(--bg)",borderRadius:8,padding:"8px 12px",lineHeight:1.6}}>
+              Tap a transaction count or an amount to see what's in it · Click a color swatch to change it ·
+              Double-click a name to rename it · ＋ target sets what you want to fund each month; the Budget tab
+              is where you put real dollars in
             </div>
           </div>
         )}
@@ -1335,7 +1536,10 @@ export default function Dashboard({ refreshTick = 0 }) {
                           <span>·</span>
                           <span style={{color:r.rolledOver>0?okCard:overCard}}>{signed(r.rolledOver)} rolled</span>
                         </>)}
-                        {r.spent!==0&&(<><span>·</span><span>{fmtAuto(r.spent)} spent</span></>)}
+                        {r.spent!==0&&(<><span>·</span>
+                          <DrillNum onClick={openDrill(r.category)} title={`See the ${getName(r.category)} transactions`}>
+                            {fmtAuto(r.spent)} spent
+                          </DrillNum></>)}
                         <span style={{flex:1}}/>
                         <button onClick={()=>setTargetEdit(r.category)} disabled={envBusy}
                           title="Set a funding target for this category"
@@ -1361,7 +1565,9 @@ export default function Dashboard({ refreshTick = 0 }) {
                       </div>
                     ):(
                       <div style={{fontSize:11,color:"var(--muted)"}}>
-                        {fmtAuto(r.spent)} spent · can't be budgeted — categorize these transactions to give them an envelope
+                        <DrillNum onClick={openDrill(r.category)} title={`See the ${getName(r.category)} transactions`}>
+                          {fmtAuto(r.spent)} spent
+                        </DrillNum> · can't be budgeted — categorize these transactions to give them an envelope
                       </div>
                     )}
                   </div>
@@ -1376,8 +1582,9 @@ export default function Dashboard({ refreshTick = 0 }) {
               )}
 
               <div style={{marginTop:16,fontSize:11,color:"var(--muted)",background:"var(--bg)",borderRadius:8,padding:"8px 12px",lineHeight:1.6}}>
-                Tap the amount to assign real dollars · ＋ target is what you want to fund · ⇄ moves money between
-                envelopes · ⟳ carries a category's leftover (or its overspend) into next month
+                Tap the amount to assign real dollars · tap what's been spent to see the transactions behind it ·
+                ＋ target is what you want to fund · ⇄ moves money between envelopes · ⟳ carries a category's
+                leftover (or its overspend) into next month
               </div>
             </>)}
           </div>
@@ -1896,13 +2103,24 @@ export default function Dashboard({ refreshTick = 0 }) {
         <div style={{textAlign:"center",marginTop:18,fontSize:11,color:"var(--muted)"}}>my-money</div>
       </div>
 
+      {/* Category drill-in. Rendered BEFORE the transaction sheet on purpose:
+          both are .overlay at the same z-index, so DOM order is what puts the
+          transaction sheet on top when a row in here is tapped — and closing it
+          drops back to this list rather than to the dashboard. */}
+      {catDrill&&(
+        <CategorySheet name={catDrill} color={getColor(catDrill)} when={monthLabel(year,month)}
+          rows={drillRows} surf={surf} getName={getName}
+          acctById={acctById} acctLabel={acctLabel} acctColor={acctColor}
+          onPick={t=>setSelTx(t)} onClose={()=>setCatDrill(null)}/>
+      )}
+
       {/* Transaction detail modal */}
       {selTx&&(()=>{
         const a=acctById(selTx.account_id);
         // Uncategorized is never offered as a manual choice — it means "the
         // classifier didn't know", and the way to undo a wrong pick is
         // "Reset to automatic" below, not to assert ignorance by hand.
-        const allCats=[...ERA_CATEGORIES.filter(c=>c!==UNCATEGORIZED),...customCats.map(c=>c.name).filter(n=>!ERA_CATEGORIES.includes(n))];
+        const allCats=[...ERA_CATEGORIES.filter(c=>c!==UNCATEGORIZED),...customCatNames.filter(n=>!ERA_CATEGORIES.includes(n))];
         return (
         <div className="overlay" onClick={()=>setSelTx(null)}>
           <div className="modal" onClick={e=>e.stopPropagation()} style={{maxHeight:"80vh",overflowY:"auto"}}>
@@ -1955,7 +2173,14 @@ export default function Dashboard({ refreshTick = 0 }) {
                 <div style={{fontSize:11,color:"var(--text)",lineHeight:1.5,marginBottom:8}}>
                   Always categorize <strong>{learnPrompt.key}</strong> as <strong>{getName(learnPrompt.category)}</strong>?
                   {learnPrompt.count>0&&<> Also updates {learnPrompt.count} past transaction{learnPrompt.count!==1?"s":""}.</>}
+                  {learnPrompt.count===0&&<> No past transactions match it.</>}
                 </div>
+                {learnPrompt.previewError&&(
+                  <div style={{fontSize:10,color:inkOn("#D85A30",surf.bg),lineHeight:1.5,marginBottom:8}}>
+                    Couldn't check past transactions: {learnPrompt.previewError}. The rule will still be
+                    saved for future transactions.
+                  </div>
+                )}
                 <div style={{display:"flex",gap:8}}>
                   <button onClick={()=>setLearnPrompt(null)} className="ibtn" style={{flex:1,justifyContent:"center",fontSize:11}}>Just this one</button>
                   <button onClick={learnMerchant} disabled={learning}
@@ -2042,16 +2267,29 @@ export default function Dashboard({ refreshTick = 0 }) {
         </div>
       )}
 
-      {/* Add category modal */}
-      {addingCat&&(
+      {/* Custom categories: add one, or retire one. Retiring lives HERE rather
+          than on the row it used to sit on, because a delete button on some
+          rows and not others is exactly the separation this sheet exists to
+          remove — in the list itself, a custom category is indistinguishable
+          from a built-in one. */}
+      {addingCat&&(()=>{
+        const dup=customCatNames.some(n=>n.toLowerCase()===newName.trim().toLowerCase())
+          ||ERA_CATEGORIES.some(n=>n.toLowerCase()===newName.trim().toLowerCase());
+        const canAdd=!!newName.trim()&&!dup;
+        const add=()=>{if(!canAdd)return;addCustomCat(newName,newColor);setNewName("");setNewColor("#7F77DD");setAddingCat(false);};
+        return (
         <div className="overlay" onClick={()=>setAddingCat(false)}>
-          <div className="modal" onClick={e=>e.stopPropagation()}>
-            <div style={{fontSize:16,fontWeight:600,marginBottom:16,color:"var(--text)"}}>Add custom category</div>
+          <div className="modal" onClick={e=>e.stopPropagation()} style={{maxHeight:"82vh",overflowY:"auto"}}>
+            <div style={{fontSize:16,fontWeight:600,marginBottom:4,color:"var(--text)"}}>Custom categories</div>
+            <div style={{fontSize:12,color:"var(--muted)",marginBottom:16,lineHeight:1.5}}>
+              They behave exactly like the built-in ones — same list, same color, same funding target.
+            </div>
             <div style={{fontSize:12,color:"var(--muted)",marginBottom:6}}>Name</div>
             <input value={newName} onChange={e=>setNewName(e.target.value)} placeholder="e.g. Date nights, Kids activities…"
-              onKeyDown={e=>{if(e.key==="Enter"&&newName.trim()){saveCats([...customCats,{id:Date.now().toString(),name:newName.trim(),color:newColor}]);setNewName("");setNewColor("#7F77DD");setAddingCat(false);}}}
+              onKeyDown={e=>{if(e.key==="Enter")add();}}
               autoFocus
-              style={{width:"100%",padding:"9px 12px",borderRadius:8,border:"1px solid var(--border)",background:"var(--bg)",color:"var(--text)",fontSize:14,fontFamily:"inherit",outline:"none",marginBottom:14}}/>
+              style={{width:"100%",padding:"9px 12px",borderRadius:8,border:"1px solid var(--border)",background:"var(--bg)",color:"var(--text)",fontSize:16,fontFamily:"inherit",outline:"none",marginBottom:dup?4:14}}/>
+            {dup&&<div style={{fontSize:11,color:"var(--muted)",marginBottom:12}}>That category already exists.</div>}
             <div style={{fontSize:12,color:"var(--muted)",marginBottom:8}}>Color</div>
             <div style={{display:"flex",gap:8,marginBottom:20,flexWrap:"wrap"}}>
               {["#7F77DD","#1D9E75","#D85A30","#378ADD","#FAC775","#D4537E","#639922","#E24B4A","#888780"].map(c=>(
@@ -2062,15 +2300,35 @@ export default function Dashboard({ refreshTick = 0 }) {
             </div>
             <div style={{display:"flex",gap:8}}>
               <button onClick={()=>setAddingCat(false)} className="ibtn" style={{flex:1,justifyContent:"center"}}>Cancel</button>
-              <button onClick={()=>{if(!newName.trim())return;saveCats([...customCats,{id:Date.now().toString(),name:newName.trim(),color:newColor}]);setNewName("");setNewColor("#7F77DD");setAddingCat(false);}}
-                disabled={!newName.trim()}
-                style={{flex:1,padding:"8px 0",borderRadius:8,border:"none",background:"var(--accent)",color:"var(--accent-text)",fontFamily:"inherit",fontSize:14,fontWeight:500,cursor:newName.trim()?"pointer":"default",opacity:newName.trim()?1:.5}}>
+              <button onClick={add} disabled={!canAdd}
+                style={{flex:1,padding:"8px 0",borderRadius:8,border:"none",background:"var(--accent)",color:"var(--accent-text)",fontFamily:"inherit",fontSize:14,fontWeight:500,cursor:canAdd?"pointer":"default",opacity:canAdd?1:.5}}>
                 Add
               </button>
             </div>
+
+            {customCats.length>0&&(<>
+              <div style={{borderTop:"1px solid var(--border)",margin:"18px 0 12px"}}/>
+              <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em",marginBottom:10}}>Yours</div>
+              {customCats.map(c=>(
+                <div key={c.id} style={{display:"flex",alignItems:"center",gap:8,marginBottom:9}}>
+                  {/* Reads getColor, the same call the row and the Budget tab
+                      make — so what's shown here is what's shown there. */}
+                  <span style={{width:11,height:11,borderRadius:3,background:markOn(getColor(c.name),surf.card),flexShrink:0}}/>
+                  <span style={{fontSize:13,fontWeight:500,color:"var(--text)",flex:1,minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{getName(c.name)}</span>
+                  <button onClick={()=>removeCustomCat(c.id)} title={`Stop offering ${getName(c.name)}`}
+                    style={{background:"none",border:"none",cursor:"pointer",color:"var(--muted)",fontSize:18,lineHeight:1,padding:"0 2px",flexShrink:0}}>×</button>
+                </div>
+              ))}
+              <div style={{fontSize:10,color:"var(--muted)",lineHeight:1.5,marginTop:8}}>
+                Removing one just stops offering it. Its color, its target and any transactions already filed
+                under it are kept — adding the same name back restores all of it. Change a color or a name on
+                the Categories tab, like any other category.
+              </div>
+            </>)}
           </div>
         </div>
-      )}
+        );
+      })()}
     </div>
   );
 }

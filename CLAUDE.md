@@ -76,7 +76,7 @@ entry once shipped.
 | `src/ui.css` | The ONLY place theme-token values live: `:root` light + a `prefers-color-scheme: dark` block (--bg/--card/--text/--muted/--border/--accent/--accent-text/--danger*/--warn*/--input-bg/--track/--shadow/--overlay), plus the font `@import` (must stay line 1), the `*` reset, keyframes, and the shared `.card`/`.tab`/`.ibtn` classes. Global so the pre-Dashboard screens get them. |
 | `src/theme.js` | Theme selection + application: localStorage pref (`mm:theme`), `resolveTheme`, `applyTheme` (sets `<html data-theme>` + syncs the `theme-color` metas), `subscribeTheme`/`subscribeSystemTheme`, `readToken` (runtime token read), `initTheme` (called from main.jsx), and the `useTheme` hook the header toggle uses. |
 | `src/paletteContrast.js` | Pure, zero imports: WCAG math + `readableInk`/`markColor`/`chipStyle`, which hold hue fixed and bisect lightness to guarantee 4.5:1 / 3:1 against a given surface. Never throws (runs during render). Covered by `test/paletteContrast.test.js`. |
-| `src/components/Dashboard.jsx` | Almost the entire UI — single file, inline styles, tabs: overview/categories/**budget**/transactions/accounts/trends/recurring/ask. Shared mini-components: `Pill`, `Swatch`, `EditName`, `Sk` (skeleton), `Donut`; envelope editors `AssignEdit`/`BudgetEdit`/`IncomeEdit` + the `TargetSheet`/`MoveSheet` modals. |
+| `src/components/Dashboard.jsx` | Almost the entire UI — single file, inline styles, tabs: overview/categories/**budget**/transactions/accounts/trends/recurring/ask. Shared mini-components: `Pill`, `Swatch`, `EditName`, `Sk` (skeleton), `Donut`, `DrillNum` (the tap-a-number affordance) ; envelope editors `AssignEdit`/`BudgetEdit`/`IncomeEdit` + the `TargetSheet`/`MoveSheet`/`CategorySheet` modals. |
 | `src/dataAdapter.js` | All Supabase reads + shapes consumed by Dashboard. Keep return shapes stable. Also holds the CSV/PDF-import writes (`findOrCreateManualInstitution`, `createManualAccount`, `getExistingTxIds`, `importCsvTransactions`, `isManualAccount`), the comparison-mode read `getAccountTransactionsInRange`, the backfill boundary `getFeedCoverageStart`, the learned-rule CRUD (`getCategoryRules`/`setCategoryRule`/`applyCategoryRuleToHistory`/`deleteCategoryRule`), the SimpleFIN predicates (`isSimpleFinAccount`, `ACCOUNT_TYPES`/`ACCOUNT_SUBTYPES`), the envelope I/O (`getEnvelopes`, `setAssigned`, `setCategoryRollover`, `setTargetKind`, `fundTargets`, `moveMoney`, `getBudgetIncome`/`setBudgetIncome`), and re-exports the pure helpers from `cashFlow.js` and `envelopes.js` so existing importers/harnesses keep working. |
 | `src/cashFlow.js` | The Trends cash-flow model (see Conventions), extracted pure: `markInternalTransfers` + `maxMatchTransfers` (Kuhn's), `cashIncome`/`cashSpending`, account-type predicates. Zero imports — plain-Node importable; covered by `test/cashFlow.test.js` incl. the brute-force matching parity check. |
 | `src/envelopes.js` | The envelope-budgeting model (see Roadmap), pure: `walkEnvelopes` (`available = assigned + carry − spent`), `targetNeed`, `readyToAssign`, `planMove`, month-key helpers. Zero imports — dataAdapter does the I/O and hands it plain arrays. Covered by `test/envelopes.test.js`. |
@@ -99,7 +99,7 @@ entry once shipped.
 | `api/_lib/supabase.js` | Service-role client + `requireUser` (JWT → householdId). |
 | `supabase/migrations/` | Ordered SQL migrations (additive-only on live data). |
 | `supabase/setup_all.sql` | One-paste fresh install — **DESTRUCTIVE, wipes all tables. Never run on live data. Never re-generate to include new migrations without that warning.** Convenience snapshot only — `migrations/` is the source of truth; ends with a column-level self-check that raises if it drifts behind migrations. |
-| `test/` | `npm test` — Node's built-in `node --test`, zero deps. Covers the pure cores only: cashFlow (incl. brute-force max-matching parity), csvImport parsing/dedup-id idempotency, category rules, envelopes (both walk regressions + by-date targets). Run before pushing. |
+| `test/` | `npm test` — Node's built-in `node --test`, zero deps. Covers the pure cores only: cashFlow (incl. brute-force max-matching parity), csvImport parsing/dedup-id idempotency, category rules, txClassify (learned-rule matching: what collapses, what stays distinct, and the over-specific-key limit), envelopes (both walk regressions + by-date targets). Run before pushing. |
 
 ## Development workflow
 
@@ -194,6 +194,25 @@ playwright-core screenshot (`executablePath:'/opt/pw-browsers/chromium'`,
   `api/_lib/spendingContext.js`, which must match or the Ask tab contradicts the
   screen. `fmtX` renders negatives as −$1,234.56.
 - Effective category = `user_category || mapped_category` (user override wins).
+- **A custom category is a category, not a kind of category.** `dash:cats` is a
+  NAME REGISTRY (so a category with no spending yet can still be offered in the
+  pickers); its `color` is only the seed chosen at creation. **`dash:colors` is
+  the one mutable colour store for every category, built-in or custom** — which
+  is what lets `getColor` answer for both and keeps a custom category the same
+  colour on the Categories tab, the Budget tab, the donut and every pill.
+  (Before this, `getColor` knew nothing about `dash:cats`, so custom categories
+  rendered #888780 grey everywhere except the separate block they were penned
+  into.) Renaming one is a DISPLAY ALIAS in `dash:names`, exactly like renaming
+  a built-in — never a rewrite of the registry name, which is the raw label
+  `user_category`/`budgets`/`budget_months` are all keyed by, and rewriting it
+  orphans every one of them. Adding and retiring live in the "+ Add category"
+  sheet rather than on the rows, because a delete button on some rows and not
+  others is the separation the unified list exists to remove.
+- **`toTxShape` stamps `counted`** = the shared `isSpend()` verdict for that
+  row. Anything that lists transactions behind a total (the category drill-in)
+  must split on it rather than re-deriving the rule, or the list's own sum
+  drifts from the number that was tapped to open it. Same reasoning as
+  `getEnvelopeSpending` aggregating through `isSpend()`.
 - "Transfers and card payments" and "Return" (credit-card negatives) are never
   counted as spending; "Return" is never counted as income.
 - **`Uncategorized` is the fallback, and it is a real taxonomy member.** It IS
@@ -221,6 +240,15 @@ playwright-core screenshot (`executablePath:'/opt/pw-browsers/chromium'`,
   "SAFEWAY #1234" and "SAFEWAY 8892" collapse but "COSTCO GAS" and
   "COSTCO WHSE" stay distinct; matching is exact or whole-token prefix,
   longest rule wins.
+  **Known limit, pinned by a REGRESSION test in `test/txClassify.test.js`:** the
+  prefix runs rule→row, so a rule is only general if the descriptor it was
+  taught from was ALREADY the short form. Teach from "COSTCO GAS #0117 SEATTLE
+  WA" and the key becomes `COSTCO GAS SEATTLE WA`, which matches that store and
+  nothing else — not even "COSTCO GAS #0117". Every automatic fix (stem to N
+  tokens, strip a trailing city/state, match both directions) trades false
+  misses for false MERGES, and a confidently wrong category is the failure mode
+  this codebase repeatedly refuses. Left as-is deliberately; letting the user
+  shorten the key in the confirm is the honest fix if it starts to matter.
 - **A card PURCHASE can never be classified as a card payment.** "Transfers and
   card payments" is excluded from spending, so a false positive there deletes
   money from every total silently. Two guards in `src/txClassify.js`: an issuer
@@ -469,20 +497,50 @@ option; that is a decision for Mason, not an automatic upgrade.
   nearly got wrong (a missing assignment must never fall back to the target; the
   walk must have no date clamp) are pinned by named REGRESSION tests.
 
+- **Category drill-in + custom categories unified** — tapping a category's
+  transaction count or amount (Categories tab) or its Spent (Budget tab) opens
+  `CategorySheet`: that month's rows in that category, split into the ones the
+  total is made of and a "Not counted" tail, off the adapter's `counted` flag so
+  the list's sum is the number that was tapped. Custom categories became
+  ordinary rows in the Categories list carrying their own colour into the Budget
+  tab, the donut and every pill (see the Conventions entry); "+ Add category"
+  became the add-and-retire manager. Three optimistic-refresh bugs fixed with
+  it, all the same shape — `reloadData` only refetches the current month, so
+  anything it doesn't reach keeps the pre-edit value on screen while the DB write
+  lands fine: a **category change or rename made from SEARCH** never appeared
+  (`saveTx` never patched `searchRes`, and `merchant_name` is derived, so
+  `toTxShape` gained `auto_description` to recompute it), and **"Always
+  categorize this merchant as X"** appeared not to reach the other transactions
+  (a rule rewrites OTHER rows, so there is no id to patch — `learnMerchant` now
+  refetches the search results and the open account sheet). Alongside those, a
+  **failed** learned-rule dry run was folded into `count = 0`, which renders
+  identically to "nothing to update", and the candidate scan paged an unordered
+  result set treating PostgREST's end-of-range 416 as fatal. See the `saveTx`
+  Gotcha and `test/txClassify.test.js` (first coverage of that path, incl. a
+  REGRESSION test pinning the over-specific-key limit). No migration.
+- **SimpleFIN advisory deadlock fixed** — the feed had been stuck since it
+  shipped: SimpleFIN returns notices about the date range *we* requested in the
+  same `errors` array as broken-bank reports, `api/sync.js` counted them as bank
+  errors, so `last_pulled_at` never advanced, so every pull re-asked for the full
+  730-day window and got the same notice — while each pull wrote ~490
+  transactions perfectly well. It also blocked CSV/PDF import into EVERY
+  SimpleFIN account (`pullWasClean` rejects any `warnings`), which is how it
+  surfaced. `classifyFeedMessage` now splits messages **error / advisory /
+  capped** on an allowlist, requests are clamped to `MAX_LOOKBACK_DAYS` (88 —
+  the feed's real reach is ~90 days, not two years, and the modal/README copy
+  said otherwise), and a *capped* range reports a `coverage_shortfall` instead of
+  stalling the watermark (stalling recovers nothing — the next pull is served the
+  same truncated window). Review caught two mis-downgrades of real failures, both
+  now named REGRESSION tests: the trouble veto ran after the guessed code
+  allowlist, and `\bauthenticat\b` cannot match "Authentication". First unit
+  coverage for `api/_lib/simplefin.js`. No migration. See the first Gotcha.
+
 ## Pending branches
 
-**`claude/finance-app-accounting-check-e1ro6w`** — the SimpleFIN advisory fix
-(see the first Gotcha). **No migration.** Code-only: `classifyFeedMessage` +
-the `MAX_LOOKBACK_DAYS` clamp in `api/_lib/simplefin.js`, the `clean`/result
-changes in `api/sync.js`, corrected feed-reach copy in `CsvImport.jsx`/README,
-and `test/simplefin.test.js`. Verify on the preview by forcing a sync and
-checking `simplefin_access.last_pulled_at` goes NON-NULL with `last_error` NULL
-— that single row is the whole fix. Advisories are surfaced in the sync result
-and server logs only; giving them a persistent column would need an additive
-migration and was deliberately deferred.
+None.
 
-Envelope budgeting merged 2026-07-29; its migration was applied to PROD
-ahead of the merge, so nothing is outstanding there.
+Envelope budgeting merged 2026-07-29; its migration was applied to PROD ahead of
+the merge, so nothing is outstanding there.
 
 Phase 4 is fully landed: code merged and deployed, and
 `20260728000002_remove_plaid.sql` **applied on 2026-07-29** after its pre-flight
@@ -805,6 +863,21 @@ tracker is the liability half of the future net-worth feature — the
   React error boundary** except `ModalErrorBoundary` inside `CsvImport.jsx`,
   which backstops only the import-modal body. Outside the modal a render throw
   still blanks the whole PWA instead of showing a message.
+- **`saveTx`'s optimistic patch is the only refresh some lists ever get, and it
+  must recompute every DERIVED field of the tx shape.** `reloadData` refetches
+  the CURRENT MONTH only, so `transactions` self-heals but `searchRes`
+  (cross-month; its effect keys on `searchQ` alone) and `acctTxs` (keyed on
+  `selAcct`) do not — miss one and the edit reads as "it didn't save" even
+  though the DB write landed. Same for the fields: `toTxShape` DERIVES
+  `category` (from `user_category`) and `merchant_name` (from
+  `user_description`), so patching only the raw column leaves the old value on
+  screen. Both bugs were live — a category change made from the search results
+  never appeared, and a rename never appeared anywhere `reloadData` didn't
+  reach. `auto_description` exists so the rename (and "reset name") can be
+  recomputed without a round trip, exactly like `auto_category`. `counted` is
+  the one field that CAN'T be recomputed — it needs the account type, which the
+  shape doesn't carry — which is fine only because its sole reader
+  (`CategorySheet`) renders from `transactions`.
 - A bank words the same transaction differently in its CSV and its PDF, so the
   dedup hash differs: importing both formats into ONE manual account
   double-inserts. `transactions.source` records `'csv'|'pdf'` and the importer
