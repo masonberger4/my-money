@@ -398,8 +398,18 @@ playwright-core screenshot (`executablePath:'/opt/pw-browsers/chromium'`,
 Migration to paste **AFTER** the production deploy is confirmed live:
 `supabase/migrations/20260728000002_remove_plaid.sql`. This is the first
 DROPPING migration, so the usual paste-then-merge order is reversed — the file's
-header explains why, and Development workflow step 4 records the rule. Delete
-the five `PLAID_*` Vercel env vars afterwards. Earlier migrations
+header explains why, and Development workflow step 4 records the rule.
+
+**Its pre-flight FIRED on the first attempt** (three surviving `plaid_tokens`
+rows) and the schema is still un-migrated. What that taught, and what the file
+now says: a Plaid Transactions Item is a LIVE recurring pull — Plaid keeps
+reading those banks 1–4× a day for as long as the Item exists, Items never
+expire or go dormant, and the deployed code can no longer call `itemRemove`. So
+the order is: copy the tokens out → `POST /item/remove` for each → paste the
+migration → **only then** delete the five `PLAID_*` Vercel env vars. Deleting
+those vars before retiring the Items is what strands them (the fallbacks —
+my.plaid.com revocation, deleting the Plaid team, a Support ticket for the token
+list — all work, but all are worse than a curl). Earlier migrations
 (`20260724000001_simplefin.sql`, `20260728000001_category_rules.sql`) are
 already live.
 

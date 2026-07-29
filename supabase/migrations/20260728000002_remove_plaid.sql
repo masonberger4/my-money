@@ -42,24 +42,41 @@
 -- api/unlink-institution.js still resets, not a Plaid-shaped column.
 
 -- ---------------------------------------------------------------------------
--- 0. PRE-FLIGHT: shout if any Plaid Item is still live.
+-- 0. PRE-FLIGHT: refuse to run while any Plaid Item is still live.
 --
---    Unlinking through the app calls plaid.itemRemove() with the access token
---    and THEN deletes the institution (api/unlink-institution.js). Dropping
---    plaid_tokens destroys the only copy of any token that never went through
---    that path -- and an Item you can no longer call itemRemove on stays alive
---    on Plaid's side, holding a free-tier slot and continuing to bill.
+--    THIS HAS FIRED IN PRACTICE (2026-07-29, three rows), so the notes below
+--    are what was actually learned rather than what was assumed.
 --
---    An EXCEPTION, not a notice. Two reasons. A notice cannot be acted on: by
---    the time this file is pasted the Plaid-free code is already deployed, so
---    there is no longer any code path that can call itemRemove -- scrolling
---    past a warning would strand a live Item permanently. And aborting is
---    free: Plaid-free code against the un-migrated schema is completely inert
---    (the dropped objects are simply never referenced), so the database can sit
---    in this state indefinitely while the rows are investigated.
+--    Why it matters is NOT primarily billing. A Transactions Item is a live,
+--    recurring, credentialed pull: Plaid keeps checking those institutions one
+--    to four times a day for as long as the Item exists, independent of whether
+--    any code calls it. Items never expire, never go dormant and are never
+--    auto-reaped. So an Item left behind by a migration is a standing
+--    authorisation to read the household's bank data, held on behalf of an
+--    application that no longer exists.
 --
---    Phase 3 already removed every Plaid account through the app, which
---    cascades plaid_tokens away, so this should never fire.
+--    Billing is real but usually $0 here: Transactions is a SUBSCRIPTION
+--    product, so the fee accrues while the Item exists and /item/remove is what
+--    ends it — but a team on the pre-2026-04-15 Limited Production tier accrues
+--    it against nothing. Check the Plaid Dashboard usage page rather than
+--    assuming either way.
+--
+--    An EXCEPTION, not a notice, because a notice cannot be acted on: by the
+--    time this file is pasted the Plaid-free code is deployed, so nothing in
+--    this repo can call itemRemove any more. Aborting is free — Plaid-free code
+--    against the un-migrated schema is completely inert, so the database can
+--    sit in this state indefinitely while the rows are dealt with.
+--
+--    CORRECTION to this file's original claim that dropping the table leaves
+--    "nothing able to reach them": the access token is the CLEANEST route, not
+--    the only one. Three others survive the drop —
+--      * revoke at my.plaid.com (also ends subscription billing),
+--      * delete the Plaid team, which removes its Items,
+--      * a Plaid Support ticket, which can return the access_token list for a
+--        client_id.
+--    So this guard protects convenience and a clean exit, not recoverability.
+--    Still: copy the tokens out and call /item/remove BEFORE deleting the
+--    PLAID_* env vars, which is much easier than any of the above.
 -- ---------------------------------------------------------------------------
 do $$
 declare
@@ -68,7 +85,7 @@ begin
   if to_regclass('public.plaid_tokens') is null then return; end if;
   execute 'select count(*) from plaid_tokens' into n;
   if n > 0 then
-    raise exception 'STOP: % plaid_tokens row(s) still exist. Their Plaid Items were never itemRemove()d, and dropping this table destroys the only copy of the access tokens needed to retire them -- they would keep holding a slot and billing with nothing able to reach them. Nothing has been changed. Investigate those rows before re-running.', n;
+    raise exception 'STOP: % plaid_tokens row(s) still exist. Those Plaid Items are still LIVE: Plaid keeps pulling those banks 1-4x a day on a standing authorisation, and Items never expire. Nothing has been changed. Copy the tokens out (select * from plaid_tokens), call POST /item/remove on each while the PLAID_* env vars still exist, then re-run this file.', n;
   end if;
 end $$;
 
