@@ -49,11 +49,16 @@ function looksMasked(s) {
   return !!s && /^[\s*·.xX_-]+$/.test(s);
 }
 
-function displayName(t) {
-  if (t.user_description) return t.user_description;
+// The bank's own name for the row, with no user override applied — the
+// counterpart to mapped_category, and what "reset name" falls back to.
+function bankName(t) {
   const merchant = looksMasked(t.merchant_name) ? '' : t.merchant_name;
   const desc = looksMasked(t.description) ? '' : t.description;
   return merchant || desc || 'Card transaction';
+}
+
+function displayName(t) {
+  return t.user_description || bankName(t);
 }
 
 const ACCOUNT_COLUMNS =
@@ -199,6 +204,11 @@ function toTxShape(t) {
     amount: t.amount,
     category: effectiveCategory(t),
     auto_category: t.mapped_category || UNCATEGORIZED,
+    // The un-overridden name, so an optimistic rename (or its reset) can
+    // recompute `merchant_name` locally the same way displayName() does.
+    // Without it the collapse into `merchant_name` is lossy and a list that is
+    // never refetched — search results, the account sheet — keeps the old name.
+    auto_description: bankName(t),
     user_category: t.user_category || null,
     user_description: t.user_description || null,
     excluded: !!t.excluded,

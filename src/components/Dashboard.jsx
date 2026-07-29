@@ -910,14 +910,24 @@ export default function Dashboard({ refreshTick = 0 }) {
   async function saveTx(fields){
     if(!selTx)return;
     const id=selTx.id;
+    // The two derived fields toTxShape computes have to be recomputed here the
+    // same way, or the row shows the pre-edit value. (`counted` can't be — it
+    // needs the account type, which the shape doesn't carry — but the only
+    // thing reading it is the category drill-in, whose rows come from
+    // `transactions`, which reloadData refetches below.)
     const apply=t=>{
       if(t.id!==id)return t;
       const next={...t,...fields};
       if("user_category" in fields)next.category=fields.user_category||t.auto_category;
+      if("user_description" in fields)next.merchant_name=fields.user_description||t.auto_description;
       return next;
     };
+    // EVERY list holding transaction rows, not just the visible one: reloadData
+    // refreshes only the current month, so search results (cross-month) and the
+    // account sheet are never refetched and the patch is all they get.
     setTransactions(prev=>prev?{...prev,transactions:prev.transactions.map(apply)}:prev);
     setAcctTxs(prev=>prev?prev.map(apply):prev);
+    setSearchRes(prev=>prev?{...prev,transactions:prev.transactions.map(apply)}:prev);
     setSelTx(prev=>prev?apply(prev):prev);
     try{
       await updateTransaction(id,fields);

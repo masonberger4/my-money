@@ -498,6 +498,9 @@ categories unified. No migration, no schema change.
   the bottom, and they now carry their own colour into the Budget tab, the donut
   and every pill (see the Conventions entry). The "+ Add category" sheet became
   the add-and-retire manager.
+- Also fixes an older bug Mason hit here: **editing a transaction found by
+  SEARCH appeared not to save** (it always did save — see the `saveTx` Gotcha).
+  `toTxShape` gained `auto_description` so the rename can be recomputed locally.
 
 Envelope budgeting merged 2026-07-29; its migration was applied to PROD ahead of
 the merge, so nothing is outstanding there.
@@ -793,6 +796,21 @@ tracker is the liability half of the future net-worth feature — the
   React error boundary** except `ModalErrorBoundary` inside `CsvImport.jsx`,
   which backstops only the import-modal body. Outside the modal a render throw
   still blanks the whole PWA instead of showing a message.
+- **`saveTx`'s optimistic patch is the only refresh some lists ever get, and it
+  must recompute every DERIVED field of the tx shape.** `reloadData` refetches
+  the CURRENT MONTH only, so `transactions` self-heals but `searchRes`
+  (cross-month; its effect keys on `searchQ` alone) and `acctTxs` (keyed on
+  `selAcct`) do not — miss one and the edit reads as "it didn't save" even
+  though the DB write landed. Same for the fields: `toTxShape` DERIVES
+  `category` (from `user_category`) and `merchant_name` (from
+  `user_description`), so patching only the raw column leaves the old value on
+  screen. Both bugs were live — a category change made from the search results
+  never appeared, and a rename never appeared anywhere `reloadData` didn't
+  reach. `auto_description` exists so the rename (and "reset name") can be
+  recomputed without a round trip, exactly like `auto_category`. `counted` is
+  the one field that CAN'T be recomputed — it needs the account type, which the
+  shape doesn't carry — which is fine only because its sole reader
+  (`CategorySheet`) renders from `transactions`.
 - A bank words the same transaction differently in its CSV and its PDF, so the
   dedup hash differs: importing both formats into ONE manual account
   double-inserts. `transactions.source` records `'csv'|'pdf'` and the importer
