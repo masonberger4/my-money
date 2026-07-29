@@ -394,24 +394,27 @@ playwright-core screenshot (`executablePath:'/opt/pw-browsers/chromium'`,
 
 ## Pending branches
 
-`claude/simplefin-build-start-ijj2fa` — **Plaid removal (phase 4)**.
-Migration to paste **AFTER** the production deploy is confirmed live:
-`supabase/migrations/20260728000002_remove_plaid.sql`. This is the first
-DROPPING migration, so the usual paste-then-merge order is reversed — the file's
-header explains why, and Development workflow step 4 records the rule.
+None. Phase 4 is fully landed: code merged and deployed, and
+`20260728000002_remove_plaid.sql` **applied on 2026-07-29** after its pre-flight
+fired once (below). Every migration in `supabase/migrations/` is live.
 
-**Its pre-flight FIRED on the first attempt** (three surviving `plaid_tokens`
-rows) and the schema is still un-migrated. What that taught, and what the file
-now says: a Plaid Transactions Item is a LIVE recurring pull — Plaid keeps
-reading those banks 1–4× a day for as long as the Item exists, Items never
-expire or go dormant, and the deployed code can no longer call `itemRemove`. So
-the order is: copy the tokens out → `POST /item/remove` for each → paste the
-migration → **only then** delete the five `PLAID_*` Vercel env vars. Deleting
-those vars before retiring the Items is what strands them (the fallbacks —
-my.plaid.com revocation, deleting the Plaid team, a Support ticket for the token
-list — all work, but all are worse than a curl). Earlier migrations
-(`20260724000001_simplefin.sql`, `20260728000001_category_rules.sql`) are
-already live.
+**What the pre-flight caught, because it is the kind of thing that recurs.**
+Three `plaid_tokens` rows survived a phase-3 cleanup that had gone by what was
+visible in the app — and they were invisible for a reason: `ALLOWED_TYPES` did
+not include `'loan'` until `031c330` (2026-07-23), so every attempt to link the
+NewRez mortgage produced an Item and an institution row but filtered the account
+away. Three link attempts, three live Plaid Items, nothing on screen. The lesson
+is that "I removed everything I could see" is not the same as "the database is
+empty", and a migration that DROPS should verify rather than trust. All three
+had zero accounts and zero transactions, so clearing them lost nothing.
+
+**Still outstanding, and NOT a code task:** those three Plaid Items still exist
+on Plaid's side. A Transactions Item is a live recurring pull — Plaid keeps
+reading the bank 1–4× a day for as long as the Item exists, Items never expire,
+and no code in this repo can call `itemRemove` any more. Retiring them is a
+manual job (Plaid Dashboard keys + `POST /item/remove`, or my.plaid.com, or the
+servicer's own third-party-access screen). Deleting the five `PLAID_*` Vercel
+env vars is done.
 
 ## Roadmap
 
