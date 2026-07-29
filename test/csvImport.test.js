@@ -259,11 +259,53 @@ test('pullWasClean accepts a genuinely clean pull', () => {
   assert.equal(pullWasClean({ results: [{ institution: 'SimpleFIN', warnings: [] }], failures: [] }), true);
 });
 
+test('REGRESSION: a pull carrying only date-range advisories is CLEAN', () => {
+  // This is the shape that deadlocked production. SimpleFIN returns notices
+  // about the range WE asked for in the same array as broken-bank reports; when
+  // api/sync.js put them in `warnings`, pullWasClean went false on every pull
+  // forever, which blocked CSV/PDF import into every SimpleFIN account while the
+  // feed was in fact working (490 transactions written that same pull).
+  //
+  // They now travel under an `advisories` key, and `coverage_shortfall` reports
+  // history the feed cannot reach. Neither may block. Renaming either back to
+  // `warnings` re-breaks import with an otherwise-green suite, which is exactly
+  // why this assertion exists here rather than only in test/simplefin.test.js.
+  const advisoryPull = {
+    results: [
+      {
+        institution: 'SimpleFIN',
+        institutions: 3,
+        accounts: 7,
+        transactions: 490,
+        advisories: [
+          'Requested date range exceeds recommended range of 45 days. In the future, this may be capped.',
+        ],
+        coverage_shortfall: { wanted_from: '2024-07-30', served_from: '2026-05-02' },
+      },
+    ],
+    failures: [],
+  };
+  assert.equal(pullWasClean(advisoryPull), true);
+
+  // …while a REAL per-bank error in `warnings` still blocks, unchanged.
+  assert.equal(
+    pullWasClean({
+      results: [{ institution: 'SimpleFIN', transactions: 490, warnings: ['BECU: needs attention'] }],
+      failures: [],
+    }),
+    false
+  );
+});
+
 // One broken bank blocks import for ALL accounts, and that is correct rather
 // than over-cautious: last_pulled_at lives on simplefin_access (one row per
 // ACCESS URL, covering every bank) and only advances when the whole pull is
 // error-free. So an unrelated bank's failure still means the next pull reaches
-// back FIRST_PULL_DAYS for everything — the same unsafe window.
+// back to the old watermark for everything — the same unsafe window.
+  //
+  // Note what `warnings` carries: real per-bank problems only. SimpleFIN's
+  // date-range notices travel under `advisories` precisely so they cannot reach
+  // this predicate (see the advisory gotcha in CLAUDE.md).
 test('a partial failure is unclean even for accounts on a healthy bank', () => {
   const partial = { results: [{ institution: 'SimpleFIN', accounts: 6, transactions: 40, warnings: ['Chase: auth failed'] }], failures: [] };
   assert.equal(pullWasClean(partial), false);

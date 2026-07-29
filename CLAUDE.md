@@ -55,11 +55,17 @@ entry once shipped.
   - **SimpleFIN pass**: per *access URL*, not per institution — one URL covers
     every bank, fetched in a single GET with no cursor and no pagination. Fans
     out into institutions (one per SimpleFIN org), accounts and transactions.
-    Incremental via a `last_pulled_at` watermark minus a 30-day overlap.
-    `last_pulled_at` (data watermark, advanced **only on success** so a failed
-    pull can't skip transactions) and `last_attempt_at` (throttle, stamped
-    **before** the request so a timeout still counts) are deliberately two
-    columns — one column would force a choice between skipping transactions
+    Incremental via a `last_pulled_at` watermark minus a 30-day overlap, and
+    every request is clamped to **~88 days** (`MAX_LOOKBACK_DAYS`) because
+    SimpleFIN serves at most 90 per call. `FIRST_PULL_DAYS` (730) stays the reach
+    we WANT — the difference is reported as a `coverage_shortfall`, not quietly
+    redefined, because the constant is the only record that older history was
+    never fetched.
+    `last_pulled_at` (data watermark, advanced when **no REAL error** came back —
+    a date-range advisory is NOT an error, see the gotcha; so is a *capped*
+    range, since stalling recovers nothing) and `last_attempt_at` (throttle,
+    stamped **before** the request so a timeout still counts) are deliberately
+    two columns — one column would force a choice between skipping transactions
     after a failure and re-hitting the Bridge on every dashboard load while a
     connection is broken. One pull an hour (SimpleFIN refreshes ~daily).
 
@@ -78,9 +84,9 @@ entry once shipped.
 | `src/csvImport.js` | Pure CSV-import core (no React/Supabase): `parseCsv`, `detectHeader`, `parseMoney`/`parseDate`, transfer flagging, dedup `plaid_tx_id` hashing, `buildRows`/`analyzeCsv` (both take `rules` + `overlapFrom`). Re-exports `guessCategory`/`transferRawCategory`/`invalidRuleCategories` from `txClassify.js`, which now owns the rule table. Plus `importPlan` (which sections the modal shows, derived from the file's dates vs the feed boundary) and the audit core: `reconcileCsv` (max-matching), `descSimilarity`, `csvDateRange`. Testable in isolation. |
 | `src/txClassify.js` | Learned-rule matching (`merchantKey`, `matchLearnedRule`) + the shared descriptor→category rule table + internal-transfer tagging (`guessCategory`, `transferRawCategory`, `classifyDescription`), validated against `ERA_CATEGORIES` at load. Lifted out of `csvImport.js` when SimpleFIN became a second caller: both feeds get a descriptor and no category, so both derive `mapped_category` at WRITE time from this one table. Pure JS — imported by server code too. |
 | `src/accountBalance.js` | `isDebtAccount` / `displayBalance` — the stored-positive → displayed-negative rule for credit and loan balances. Pure JS; imported by both Dashboard.jsx and the server-side assistant context. |
-| `api/_lib/simplefin.js` | SimpleFIN protocol layer: setup-token decode, claim POST, access-URL split (creds → Authorization header), the `/accounts` GET, and `normalizeAccountSet` (reads BOTH wire shapes). Also `inferAccountType`, `normalizeBalance`, the sign flip, and the env knobs. Server-only — handles bank credentials. |
+| `api/_lib/simplefin.js` | SimpleFIN protocol layer: setup-token decode, claim POST, access-URL split (creds → Authorization header), the `/accounts` GET, and `normalizeAccountSet` (reads BOTH wire shapes, and splits feed messages into errors / advisories / capped). Also the **feed-message classifier** (`classifyFeedMessage`, allowlist polarity) and the lookback clamp (`clampStartDate`/`MAX_LOOKBACK_DAYS`) — both pure, covered by `test/simplefin.test.js`. Also `inferAccountType`, `normalizeBalance`, the sign flip, and the env knobs. Server-only — handles bank credentials. |
 | `src/components/SimpleFinConnect.jsx` | The connect modal, reachable from the Accounts tab, the EmptyState and the FAB: link banks at SimpleFIN Bridge → paste the setup token → claim + first sync. Shows connection status, a disconnect action, and Restore for removed banks. |
-| `src/components/CsvImport.jsx` | Import modal for **CSV *and* PDF**. **TWO sections, chosen by the FILE'S DATE RANGE against the feed's coverage** — not by the target account, which can no longer tell backfill from audit now that every account is manual or SimpleFIN-fed. Rows before the boundary import; rows on/after it are compared and never inserted; a straddling file does both on its respective slices. One override, "Compare only", which can only move toward not-inserting. A never-synced fed account must sync first (the first pull reaches back 730 days). |
+| `src/components/CsvImport.jsx` | Import modal for **CSV *and* PDF**. **TWO sections, chosen by the FILE'S DATE RANGE against the feed's coverage** — not by the target account, which can no longer tell backfill from audit now that every account is manual or SimpleFIN-fed. Rows before the boundary import; rows on/after it are compared and never inserted; a straddling file does both on its respective slices. One override, "Compare only", which can only move toward not-inserting. A never-synced fed account must sync first (the first pull reaches back ~88 days — SimpleFIN's cap). |
 | `src/pdfImport.js` | Pure PDF-statement parsing core (no pdf.js/React/Supabase): text runs → lines → columns → **the same cell grid `buildRows` consumes**. Template auto-detect (`autoDetectTemplate`), `applyTemplate`, month-name dates + year inference from the statement period, `normalizeDebitCredit`, `defaultTemplate` (the fallback the modal seeds the editor with). Testable in Node. |
 | `src/pdfExtract.js` | The only file that touches pdf.js. Lazy `import()` (keeps ~1.8MB out of the main bundle) of the **legacy** build, bundled locally (no CDN, CSP/offline-safe). Runs the parser on the **main thread** via `globalThis.pdfjsWorker` so `src/pdfPolyfills.js` is in scope for it (a Worker has its own globals). |
 | `src/pdfPolyfills.js` | Feature-detected polyfills pdf.js needs on iOS Safari — **`ReadableStream` async iteration** (the load-bearing one; see Gotchas), plus `.at` and `structuredClone` for genuinely old devices. |
@@ -446,7 +452,8 @@ option; that is a decision for Mason, not an automatic upgrade.
   `!targetIsPlaid` and silently became true for every SimpleFIN account; a
   FAILED coverage lookup was indistinguishable from "the feed has nothing", so a
   dropped connection opened the overlap guard on a synced account; a never-synced
-  account read as "import everything" when its first pull reaches back 730 days.
+  account read as "import everything" when its first pull reaches back as far as
+  the feed allows.
 - **Envelope budgeting (YNAB rules 1–3)** — a **Budget tab** that plans forward:
   `available = assigned + carry − spent`, walked month by month from each
   category's own first assignment. Ready to Assign on **hand-entered** income
@@ -464,8 +471,18 @@ option; that is a decision for Mason, not an automatic upgrade.
 
 ## Pending branches
 
-None. Envelope budgeting merged 2026-07-29; its migration was applied to PROD
-ahead of the merge, so nothing is outstanding.
+**`claude/finance-app-accounting-check-e1ro6w`** — the SimpleFIN advisory fix
+(see the first Gotcha). **No migration.** Code-only: `classifyFeedMessage` +
+the `MAX_LOOKBACK_DAYS` clamp in `api/_lib/simplefin.js`, the `clean`/result
+changes in `api/sync.js`, corrected feed-reach copy in `CsvImport.jsx`/README,
+and `test/simplefin.test.js`. Verify on the preview by forcing a sync and
+checking `simplefin_access.last_pulled_at` goes NON-NULL with `last_error` NULL
+— that single row is the whole fix. Advisories are surfaced in the sync result
+and server logs only; giving them a persistent column would need an additive
+migration and was deliberately deferred.
+
+Envelope budgeting merged 2026-07-29; its migration was applied to PROD
+ahead of the merge, so nothing is outstanding there.
 
 Phase 4 is fully landed: code merged and deployed, and
 `20260728000002_remove_plaid.sql` **applied on 2026-07-29** after its pre-flight
@@ -690,6 +707,36 @@ tracker is the liability half of the future net-worth feature — the
 
 ## Gotchas
 
+- **SimpleFIN puts advisories about YOUR OWN REQUEST in the same
+  `errors`/`errlist` array as broken-bank reports, and the ordinary first pull
+  triggers one.** Two live examples: "Requested date range exceeds limit of 90
+  days and was capped." (asked >90; data WAS truncated at the old end) and
+  "…exceeds recommended range of 45 days. In the future, this may be capped."
+  (asked 46–90; purely advisory, nothing lost). `api/sync.js` counted every entry
+  as a bank error, which **deadlocked the feed in production**: `last_pulled_at`
+  only advances on an error-free pull, so it stayed NULL, so the next pull asked
+  for the full `FIRST_PULL_DAYS` window, which re-emitted the notice — forever,
+  while each of those pulls wrote hundreds of transactions perfectly well. It
+  also blocked ALL CSV/PDF import into EVERY SimpleFIN account, because
+  `pullWasClean` treats any `warnings` as unclean. Four rules now:
+  (a) `classifyFeedMessage` is an **allowlist** — an unfamiliar message stays an
+  error, per-bank structure (`conn_id`/`account_id`) forces error unless the
+  `code` is allowlisted, and a "needs attention / reconnect / credential" veto
+  beats the range match; (b) requests are **clamped** (`MAX_LOOKBACK_DAYS`, ~88)
+  so the hard-cap notice can't arise, at `fetchAccountSet` so the new-account
+  backfill is covered too; (c) advisories never reach the result `warnings[]`
+  (which `pullWasClean` inspects), travelling in a separate `advisories` key —
+  nor `last_error` (rendered in `--danger`) on any ordinary pull; the one path
+  that can still put one there is the zero-usable-accounts throw, which is
+  pre-existing and self-clears as soon as a bank is linked; (d) **the watermark
+  is never used to express
+  a coverage shortfall** — stalling it recovers nothing, since the next pull
+  computes the same start and is served the same truncated window, so a shortfall
+  is *reported* (`coverage_shortfall`) and the watermark still moves. Note the
+  shape of this failure: a watermark that never advances has **no alarm
+  anywhere** — the only tell was `last_pulled_at` NULL while transactions kept
+  arriving. `test/simplefin.test.js` pins the classification, including that a
+  novel message stays an error.
 - **Nothing in this repo loads `api/*.js` except `test/apiLoads.test.js`.**
   `vite build` bundles only what `src/main.jsx` reaches, and no `src/` file
   imports `api/` — the client talks to those routes over HTTP. So a dangling

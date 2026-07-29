@@ -8,6 +8,8 @@ import {
   SFIN_PREFIX,
   FIRST_PULL_DAYS,
   OVERLAP_DAYS,
+  MAX_LOOKBACK_DAYS,
+  clampStartDate,
   MIN_PULL_MINUTES,
   INCLUDE_PENDING,
 } from './_lib/simplefin.js';
@@ -169,9 +171,30 @@ async function pullOneAccessUrl(supabase, householdId, accessRow, { force, categ
   // late-post a transaction inside a date we already pulled. Re-seeing a row is
   // free — the upsert lands on the same (account_id, plaid_tx_id).
   const floor = now.getTime() - FIRST_PULL_DAYS * DAY_MS;
-  const startDate = new Date(
-    lastPulled ? Math.max(lastPulled.getTime() - OVERLAP_DAYS * DAY_MS, floor) : floor
-  );
+  const wantedStartMs = lastPulled
+    ? Math.max(lastPulled.getTime() - OVERLAP_DAYS * DAY_MS, floor)
+    : floor;
+  // SimpleFIN serves at most 90 days per request, so what we WANT and what we
+  // can ASK FOR are two different dates. Clamping here (as well as inside
+  // fetchAccountSet) is what lets the shortfall be reported instead of silently
+  // dropped: `clamped` means there is a window we wanted and cannot get from the
+  // feed at all, and statement import is the only way it ever arrives.
+  const { startMs, clamped } = clampStartDate(wantedStartMs, now.getTime());
+  const startDate = new Date(startMs);
+  const coverageShortfall = clamped
+    ? {
+        wanted_from: new Date(wantedStartMs).toISOString().slice(0, 10),
+        served_from: startDate.toISOString().slice(0, 10),
+      }
+    : null;
+  if (coverageShortfall) {
+    console.warn(
+      '[sync:simplefin] feed reach is %d days: wanted from %s, requesting from %s',
+      MAX_LOOKBACK_DAYS,
+      coverageShortfall.wanted_from,
+      coverageShortfall.served_from
+    );
+  }
 
   // Stamped before the request, so a timeout or a crashed invocation still
   // counts as an attempt and the throttle holds.
@@ -190,16 +213,28 @@ async function pullOneAccessUrl(supabase, householdId, accessRow, { force, categ
     startDate,
     pending: INCLUDE_PENDING,
   });
-  const { errors, accounts, skipped } = normalizeAccountSet(json);
+  // `errors` is REAL problems only; date-range notices about our own request
+  // arrive separately (see classifyFeedMessage). Only `errors` may hold the
+  // watermark back or block statement import.
+  const { errors, advisories, capped, accounts, skipped } = normalizeAccountSet(json);
 
   if (skipped) {
     console.warn('[sync:simplefin] skipped %d unusable account object(s)', skipped);
   }
+  for (const note of [...capped, ...advisories]) {
+    console.warn('[sync:simplefin] feed advisory (not a failure): %s', note);
+  }
   // SimpleFIN reports a broken bank connection as a free-text string in the
   // response body rather than an HTTP error, and keeps returning the accounts
-  // it *can* reach. Nothing back at all plus an error means the pull failed.
-  if (errors.length && accounts.length === 0) {
-    throw new Error(`SimpleFIN reported: ${errors.join('; ')}`);
+  // it *can* reach. Nothing back at all plus ANY message means the pull failed —
+  // deliberately every message class, not just `errors`: an advisory arriving
+  // with zero accounts is a Bridge that answered without answering, and treating
+  // that as success would advance the watermark over data we never saw. Zero
+  // accounts and zero messages is a Bridge with no banks linked yet, which is
+  // not an error.
+  const allMessages = [...errors, ...capped, ...advisories];
+  if (allMessages.length && accounts.length === 0) {
+    throw new Error(`SimpleFIN reported: ${allMessages.join('; ')}`);
   }
 
   // ---- institutions, one per org -------------------------------------------
@@ -436,7 +471,17 @@ async function pullOneAccessUrl(supabase, householdId, accessRow, { force, categ
         accountIds: backfillIds,
       });
       const before = txRows.length;
-      collect(normalizeAccountSet(history).accounts);
+      // fetchAccountSet clamps this start to MAX_LOOKBACK_DAYS, so `floor`
+      // (FIRST_PULL_DAYS back) is the reach we want, not what arrives — a new
+      // account gets the feed's whole window and no more, whatever that is.
+      const backfillSet = normalizeAccountSet(history);
+      collect(backfillSet.accounts);
+      // A real error here means the new account's history is incomplete. It used
+      // to be discarded silently: only `.accounts` was read, so a broken bank in
+      // the backfill response looked identical to a clean one.
+      if (backfillSet.errors.length) {
+        throw new Error(`SimpleFIN reported: ${backfillSet.errors.join('; ')}`);
+      }
       console.log(
         '[sync:simplefin] backfilled %d row(s) of history for %d new account(s)',
         txRows.length - before,
@@ -491,13 +536,26 @@ async function pullOneAccessUrl(supabase, householdId, accessRow, { force, categ
     if (error) throw error;
   }
 
-  // Advance the data watermark ONLY on a completely clean pull. A partial
+  // Advance the data watermark ONLY on a pull with no REAL error. A partial
   // failure comes back as HTTP 200 with the reachable banks plus an error
   // string for the broken one — moving the watermark then would leave the
   // broken bank's outage window behind forever once it exceeded the 30-day
   // overlap. Leaving it put means the next pull re-requests from where the
   // last good one ended; startDate is floored at FIRST_PULL_DAYS so a bank the
   // user never fixes can't grow the window without bound.
+  //
+  // "REAL error" is load-bearing, and the distinction is not cosmetic: counting
+  // SimpleFIN's date-range notices here deadlocked the feed in production. The
+  // watermark stayed NULL, so every pull asked for the full FIRST_PULL_DAYS
+  // window, which re-emitted the notice, which kept the watermark NULL — while
+  // each of those pulls wrote hundreds of transactions perfectly well. Statement
+  // import was collateral: pullWasClean treats any `warnings` as unclean.
+  //
+  // A CAPPED range does not hold the watermark either, which looks wrong and
+  // isn't: stalling recovers nothing, because the next pull computes the same
+  // start and is served the same truncated response, so the un-served window
+  // only grows. A coverage shortfall is reported (below) instead of being
+  // expressed as a refusal to move.
   //
   // A failed history backfill clears the watermark instead, so the next pull
   // re-requests full history for every account — the only way to give the new
@@ -525,6 +583,14 @@ async function pullOneAccessUrl(supabase, householdId, accessRow, { force, categ
     ignored_accounts: ignoredTypes,
     transactions: written,
     ...(errors.length ? { warnings: errors } : {}),
+    // Deliberately NOT `warnings`. pullWasClean (src/sync.js) rejects a result
+    // carrying warnings, and gating statement import on a note about our own
+    // request is what blocked every import into every SimpleFIN account.
+    ...(capped.length || advisories.length ? { advisories: [...capped, ...advisories] } : {}),
+    // The window we wanted and the feed cannot serve. Nothing downstream can
+    // recover it — statement import is the path — so it is surfaced rather than
+    // dropped.
+    ...(coverageShortfall ? { coverage_shortfall: coverageShortfall } : {}),
   };
 }
 
