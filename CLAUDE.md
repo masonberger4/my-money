@@ -114,7 +114,19 @@ entry once shipped.
    merge without that. Don't open PRs unless asked. Delete branches after merge
    (this sandbox can't delete remote branches — Mason clicks it in the UI;
    GitHub MCP tools may transiently disconnect — retry before treating as fatal).
-4. **Migrations are additive-only** on live data (`alter table … add column`).
+4. **`git fetch origin` and absorb main before EVERY feature-branch push, and
+   again right before the merge to main.** Multiple sessions land features the
+   same day, so main moves while a branch is in review — during the
+   category-chips branch it moved twice (SimpleFIN deadlock fix, then the Tax
+   tab), the second time touching the same Dashboard.jsx the branch edits. If
+   `git rev-list --count HEAD..origin/main` isn't 0: `git merge origin/main`
+   into the branch (MERGE, never rebase — the branch is pushed, and replaying
+   other sessions' published commits manufactures the two-bases incident),
+   re-run `npm test` + the build (+ re-screenshot if the moved code touches the
+   UI; check whether main added dataAdapter exports the harness mocks must
+   stub), then push. Otherwise the preview Mason reviews is built on a base
+   that no longer exists, and "merge <feature>" lands an untested combination.
+5. **Migrations are additive-only** on live data (`alter table … add column`).
    Hand Mason the exact SQL to paste in the Supabase SQL Editor at merge time.
    **A migration that DROPS inverts the order**: additive SQL is safe to paste
    before the merge because old code ignores new columns, but a drop is only
