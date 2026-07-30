@@ -1,6 +1,6 @@
 # Personal Finance App
 
-A self-hosted, private personal finance dashboard. Connects to all your financial accounts — checking, savings, credit cards, 401k, brokerage, loans, mortgages — via Plaid. All data is cached locally on your device. No subscriptions. Your data stays yours.
+A self-hosted, private personal finance dashboard. Connects to your financial accounts — checking, savings, credit cards, loans, mortgages — via SimpleFIN, with CSV/PDF statement import for anything a feed can't reach. All data lives in the household's own Supabase Postgres (cloud-first, no local cache). No subscriptions. Your data stays yours.
 
 ---
 
@@ -17,7 +17,7 @@ This project started as a spending dashboard built on top of Era Context (a fina
 - **Color picker per category** — click the swatch to change it, persists across sessions
 - **Inline category renaming** — double-click any category name to edit it
 - **Custom categories** — add your own with name and color via a modal
-- **All customizations persist** via artifact storage (migrating to IndexedDB in the full app)
+- **All customizations persist** via artifact storage (now the Supabase `settings` table in the full app)
 
 During that process we also:
 - Recategorized Costco from "Shopping and gear" → "Groceries" across 8 transactions
@@ -26,7 +26,7 @@ During that process we also:
 
 ### Why we're moving off Era
 
-Era connects to Plaid under the hood and charges a subscription to sit in the middle. Building directly on Plaid + Vercel replicates everything Era provides, costs nothing ongoing, and means we own the full stack and all the data. Era's historical data should be exported before canceling.
+Era charges a subscription to sit between you and your banks. Building directly on a bank feed + Vercel replicates everything Era provides for ~$15/yr, and means we own the full stack and all the data. Era's historical data should be exported before canceling.
 
 ---
 
@@ -39,29 +39,32 @@ Era connects to Plaid under the hood and charges a subscription to sit in the mi
    │
    └── Vercel serverless functions  (/api/*)
          │   verify the caller's Supabase JWT
-         │   hold the Plaid + Supabase service secrets
+         │   hold the SimpleFIN + Supabase service secrets
          │
          ├── Supabase Postgres (canonical store)
          │     ├── households / household_members
-         │     ├── institutions   (which Plaid credential linked each bank)
-         │     ├── plaid_tokens   (access tokens — service-role only, never
-         │     │                   readable from a browser)
-         │     ├── accounts       (balances, types)
-         │     ├── transactions   (full history, upserted by plaid_tx_id)
-         │     └── settings       (category colors, names, custom categories)
+         │     ├── institutions      (one per SimpleFIN org, + the manual
+         │     │                      "Imported" one)
+         │     ├── simplefin_access  (the access URL — it embeds bank
+         │     │                      credentials; service-role only, never
+         │     │                      readable from a browser)
+         │     ├── accounts          (balances, types)
+         │     ├── transactions      (full history, upserted by plaid_tx_id)
+         │     ├── category_rules    (learned merchant → category)
+         │     └── settings          (category colors, names, custom categories)
          │
-         └── Plaid API (one or more developer accounts, see below)
+         └── SimpleFIN Bridge
                │
-               └── Banks: Capital One, Chase, Fidelity, etc.
+               └── Banks: Capital One, Chase, BECU, NewRez, etc.
 ```
 
 **Key decisions:**
 
 - **Cloud-first**: Supabase Postgres is the single source of truth so the same data shows on the laptop and both phones. IndexedDB/Dexie was dropped.
-- **Plaid access tokens never reach the browser.** They live in `plaid_tokens`, a table with RLS enabled and no client policies — only the serverless functions (service role) can read it.
-- **Sync runs server-side** (`api/sync.js`): cursor-based `transactionsSync` per institution, upserts into Supabase, marks institutions `needs_reauth` when Plaid demands a re-login.
+- **The SimpleFIN access URL never reaches the browser.** It embeds HTTP Basic credentials for every linked bank, and lives in `simplefin_access` — RLS enabled, zero client policies, readable only by the serverless functions.
+- **Sync runs server-side** (`api/sync.js`): one pull per access URL (one URL covers every bank), upserted into Supabase. Incremental via a `last_pulled_at` watermark minus a 30-day overlap, throttled to one pull an hour.
 - **One shared household login** (email + password via Supabase Auth). All data is scoped to the household by row-level security.
-- **Multiple Plaid developer accounts** are supported via the `PLAID_CREDENTIALS` env var — see "Multiple Plaid accounts" below.
+- **`transactions.plaid_tx_id` / `accounts.plaid_account_id` are historical names, not Plaid columns.** They hold every source's external id (`sfin:`, `csv:`, `manual:`) and are the upsert conflict targets. Plaid itself was removed; these stayed.
 
 ---
 
@@ -69,27 +72,25 @@ Era connects to Plaid under the hood and charges a subscription to sit in the mi
 
 | Layer | Tool | Why |
 |---|---|---|
-| Bank connections | Plaid (free trial → Production) | Industry standard, supports all account types. See [Cost](#cost) for the connection-based pricing. |
+| Bank connections | SimpleFIN Bridge | ~$15/yr flat, read-only, no per-connection billing, and serverless-friendly (no daemon). Replaced Plaid, whose per-Item pricing was the reason to move. |
 | Backend / hosting | Vercel (Hobby tier) | Free, serverless functions in `/api/`, deploys from GitHub |
 | Database + auth | Supabase (free tier) | Postgres with row-level security, shared household login, multi-device |
 | Frontend | React + Vite | Carries forward the existing dashboard; fast dev experience |
-| Charts | Recharts | Replaces hand-rolled SVG donut chart with something maintainable |
-| Date handling | date-fns | Lightweight, tree-shakeable |
-| Bank auth UI | react-plaid-link | Plaid's official React component for the OAuth-style Link flow |
+| Charts | Hand-rolled inline SVG (incl. the `Donut` component) | No chart library — small, styleable, no bundle weight |
+| Bank auth UI | none — a pasted setup token | SimpleFIN has no SDK: you link banks on Bridge's own site and paste the token it prints. One less dependency in the bundle. |
+| Statement import | Hand-rolled CSV + PDF parsing (`pdfjs-dist`) | The coverage floor for banks a feed can't reach, and the way to recover history older than the feed provides |
 
 ---
 
 ## Account types supported
 
-| Type | Plaid product | What we show |
+| Type | Where it comes from | What we show |
 |---|---|---|
 | Checking / savings | Transactions | Balance, transaction history, income detection |
-| Credit cards | Transactions + Liabilities | Balance, APR, payment due, transaction history |
-| 401k / brokerage | Investments | Holdings, allocation, gain/loss, total value |
-| Loans | Liabilities | Balance, APR, minimum payment, payoff projection |
-| Mortgages | Liabilities | Balance, rate, escrow, next payment |
+| Credit cards | Transactions | Balance, transaction history |
+| Loans / mortgages | Transactions | Balance (APR / minimum payment / payoff projection is the planned Debt tracker — see CLAUDE.md Roadmap) |
 
-All accounts feed into a **net worth view**: total assets minus total liabilities, computed live from IndexedDB.
+Only `depository`, `credit`, and `loan` account types are synced — no investments support. A **net worth view** (assets minus liabilities, computed from Supabase) is a possible later feature, not built.
 
 ---
 
@@ -97,80 +98,70 @@ All accounts feed into a **net worth view**: total assets minus total liabilitie
 
 1. User hits **Refresh** in the dashboard
 2. Frontend POSTs `/api/sync` with the household JWT
-3. The server, per institution: reads the access token from `plaid_tokens`,
-   calls Plaid `transactionsSync` with the stored cursor, and upserts
-   accounts + transactions into Supabase
-4. Dashboard re-reads from Supabase and re-renders
+3. The server reads the stored access URL, splits its embedded credentials into
+   an `Authorization` header (Node's `fetch` refuses a URL containing
+   credentials), and GETs `/accounts` — one request covering every linked bank,
+   with no cursor and no pagination
+4. The response fans out into institutions (one per SimpleFIN org), accounts and
+   transactions, all upserted idempotently
+5. Dashboard re-reads from Supabase and re-renders
 
-First sync: Plaid returns up to 24 months of history per institution (we
-request `days_requested: 730`). Subsequent syncs: delta only.
+Every request is clamped to ~88 days (`SIMPLEFIN_MAX_LOOKBACK_DAYS`), because
+SimpleFIN serves at most 90 days per call and reports a longer request as a
+"date range was capped" notice in the response body. `SIMPLEFIN_FIRST_PULL_DAYS`
+(730) stays the reach we'd *like* on a first pull; the gap between the two is
+reported as a `coverage_shortfall` rather than silently dropped, and CSV/PDF
+statement import is how anything older gets in. The cap is SimpleFIN's, not the
+banks'. Later pulls start from the last successful pull minus a 30-day overlap,
+and are throttled to one an hour — SimpleFIN refreshes about daily, so more
+often would just re-fetch the same rows.
 
 ---
 
 ## Linking a new account
 
-1. User clicks **+ Add Account**
-2. `/api/create-link-token` picks the first Plaid credential with a free Item
-   slot and returns a `link_token` + `credential_key`
-3. `react-plaid-link` opens Plaid Link — an iframe served by Plaid on Plaid's domain
-4. User logs into their bank via Plaid (credentials never touch our code), completes 2FA
-5. Plaid returns a short-lived `public_token` to our app
-6. Frontend sends `public_token` + `credential_key` to `/api/exchange-token`
-7. The server exchanges it for a permanent `access_token`, stores it in
-   `plaid_tokens`, and records the institution with its `credential_key`
-8. First sync runs automatically
+1. User clicks **⚡ Connect with SimpleFIN** (Accounts tab, the empty state, or
+   the floating button)
+2. They open **SimpleFIN Bridge**, link their banks there, and press *Create
+   Setup Token*
+3. They paste that token into the modal
+4. `/api/simplefin-claim` base64-decodes it to a single-use claim URL and POSTs
+   it; the response body is the durable access URL, stored server-side. The
+   browser never sees it.
+5. A first sync runs immediately
 
----
+**New accounts arrive hidden.** SimpleFIN sends no account type, so it is
+inferred from the account name and then owned by you — and the checking/savings
+distinction decides whether an account's outflows count as household spending.
+Unhiding an account is how you confirm the guess. Check it before you do.
 
-## Multiple Plaid accounts
+### When a bank isn't supported
 
-Plaid's free tier caps how many Items (bank connections) one developer account
-can hold. When you hit the cap, create another Plaid developer account and add
-it to the app — no code changes:
-
-1. Sign up at <https://dashboard.plaid.com> with a new email, request
-   production access, and copy the new `client_id` + `secret`.
-2. Append an entry to the `PLAID_CREDENTIALS` env var (Vercel → Project
-   Settings → Environment Variables, and your local `.env.local`):
-
-   ```json
-   [
-     {"key": "main",       "client_id": "...", "secret": "..."},
-     {"key": "overflow-1", "client_id": "...", "secret": "..."}
-   ]
-   ```
-
-   The `key` is any stable label you choose — it's recorded on each
-   institution so syncs route through the credential that owns the Item.
-   **Don't change a key after institutions are linked under it.**
-3. Redeploy (Vercel) / restart the dev server.
-
-New links automatically go to the first credential with a free slot
-(`PLAID_MAX_ITEMS_PER_CREDENTIAL`, default 10). When every credential is
-full, **+ Add account** shows a message telling you to add the next one.
-Existing institutions keep syncing through whichever credential linked them.
+Use **⤓ Import statement** instead: a CSV or PDF becomes real transactions on a
+manual account. The same importer also backfills history *older* than the feed
+reaches, onto a fed account — it will only insert rows dated before the feed's
+own coverage begins, because the two id spaces can't dedup against each other.
 
 ---
 
 ## Carry-forward from Era dashboard
 
-Everything already built should be ported in with minimal changes. Storage swaps from `window.storage` (artifact API) to `db.settings` (Dexie). Everything else is UI code that transfers directly:
+Everything already built was ported in with minimal changes. Storage swapped from `window.storage` (artifact API) to the Supabase `settings` table. Everything else was UI code that transferred directly:
 
-- [ ] Month navigation with ‹ › arrows
-- [ ] Overview tab: donut chart + top categories + recent transactions
-- [ ] Categories tab: color swatches, inline renaming, custom categories, bar chart
-- [ ] Transactions tab: full list with category pills
-- [ ] Trends tab: 6-month bar chart (clickable), income vs. spending comparison
-- [ ] Summary cards: total spent, balance, month-over-month delta
+- [x] Month navigation with ‹ › arrows
+- [x] Overview tab: donut chart + top categories + recent transactions
+- [x] Categories tab: color swatches, inline renaming, custom categories, bar chart
+- [x] Transactions tab: full list with category pills
+- [x] Trends tab: 6-month bar chart (clickable), income vs. spending comparison
+- [x] Summary cards: total spent, balance, month-over-month delta
 
 ---
 
 ## New views to build
 
-- [ ] **Account list**: all linked accounts, grouped by type, with current balances and institution logos
-- [ ] **Net worth**: assets vs. liabilities summary at top, breakdown by account type
-- [ ] **Investments**: holdings table, allocation donut, total value and gain/loss
-- [ ] **Liabilities**: each loan/mortgage/card with payoff projection and minimum payment tracker
+- [x] **Account list**: all linked accounts, grouped by type, with current balances
+- [ ] **Net worth**: assets vs. liabilities summary at top, breakdown by account type (discussed, not committed)
+- [ ] **Debt tracker**: each loan/mortgage/card with payoff projection and minimum payment tracker (specced in CLAUDE.md Roadmap)
 - [ ] **Multi-account filter**: "All accounts" default, filter to one account or one account type
 
 ---
@@ -191,27 +182,23 @@ The dashboard is responsive from the start (carried from artifact code). Additio
 3. Scroll down and tap **Add to Home Screen**.
 4. Confirm — "my-money" now appears on your home screen and launches full-screen with its own icon, no Safari chrome.
 
-The app shell is cached by a service worker, so the home-screen app opens instantly and still launches when offline (the latest cached data renders; new transactions need a network to sync). Plaid API calls and `/api/*` requests are never cached.
+The app shell is cached by a service worker, so the home-screen app opens instantly and still launches when offline (the latest cached data renders; new transactions need a network to sync). `/api/*` requests are never cached.
 
 ---
 
 ## Cost
 
-| Service | Tier | Monthly cost |
+| Service | Tier | Cost |
 |---|---|---|
-| Plaid | Free trial (10 connections) → Production | $0 during trial; paid after |
+| SimpleFIN Bridge | Standard | ~$15/year, flat |
 | Vercel | Hobby | $0 |
 | Domain (optional) | — | ~$0.85/mo |
-| Supabase (optional, v2 cross-device sync) | Free tier | $0 |
+| Supabase (primary data store) | Free tier | $0 |
+| Anthropic API (the Ask tab) | Pay-as-you-go | Only what you spend; the model is selectable |
 
-### Plaid connections
-
-Plaid retired the old free "Development" tier. The current model is a **free trial capped at 10 connections**, then a paid Production plan. API calls against those connections are unlimited.
-
-A **connection** is one bank login (Plaid calls it an *Item*), even if that login exposes several accounts. Two things to know:
-
-- **The same bank linked twice = two connections.** Plaid can't tell it's the same person.
-- **Each device that links independently consumes a connection per bank.** Linking your bank on both laptop and phone = 2 connections for one bank.
+SimpleFIN charges per *user*, not per connection, so adding banks costs nothing.
+That is why the app moved off Plaid, whose free tier capped connections and
+whose paid tier billed per Item — the same bank linked twice counted twice.
 
 ---
 
@@ -220,14 +207,14 @@ A **connection** is one bank login (Plaid calls it an *Item*), even if that logi
 | Phase | Description | Status |
 |---|---|---|
 | 0 | Era dashboard — spending breakdown, categories, trends, month nav | ✅ Done (as artifact) |
-| 1 | Plaid developer account, credentials, enable products | ⬜ Not started |
-| 2 | Project scaffold — Vite, dependencies, folder structure, git | ⬜ Not started |
-| 3 | Vercel serverless functions — link token, exchange, transactions, accounts, investments, liabilities | ⬜ Not started |
-| 4 | IndexedDB schema + sync logic via Dexie | ⬜ Not started |
-| 5 | Frontend — port Era dashboard, add multi-account views, net worth, investments, liabilities | ⬜ Not started |
-| 6 | Deploy to Vercel, environment variables, live URL | ⬜ Not started |
-| 7 | Mobile polish — PWA, touch targets, swipe nav, pull to refresh | ⬜ Not started |
-| 8 | (Optional) Supabase sync layer for cross-device consistency | ⬜ Backlog |
+| 1 | Bank feed connected (Plaid originally; now SimpleFIN) | ✅ Done |
+| 2 | Project scaffold — Vite, dependencies, folder structure, git | ✅ Done |
+| 3 | Vercel serverless functions — link token, exchange, sync | ✅ Done |
+| 4 | Supabase schema + server-side sync (replaced the original IndexedDB/Dexie plan) | ✅ Done |
+| 5 | Frontend — port Era dashboard, multi-account accounts view | ✅ Done |
+| 6 | Deploy to Vercel, environment variables, live URL | ✅ Done |
+| 7 | Mobile polish — PWA install | ✅ Done (further polish tracked in Mobile section) |
+| 8 | Supabase as the primary store (promoted from optional sync layer) | ✅ Done |
 
 ---
 

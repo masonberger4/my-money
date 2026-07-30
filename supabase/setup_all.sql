@@ -15,14 +15,24 @@
 -- Drops everything created by the migrations.
 -- Use during development when you want a clean slate.
 -- Does NOT delete users from auth.users — do that in the Auth UI.
--- WARNING: this also drops plaid_tokens. You'd need to re-link every
--- institution through Plaid Link afterwards.
+-- WARNING: this also drops simplefin_access. You'd need to re-claim a setup
+-- token at SimpleFIN Bridge (Accounts → ⚡ SimpleFIN) afterwards.
 
 drop publication if exists supabase_realtime;
 create publication supabase_realtime;
 
+drop table if exists budget_months cascade;
+drop table if exists budgets cascade;
 drop table if exists settings cascade;
+-- Plaid is gone (20260728000002), but this wipe list must still name
+-- plaid_tokens: a project created by an OLDER version of this file has the
+-- table, and dropping institutions with CASCADE would only take its foreign
+-- key, leaving an orphaned table full of stale access tokens behind.
 drop table if exists plaid_tokens cascade;
+drop table if exists simplefin_access cascade;
+drop table if exists category_rules cascade;
+drop table if exists mileage_log cascade;
+drop table if exists entities cascade;
 drop table if exists mfa_prompts cascade;
 drop table if exists pull_jobs cascade;
 drop table if exists pending_items cascade;
@@ -397,6 +407,13 @@ alter table transactions
   add constraint transactions_account_plaid_tx_unique unique (account_id, plaid_tx_id);
 
 -- ---- plaid_tokens (service_role only) ---------------------------------------
+-- NOTE: replayed for fidelity, then dropped again by MIGRATION 10 below — the
+-- same pattern as pull_jobs/mfa_prompts above, which MIGRATION 2 removes. A
+-- fresh install does NOT end up with this table. What it DOES end up with, and
+-- what must survive, are the two renames just above: accounts.plaid_account_id
+-- and transactions.plaid_tx_id are the adapter-agnostic external-id columns
+-- every feed writes: 'sfin:', 'csv:' (BOTH CSV and PDF -- there is no 'pdf:'
+-- namespace; transactions.source tells those apart) and 'manual:'.
 create table plaid_tokens (
   institution_id uuid primary key references institutions(id) on delete cascade,
   access_token text not null,
@@ -434,6 +451,253 @@ create policy settings_all on settings
 alter table accounts add column nickname text;
 alter table accounts add column color text;
 
+-- ============ MIGRATION 4: transaction editing ============
+-- Migration 4: user edits on transactions.
+-- user_category: manual override of the Plaid-derived mapped_category.
+--   Effective category everywhere = coalesce(user_category, mapped_category).
+-- excluded: removes the transaction from spending/income totals and charts
+--   (still visible, dimmed, in transaction lists).
+-- Plaid syncs never overwrite these — api/sync.js upserts omit both columns.
+
+alter table transactions add column user_category text;
+alter table transactions add column excluded boolean not null default false;
+
+-- ============ MIGRATION 5: transaction rename ============
+-- User-supplied display name for a transaction. Overrides merchant_name /
+-- description everywhere in the UI. For bank descriptors that arrive masked
+-- (e.g. "******* ******" from some Amazon card processors).
+-- Plaid sync upserts omit it, so renames survive re-syncs.
+
+alter table transactions add column user_description text;
+
+-- ============ MIGRATION 6: budgets ============
+-- Per-category monthly budgets.
+-- One row per (household, category); monthly_limit is the dollar cap for a
+-- calendar month. No row = no budget for that category. Same RLS pattern as
+-- the settings table.
+
+create table budgets (
+  household_id uuid not null default current_household_id() references households(id) on delete cascade,
+  category text not null,
+  monthly_limit numeric(12, 2) not null,
+  updated_at timestamptz not null default now(),
+  primary key (household_id, category)
+);
+
+alter table budgets enable row level security;
+
+create policy budgets_all on budgets
+  for all to authenticated
+  using (household_id = current_household_id())
+  with check (household_id = current_household_id());
+
+-- ============ MIGRATION 7: csv import ============
+-- accounts.is_manual: marks accounts created by CSV import rather than Plaid.
+--   Belt-and-suspenders only: what actually keeps manual data safe from sync is
+--   that the manual institution has no plaid_tokens row AND its status is
+--   'disabled', so api/sync.js skips it either way.
+-- transactions.source: 'plaid' (default, from api/sync.js) or 'csv'/'pdf'
+--   (the importer). Lets a future undo/filter tell imported rows apart.
+
+alter table accounts add column if not exists is_manual boolean not null default false;
+
+alter table transactions add column if not exists source text not null default 'plaid';
+
+-- ============ MIGRATION 8: simplefin ============
+-- See supabase/migrations/20260724000001_simplefin.sql for the full rationale.
+-- simplefin_access holds the claimed access URL, which embeds HTTP Basic
+-- credentials for the household's banks — so it gets the plaid_tokens
+-- treatment: RLS enabled with ZERO policies (service_role only). household_id
+-- has NO default on purpose: every write happens from api/ under service_role,
+-- where current_household_id() is NULL, so a forgotten value fails loudly
+-- instead of writing an orphan row.
+
+create table if not exists simplefin_access (
+  id uuid primary key default gen_random_uuid(),
+  household_id uuid not null references households(id) on delete cascade,
+  access_url text not null,
+  last_pulled_at timestamptz,      -- data watermark; advanced only on success
+  last_attempt_at timestamptz,     -- throttle; stamped before the request
+  last_error text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (household_id, access_url)
+);
+
+alter table simplefin_access enable row level security;
+
+drop trigger if exists simplefin_access_touch_updated_at on simplefin_access;
+create trigger simplefin_access_touch_updated_at
+  before update on simplefin_access
+  for each row execute function touch_updated_at();
+
+-- institutions.simplefin_org_id doubles as the FEED DISCRIMINATOR:
+--   null     => Plaid-fed (or the manual "Imported" institution)
+--   not null => SimpleFIN-fed, skipped by the Plaid pass in api/sync.js
+alter table institutions add column if not exists simplefin_org_id text;
+
+create unique index if not exists institutions_household_simplefin_org_idx
+  on institutions (household_id, simplefin_org_id)
+  where simplefin_org_id is not null;
+
+-- ============ MIGRATION 9: learned category rules ============
+-- See supabase/migrations/20260728000001_category_rules.sql. Written by the
+-- CLIENT (the confirm in the transaction sheet), so it takes the
+-- budgets/settings RLS shape rather than the service_role-only shape above.
+
+create table if not exists category_rules (
+  household_id uuid not null default current_household_id() references households(id) on delete cascade,
+  merchant_key text not null,
+  category text not null,
+  source text not null default 'user',
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  primary key (household_id, merchant_key)
+);
+
+alter table category_rules enable row level security;
+
+drop policy if exists category_rules_all on category_rules;
+create policy category_rules_all on category_rules
+  for all to authenticated
+  using (household_id = current_household_id())
+  with check (household_id = current_household_id());
+
+-- ============ MIGRATION 10: remove plaid ============
+-- See supabase/migrations/20260728000002_remove_plaid.sql for the full
+-- rationale and for the ordering rule that matters on LIVE data (that file is
+-- pasted AFTER the code deploy, not before — it drops, it doesn't add).
+-- Here it is just the tail of the replay: undo the Plaid-shaped parts of
+-- MIGRATION 2. accounts.plaid_account_id and transactions.plaid_tx_id are NOT
+-- Plaid-shaped despite the names and are deliberately left alone.
+
+drop table if exists plaid_tokens;
+
+alter table institutions drop column if exists plaid_credential_key;
+alter table institutions drop column if exists plaid_item_id;
+
+-- 'needs_reauth' was a Plaid-only status (api/sync.js set it on
+-- ITEM_LOGIN_REQUIRED). Nothing can write or clear it now, so it leaves the
+-- allowed set. Drop by name first so this file stays re-runnable, then sweep
+-- any differently-named check that still permits the value.
+alter table institutions drop constraint if exists institutions_status_check;
+
+do $$
+declare
+  c text;
+begin
+  for c in
+    select con.conname
+    from pg_constraint con
+    join pg_class rel on rel.oid = con.conrelid
+    join pg_namespace nsp on nsp.oid = rel.relnamespace
+    where nsp.nspname = 'public'
+      and rel.relname = 'institutions'
+      and con.contype = 'c'
+      and pg_get_constraintdef(con.oid) like '%needs_reauth%'
+  loop
+    execute format('alter table public.institutions drop constraint %I', c);
+  end loop;
+end $$;
+
+update institutions set status = 'error' where status = 'needs_reauth';
+
+alter table institutions
+  add constraint institutions_status_check
+  check (status in ('active', 'disabled', 'error'));
+
+-- ============ MIGRATION 11: envelope budgeting ============
+-- budget_months adds the per-(category, month) grain the flat budgets table
+-- lacked: `assigned` is how many real dollars the household gave a category in
+-- that month. A MISSING ROW MEANS assigned 0 — never a fallback to
+-- budgets.monthly_limit, which would manufacture a rolled-over balance out of
+-- months nobody actually budgeted.
+--
+-- budgets keeps one row per category but monthly_limit now means the rule-2
+-- funding *target* rather than a spending cap, and it gains rollover (rule 3),
+-- target_kind ('monthly' | 'by_date') and target_date. monthly_limit becomes
+-- nullable so a category can carry rollover settings without a target amount.
+
+create table budget_months (
+  household_id uuid not null default current_household_id() references households(id) on delete cascade,
+  category text not null,
+  -- Always the first of the month; the check keeps the primary key honest so
+  -- two writers can't create '2026-07-01' and '2026-07-15' for one month.
+  month date not null check (month = date_trunc('month', month)::date),
+  assigned numeric(12, 2) not null default 0,
+  updated_at timestamptz not null default now(),
+  primary key (household_id, category, month)
+);
+
+alter table budget_months enable row level security;
+
+create policy budget_months_all on budget_months
+  for all to authenticated
+  using (household_id = current_household_id())
+  with check (household_id = current_household_id());
+
+alter table budgets add column if not exists rollover boolean not null default true;
+alter table budgets add column if not exists target_kind text not null default 'monthly'
+  check (target_kind in ('monthly', 'by_date'));
+alter table budgets add column if not exists target_date date;
+alter table budgets alter column monthly_limit drop not null;
+
+-- ============ MIGRATION 12: rental tracking + tax prep ============
+-- entities = rental properties ('business' allowed for a future side-business).
+-- accounts.entity_id is the account-level default; transactions.entity_id the
+-- per-row override (user-owned — sync/import never write either). The capital
+-- columns keep improvements off the Schedule E expense lines; mileage_log is
+-- hand-entered (SimpleFIN has no mileage, a PWA has no background GPS).
+
+create table entities (
+  id uuid primary key default gen_random_uuid(),
+  household_id uuid not null default current_household_id() references households(id) on delete cascade,
+  name text not null,
+  kind text not null default 'rental' check (kind in ('rental', 'business')),
+  created_at timestamptz not null default now(),
+  archived_at timestamptz
+);
+
+alter table entities enable row level security;
+
+create policy entities_all on entities
+  for all to authenticated
+  using (household_id = current_household_id())
+  with check (household_id = current_household_id());
+
+alter table accounts
+  add column if not exists entity_id uuid references entities(id) on delete set null;
+
+alter table transactions
+  add column if not exists entity_id uuid references entities(id) on delete set null;
+alter table transactions
+  add column if not exists is_capital boolean not null default false;
+alter table transactions
+  add column if not exists placed_in_service date;
+alter table transactions
+  add column if not exists useful_life_years integer;
+
+create index if not exists transactions_entity_idx
+  on transactions (entity_id)
+  where entity_id is not null;
+
+create table mileage_log (
+  id uuid primary key default gen_random_uuid(),
+  household_id uuid not null default current_household_id() references households(id) on delete cascade,
+  entity_id uuid references entities(id) on delete cascade,
+  on_date date not null,
+  miles numeric(7, 1) not null check (miles > 0),
+  purpose text,
+  created_at timestamptz not null default now()
+);
+
+alter table mileage_log enable row level security;
+
+create policy mileage_log_all on mileage_log
+  for all to authenticated
+  using (household_id = current_household_id())
+  with check (household_id = current_household_id());
+
 -- ============ AUTO-CREATE HOUSEHOLD ============
 -- Links the household to the first (usually only) auth user. If you haven't
 -- created the user yet, this is skipped — create the user and re-run the
@@ -456,10 +720,163 @@ begin
 end $$;
 
 -- ============ FINAL CHECK ============
-select
-  (select count(*) from information_schema.tables
-    where table_schema = 'public'
-      and table_name in ('households','household_members','institutions',
-                         'accounts','transactions','plaid_tokens','settings'))
-    as tables_created_of_7,
-  (select count(*) > 0 from household_members) as household_linked;
+-- Asserts the schema matches ALL migrations in supabase/migrations/ — raises
+-- (instead of printing a wrong-but-green count) if this file drifts behind.
+-- When adding a migration here, extend these assertions to cover it.
+do $$
+declare
+  missing text[] := '{}';
+  stale   text[] := '{}';
+begin
+  if to_regclass('public.budgets') is null then
+    missing := array_append(missing, 'budgets table (20260720)');
+  end if;
+  if not exists (select 1 from information_schema.columns
+      where table_schema = 'public' and table_name = 'transactions'
+        and column_name = 'user_category') then
+    missing := array_append(missing, 'transactions.user_category (20260715)');
+  end if;
+  if not exists (select 1 from information_schema.columns
+      where table_schema = 'public' and table_name = 'transactions'
+        and column_name = 'user_description') then
+    missing := array_append(missing, 'transactions.user_description (20260717)');
+  end if;
+  if not exists (select 1 from information_schema.columns
+      where table_schema = 'public' and table_name = 'transactions'
+        and column_name = 'source') then
+    missing := array_append(missing, 'transactions.source (20260722)');
+  end if;
+  if not exists (select 1 from information_schema.columns
+      where table_schema = 'public' and table_name = 'accounts'
+        and column_name = 'is_manual') then
+    missing := array_append(missing, 'accounts.is_manual (20260722)');
+  end if;
+  if to_regclass('public.simplefin_access') is null then
+    missing := array_append(missing, 'simplefin_access table (20260724)');
+  end if;
+  if not exists (select 1 from information_schema.columns
+      where table_schema = 'public' and table_name = 'simplefin_access'
+        and column_name = 'last_attempt_at') then
+    missing := array_append(missing, 'simplefin_access.last_attempt_at (20260724)');
+  end if;
+  if not exists (select 1 from information_schema.columns
+      where table_schema = 'public' and table_name = 'institutions'
+        and column_name = 'simplefin_org_id') then
+    missing := array_append(missing, 'institutions.simplefin_org_id (20260724)');
+  end if;
+  if to_regclass('public.category_rules') is null then
+    missing := array_append(missing, 'category_rules table (20260728)');
+  end if;
+  if to_regclass('public.budget_months') is null then
+    missing := array_append(missing, 'budget_months table (20260729)');
+  end if;
+  if not exists (select 1 from information_schema.columns
+      where table_schema = 'public' and table_name = 'budgets'
+        and column_name = 'rollover') then
+    missing := array_append(missing, 'budgets.rollover (20260729)');
+  end if;
+  if not exists (select 1 from information_schema.columns
+      where table_schema = 'public' and table_name = 'budgets'
+        and column_name = 'target_kind') then
+    missing := array_append(missing, 'budgets.target_kind (20260729)');
+  end if;
+  if not exists (select 1 from information_schema.columns
+      where table_schema = 'public' and table_name = 'budgets'
+        and column_name = 'target_date') then
+    missing := array_append(missing, 'budgets.target_date (20260729)');
+  end if;
+  -- monthly_limit must be NULLABLE after 20260729 — a category can carry
+  -- rollover settings without a target amount.
+  if exists (select 1 from information_schema.columns
+      where table_schema = 'public' and table_name = 'budgets'
+        and column_name = 'monthly_limit' and is_nullable = 'NO') then
+    missing := array_append(missing, 'budgets.monthly_limit still NOT NULL (20260729)');
+  end if;
+  if to_regclass('public.entities') is null then
+    missing := array_append(missing, 'entities table (20260730)');
+  end if;
+  if to_regclass('public.mileage_log') is null then
+    missing := array_append(missing, 'mileage_log table (20260730)');
+  end if;
+  if not exists (select 1 from information_schema.columns
+      where table_schema = 'public' and table_name = 'accounts'
+        and column_name = 'entity_id') then
+    missing := array_append(missing, 'accounts.entity_id (20260730)');
+  end if;
+  if not exists (select 1 from information_schema.columns
+      where table_schema = 'public' and table_name = 'transactions'
+        and column_name = 'entity_id') then
+    missing := array_append(missing, 'transactions.entity_id (20260730)');
+  end if;
+  if not exists (select 1 from information_schema.columns
+      where table_schema = 'public' and table_name = 'transactions'
+        and column_name = 'is_capital') then
+    missing := array_append(missing, 'transactions.is_capital (20260730)');
+  end if;
+  if not exists (select 1 from information_schema.columns
+      where table_schema = 'public' and table_name = 'transactions'
+        and column_name = 'placed_in_service') then
+    missing := array_append(missing, 'transactions.placed_in_service (20260730)');
+  end if;
+  if not exists (select 1 from information_schema.columns
+      where table_schema = 'public' and table_name = 'transactions'
+        and column_name = 'useful_life_years') then
+    missing := array_append(missing, 'transactions.useful_life_years (20260730)');
+  end if;
+
+  -- The two adapter-agnostic external-id columns. Plaid-named, NOT Plaid-owned:
+  -- every feed writes them ('sfin:', 'csv:', 'manual:') and they carry
+  -- the upsert conflict targets that make a re-pull idempotent. Asserted PRESENT
+  -- so a future "finish the Plaid cleanup" edit that drops them fails here
+  -- instead of silently breaking every sync and import.
+  if not exists (select 1 from information_schema.columns
+      where table_schema = 'public' and table_name = 'transactions'
+        and column_name = 'plaid_tx_id') then
+    missing := array_append(missing, 'transactions.plaid_tx_id (20260606) — adapter-agnostic, must never be dropped');
+  end if;
+  if not exists (select 1 from information_schema.columns
+      where table_schema = 'public' and table_name = 'accounts'
+        and column_name = 'plaid_account_id') then
+    missing := array_append(missing, 'accounts.plaid_account_id (20260606) — adapter-agnostic, must never be dropped');
+  end if;
+
+  -- ---- ABSENCE assertions (20260728000002_remove_plaid) --------------------
+  -- Everything above asks "is it there?". Plaid removal is a DROP migration, so
+  -- these ask the opposite: if any of them still exists, this file replayed the
+  -- Plaid blocks without replaying the removal that undoes them.
+  if to_regclass('public.plaid_tokens') is not null then
+    stale := array_append(stale, 'plaid_tokens table still exists (20260728000002)');
+  end if;
+  if exists (select 1 from information_schema.columns
+      where table_schema = 'public' and table_name = 'institutions'
+        and column_name = 'plaid_credential_key') then
+    stale := array_append(stale, 'institutions.plaid_credential_key still exists (20260728000002)');
+  end if;
+  if exists (select 1 from information_schema.columns
+      where table_schema = 'public' and table_name = 'institutions'
+        and column_name = 'plaid_item_id') then
+    stale := array_append(stale, 'institutions.plaid_item_id still exists (20260728000002)');
+  end if;
+  if exists (
+    select 1 from pg_constraint con
+    join pg_class rel on rel.oid = con.conrelid
+    join pg_namespace nsp on nsp.oid = rel.relnamespace
+    where nsp.nspname = 'public' and rel.relname = 'institutions'
+      and con.contype = 'c'
+      and pg_get_constraintdef(con.oid) like '%needs_reauth%'
+  ) then
+    stale := array_append(stale, e'institutions.status still permits \'needs_reauth\' (20260728000002)');
+  end if;
+
+  if array_length(missing, 1) > 0 then
+    raise exception 'setup_all.sql is out of sync with migrations/: missing %',
+      array_to_string(missing, ', ');
+  end if;
+  if array_length(stale, 1) > 0 then
+    raise exception 'setup_all.sql is out of sync with migrations/: not removed: %',
+      array_to_string(stale, ', ');
+  end if;
+  raise notice 'Schema check passed: all migrations present, Plaid artifacts removed.';
+end $$;
+
+select (select count(*) > 0 from household_members) as household_linked;

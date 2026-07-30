@@ -19,81 +19,51 @@ export const ERA_CATEGORIES = [
   'Cash, checks, and misc',
   'Transfers and card payments',
   'Return',
+  // Not a real spending category — the honest answer when the classifier does
+  // not recognise a merchant. It exists because the previous fallback was
+  // "Shopping and gear", a category actually in use, which made "we don't know"
+  // indistinguishable from "this is shopping" and quietly inflated it (46% of a
+  // realistic merchant corpus landed there). Uncategorized IS counted as
+  // spending — the money did leave — but it can't be budgeted, and it shows up
+  // in the Categories tab so the size of the unknown is visible.
+  'Uncategorized',
 ];
 
-const TRANSFER_CATEGORY = 'Transfers and card payments';
-const RETURN_CATEGORY = 'Return';
+// Exported so csvImport/txClassify and the tests share one definition rather
+// than each keeping a copy that can drift.
+export const TRANSFER_CATEGORY = 'Transfers and card payments';
+export const RETURN_CATEGORY = 'Return';
+export const UNCATEGORIZED = 'Uncategorized';
 
-const unmappedWarned = new Set();
+// The classifier's fallback. It is UNCATEGORIZED, not 'Shopping and gear' —
+// that was the whole point of introducing Uncategorized, and this alias exists
+// only so csvImport/txClassify and test/csvImport.test.js name one thing.
+// Note test/csvImport.test.js asserts guessCategory(x) === FALLBACK_CATEGORY,
+// which is SYMBOLIC: it proves they agree, not what the value is. The explicit
+// value assertion in that file is what stops a silent revert to a real
+// category. Don't remove either.
+export const FALLBACK_CATEGORY = UNCATEGORIZED;
 
-export function mapPlaidCategory(primary, detailed) {
-  const p = (primary || '').toUpperCase();
-  const d = (detailed || '').toUpperCase();
-
-  switch (p) {
-    case 'FOOD_AND_DRINK':
-      if (d.includes('GROCERIES')) return 'Groceries';
-      if (d.includes('COFFEE')) return 'Coffee and snacks';
-      if (d.includes('RESTAURANT') || d.includes('FAST_FOOD')) return 'Dining out';
-      return 'Dining out';
-
-    case 'TRANSPORTATION':
-      if (d.includes('TAXIS_AND_RIDE_SHARES')) return 'Ride shares';
-      if (d.includes('PUBLIC_TRANSIT')) return 'Public transit';
-      if (
-        d.includes('GAS') ||
-        d.includes('PARKING') ||
-        d.includes('TOLLS') ||
-        d.includes('MAINTENANCE')
-      )
-        return 'Vehicle expenses';
-      if (d.includes('FLIGHT') || d.includes('HOTEL') || d.includes('TRAVEL'))
-        return 'Travel and vacation';
-      return 'Vehicle expenses';
-
-    case 'TRAVEL':
-      return 'Travel and vacation';
-
-    case 'ENTERTAINMENT':
-    case 'RECREATION_SERVICES':
-      return 'Entertainment and subscriptions';
-
-    case 'GENERAL_MERCHANDISE':
-      return 'Shopping and gear';
-
-    case 'PERSONAL_CARE':
-      return 'Health and fitness';
-
-    case 'MEDICAL':
-      return 'Healthcare and pharmacy';
-
-    case 'HOME_IMPROVEMENT':
-      return 'Home maintenance and improvement';
-
-    case 'RENT_AND_UTILITIES':
-      return 'Utilities';
-
-    case 'GOVERNMENT_AND_NON_PROFIT':
-    case 'GENERAL_SERVICES':
-      return 'Cash, checks, and misc';
-
-    case 'TRANSFER_IN':
-    case 'TRANSFER_OUT':
-    case 'LOAN_PAYMENTS':
-    case 'BANK_FEES':
-    case 'INCOME':
-      return TRANSFER_CATEGORY;
-
-    default: {
-      const key = `${p}|${d}`;
-      if (!unmappedWarned.has(key)) {
-        unmappedWarned.add(key);
-        console.warn(`[categoryMap] Unmapped Plaid category: ${key} → defaulting to "Shopping and gear"`);
-      }
-      return 'Shopping and gear';
-    }
-  }
+// Categories that exist for bookkeeping rather than budgeting. A budget on
+// "Uncategorized" would be a budget on the classifier's ignorance, and a
+// budget on "Return" would be an envelope whose Spent can never move —
+// Return rows are credit-card negatives, permanently excluded from spending.
+export function isBudgetableCategory(category) {
+  return (
+    category !== UNCATEGORIZED && category !== TRANSFER_CATEGORY && category !== RETURN_CATEGORY
+  );
 }
+
+// mapPlaidCategory lived here until Plaid was removed. It translated Plaid's
+// Personal Finance Category codes (FOOD_AND_DRINK / TRANSPORTATION / …) into
+// this taxonomy, and nothing produces those codes any more: SimpleFIN sends no
+// category at all, and both surviving write paths — the SimpleFIN pass in
+// api/sync.js and CSV/PDF import — derive `mapped_category` from the descriptor
+// via src/txClassify.js instead.
+//
+// Historical rows keep whatever `mapped_category` was written at the time; the
+// function was never called at READ time, so deleting it changes nothing that
+// is already in the database.
 
 export function isTransferCategory(category) {
   return category === TRANSFER_CATEGORY;

@@ -1,20 +1,19 @@
 # Supabase setup
 
-Cloud canonical data store for my-money. The Plaid sync (server-side in
-`api/sync.js`) writes here; the React app on Vercel + your phones read from
-here. Plaid access tokens live in a service-role-only table — browsers never
-see them.
+Cloud canonical data store for my-money. The SimpleFIN sync (server-side in
+`api/sync.js`) writes here, as does CSV/PDF import from the browser; the React
+app on Vercel + your phones read from here. The SimpleFIN access URL embeds
+bank credentials and lives in a service-role-only table — browsers never see
+it.
 
 ## Files
 
 | File | Purpose |
 |---|---|
-| **`setup_all.sql`** | **Start here.** One paste: wipes partial state, applies all migrations, auto-creates the household. |
-| `migrations/20260605000001_init.sql` | Base tables, RLS, Realtime publication. Run first on an empty database. |
-| `migrations/20260606000001_plaid.sql` | Reshapes the schema for Plaid: drops scraper-era tables, adds `plaid_tokens` (service-role only), `plaid_credential_key` for multi-Plaid-account routing, `settings` for dashboard prefs. Run second. |
-| `migrations/20260714000001_account_labels.sql` | Adds `nickname` + `color` to accounts for the per-account badges shown on transactions. Run third. |
-| `seed.sql` | Optional sample data. Real data arrives via Plaid on first sync. |
-| `reset.sql` | Drops everything from both migrations. For dev resets. |
+| **`setup_all.sql`** | **Start here for a FRESH install.** One paste: wipes partial state, recreates the full schema, auto-creates the household. A convenience snapshot of the migrations — `migrations/` is the source of truth. **Destructive: never run on a project with real data.** |
+| `migrations/` | The source of truth for the schema. On an existing database, run every file in filename order (each is additive-safe on live data unless its header says otherwise). |
+| `seed.sql` | Optional sample data. Real data arrives from the SimpleFIN feed on first sync, or from a CSV/PDF import. |
+| `reset.sql` | Drops everything the migrations create. For dev resets. |
 
 ## The secrets involved, and where each one goes
 
@@ -24,7 +23,7 @@ see them.
 | anon / public key | Automatic | Yes — `VITE_SUPABASE_ANON_KEY` | Public by design; RLS + login gate all access. |
 | service_role key | Automatic | Yes — `SUPABASE_SERVICE_ROLE_KEY` (server-side only) | Bypasses RLS. Never in client code, never committed. |
 | Household email + password | You, in step 3 | **No** | Typed into the app's login screen on each device. Share with your wife. |
-| Plaid client_id + secret | plaid.com dashboard | Yes — `PLAID_CREDENTIALS` (server-side only) | See root README for the multi-account format. |
+| SimpleFIN setup token | bridge.simplefin.org | **No** | Pasted into the app once (Accounts → ⚡ SimpleFIN). Claimed server-side into a durable access URL stored in `simplefin_access` — service-role only, never in env, never in the browser. |
 
 ## Setup (~15 min)
 
@@ -61,31 +60,28 @@ see them.
 1. SQL Editor (left sidebar, `>_` icon) → **New query**.
 2. Open **`setup_all.sql`** (in this folder), select ALL of it, copy.
 3. Paste into the editor → **Run** (or Cmd/Ctrl+Enter).
-4. The result at the bottom should show:
-   `tables_created_of_7 = 7` and `household_linked = true`.
+4. The result at the bottom should show `household_linked = true` (a built-in
+   schema check raises an error if the script is out of sync with
+   `migrations/` — if it does, the file needs regenerating, not your setup).
 
-That one file wipes any partial state, applies all three migrations in
-order, and automatically creates the household linked to the auth user you
-made in step 2 — no UUID copy-pasting. It's safe to re-run any time before
-you have real data in the project. If you forgot step 2, it still creates
-the tables, prints "No auth user found", and you just re-run it after
-creating the user.
+That one file wipes any partial state, recreates the full schema (everything
+in `migrations/`, in order), and automatically creates the household linked
+to the auth user you made in step 2 — no UUID copy-pasting. It's safe to
+re-run any time before you have real data in the project. If you forgot
+step 2, it still creates the tables, prints "No auth user found", and you
+just re-run it after creating the user.
 
 Table Editor should now show: `households`, `household_members`,
-`institutions`, `accounts`, `transactions`, `plaid_tokens`, `settings`.
+`institutions`, `accounts`, `transactions`, `settings`, `budgets`,
+`simplefin_access`, `category_rules`.
 
 <details>
 <summary>Alternative: run migrations individually</summary>
 
-Paste and run, in order:
-
-1. `migrations/20260605000001_init.sql`
-2. `migrations/20260606000001_plaid.sql`
-3. `migrations/20260714000001_account_labels.sql`
-
-Then create the household manually (step 4 below). Use this path only for
-applying a NEW migration to a project that already has real data —
-`setup_all.sql` would wipe it.
+Paste and run every file in `migrations/`, in filename order. Then create
+the household manually (step 4 below). This path is REQUIRED for applying a
+NEW migration to a project that already has real data — `setup_all.sql` is
+for fresh installs only and would wipe it.
 </details>
 
 **About RLS:** the migrations explicitly enable row-level security on every
@@ -93,8 +89,8 @@ table — there is no dashboard toggle you need to set, and any "enable RLS by
 default for new tables" setting is fine but redundant (tables are only ever
 created by these migrations). Just never *disable* RLS on any of these
 tables. After running the migrations, Dashboard → **Advisors** should show
-no RLS warnings (`plaid_tokens` intentionally has RLS on with zero
-policies — that's what keeps access tokens server-only).
+no RLS warnings (`simplefin_access` intentionally has RLS on with zero
+policies — that's what keeps the credential-bearing access URL server-only).
 
 ### 4. Configure the app
 
@@ -102,7 +98,9 @@ Copy `.env.example` → `.env.local` and fill in:
 
 - `VITE_SUPABASE_URL` + `VITE_SUPABASE_ANON_KEY` (browser)
 - `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` (api/ routes)
-- `PLAID_CREDENTIALS` (see root README section on Plaid accounts)
+
+There is no bank-feed secret in env: SimpleFIN's access URL is claimed at
+runtime and stored in the database.
 
 On Vercel, set the same variables in Project Settings → Environment Variables.
 
@@ -111,8 +109,8 @@ On Vercel, set the same variables in Project Settings → Environment Variables.
 Run in the SQL Editor after using the app (sign in → link an account → sync):
 
 ```sql
--- Institutions show which Plaid credential linked them
-select name, plaid_credential_key, status, last_successful_pull_at from institutions;
+-- simplefin_org_id is the feed discriminator: not null => SimpleFIN-fed
+select name, simplefin_org_id, status, last_successful_pull_at from institutions;
 
 -- Accounts and balances arrived
 select name, mask, type, current_balance from accounts;
@@ -124,17 +122,17 @@ select count(*) from transactions;
 Security spot-checks:
 
 ```sql
--- plaid_tokens has RLS enabled and NO policies → authenticated users get
+-- simplefin_access has RLS enabled and NO policies → authenticated users get
 -- nothing; only service_role (the API) can read. Should return rows here
 -- (SQL Editor runs as service_role) …
-select institution_id, left(access_token, 12) || '…' as token_prefix from plaid_tokens;
+select id, left(access_url, 12) || '…' as url_prefix, last_pulled_at from simplefin_access;
 ```
 
 …but from the **browser console** on your deployed app (signed in!), this must
 return an empty array:
 
 ```js
-await window.supabase?.from('plaid_tokens').select('*') // → { data: [] }
+await window.supabase?.from('simplefin_access').select('*') // → { data: [] }
 ```
 
 > Note: the SQL Editor runs as `service_role`, which bypasses RLS and has no
@@ -146,6 +144,7 @@ await window.supabase?.from('plaid_tokens').select('*') // → { data: [] }
 Just re-run `setup_all.sql` — it wipes and rebuilds everything, including the
 household link.
 
-The Auth user survives resets (it lives in `auth.users`). Re-linking every
-institution through Plaid Link is required after a reset because access tokens
-are dropped with `plaid_tokens`.
+The Auth user survives resets (it lives in `auth.users`). Re-claiming a
+SimpleFIN setup token is required after a reset because the access URL is
+dropped with `simplefin_access`. Any CSV/PDF-imported history is dropped too —
+re-import the files.

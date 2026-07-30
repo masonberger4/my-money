@@ -24,13 +24,15 @@ for (const file of files) {
     console.warn(`Skipping ${file}: no default export function`);
     continue;
   }
-  app.post(route, (req, res) => {
+  // Any method: Vercel routes a file to every verb and each handler does its
+  // own method check (simplefin-status answers GET and DELETE, not POST).
+  app.all(route, (req, res) => {
     Promise.resolve(handler(req, res)).catch((err) => {
       console.error(`Unhandled error in ${route}:`, err);
       if (!res.headersSent) res.status(500).json({ error: 'Internal error' });
     });
   });
-  console.log(`Mounted POST ${route}`);
+  console.log(`Mounted ${route}`);
 }
 
 const PORT = 3001;

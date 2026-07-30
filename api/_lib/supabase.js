@@ -1,7 +1,8 @@
 import { createClient } from '@supabase/supabase-js';
 
 // Service-role client: bypasses RLS. Server-side only — this is how the API
-// routes read plaid_tokens, which no client-facing policy exposes.
+// routes read simplefin_access, which no client-facing policy exposes (its
+// URL embeds the household's bank credentials).
 let serviceClient = null;
 
 export function getServiceClient() {
