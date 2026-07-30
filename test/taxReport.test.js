@@ -1,0 +1,164 @@
+// Covers src/taxReport.js, the pure tax lens. The properties that matter:
+//
+//  * Money never disappears silently: every non-excluded row lands in exactly
+//    one of rents / a mapped line / the visible unmapped bucket / the capital
+//    list. (The Uncategorized lesson applied to tax lines — the failure mode
+//    this guards against is a report that quietly drops what it can't place.)
+//  * Capital expenses NEVER reach an expense line, even when their category is
+//    mapped — an improvement that also lands on line 14 is double-counted.
+//  * Refunds net: the app stores positive = out, and a mapped negative must
+//    reduce its line, not become income.
+//  * The mileage table is effective-dated and the 2026 mid-year rate change
+//    lands on the right day, via string comparison (no Date, no TZ drift).
+
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  SCHEDULE_E_LINES,
+  RENTS_KEY,
+  scheduleEReport,
+  entityMonthly,
+  personalDeductionReport,
+  DEDUCTION_BUCKETS,
+  mileageRate,
+  mileageDeduction,
+  scheduleECsv,
+} from '../src/taxReport.js';
+
+const tx = (over) => ({
+  id: over.id ?? 'x',
+  transaction_date: '2026-03-10',
+  amount: 0,
+  category: 'Uncategorized',
+  merchant_name: 'M',
+  is_capital: false,
+  placed_in_service: null,
+  useful_life_years: null,
+  excluded: false,
+  ...over,
+});
+
+test('scheduleEReport routes every row to exactly one section', () => {
+  const mapping = { Utilities: 17, 'Home maintenance and improvement': 14, Rent: RENTS_KEY };
+  const rows = [
+    tx({ id: 'a', amount: 120.5, category: 'Utilities' }),
+    tx({ id: 'b', amount: -20.5, category: 'Utilities' }), // refund nets line 17
+    tx({ id: 'c', amount: 300, category: 'Home maintenance and improvement' }),
+    tx({ id: 'd', amount: -1800, category: 'Cash, checks, and misc' }), // unmapped money in = rent
+    tx({ id: 'e', amount: -1800, category: 'Rent' }), // explicitly mapped rent
+    tx({ id: 'f', amount: 75, category: 'Dining out' }), // unmapped money out
+    tx({ id: 'g', amount: 9000, category: 'Home maintenance and improvement', is_capital: true, placed_in_service: '2026-03-15', useful_life_years: 27 }),
+    tx({ id: 'h', amount: 55, category: 'Utilities', excluded: true }), // excluded rows invisible
+  ];
+  const r = scheduleEReport(rows, mapping);
+
+  assert.equal(r.lines.find((l) => l.line === 17).total, 100); // 120.50 − 20.50
+  assert.equal(r.lines.find((l) => l.line === 14).total, 300); // capital row g NOT here
+  assert.equal(r.rents.total, 3600);
+  assert.equal(r.rents.count, 2);
+  assert.deepEqual(r.unmapped, [{ category: 'Dining out', total: 75, count: 1 }]);
+  assert.equal(r.capital.total, 9000);
+  assert.equal(r.capital.items[0].placed_in_service, '2026-03-15');
+  assert.equal(r.totalExpenses, 400);
+  assert.equal(r.net, 3600 - 400);
+
+  // Conservation: rents + lines + unmapped + capital account for every
+  // non-excluded dollar (as absolute flows, refunds netted inside sections).
+  const placed = r.rents.total - 0 + r.totalExpenses + r.unmappedTotal + r.capital.total;
+  assert.equal(placed, 3600 + 400 + 75 + 9000);
+});
+
+test('scheduleEReport is defensive about garbage input', () => {
+  assert.equal(scheduleEReport(null, null).rents.total, 0);
+  assert.equal(scheduleEReport([null, {}], undefined).totalExpenses, 0);
+  const r = scheduleEReport([tx({ amount: 10, category: 'X' })], { X: 999 }); // unknown line number
+  assert.equal(r.unmapped.length, 1, 'a mapping to a nonexistent line falls back to visible-unmapped');
+});
+
+test('scheduleEReport line 18 (depreciation) is not a mappable line', () => {
+  assert.ok(!SCHEDULE_E_LINES.some((l) => l.line === 18));
+  const r = scheduleEReport([tx({ amount: 50, category: 'X' })], { X: 18 });
+  assert.equal(r.unmapped[0].total, 50);
+});
+
+test('unmapped bucket sorts by size then name, deterministically', () => {
+  const rows = [
+    tx({ amount: 10, category: 'B' }),
+    tx({ amount: 10, category: 'A' }),
+    tx({ amount: 40, category: 'C' }),
+  ];
+  const r = scheduleEReport(rows, {});
+  assert.deepEqual(r.unmapped.map((u) => u.category), ['C', 'A', 'B']);
+});
+
+test('entityMonthly builds a sorted cash P&L including capital outflows', () => {
+  const rows = [
+    tx({ transaction_date: '2026-02-03', amount: -1800 }),
+    tx({ transaction_date: '2026-01-15', amount: 200 }),
+    tx({ transaction_date: '2026-01-02', amount: -1800 }),
+    tx({ transaction_date: '2026-01-20', amount: 9000, is_capital: true }),
+  ];
+  const m = entityMonthly(rows);
+  assert.deepEqual(m.map((x) => x.ym), ['2026-01', '2026-02']);
+  assert.equal(m[0].income, 1800);
+  assert.equal(m[0].expenses, 9200);
+  assert.equal(m[0].net, -7400);
+});
+
+test('personalDeductionReport totals mapped buckets and nets refunds', () => {
+  const mapping = { 'Healthcare and pharmacy': 'medical', Giving: 'charitable' };
+  const rows = [
+    tx({ amount: 250, category: 'Healthcare and pharmacy' }),
+    tx({ amount: -50, category: 'Healthcare and pharmacy' }),
+    tx({ amount: 100, category: 'Giving' }),
+    tx({ amount: 999, category: 'Dining out' }), // unmapped: not a deduction
+    tx({ amount: 40, category: 'Giving', excluded: true }),
+  ];
+  const r = personalDeductionReport(rows, mapping);
+  const byKey = Object.fromEntries(r.map((b) => [b.key, b]));
+  assert.equal(byKey.medical.total, 200);
+  assert.equal(byKey.medical.count, 2);
+  assert.equal(byKey.charitable.total, 100);
+  assert.equal(byKey.taxes_paid.total, 0);
+  assert.equal(r.length, DEDUCTION_BUCKETS.length, 'every bucket present even at zero');
+});
+
+test('mileageRate picks the effective-dated rate by string comparison', () => {
+  assert.equal(mileageRate('2026-06-30'), 0.725);
+  assert.equal(mileageRate('2026-07-01'), 0.76, 'the 2026 mid-year raise lands exactly on July 1');
+  assert.equal(mileageRate('2025-12-31'), 0.70);
+  assert.equal(mileageRate('2024-01-01'), 0.67);
+  assert.equal(mileageRate('2023-12-31'), null, 'before the table = unknown, never guessed');
+  assert.equal(mileageRate(''), null);
+  assert.equal(mileageRate(undefined), null);
+});
+
+test('mileageDeduction splits a straddling year by rate and counts unrated miles', () => {
+  const r = mileageDeduction([
+    { on_date: '2026-03-01', miles: 100 },
+    { on_date: '2026-08-01', miles: 100 },
+    { on_date: '2023-05-01', miles: 40 },
+    { on_date: '2026-08-02', miles: 0 }, // ignored
+  ]);
+  assert.equal(r.miles, 200);
+  assert.equal(r.amount, 148.5); // 100×0.725 + 100×0.76
+  assert.equal(r.unratedMiles, 40);
+  assert.deepEqual(r.byRate, [
+    { rate: 0.725, miles: 100, amount: 72.5 },
+    { rate: 0.76, miles: 100, amount: 76 },
+  ]);
+});
+
+test('scheduleECsv escapes and carries the sign-convention column name', () => {
+  const r = scheduleEReport(
+    [
+      tx({ amount: 10, category: 'Utilities' }),
+      tx({ amount: 500, category: 'X', is_capital: true, merchant_name: 'Doors, "Custom" Co' }),
+    ],
+    { Utilities: 17 },
+  );
+  const csv = scheduleECsv(r, { entityName: 'Maple St', year: 2026 });
+  assert.ok(csv.includes('amount_positive_is_outflow'));
+  assert.ok(csv.includes('"Doors, ""Custom"" Co"'), 'RFC-4180 quoting for commas and quotes');
+  assert.ok(csv.includes('Not tax advice'));
+});

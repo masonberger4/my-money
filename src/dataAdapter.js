@@ -38,6 +38,12 @@ function shiftMonth(year, month, delta) {
 const TX_COLUMNS =
   'id, plaid_tx_id, account_id, date, amount, merchant_name, description, mapped_category, raw_category, user_category, user_description, excluded, pending';
 
+// The rental-tax columns (20260730000001) ride along on every transaction read
+// so the detail sheet can show and edit them from ANY list — transactions tab,
+// search results, the account sheet. Dropped (with the flag, below) until the
+// migration is pasted, exactly like transactions.source.
+const TX_TAX_COLUMNS = ', entity_id, is_capital, placed_in_service, useful_life_years';
+
 // User override wins over the classifier's answer.
 function effectiveCategory(t) {
   return t.user_category || t.mapped_category || UNCATEGORIZED;
@@ -68,28 +74,46 @@ const ACCOUNT_COLUMNS =
 // years: it needs only the spending predicate's inputs, and never reads
 // `_internal`, so it skips both the wide column list and the O(V·E) transfer
 // matching. Every other caller gets the full rows and the matching as before.
-async function getTransactionsBetween(start, end, { columns = TX_COLUMNS, markTransfers = true } = {}) {
+async function getTransactionsBetween(start, end, { columns, markTransfers = true } = {}) {
   // RLS scopes every query to the signed-in household automatically.
   // The inner join on accounts drops transactions belonging to hidden
   // accounts from every dashboard view (spending, lists, trends).
-  const rows = [];
-  const page = 1000;
-  for (let from = 0; ; from += page) {
-    const { data, error } = await supabase
-      .from('transactions')
-      .select(`${columns}, accounts!inner(hidden, type, subtype)`)
-      .eq('accounts.hidden', false)
-      .gte('date', start)
-      .lte('date', end)
-      .order('date', { ascending: false })
-      // Tiebreaker: date alone is not a stable sort, so without it a page
-      // boundary landing inside a run of same-dated rows can drop or repeat
-      // one. Reachable now that the envelope walk can span years.
-      .order('id', { ascending: false })
-      .range(from, from + page - 1);
-    if (error) throw error;
-    rows.push(...data);
-    if (data.length < page) break;
+  // An explicit `columns` (the envelope walk's narrow list) skips the tax
+  // columns; the default wide read carries them, degrading pre-migration.
+  const fetchAll = async withEntity => {
+    const cols = columns ?? (withEntity ? TX_COLUMNS + TX_TAX_COLUMNS : TX_COLUMNS);
+    const join = `accounts!inner(hidden, type, subtype${withEntity ? ', entity_id' : ''})`;
+    const rows = [];
+    const page = 1000;
+    for (let from = 0; ; from += page) {
+      const { data, error } = await supabase
+        .from('transactions')
+        .select(`${cols}, ${join}`)
+        .eq('accounts.hidden', false)
+        .gte('date', start)
+        .lte('date', end)
+        .order('date', { ascending: false })
+        // Tiebreaker: date alone is not a stable sort, so without it a page
+        // boundary landing inside a run of same-dated rows can drop or repeat
+        // one. Reachable now that the envelope walk can span years.
+        .order('id', { ascending: false })
+        .range(from, from + page - 1);
+      if (error) throw error;
+      rows.push(...data);
+      if (data.length < page) break;
+    }
+    return rows;
+  };
+  let rows;
+  try {
+    rows = await fetchAll(!columns && transactionsHaveEntity);
+  } catch (error) {
+    if (!columns && transactionsHaveEntity && isMissingColumnError(error, 'entity_id')) {
+      transactionsHaveEntity = false;
+      rows = await fetchAll(false);
+    } else {
+      throw error;
+    }
   }
   // Credit-card refunds become "Return" — not income, not spending.
   for (const t of rows) {
@@ -212,6 +236,12 @@ function toTxShape(t) {
     user_category: t.user_category || null,
     user_description: t.user_description || null,
     excluded: !!t.excluded,
+    // The row's OWN rental assignment (null = inherit the account's default —
+    // resolve against accounts.entity_id where the effective value matters).
+    entity_id: t.entity_id ?? null,
+    is_capital: !!t.is_capital,
+    placed_in_service: t.placed_in_service ?? null,
+    useful_life_years: t.useful_life_years ?? null,
     // Whether this row is one of the dollars a category bar / envelope Spent is
     // made of. It rides along rather than being re-derived in the UI so a
     // category drill-in's own total can never disagree with the number that was
@@ -224,11 +254,18 @@ function toTxShape(t) {
 
 // fields: { user_category } (null reverts to the automatic category),
 // { user_description } (null reverts to the bank's name), and/or { excluded }.
+// The rental-tax fields ride the same allowlist: { entity_id } (null reverts
+// to the account's default entity), { is_capital }, { placed_in_service },
+// { useful_life_years }. All user-owned — sync never writes any of them.
 export async function updateTransaction(id, fields) {
   const allowed = {};
   if ('user_category' in fields) allowed.user_category = fields.user_category;
   if ('user_description' in fields) allowed.user_description = fields.user_description;
   if ('excluded' in fields) allowed.excluded = fields.excluded;
+  if ('entity_id' in fields) allowed.entity_id = fields.entity_id;
+  if ('is_capital' in fields) allowed.is_capital = fields.is_capital;
+  if ('placed_in_service' in fields) allowed.placed_in_service = fields.placed_in_service;
+  if ('useful_life_years' in fields) allowed.useful_life_years = fields.useful_life_years;
   const { error } = await supabase.from('transactions').update(allowed).eq('id', id);
   if (error) throw error;
 }
@@ -243,11 +280,20 @@ export async function getTransactions({ year, month }) {
 }
 
 export async function getAccounts() {
-  const { data, error } = await supabase
-    .from('accounts')
-    .select(ACCOUNT_COLUMNS)
-    .order('type', { ascending: true })
-    .order('name', { ascending: true });
+  // entity_id lands with the rental-tax migration; previews share the prod DB,
+  // so this read must survive the column not existing yet (same trap as
+  // is_manual). Rows without the column read as entity-less, which is right.
+  const attempt = withEntity =>
+    supabase
+      .from('accounts')
+      .select(withEntity ? `${ACCOUNT_COLUMNS}, entity_id` : ACCOUNT_COLUMNS)
+      .order('type', { ascending: true })
+      .order('name', { ascending: true });
+  let { data, error } = await attempt(accountsHaveEntity);
+  if (error && accountsHaveEntity && isMissingColumnError(error, 'entity_id')) {
+    accountsHaveEntity = false;
+    ({ data, error } = await attempt(false));
+  }
   if (error) throw error;
   return { accounts: data };
 }
@@ -265,6 +311,9 @@ export async function updateAccount(id, fields) {
   if ('hidden' in fields) allowed.hidden = fields.hidden;
   if ('type' in fields && ACCOUNT_TYPES.includes(fields.type)) allowed.type = fields.type;
   if ('subtype' in fields) allowed.subtype = fields.subtype;
+  // Account-level rental default: every transaction on this account belongs to
+  // the entity unless the row overrides it (null = no default).
+  if ('entity_id' in fields) allowed.entity_id = fields.entity_id;
   const { error } = await supabase.from('accounts').update(allowed).eq('id', id);
   if (error) throw error;
 }
@@ -272,12 +321,18 @@ export async function updateAccount(id, fields) {
 // All transactions for one account, newest first, capped so a huge history
 // can't lock up the phone. Returns { transactions, hasMore }.
 export async function getAccountTransactions(accountId, { limit = 500 } = {}) {
-  const { data, error } = await supabase
-    .from('transactions')
-    .select(`${TX_COLUMNS}, accounts(type)`)
-    .eq('account_id', accountId)
-    .order('date', { ascending: false })
-    .limit(limit + 1);
+  const attempt = withEntity =>
+    supabase
+      .from('transactions')
+      .select(`${withEntity ? TX_COLUMNS + TX_TAX_COLUMNS : TX_COLUMNS}, accounts(type)`)
+      .eq('account_id', accountId)
+      .order('date', { ascending: false })
+      .limit(limit + 1);
+  let { data, error } = await attempt(transactionsHaveEntity);
+  if (error && transactionsHaveEntity && isMissingColumnError(error, 'entity_id')) {
+    transactionsHaveEntity = false;
+    ({ data, error } = await attempt(false));
+  }
   if (error) throw error;
   for (const t of data) {
     t.mapped_category = applyAccountRules(t.mapped_category, t.amount, t.accounts?.type);
@@ -812,13 +867,19 @@ export async function searchTransactions(query, { limit = 200 } = {}) {
     `merchant_name.ilike.${pat}`,
     `user_description.ilike.${pat}`,
   ];
-  const { data, error } = await supabase
-    .from('transactions')
-    .select(`${TX_COLUMNS}, accounts!inner(hidden, type, subtype)`)
-    .eq('accounts.hidden', false)
-    .or(ors.join(','))
-    .order('date', { ascending: false })
-    .limit(limit + 1);
+  const attempt = withEntity =>
+    supabase
+      .from('transactions')
+      .select(`${withEntity ? TX_COLUMNS + TX_TAX_COLUMNS : TX_COLUMNS}, accounts!inner(hidden, type, subtype)`)
+      .eq('accounts.hidden', false)
+      .or(ors.join(','))
+      .order('date', { ascending: false })
+      .limit(limit + 1);
+  let { data, error } = await attempt(transactionsHaveEntity);
+  if (error && transactionsHaveEntity && isMissingColumnError(error, 'entity_id')) {
+    transactionsHaveEntity = false;
+    ({ data, error } = await attempt(false));
+  }
   if (error) throw error;
 
   for (const t of data) {
@@ -1111,4 +1172,115 @@ export async function importCsvTransactions(accountId, rows, source = 'csv') {
     written += slice.length;
   }
   return written;
+}
+
+// --- Rental entities + tax lens ---------------------------------------------
+// The rental-tax migration (20260730000001) adds all of this at once, so one
+// table-level flag covers the reads that need it. Like category_rules, every
+// read degrades to "feature not installed" when the migration hasn't been
+// pasted yet (previews share the prod database).
+
+let hasEntities = true;
+let hasMileage = true;
+let accountsHaveEntity = true;
+let transactionsHaveEntity = true;
+
+function isMissingTableError(error) {
+  return error && (error.code === 'PGRST205' || error.code === '42P01');
+}
+
+// Rental properties (kind='rental'; the schema also allows 'business' for a
+// future side-business, but nothing in the UI creates one yet). Archived
+// entities are returned too: a year-end report must still resolve an entity
+// archived mid-year — callers filter on archived_at for pickers.
+export async function getEntities() {
+  if (!hasEntities) return { entities: [] };
+  const { data, error } = await supabase
+    .from('entities')
+    .select('id, name, kind, created_at, archived_at')
+    .order('created_at', { ascending: true });
+  if (error) {
+    if (isMissingTableError(error)) {
+      hasEntities = false;
+      return { entities: [] };
+    }
+    throw error;
+  }
+  return { entities: data };
+}
+
+export async function createEntity(name, kind = 'rental') {
+  const { data, error } = await supabase
+    .from('entities')
+    .insert({ name, kind })
+    .select('id, name, kind, created_at, archived_at')
+    .single();
+  if (error) throw error;
+  return data;
+}
+
+// fields: { name } and/or { archived_at } (an ISO timestamp archives, null
+// restores). Archive rather than delete — transactions reference the row.
+export async function updateEntity(id, fields) {
+  const allowed = {};
+  if ('name' in fields) allowed.name = fields.name;
+  if ('archived_at' in fields) allowed.archived_at = fields.archived_at;
+  const { error } = await supabase.from('entities').update(allowed).eq('id', id);
+  if (error) throw error;
+}
+
+// Every transaction of one calendar year, shaped like toTxShape (which now
+// carries the tax fields), plus the EFFECTIVE entity resolved (tx.entity_id ??
+// the account's default). Hidden accounts are excluded like every other
+// dashboard read — a hidden SimpleFIN account's type is an unconfirmed guess,
+// and unhiding is the act that confirms it; assign entities after that. Feeds
+// both the Schedule E report (entity rows) and the personal-deduction report
+// (the rest), so it returns everything and lets src/taxReport.js split.
+export async function getTaxYearTransactions(year) {
+  const rows = await getTransactionsBetween(`${year}-01-01`, `${year}-12-31`);
+  return {
+    transactions: rows.map(t => ({
+      ...toTxShape(t),
+      // toTxShape's entity_id is the row's OWN value (so the detail sheet can
+      // tell an explicit assignment from an inherited one); this is the value
+      // the report filters on.
+      effective_entity_id: t.entity_id ?? t.accounts?.entity_id ?? null,
+    })),
+  };
+}
+
+// --- Mileage log (hand-entered; valued by src/taxReport.js) ------------------
+
+export async function getMileage(year) {
+  if (!hasMileage) return { mileage: [] };
+  const { data, error } = await supabase
+    .from('mileage_log')
+    .select('id, entity_id, on_date, miles, purpose')
+    .gte('on_date', `${year}-01-01`)
+    .lte('on_date', `${year}-12-31`)
+    .order('on_date', { ascending: false })
+    .limit(2000);
+  if (error) {
+    if (isMissingTableError(error)) {
+      hasMileage = false;
+      return { mileage: [] };
+    }
+    throw error;
+  }
+  return { mileage: data };
+}
+
+export async function addMileage({ on_date, miles, purpose, entity_id }) {
+  const { data, error } = await supabase
+    .from('mileage_log')
+    .insert({ on_date, miles, purpose: purpose || null, entity_id: entity_id || null })
+    .select('id, entity_id, on_date, miles, purpose')
+    .single();
+  if (error) throw error;
+  return data;
+}
+
+export async function deleteMileage(id) {
+  const { error } = await supabase.from('mileage_log').delete().eq('id', id);
+  if (error) throw error;
 }

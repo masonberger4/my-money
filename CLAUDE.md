@@ -76,10 +76,11 @@ entry once shipped.
 | `src/ui.css` | The ONLY place theme-token values live: `:root` light + a `prefers-color-scheme: dark` block (--bg/--card/--text/--muted/--border/--accent/--accent-text/--danger*/--warn*/--input-bg/--track/--shadow/--overlay), plus the font `@import` (must stay line 1), the `*` reset, keyframes, and the shared `.card`/`.tab`/`.ibtn` classes. Global so the pre-Dashboard screens get them. |
 | `src/theme.js` | Theme selection + application: localStorage pref (`mm:theme`), `resolveTheme`, `applyTheme` (sets `<html data-theme>` + syncs the `theme-color` metas), `subscribeTheme`/`subscribeSystemTheme`, `readToken` (runtime token read), `initTheme` (called from main.jsx), and the `useTheme` hook the header toggle uses. |
 | `src/paletteContrast.js` | Pure, zero imports: WCAG math + `readableInk`/`markColor`/`chipStyle`, which hold hue fixed and bisect lightness to guarantee 4.5:1 / 3:1 against a given surface. Never throws (runs during render). Covered by `test/paletteContrast.test.js`. |
-| `src/components/Dashboard.jsx` | Almost the entire UI — single file, inline styles, tabs: overview/categories/**budget**/transactions/accounts/trends/recurring/ask. Shared mini-components: `Pill`, `Swatch`, `EditName`, `Sk` (skeleton), `Donut`, `DrillNum` (the tap-a-number affordance) ; envelope editors `AssignEdit`/`BudgetEdit`/`IncomeEdit` + the `TargetSheet`/`MoveSheet`/`CategorySheet` modals. |
-| `src/dataAdapter.js` | All Supabase reads + shapes consumed by Dashboard. Keep return shapes stable. Also holds the CSV/PDF-import writes (`findOrCreateManualInstitution`, `createManualAccount`, `getExistingTxIds`, `importCsvTransactions`, `isManualAccount`), the comparison-mode read `getAccountTransactionsInRange`, the backfill boundary `getFeedCoverageStart`, the learned-rule CRUD (`getCategoryRules`/`setCategoryRule`/`applyCategoryRuleToHistory`/`deleteCategoryRule`), the SimpleFIN predicates (`isSimpleFinAccount`, `ACCOUNT_TYPES`/`ACCOUNT_SUBTYPES`), the envelope I/O (`getEnvelopes`, `setAssigned`, `setCategoryRollover`, `setTargetKind`, `fundTargets`, `moveMoney`, `getBudgetIncome`/`setBudgetIncome`), and re-exports the pure helpers from `cashFlow.js` and `envelopes.js` so existing importers/harnesses keep working. |
+| `src/components/Dashboard.jsx` | Almost the entire UI — single file, inline styles, tabs: overview/categories/**budget**/transactions/accounts/trends/recurring/**tax**/ask. Shared mini-components: `Pill`, `Swatch`, `EditName`, `Sk` (skeleton), `Donut`, `DrillNum` (the tap-a-number affordance) ; envelope editors `AssignEdit`/`BudgetEdit`/`IncomeEdit` + the `TargetSheet`/`MoveSheet`/`CategorySheet` modals. |
+| `src/dataAdapter.js` | All Supabase reads + shapes consumed by Dashboard. Keep return shapes stable. Also holds the CSV/PDF-import writes (`findOrCreateManualInstitution`, `createManualAccount`, `getExistingTxIds`, `importCsvTransactions`, `isManualAccount`), the comparison-mode read `getAccountTransactionsInRange`, the backfill boundary `getFeedCoverageStart`, the learned-rule CRUD (`getCategoryRules`/`setCategoryRule`/`applyCategoryRuleToHistory`/`deleteCategoryRule`), the SimpleFIN predicates (`isSimpleFinAccount`, `ACCOUNT_TYPES`/`ACCOUNT_SUBTYPES`), the envelope I/O (`getEnvelopes`, `setAssigned`, `setCategoryRollover`, `setTargetKind`, `fundTargets`, `moveMoney`, `getBudgetIncome`/`setBudgetIncome`), the rental/tax I/O (`getEntities`/`createEntity`/`updateEntity`, `getTaxYearTransactions`, `getMileage`/`addMileage`/`deleteMileage`), and re-exports the pure helpers from `cashFlow.js` and `envelopes.js` so existing importers/harnesses keep working. |
 | `src/cashFlow.js` | The Trends cash-flow model (see Conventions), extracted pure: `markInternalTransfers` + `maxMatchTransfers` (Kuhn's), `cashIncome`/`cashSpending`, account-type predicates. Zero imports — plain-Node importable; covered by `test/cashFlow.test.js` incl. the brute-force matching parity check. |
 | `src/envelopes.js` | The envelope-budgeting model (see Roadmap), pure: `walkEnvelopes` (`available = assigned + carry − spent`), `targetNeed`, `readyToAssign`, `planMove`, month-key helpers. Zero imports — dataAdapter does the I/O and hands it plain arrays. Covered by `test/envelopes.test.js`. |
+| `src/taxReport.js` | The Tax tab's pure core, zero imports: `SCHEDULE_E_LINES` + `scheduleEReport` (category→line mapping, refund netting, capital expenses pulled out of the lines, a VISIBLE unmapped bucket — the Uncategorized lesson applied to tax lines), `entityMonthly` (per-property cash P&L), `personalDeductionReport` (charitable/medical/taxes-paid buckets), `MILEAGE_RATES` (effective-dated IRS rates — data that goes stale; verify at irs.gov each January) + `mileageDeduction`, and `scheduleECsv` (exports keep the stored positive=out sign; the column name says so). Covered by `test/taxReport.test.js`. |
 | `src/categoryMap.js` | `ERA_CATEGORIES` (the taxonomy source of truth) + `applyAccountRules` (credit-card negatives → "Return", excluded from income); `UNCATEGORIZED`/`FALLBACK_CATEGORY` + `isBudgetableCategory`; pure JS, imported by server code too. No "Housing"/"Income" member; `Uncategorized` IS one. `mapPlaidCategory` was deleted with Plaid — nothing produces those codes now, and it was never called at read time, so historical rows are unaffected. |
 | `src/csvImport.js` | Pure CSV-import core (no React/Supabase): `parseCsv`, `detectHeader`, `parseMoney`/`parseDate`, transfer flagging, dedup `plaid_tx_id` hashing, `buildRows`/`analyzeCsv` (both take `rules` + `overlapFrom`). Re-exports `guessCategory`/`transferRawCategory`/`invalidRuleCategories` from `txClassify.js`, which now owns the rule table. Plus `importPlan` (which sections the modal shows, derived from the file's dates vs the feed boundary) and the audit core: `reconcileCsv` (max-matching), `descSimilarity`, `csvDateRange`. Testable in isolation. |
 | `src/txClassify.js` | Learned-rule matching (`merchantKey`, `matchLearnedRule`) + the shared descriptor→category rule table + internal-transfer tagging (`guessCategory`, `transferRawCategory`, `classifyDescription`), validated against `ERA_CATEGORIES` at load. Lifted out of `csvImport.js` when SimpleFIN became a second caller: both feeds get a descriptor and no category, so both derive `mapped_category` at WRITE time from this one table. Pure JS — imported by server code too. |
@@ -99,7 +100,7 @@ entry once shipped.
 | `api/_lib/supabase.js` | Service-role client + `requireUser` (JWT → householdId). |
 | `supabase/migrations/` | Ordered SQL migrations (additive-only on live data). |
 | `supabase/setup_all.sql` | One-paste fresh install — **DESTRUCTIVE, wipes all tables. Never run on live data. Never re-generate to include new migrations without that warning.** Convenience snapshot only — `migrations/` is the source of truth; ends with a column-level self-check that raises if it drifts behind migrations. |
-| `test/` | `npm test` — Node's built-in `node --test`, zero deps. Covers the pure cores only: cashFlow (incl. brute-force max-matching parity), csvImport parsing/dedup-id idempotency, category rules, txClassify (learned-rule matching: what collapses, what stays distinct, and the over-specific-key limit), envelopes (both walk regressions + by-date targets). Run before pushing. |
+| `test/` | `npm test` — Node's built-in `node --test`, zero deps. Covers the pure cores only: cashFlow (incl. brute-force max-matching parity), csvImport parsing/dedup-id idempotency, category rules, txClassify (learned-rule matching: what collapses, what stays distinct, and the over-specific-key limit), envelopes (both walk regressions + by-date targets), taxReport (every-row-lands-somewhere conservation, capital never reaches an expense line, the 2026 mid-year mileage-rate boundary). Run before pushing. |
 
 ## Development workflow
 
@@ -366,6 +367,41 @@ quietly-wrong number in exactly the place that must be trusted. The figure is
 typed in. If every income account proves reliably fed, deriving it becomes an
 option; that is a decision for Mason, not an automatic upgrade.
 
+### Rental tracking + tax lens (Tax tab — decided, don't relitigate)
+- **Entities are a LENS, not an exclusion.** A transaction tagged to a rental
+  property still counts in every household spending view (purchase-based AND
+  cash-flow) — the Tax tab re-reads the same rows through a Schedule E mapping.
+  Don't "fix" rental spend showing in Categories by filtering entity rows out
+  of either spending model; if that's ever wanted it's a deliberate decision
+  for Mason, taken separately.
+- **Effective entity at READ time = `tx.entity_id ?? account.entity_id`.**
+  The account column is the default for a dedicated rental account; the row
+  column is the override for rental expenses paid from a shared account. Both
+  are USER-OWNED like `user_category` — the sync and the importers never write
+  them, which is what makes assignments survive re-pulls. Copied from Monarch's
+  design: entity attribution is orthogonal to categories (no recategorizing
+  needed, and category edits never move a row between properties).
+- **Capital expenses never reach a Schedule E expense line.** `is_capital`
+  pulls a row out of the mapped lines into its own list (improvements are
+  depreciated, not deducted — line 18 is deliberately not mappable); the flag
+  plus `placed_in_service`/`useful_life_years` are user-owned columns on
+  `transactions`, edited in the detail sheet.
+- **Unmapped money is VISIBLE, never guessed** — same philosophy as
+  `Uncategorized`: the worksheet shows an amber "not on any line yet" bucket
+  instead of silently dropping rows (Quicken's tax export drops unmapped rows;
+  that is the bug not to copy). Unmapped money IN on an entity counts as rents
+  received by default. Category→line mappings live per entity under the ONE
+  `tax:maps` settings key (`{emap:{entityId:{cat:line|'rents'}},dmap:{...}}`).
+- The whole tab is **record-keeping for the preparer, not tax math**: no AGI
+  floors, no depreciation schedules, no estimated-tax computation. The UI says
+  "not tax advice" and it should stay true. `MILEAGE_RATES` in
+  `src/taxReport.js` is effective-dated DATA that goes stale — verify against
+  irs.gov each January (2026 split mid-year: 72.5¢ → 76¢ on Jul 1).
+- The `entities` table allows `kind='business'` (schema only) so a future
+  side-business/Schedule C build can reuse all of this without a migration;
+  the UI is rental-first on purpose. CSV export goes through the share sheet
+  on iOS (blob-anchor downloads are unreliable in the installed PWA).
+
 ## Merged features (live on main; details in code + PRs)
 
 - **Transaction editing** — detail sheet: recategorize (`user_category`),
@@ -537,7 +573,15 @@ option; that is a decision for Mason, not an automatic upgrade.
 
 ## Pending branches
 
-None.
+**`claude/monarch-feature-comparison-p24np6` — Rental tracking + tax prep (Tax
+tab).** Entities (rental properties) + account/transaction tagging, Schedule E
+worksheet with per-entity category→line mapping, capital-expense flag, personal
+deduction buckets, hand-entered mileage log, CSV export for the preparer. See
+the "Rental tracking + tax lens" conventions above. Migration
+`20260730000001_rental_tax.sql` is **additive** → normal order: paste it in the
+Supabase SQL Editor BEFORE merging (old code ignores the new tables/columns;
+the new code degrades gracefully until it's pasted, so previews work either
+way). setup_all.sql replays it and its self-check covers it.
 
 Envelope budgeting merged 2026-07-29; its migration was applied to PROD ahead of
 the merge, so nothing is outstanding there.
