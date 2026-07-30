@@ -570,21 +570,28 @@ option; that is a decision for Mason, not an automatic upgrade.
   now named REGRESSION tests: the trouble veto ran after the guessed code
   allowlist, and `\bauthenticat\b` cannot match "Authentication". First unit
   coverage for `api/_lib/simplefin.js`. No migration. See the first Gotcha.
+- **Rental tracking + tax prep (Tax tab)** — rental properties as `entities`,
+  tagged at the account level (`accounts.entity_id`, the default for a dedicated
+  rental account) or per row (`transactions.entity_id`, the override for a
+  shared account), both user-owned so re-pulls never clear them. Feeds a
+  Schedule E worksheet per property (per-entity category→line mapping in the one
+  `tax:maps` settings key, capital expenses held out of the expense lines, a
+  visible unmapped bucket, CSV export through the iOS share sheet), a personal
+  deduction report, and a hand-entered mileage log valued at effective-dated IRS
+  rates. Pure core in `src/taxReport.js` (`test/taxReport.test.js`); migration
+  `20260730000001_rental_tax.sql`, **applied to PROD 2026-07-30**. The
+  decided-don't-relitigate list is in Conventions. Two adversarial review rounds
+  found the bugs worth remembering, both generalized into Gotchas below: a
+  `setState(null)` cache invalidation that silently no-ops, and a `<input
+  type="date">` that emits complete garbage values while a year is typed.
 
 ## Pending branches
 
-**`claude/monarch-feature-comparison-p24np6` — Rental tracking + tax prep (Tax
-tab).** Entities (rental properties) + account/transaction tagging, Schedule E
-worksheet with per-entity category→line mapping, capital-expense flag, personal
-deduction buckets, hand-entered mileage log, CSV export for the preparer. See
-the "Rental tracking + tax lens" conventions above. Migration
-`20260730000001_rental_tax.sql` is **additive** → normal order: paste it in the
-Supabase SQL Editor BEFORE merging (old code ignores the new tables/columns;
-the new code degrades gracefully until it's pasted, so previews work either
-way). setup_all.sql replays it and its self-check covers it.
+None.
 
-Envelope budgeting merged 2026-07-29; its migration was applied to PROD ahead of
-the merge, so nothing is outstanding there.
+Rental tracking + tax prep merged 2026-07-30, with
+`20260730000001_rental_tax.sql` applied to PROD ahead of the merge (additive, so
+the safe order). Envelope budgeting merged 2026-07-29 the same way.
 
 Phase 4 is fully landed: code merged and deployed, and
 `20260728000002_remove_plaid.sql` **applied on 2026-07-29** after its pre-flight
@@ -930,6 +937,23 @@ tracker is the liability half of the future net-worth feature — the
   postings, reversals), not household spending, and the real payment is already
   in cash flow via the checking feed. Those belong to the future Debt tracker —
   don't import them onto a depository account.
+- **A `setState(null)` sentinel is NOT a reliable cache invalidation.** The lazy
+  tab caches (`recurring`, `taxData`) are "null means refetch", so every
+  invalidation site calls `setX(null)` — but when the value is ALREADY null,
+  i.e. a load is in flight, React bails on the identical value, the effect never
+  re-runs, and the in-flight request paints a pre-edit snapshot with nothing left
+  to supersede it. Gating the effect on an `isLoading` flag makes it worse: it
+  suppresses exactly the superseding load a sequence guard needs, so the guard
+  becomes dead code and the *stale* response is the one that wins. The Tax tab
+  uses an **epoch counter** instead (`invalidateTax` bumps `taxEpoch`, which is
+  an effect dep, so a new sequence is always minted and the old response is
+  dropped). Invalidate AFTER the write commits, too — a pre-write invalidation
+  can start a read that races the UPDATE.
+- **`<input type="date">` emits COMPLETE values while a year is typed** —
+  "0002-06-15", "0020-06-15", "0202-06-15", "2026-06-15". Committing on `change`
+  therefore writes garbage years (and, with an optimistic patch, the later blur
+  sees no change and never corrects them). Commit date inputs on **blur**, with
+  a sanity floor on the year.
 - One Claude session per line of work, branched from current main — two sessions
   off different bases once regressed production (the "iphone-app" incident).
 - If pushes stop deploying and GitHub API calls 503, check githubstatus.com
