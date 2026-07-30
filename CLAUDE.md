@@ -597,48 +597,31 @@ option; that is a decision for Mason, not an automatic upgrade.
   `setState(null)` cache invalidation that silently no-ops, and a `<input
   type="date">` that emits complete garbage values while a year is typed.
 
+- **Category filter chips (Transactions tab)** — a second "bubble" row under
+  the account chips: one chip per category PRESENT in the rows in view (never
+  the whole taxonomy — and never `spending.groups`, whose `isSpend()` pass
+  omits transfers/Return/loan rows that are visibly in the list), tap to see
+  only that category, composing with the account filter (AND). The pool is
+  account-filtered but NOT category-filtered, so a selection can't erase the
+  chips that clear it. One horizontally-scrolling 24px line (ERA labels are too
+  long to wrap at 390px), alphabetical by display name, no per-chip counts.
+  Two strand-guards worth keeping: the render guard is
+  `catChips.length>1||txCatFilter` (the second clause keeps "All categories"
+  mounted while a filter is active), and the active category is *pinned* into
+  the list when nothing in view matches it. Tapping the active chip clears it.
+  Deliberately overlaps `CategorySheet` (the sheet explains a TOTAL split on
+  `counted`; the chips browse the LEDGER). **Cross-month category browse is NOT
+  built** — needs a server-side read whose `.or()` prefilter cannot express
+  `Return` (synthesised by `applyAccountRules`, in no column) and would add a
+  fourth never-refetched list for `saveTx`/`learnMerchant` to patch. No
+  migration, no adapter change.
+
 ## Pending branches
 
-**`claude/category-transactions-styling-rd989c`** — category filter chips on the
-Transactions tab. No migration, no schema change, no adapter change.
-- A second chip row under the account chips: one "bubble" per category, tap to
-  see only that category's transactions. Composes with the account filter (AND).
-- **Chips are PRESENCE-derived, not taxonomy-derived** — only categories actually
-  in the rows in view. All 21 `ERA_CATEGORIES` plus customs would be a wall of
-  mostly-dead-end chips, and `spending.groups` is the wrong population (it runs
-  through `isSpend()`, so it omits transfers, Return and loan rows that are
-  visibly in the list).
-- The pool is **account-filtered but NOT category-filtered**, so picking a
-  category can't erase the chips that clear it. Deliberately one-way: accounts
-  narrow the offered categories, categories never narrow the offered accounts.
-- **The guard is `catChips.length>1||txCatFilter`, and the second clause is
-  load-bearing.** Without it, a pool that collapses to one category unmounts the
-  whole row while the filter is still applied — taking "All categories" with it
-  and leaving a filtered list with no way out. Same reason the active category is
-  *pinned* into the list when nothing in view matches it (month change, account
-  switch, narrower search): auto-clearing a filter the user set reads as a bug.
-- **One horizontally-scrolling line, not a wrapping row** (the accounts row still
-  wraps). Usable width inside `.card` at 390px is ~316px and "Home maintenance
-  and improvement" alone is ~230px, so wrapping ~15 chips buries the list under
-  six rows. Verified: strip is 24px tall, 1782px of scroll content, and the page
-  body never scrolls horizontally. Horizontal scroll is already the tab bar's idiom.
-- **Alphabetical by display name.** Count- or amount-ordering reshuffles under the
-  thumb on every keystroke and month change; ordering by outflow would put
-  "Transfers and card payments" first nearly every month. No per-chip counts or
-  totals either — they'd contradict the Categories tab's `transaction_count` one
-  `DrillNum` tap away, and the muted numerals would have eaten `chipStyle`'s
-  zero-headroom ink.
-- Tapping the ACTIVE category chip clears it (the account chip doesn't) — on a
-  scrolling row "All categories" can be off-screen, which never happens on the
-  wrapping account row.
-- Deliberately overlaps `CategorySheet`: both answer "this month's rows in this
-  category", but the sheet explains a TOTAL (split on `counted`) and this browses
-  the LEDGER (no split, no totals). **Cross-month category browse is NOT built** —
-  it needs a server-side read whose `.or()` prefilter cannot express `Return`
-  (synthesised by `applyAccountRules`, in no column) and would add a fourth
-  never-refetched list for `saveTx`/`learnMerchant` to patch. Roadmap.
+None.
 
-Rental tracking + tax prep merged 2026-07-30, with
+Category filter chips merged 2026-07-30 (no migration). Rental tracking +
+tax prep merged 2026-07-30, with
 `20260730000001_rental_tax.sql` applied to PROD ahead of the merge (additive, so
 the safe order). Envelope budgeting merged 2026-07-29 the same way.
 
