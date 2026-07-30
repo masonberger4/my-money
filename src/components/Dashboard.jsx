@@ -627,6 +627,13 @@ export default function Dashboard({ refreshTick = 0 }) {
   const [taxYear,setTaxYear]=useState(now.getFullYear());
   const [taxData,setTaxData]=useState(null);    // {transactions} for taxYear, lazy like recurring
   const [taxLoading,setTaxLoading]=useState(false);
+  // Invalidation epoch. A bare setTaxData(null) is NOT a reliable invalidation:
+  // when taxData is already null (a load in flight), React bails on the
+  // identical value, the effect never re-runs, and the in-flight load paints a
+  // stale snapshot with nothing left to supersede it. Bumping the epoch always
+  // changes a dependency, so every invalidation mints a new taxSeq and the
+  // seq check drops whatever was in flight.
+  const [taxEpoch,setTaxEpoch]=useState(0);
   const [mileage,setMileage]=useState([]);
   // {emap:{[entityId]:{category:line|'rents'}}, dmap:{category:bucketKey}} —
   // household-shared (settings table): the tax mapping is about the money, not
@@ -783,7 +790,7 @@ export default function Dashboard({ refreshTick = 0 }) {
       const e=await createEntity(name);
       setEntities(prev=>[...prev,e]);
       setNewEntityName("");setAddingEntity(false);
-      setTaxData(null);
+      invalidateTax();
     }catch(err){
       console.error("creating the property failed",err);
       window.alert(`Couldn't add the property: ${err.message||err}\n\nIf this is a fresh deploy, the rental-tax migration may not have been applied yet.`);
@@ -864,14 +871,18 @@ export default function Dashboard({ refreshTick = 0 }) {
         getEnvelopes({year:y,month:m}).catch(e=>isEnvelopeSchemaMissing(e)?null:undefined),
         getBudgetIncome({year:y,month:m}).catch(()=>undefined),
         // Eager because the transaction sheet and account sheet both offer the
-        // entity picker; degrades to [] until the rental-tax migration lands.
-        getEntities().catch(()=>({entities:[]})),
+        // entity picker; degrades to [] until the rental-tax migration lands
+        // (inside getEntities) — undefined = transient failure, keep state.
+        getEntities().catch(()=>undefined),
       ]);
       if(seq!==loadSeq.current)return false;
       setOverview(ov);setSpending(sp);setTransactions(tx);setCashFlow(cf);
       setAccounts(ac.accounts||[]);
-      setEntities(ents.entities||[]);
-      setTaxData(null); // recompute lazily on next Tax-tab visit
+      // A transient entity-read failure keeps the previous list (the envelope
+      // pattern): folding it into [] would blank the entity chips and every
+      // property worksheet until the next successful reload.
+      if(ents!==undefined)setEntities(ents.entities||[]);
+      invalidateTax(); // recompute lazily on next Tax-tab visit
       // A completed envelope write may have painted fresher rows while this
       // reload was in flight — don't overwrite them (or the freshly saved
       // budgets/targets) with a pre-write snapshot.
@@ -922,14 +933,15 @@ export default function Dashboard({ refreshTick = 0 }) {
   },[tab,recurring,recLoading]);
 
   // The Tax tab is lazy the same way: a calendar year of rows + the mileage
-  // log + the saved category→tax-line mappings, cached until the next reload
-  // or a taxYear change (the nav sets taxData back to null). The sequence ref
-  // is the same guard reloadData/search use: two fast year taps leave two
-  // loads in flight, and without it the slower one would paint its year's
-  // rows under the other year's header.
+  // log + the saved category→tax-line mappings, cached until invalidateTax
+  // (below) drops it. The sequence ref is the same guard reloadData/search
+  // use — and deliberately NO taxLoading in the guard or the deps: gating on
+  // it would serialize loads, suppressing exactly the superseding load the
+  // seq check needs, so a year tap during an in-flight load would paint the
+  // old year's rows under the new header (review-caught).
   const taxSeq=useRef(0);
   useEffect(()=>{
-    if(tab!=="tax"||taxData||taxLoading)return;
+    if(tab!=="tax"||taxData)return;
     const seq=++taxSeq.current;
     setTaxLoading(true);
     Promise.all([
@@ -952,7 +964,9 @@ export default function Dashboard({ refreshTick = 0 }) {
       })
       .catch(err=>{if(seq===taxSeq.current){console.error(err);setTaxData({transactions:[]});}})
       .finally(()=>{if(seq===taxSeq.current)setTaxLoading(false);});
-  },[tab,taxData,taxLoading,taxYear]);
+  },[tab,taxData,taxYear,taxEpoch]);
+  // The ONLY way to invalidate the tax cache — see the taxEpoch comment.
+  const invalidateTax=useCallback(()=>{setTaxData(null);setTaxEpoch(e=>e+1);},[]);
 
   // Cross-month search: debounced 300ms, min 2 chars; the sequence id drops
   // stale responses so fast typing can't render out-of-order results.
@@ -1102,7 +1116,10 @@ export default function Dashboard({ refreshTick = 0 }) {
     setSelTx(prev=>prev?apply(prev):prev);
     // Any edit can move a row in or out of a tax report (category, entity,
     // capital flag, exclusion) — drop the cached year and recompute lazily.
-    setTaxData(null);
+    // This pre-write invalidation may start a load that races the UPDATE, but
+    // reloadData below runs after the write and bumps the epoch again, which
+    // supersedes any pre-commit snapshot (the seq check drops it).
+    invalidateTax();
     try{
       await updateTransaction(id,fields);
     }catch(err){
@@ -1986,7 +2003,11 @@ export default function Dashboard({ refreshTick = 0 }) {
                     const active=(selAcct.entity_id||null)===e.id;
                     const cs=active&&e.id?chipOn(ENTITY_CHIP,surf.bg):null;
                     return (
-                      <button key={e.id||"none"} onClick={()=>{saveAccount(selAcct.id,{entity_id:e.id});setTaxData(null);}}
+                      // Invalidate AFTER the write commits: doing it before
+                      // lets the tax tab's SELECT race the UPDATE and cache
+                      // the old attribution (saveAccount swallows errors, so
+                      // awaiting is safe).
+                      <button key={e.id||"none"} onClick={async()=>{await saveAccount(selAcct.id,{entity_id:e.id});invalidateTax();}}
                         style={{fontSize:11,fontWeight:600,padding:"5px 10px",borderRadius:20,fontFamily:"inherit",cursor:"pointer",
                           background:cs?cs.bg:"var(--card)",color:cs?cs.ink:(active?"var(--text)":"var(--muted)"),
                           border:`1px solid ${active?(e.id?markOn(ENTITY_CHIP,surf.bg):"var(--text)"):"var(--border)"}`,transition:"all .15s"}}>
@@ -2305,9 +2326,9 @@ export default function Dashboard({ refreshTick = 0 }) {
             {/* Tax year + framing */}
             <div className="card">
               <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:10}}>
-                <button className="nbtn" onClick={()=>{setTaxYear(y=>y-1);setTaxData(null);}}>‹</button>
+                <button className="nbtn" onClick={()=>{setTaxYear(y=>y-1);invalidateTax();}}>‹</button>
                 <div style={{fontSize:18,fontWeight:600,minWidth:90,textAlign:"center",color:"var(--text)"}}>{taxYear}</div>
-                <button className="nbtn" disabled={!canNextTax} onClick={()=>{if(canNextTax){setTaxYear(y=>y+1);setTaxData(null);}}}>›</button>
+                <button className="nbtn" disabled={!canNextTax} onClick={()=>{if(canNextTax){setTaxYear(y=>y+1);invalidateTax();}}}>›</button>
               </div>
               <div style={{fontSize:10,color:"var(--muted)",textAlign:"center",marginTop:6,lineHeight:1.5}}>
                 Calendar-year records for your tax preparer — not tax advice. Rental transactions still
@@ -2403,6 +2424,17 @@ export default function Dashboard({ refreshTick = 0 }) {
                     <span style={{color:"var(--text)"}}>3 · Rents received</span>
                     <span style={{fontFamily:"'DM Mono',monospace",color:"var(--text)"}}>{fmtAuto(rep.rents.total)}</span>
                   </div>
+                  {/* Line 3 goes on the return — say how much of it was a
+                      DEFAULT (unmapped money in) rather than an explicit
+                      mapping, so a refund in an unmapped category can't
+                      inflate rents invisibly. */}
+                  {rep.rents.defaulted.count>0&&(
+                    <div style={{fontSize:10,color:"var(--muted)",marginTop:-2,marginBottom:6}}>
+                      includes {fmtAuto(rep.rents.defaulted.total)} from {rep.rents.defaulted.count} unmapped
+                      deposit{rep.rents.defaulted.count!==1?"s":""} counted as rent by default — map their
+                      categories below if that's wrong
+                    </div>
+                  )}
                   {rep.lines.filter(l=>l.total!==0).map(l=>(
                     <div key={l.line} style={{display:"flex",justifyContent:"space-between",fontSize:12,marginBottom:5}}>
                       <span style={{color:"var(--text)"}}>{l.line} · {l.label}</span>
@@ -2724,13 +2756,17 @@ export default function Dashboard({ refreshTick = 0 }) {
                     {selTx.is_capital&&(
                       <div style={{display:"flex",gap:8,marginTop:8}}>
                         <label style={{flex:1,fontSize:10,color:"var(--muted)"}}>Placed in service
-                          {/* Commit only complete, changed dates: while a date
-                              is being typed the input's value is "" and an
-                              onChange save would fire a null write (and a full
-                              reload) per keystroke. */}
+                          {/* Commit on BLUR only. Typing a year in a date
+                              input yields a COMPLETE value per keystroke
+                              ("0002-…", "0020-…", …), so an onChange commit
+                              persists garbage intermediate years — and the
+                              optimistic patch then makes blur a no-op on the
+                              garbage (review-caught). The year floor rejects
+                              an abandoned partial year the same way. */}
                           <input type="date" key={selTx.id} defaultValue={selTx.placed_in_service||""}
-                            onChange={ev=>{const v=ev.target.value||null;if(v&&v!==(selTx.placed_in_service||null))saveTx({placed_in_service:v});}}
-                            onBlur={ev=>{const v=ev.target.value||null;if(v!==(selTx.placed_in_service||null))saveTx({placed_in_service:v});}}
+                            onBlur={ev=>{const raw=ev.target.value||null;const v=raw&&raw.slice(0,4)>="1900"?raw:null;
+                              ev.target.value=v||"";
+                              if(v!==(selTx.placed_in_service||null))saveTx({placed_in_service:v});}}
                             style={{width:"100%",marginTop:3,padding:"6px 8px",borderRadius:8,border:"1px solid var(--border)",
                               background:"var(--bg)",color:"var(--text)",fontSize:12,fontFamily:"inherit",outline:"none"}}/>
                         </label>

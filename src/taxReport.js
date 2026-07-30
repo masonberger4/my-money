@@ -68,6 +68,13 @@ export function scheduleEReport(rows, mapping) {
   const capital = [];
   let rentsTotal = 0;
   let rentsCount = 0;
+  // The rows that landed in rents by DEFAULT (unmapped money in), not by an
+  // explicit mapping — reported separately so the preparer can audit line 3
+  // instead of trusting a guess. Same visibility rule as the unmapped bucket:
+  // a refund in an unmapped expense category lands here, and only showing the
+  // subtotal makes that reviewable.
+  let defaultedTotal = 0;
+  let defaultedCount = 0;
 
   for (const t of Array.isArray(rows) ? rows : []) {
     if (!t || t.excluded) continue;
@@ -100,6 +107,8 @@ export function scheduleEReport(rows, mapping) {
       // Unmapped money IN on a rental entity is rent until told otherwise.
       rentsTotal += -amount;
       rentsCount += 1;
+      defaultedTotal += -amount;
+      defaultedCount += 1;
     } else {
       const cat = t.category || 'Uncategorized';
       const cur = unmappedByCat.get(cat) || { total: 0, count: 0 };
@@ -123,8 +132,13 @@ export function scheduleEReport(rows, mapping) {
   const unmappedTotal = round2(unmapped.reduce((s, u) => s + u.total, 0));
   const capitalTotal = round2(capital.reduce((s, c) => s + c.amount, 0));
 
+  const rentsRounded = round2(rentsTotal);
   return {
-    rents: { total: round2(rentsTotal), count: rentsCount },
+    rents: {
+      total: rentsRounded,
+      count: rentsCount,
+      defaulted: { total: round2(defaultedTotal), count: defaultedCount },
+    },
     lines,
     totalExpenses,
     unmapped,
@@ -132,7 +146,9 @@ export function scheduleEReport(rows, mapping) {
     capital: { total: capitalTotal, items: capital },
     // Cash result of the mapped picture only — depreciation (line 18) and the
     // unmapped bucket are deliberately not in it; the preparer owns those.
-    net: round2(rentsTotal - totalExpenses),
+    // Subtract the same rounded value rents.total shows, so the on-screen
+    // identity rents − expenses = net can never be off by a cent.
+    net: round2(rentsRounded - totalExpenses),
   };
 }
 
@@ -169,14 +185,19 @@ export const DEFAULT_DEDUCTION_MAP = {
   'Healthcare and pharmacy': 'medical',
 };
 
+const DEDUCTION_KEYS = new Set(DEDUCTION_BUCKETS.map((b) => b.key));
+
 // rows: NON-entity transactions for the year; mapping { [category]: bucketKey }.
+// An unknown bucket key (stale settings after a future rename) is skipped like
+// an unmapped category — never silently accumulated into a bucket that no
+// report row renders (the lineLabel() guard's sibling).
 export function personalDeductionReport(rows, mapping) {
   const map = mapping && typeof mapping === 'object' ? mapping : {};
   const totals = new Map();
   for (const t of Array.isArray(rows) ? rows : []) {
     if (!t || t.excluded) continue;
     const bucket = map[t.category];
-    if (!bucket) continue;
+    if (!bucket || !DEDUCTION_KEYS.has(bucket)) continue;
     const amount = Number(t.amount) || 0;
     if (amount === 0) continue;
     const cur = totals.get(bucket) || { total: 0, count: 0 };
@@ -208,11 +229,14 @@ export const MILEAGE_RATES = [
 
 // ISO-string comparison on purpose: `new Date('2026-07-01')` is UTC-midnight
 // and shifts a day in western timezones. Dates never touch Date here.
+// Picks the MAX `from` ≤ the date rather than the last array entry, so a
+// future January edit that appends out of order can't silently misprice every
+// later drive (a test also pins the array as ascending).
 export function mileageRate(isoDate) {
   if (typeof isoDate !== 'string' || !isoDate) return null;
   let found = null;
   for (const r of MILEAGE_RATES) {
-    if (r.from <= isoDate) found = r;
+    if (r.from <= isoDate && (!found || r.from > found.from)) found = r;
   }
   return found ? found.rate : null;
 }
@@ -242,24 +266,30 @@ export function mileageDeduction(logRows) {
     cur.amount += m * rate;
     byRate.set(rate, cur);
   }
+  const byRateRows = [...byRate.values()]
+    .map((r) => ({ rate: r.rate, miles: round2(r.miles), amount: round2(r.amount) }))
+    .sort((a, b) => a.rate - b.rate);
   return {
     miles: round2(miles),
-    amount: round2(amount),
+    // Sum of the rounded per-rate rows, not a separately-rounded grand total —
+    // the preparer's log shows the rows, and they must add up to the headline.
+    amount: round2(byRateRows.reduce((s, r) => s + r.amount, 0)),
     unratedMiles: round2(unratedMiles),
-    byRate: [...byRate.values()]
-      .map((r) => ({ rate: r.rate, miles: round2(r.miles), amount: round2(r.amount) }))
-      .sort((a, b) => a.rate - b.rate),
+    byRate: byRateRows,
   };
 }
 
 // ---------------------------------------------------------------------------
 // CSV for the preparer. Amounts keep the app's stored sign and the column
-// name says so — flipping signs on export would make a re-import through the
-// CSV importer double-negate.
+// name (`amount_positive_is_outflow`) says so. Note this file is NOT meant to
+// round-trip through the CSV importer: what actually protects against that is
+// that detectHeader can't auto-map these headers (no synonym matches), so the
+// importer demands manual mapping and shows a preview — the sign convention in
+// the column name is documentation for the human, not import safety.
 
 function csvCell(v) {
   const s = String(v ?? '');
-  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
 export function scheduleECsv(report, { entityName = '', year = '' } = {}) {
@@ -270,6 +300,9 @@ export function scheduleECsv(report, { entityName = '', year = '' } = {}) {
     ['line', 'label', 'total'],
     ['3', 'Rents received', report.rents.total.toFixed(2)],
   ];
+  if (report.rents.defaulted?.count > 0) {
+    rows.push(['', `  of which ${report.rents.defaulted.count} unmapped deposit(s) counted as rent by default - review`, report.rents.defaulted.total.toFixed(2)]);
+  }
   for (const l of report.lines) rows.push([String(l.line), l.label, l.total.toFixed(2)]);
   rows.push(['', 'Total expenses (mapped lines)', report.totalExpenses.toFixed(2)]);
   if (report.unmapped.length) {

@@ -20,6 +20,7 @@ import {
   entityMonthly,
   personalDeductionReport,
   DEDUCTION_BUCKETS,
+  MILEAGE_RATES,
   mileageRate,
   mileageDeduction,
   scheduleECsv,
@@ -147,6 +148,89 @@ test('mileageDeduction splits a straddling year by rate and counts unrated miles
     { rate: 0.725, miles: 100, amount: 72.5 },
     { rate: 0.76, miles: 100, amount: 76 },
   ]);
+});
+
+test('lines always contains every Schedule E line in order, including zeros', () => {
+  // The Tax tab maps over r.lines and the CSV emits a row per line — a future
+  // "filter zero lines" cleanup would break both, so the full shape is pinned
+  // on an EMPTY report.
+  const r = scheduleEReport([], {});
+  assert.deepEqual(r.lines.map((l) => l.line), SCHEDULE_E_LINES.map((l) => l.line));
+  assert.ok(r.lines.every((l) => l.total === 0));
+});
+
+test('a positive amount in a RENTS_KEY category nets rents down (returned deposit)', () => {
+  const r = scheduleEReport(
+    [tx({ amount: -1800, category: 'Rent' }), tx({ amount: 500, category: 'Rent' })],
+    { Rent: RENTS_KEY },
+  );
+  assert.equal(r.rents.total, 1300);
+  assert.equal(r.rents.defaulted.count, 0, 'explicitly mapped rent is never "defaulted"');
+});
+
+test('a mapped line can net negative overall and stays visible', () => {
+  const r = scheduleEReport(
+    [tx({ amount: 40, category: 'Utilities' }), tx({ amount: -100, category: 'Utilities' })],
+    { Utilities: 17 },
+  );
+  assert.equal(r.lines.find((l) => l.line === 17).total, -60);
+  const csv = scheduleECsv(r, { entityName: 'X', year: 2026 });
+  assert.ok(csv.includes('17,Utilities,-60.00'), 'the preparer sees the negative line in the CSV');
+});
+
+test('unmapped money in is counted as rent AND reported as defaulted', () => {
+  // The settled default (unmapped deposits = rent) with the visibility the
+  // review demanded: a refund in an unmapped expense category lands in rents,
+  // and the defaulted subtotal is what lets the preparer audit that.
+  const r = scheduleEReport(
+    [tx({ amount: -1800, category: 'Cash, checks, and misc' }), tx({ amount: -25, category: 'Dining out' })],
+    {},
+  );
+  assert.equal(r.rents.total, 1825);
+  assert.deepEqual(r.rents.defaulted, { total: 1825, count: 2 });
+  assert.ok(scheduleECsv(r, {}).includes('counted as rent by default'));
+});
+
+test('net uses the same rounded rents value the report displays', () => {
+  const r = scheduleEReport(
+    [tx({ amount: -100.005, category: 'X' }), tx({ amount: 10, category: 'Utilities' })],
+    { Utilities: 17 },
+  );
+  assert.equal(r.net, Math.round((r.rents.total - r.totalExpenses) * 100) / 100);
+});
+
+test('personalDeductionReport skips unknown bucket keys instead of hiding money in them', () => {
+  const r = personalDeductionReport(
+    [tx({ amount: 100, category: 'Giving' })],
+    { Giving: 'renamed_bucket_from_the_future' },
+  );
+  assert.ok(r.every((b) => b.total === 0 && b.count === 0));
+});
+
+test('MILEAGE_RATES is strictly ascending by effective date', () => {
+  // The file is edited every January; an out-of-order insert must fail a test,
+  // not silently misprice drives (mileageRate also picks max-from, not
+  // last-in-array, as a second belt).
+  for (let i = 1; i < MILEAGE_RATES.length; i++) {
+    assert.ok(MILEAGE_RATES[i - 1].from < MILEAGE_RATES[i].from);
+  }
+});
+
+test('scheduleECsv structure: header row, every line present, trailing newline', () => {
+  const csv = scheduleECsv(scheduleEReport([], {}), { entityName: 'X', year: 2026 });
+  assert.ok(csv.endsWith('\n'));
+  const lines = csv.split('\n');
+  assert.ok(lines.includes('line,label,total'));
+  for (const l of SCHEDULE_E_LINES) assert.ok(lines.some((row) => row.startsWith(`${l.line},`)));
+});
+
+test('csvCell quotes carriage returns', () => {
+  const r = scheduleEReport(
+    [tx({ amount: 500, category: 'X', is_capital: true, merchant_name: 'BAD\rVENDOR' })],
+    {},
+  );
+  const csv = scheduleECsv(r, {});
+  assert.ok(csv.includes('"BAD\rVENDOR"'));
 });
 
 test('scheduleECsv escapes and carries the sign-convention column name', () => {

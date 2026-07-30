@@ -813,6 +813,16 @@ begin
         and column_name = 'is_capital') then
     missing := array_append(missing, 'transactions.is_capital (20260730)');
   end if;
+  if not exists (select 1 from information_schema.columns
+      where table_schema = 'public' and table_name = 'transactions'
+        and column_name = 'placed_in_service') then
+    missing := array_append(missing, 'transactions.placed_in_service (20260730)');
+  end if;
+  if not exists (select 1 from information_schema.columns
+      where table_schema = 'public' and table_name = 'transactions'
+        and column_name = 'useful_life_years') then
+    missing := array_append(missing, 'transactions.useful_life_years (20260730)');
+  end if;
 
   -- The two adapter-agnostic external-id columns. Plaid-named, NOT Plaid-owned:
   -- every feed writes them ('sfin:', 'csv:', 'manual:') and they carry
