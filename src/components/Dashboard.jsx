@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
-import { getOverview, getSpending, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES, setCategoryRule, applyCategoryRuleToHistory, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, invalidateEnvelopeSpending, isEnvelopeSchemaMissing, targetNeed, readyToAssign, monthKey } from "../dataAdapter.js";
+import { getOverview, getSpending, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES, setCategoryRule, applyCategoryRuleToHistory, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, invalidateEnvelopeSpending, isEnvelopeSchemaMissing, targetNeed, readyToAssign, monthKey, getEntities, createEntity, updateEntity, getTaxYearTransactions, getMileage, addMileage, deleteMileage } from "../dataAdapter.js";
+import { SCHEDULE_E_LINES, RENTS_KEY, DEFAULT_SCHEDULE_E_MAP, scheduleEReport, entityMonthly, personalDeductionReport, DEDUCTION_BUCKETS, DEFAULT_DEDUCTION_MAP, mileageDeduction, scheduleECsv } from "../taxReport.js";
 import { merchantKey } from "../txClassify.js";
 import { detectRecurring } from "../recurring.js";
 import { unlinkInstitution, askAssistant } from "../apiClient.js";
@@ -44,6 +45,11 @@ const ACCOUNT_COLORS = ["#7F77DD","#1D9E75","#D85A30","#378ADD","#FAC775","#D453
 // settings control, not the app's primary action, and reusing --accent would
 // make it compete with the "Always" button in the transaction sheet.
 const TYPE_CHIP = "#378ADD";
+
+// The green the rental-property controls paint their active chip with — same
+// role as TYPE_CHIP (a settings control, not --accent), distinct hue so a
+// property assignment never reads as an account-type change.
+const ENTITY_CHIP = "#639922";
 
 // Three-state theme control: system -> light -> dark -> system. An icon alone
 // can't say which of THREE states is active, so each one carries a label too.
@@ -128,6 +134,32 @@ function fmtX(n) {
 // "$1,234" for whole dollars, "$1,234.56" when there are cents to show.
 function fmtAuto(n) { return Math.round(Number(n)*100)%100===0?fmt(n):fmtX(n); }
 function signed(n) { return `${n>0?"+":""}${fmtAuto(n)}`; }
+
+// Hand a generated CSV to the user. In the installed iOS PWA, blob-URL anchor
+// downloads are unreliable — the share sheet (→ Save to Files / AirDrop / a
+// mail draft to the CPA) is the path that actually works there, so try it
+// first and fall back to the anchor click for desktop browsers.
+async function downloadCsv(filename,text){
+  try{
+    const file=new File([text],filename,{type:"text/csv"});
+    if(navigator.canShare&&navigator.canShare({files:[file]})){
+      await navigator.share({files:[file],title:filename});
+      return;
+    }
+  }catch(err){
+    if(err&&err.name==="AbortError")return; // user closed the share sheet
+    console.error("share failed, falling back to download",err);
+  }
+  try{
+    const url=URL.createObjectURL(new Blob([text],{type:"text/csv"}));
+    const a=document.createElement("a");
+    a.href=url;a.download=filename;
+    document.body.appendChild(a);a.click();a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url),4000);
+  }catch(err){
+    console.error("csv download failed",err);
+  }
+}
 // "Jun 2027" from a 'YYYY-MM-DD' target date.
 function monthYear(dateStr) {
   const [y,m]=String(dateStr||"").slice(0,7).split("-").map(Number);
@@ -593,6 +625,26 @@ export default function Dashboard({ refreshTick = 0 }) {
   const [acctLoading,setAcctLoading]=useState(false);
   const [recurring,setRecurring]=useState(null);
   const [recLoading,setRecLoading]=useState(false);
+  // --- Rental & tax (Tax tab) ---
+  const [entities,setEntities]=useState([]);
+  const [taxYear,setTaxYear]=useState(now.getFullYear());
+  const [taxData,setTaxData]=useState(null);    // {transactions} for taxYear, lazy like recurring
+  const [taxLoading,setTaxLoading]=useState(false);
+  // Invalidation epoch. A bare setTaxData(null) is NOT a reliable invalidation:
+  // when taxData is already null (a load in flight), React bails on the
+  // identical value, the effect never re-runs, and the in-flight load paints a
+  // stale snapshot with nothing left to supersede it. Bumping the epoch always
+  // changes a dependency, so every invalidation mints a new taxSeq and the
+  // seq check drops whatever was in flight.
+  const [taxEpoch,setTaxEpoch]=useState(0);
+  const [mileage,setMileage]=useState([]);
+  // {emap:{[entityId]:{category:line|'rents'}}, dmap:{category:bucketKey}} —
+  // household-shared (settings table): the tax mapping is about the money, not
+  // the device.
+  const [taxMaps,setTaxMaps]=useState(null);
+  const [addingEntity,setAddingEntity]=useState(false);
+  const [newEntityName,setNewEntityName]=useState("");
+  const [mileForm,setMileForm]=useState(null);  // {on_date,miles,purpose,entity_id}
   const [customColors,setCustomColors]=useState({});
   const [customNames,setCustomNames]=useState({});
   const [customCats,setCustomCats]=useState([]);
@@ -717,6 +769,66 @@ export default function Dashboard({ refreshTick = 0 }) {
   function saveAsstModel(m){setAsstModel(m);setSetting("asst:model",m).catch(()=>{});}
   function saveAsstEffort(e){setAsstEffort(e);setSetting("asst:effort",e).catch(()=>{});}
 
+  // --- Rental & tax handlers ---
+  async function saveTaxMaps(next){setTaxMaps(next);try{await setSetting("tax:maps",JSON.stringify(next));}catch(err){console.error("saving tax maps failed",err);}}
+  // A fresh entity's Schedule E mapping starts from the conservative defaults;
+  // the FIRST edit copies them into the stored map and edits that. Never merge
+  // the defaults over a stored map — that would resurrect a default the user
+  // explicitly un-mapped, making "Not mapped" a silent no-op for those rows.
+  const emapFor=useCallback(id=>taxMaps?.emap?.[id]??DEFAULT_SCHEDULE_E_MAP,[taxMaps]);
+  function setEmapEntry(entityId,category,value){
+    const next={...emapFor(entityId)};
+    if(value==null)delete next[category];else next[category]=value;
+    saveTaxMaps({...(taxMaps||{dmap:{...DEFAULT_DEDUCTION_MAP}}),emap:{...(taxMaps?.emap||{}),[entityId]:next}});
+  }
+  function setDmapEntry(category,bucket){
+    const next={...(taxMaps?.dmap||{...DEFAULT_DEDUCTION_MAP})};
+    if(bucket==null)delete next[category];else next[category]=bucket;
+    saveTaxMaps({...(taxMaps||{}),emap:taxMaps?.emap||{},dmap:next});
+  }
+  async function handleAddEntity(){
+    const name=newEntityName.trim();
+    if(!name)return;
+    try{
+      const e=await createEntity(name);
+      setEntities(prev=>[...prev,e]);
+      setNewEntityName("");setAddingEntity(false);
+      invalidateTax();
+    }catch(err){
+      console.error("creating the property failed",err);
+      window.alert(`Couldn't add the property: ${err.message||err}\n\nIf this is a fresh deploy, the rental-tax migration may not have been applied yet.`);
+    }
+  }
+  async function renameEntity(id,name){
+    const n=(name||"").trim();
+    if(!n)return;
+    setEntities(prev=>prev.map(e=>e.id===id?{...e,name:n}:e));
+    try{await updateEntity(id,{name:n});}catch(err){console.error("renaming the property failed",err);}
+  }
+  async function setEntityArchived(id,archived){
+    const at=archived?new Date().toISOString():null;
+    setEntities(prev=>prev.map(e=>e.id===id?{...e,archived_at:at}:e));
+    try{await updateEntity(id,{archived_at:at});}catch(err){console.error("archiving the property failed",err);}
+  }
+  async function handleAddMileage(){
+    if(!mileForm)return;
+    const miles=Number(mileForm.miles);
+    if(!mileForm.on_date||!Number.isFinite(miles)||miles<=0)return;
+    try{
+      const row=await addMileage({on_date:mileForm.on_date,miles,purpose:mileForm.purpose,entity_id:mileForm.entity_id||null});
+      // Only list it if it belongs to the year on screen.
+      if(row.on_date.slice(0,4)===String(taxYear))setMileage(prev=>[row,...prev].sort((a,b)=>a.on_date<b.on_date?1:-1));
+      setMileForm(null);
+    }catch(err){
+      console.error("adding mileage failed",err);
+      window.alert(`Couldn't save the drive: ${err.message||err}`);
+    }
+  }
+  async function handleDeleteMileage(id){
+    setMileage(prev=>prev.filter(m=>m.id!==id));
+    try{await deleteMileage(id);}catch(err){console.error("deleting mileage failed",err);}
+  }
+
   const isCurrent = year===now.getFullYear()&&month===now.getMonth()+1;
   // Every other tab reports on months that have happened, so it stops at the
   // current one. Budgeting is forward-looking — assigning next month's money
@@ -748,7 +860,7 @@ export default function Dashboard({ refreshTick = 0 }) {
     invalidateEnvelopeSpending();
     const eseq=++envSeq.current;
     try{
-      const[ov,sp,tx,cf,ac,bu,en,inc]=await Promise.all([
+      const[ov,sp,tx,cf,ac,bu,en,inc,ents]=await Promise.all([
         cur?getOverview():Promise.resolve(null),
         getSpending({year:y,month:m}),
         getTransactions({year:y,month:m}),
@@ -761,10 +873,19 @@ export default function Dashboard({ refreshTick = 0 }) {
         // otherwise one flaky request would claim the migration never ran.
         getEnvelopes({year:y,month:m}).catch(e=>isEnvelopeSchemaMissing(e)?null:undefined),
         getBudgetIncome({year:y,month:m}).catch(()=>undefined),
+        // Eager because the transaction sheet and account sheet both offer the
+        // entity picker; degrades to [] until the rental-tax migration lands
+        // (inside getEntities) — undefined = transient failure, keep state.
+        getEntities().catch(()=>undefined),
       ]);
       if(seq!==loadSeq.current)return false;
       setOverview(ov);setSpending(sp);setTransactions(tx);setCashFlow(cf);
       setAccounts(ac.accounts||[]);
+      // A transient entity-read failure keeps the previous list (the envelope
+      // pattern): folding it into [] would blank the entity chips and every
+      // property worksheet until the next successful reload.
+      if(ents!==undefined)setEntities(ents.entities||[]);
+      invalidateTax(); // recompute lazily on next Tax-tab visit
       // A completed envelope write may have painted fresher rows while this
       // reload was in flight — don't overwrite them (or the freshly saved
       // budgets/targets) with a pre-write snapshot.
@@ -813,6 +934,42 @@ export default function Dashboard({ refreshTick = 0 }) {
       .catch(err=>{console.error(err);setRecurring([]);})
       .finally(()=>setRecLoading(false));
   },[tab,recurring,recLoading]);
+
+  // The Tax tab is lazy the same way: a calendar year of rows + the mileage
+  // log + the saved category→tax-line mappings, cached until invalidateTax
+  // (below) drops it. The sequence ref is the same guard reloadData/search
+  // use — and deliberately NO taxLoading in the guard or the deps: gating on
+  // it would serialize loads, suppressing exactly the superseding load the
+  // seq check needs, so a year tap during an in-flight load would paint the
+  // old year's rows under the new header (review-caught).
+  const taxSeq=useRef(0);
+  useEffect(()=>{
+    if(tab!=="tax"||taxData)return;
+    const seq=++taxSeq.current;
+    setTaxLoading(true);
+    Promise.all([
+      getTaxYearTransactions(taxYear),
+      getMileage(taxYear).catch(err=>{console.error("mileage load failed",err);return {mileage:[]};}),
+      getSetting("tax:maps").catch(()=>null),
+    ])
+      .then(([t,m,maps])=>{
+        if(seq!==taxSeq.current)return;
+        setTaxData(t);
+        setMileage(m.mileage||[]);
+        setTaxMaps(prev=>{
+          if(prev)return prev; // don't clobber unsaved edits with a stale read
+          let parsed=null;
+          try{parsed=maps?JSON.parse(maps):null;}catch{}
+          return (parsed&&typeof parsed==="object")
+            ?{emap:parsed.emap||{},dmap:parsed.dmap||{...DEFAULT_DEDUCTION_MAP}}
+            :{emap:{},dmap:{...DEFAULT_DEDUCTION_MAP}};
+        });
+      })
+      .catch(err=>{if(seq===taxSeq.current){console.error(err);setTaxData({transactions:[]});}})
+      .finally(()=>{if(seq===taxSeq.current)setTaxLoading(false);});
+  },[tab,taxData,taxYear,taxEpoch]);
+  // The ONLY way to invalidate the tax cache — see the taxEpoch comment.
+  const invalidateTax=useCallback(()=>{setTaxData(null);setTaxEpoch(e=>e+1);},[]);
 
   // Cross-month search: debounced 300ms, min 2 chars; the sequence id drops
   // stale responses so fast typing can't render out-of-order results.
@@ -960,6 +1117,12 @@ export default function Dashboard({ refreshTick = 0 }) {
     setAcctTxs(prev=>prev?prev.map(apply):prev);
     setSearchRes(prev=>prev?{...prev,transactions:prev.transactions.map(apply)}:prev);
     setSelTx(prev=>prev?apply(prev):prev);
+    // Any edit can move a row in or out of a tax report (category, entity,
+    // capital flag, exclusion) — drop the cached year and recompute lazily.
+    // This pre-write invalidation may start a load that races the UPDATE, but
+    // reloadData below runs after the write and bumps the epoch again, which
+    // supersedes any pre-commit snapshot (the seq check drops it).
+    invalidateTax();
     try{
       await updateTransaction(id,fields);
     }catch(err){
@@ -1315,7 +1478,7 @@ export default function Dashboard({ refreshTick = 0 }) {
 
         {/* Tabs */}
         <div style={{display:"flex",gap:3,background:"var(--bg)",borderRadius:24,padding:4,marginBottom:14,border:"1px solid var(--border)",overflowX:"auto"}}>
-          {["overview","categories","budget","transactions","accounts","trends","recurring","ask"].map(t=>(
+          {["overview","categories","budget","transactions","accounts","trends","recurring","tax","ask"].map(t=>(
             <button key={t} className={`tab${tab===t?" active":""}`}
               onClick={()=>{
                 setTab(t);
@@ -1913,6 +2076,40 @@ export default function Dashboard({ refreshTick = 0 }) {
                 </div>
               </div>
             )}
+
+            {/* Rental property — account-level default (every transaction on
+                this account counts for the property on the Tax tab). Offered
+                once a property exists; also shown when the account is already
+                assigned to one that was since archived, so it can be cleared.
+                Same --bg panel as the type editor, so the chips tint over
+                surf.bg, not surf.card. */}
+            {(entities.some(e=>!e.archived_at)||selAcct.entity_id)&&(
+              <div style={{marginTop:12,background:"var(--bg)",borderRadius:8,padding:"10px 12px"}}>
+                <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em",marginBottom:8}}>Rental property</div>
+                <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+                  {[{id:null,name:"None"},...entities.filter(e=>!e.archived_at||e.id===selAcct.entity_id)].map(e=>{
+                    const active=(selAcct.entity_id||null)===e.id;
+                    const cs=active&&e.id?chipOn(ENTITY_CHIP,surf.bg):null;
+                    return (
+                      // Invalidate AFTER the write commits: doing it before
+                      // lets the tax tab's SELECT race the UPDATE and cache
+                      // the old attribution (saveAccount swallows errors, so
+                      // awaiting is safe).
+                      <button key={e.id||"none"} onClick={async()=>{await saveAccount(selAcct.id,{entity_id:e.id});invalidateTax();}}
+                        style={{fontSize:11,fontWeight:600,padding:"5px 10px",borderRadius:20,fontFamily:"inherit",cursor:"pointer",
+                          background:cs?cs.bg:"var(--card)",color:cs?cs.ink:(active?"var(--text)":"var(--muted)"),
+                          border:`1px solid ${active?(e.id?markOn(ENTITY_CHIP,surf.bg):"var(--text)"):"var(--border)"}`,transition:"all .15s"}}>
+                        {e.name}
+                      </button>
+                    );
+                  })}
+                </div>
+                <div style={{fontSize:10,color:"var(--muted)",marginTop:8,lineHeight:1.5}}>
+                  Tags every transaction on this account for the property on the Tax tab (single
+                  transactions can still be reassigned in their detail sheet). No other totals change.
+                </div>
+              </div>
+            )}
             <div style={{borderTop:"1px solid var(--border)",margin:"12px 0"}}/>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
               <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em"}}>All transactions</div>
@@ -2188,6 +2385,328 @@ export default function Dashboard({ refreshTick = 0 }) {
           </div>
         )}
 
+        {/* TAX — the rental Schedule E lens, personal deductions and the
+            mileage log. Record-keeping for the preparer, NOT tax math: no AGI
+            floors, no depreciation schedules, no advice. Entity-tagged rows
+            still count in every household spending view — this tab is a lens
+            over the same rows, not an exclusion (deliberate; don't "fix" it by
+            filtering them out of spending). */}
+        {tab==="tax"&&(()=>{
+          const activeEnts=entities.filter(e=>!e.archived_at);
+          const txs=taxData?.transactions||[];
+          const busy=taxLoading||!taxData;
+          const dmap=taxMaps?.dmap||DEFAULT_DEDUCTION_MAP;
+          const canNextTax=taxYear<now.getFullYear();
+          const personalRows=txs.filter(t=>!t.effective_entity_id);
+          const deductions=personalDeductionReport(personalRows,dmap);
+          const mileSum=mileageDeduction(mileage);
+          const entName=id=>entities.find(x=>x.id===id)?.name||null;
+          // Active properties, plus archived ones that still have rows in the
+          // viewed year — an archive must not erase a filed year's worksheet.
+          const shownEnts=entities.filter(e=>!e.archived_at||txs.some(t=>t.effective_entity_id===e.id));
+          const lineOptions=[["","Not mapped"],[RENTS_KEY,"Rents received (income)"],...SCHEDULE_E_LINES.map(l=>[String(l.line),`${l.line} · ${l.label}`])];
+          const selStyleSm={fontSize:11,fontFamily:"inherit",color:"var(--text)",background:"var(--bg)",border:"1px solid var(--border)",borderRadius:8,padding:"4px 6px",cursor:"pointer",outline:"none",maxWidth:180};
+          const allCatNames=[...ERA_CATEGORIES.filter(c=>c!==UNCATEGORIZED),...customCatNames.filter(n=>!ERA_CATEGORIES.includes(n))];
+          const localToday=`${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,"0")}-${String(now.getDate()).padStart(2,"0")}`;
+          const amber=inkOn("#C08A2E",surf.card);
+          return (
+          <div style={{display:"flex",flexDirection:"column",gap:12}}>
+            {/* Tax year + framing */}
+            <div className="card">
+              <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:10}}>
+                <button className="nbtn" onClick={()=>{setTaxYear(y=>y-1);invalidateTax();}}>‹</button>
+                <div style={{fontSize:18,fontWeight:600,minWidth:90,textAlign:"center",color:"var(--text)"}}>{taxYear}</div>
+                <button className="nbtn" disabled={!canNextTax} onClick={()=>{if(canNextTax){setTaxYear(y=>y+1);invalidateTax();}}}>›</button>
+              </div>
+              <div style={{fontSize:10,color:"var(--muted)",textAlign:"center",marginTop:6,lineHeight:1.5}}>
+                Calendar-year records for your tax preparer — not tax advice. Rental transactions still
+                count in the household spending views; this tab is a lens over the same rows.
+              </div>
+            </div>
+
+            {/* Properties */}
+            <div className="card">
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+                <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em"}}>Rental properties</div>
+                <button className="ibtn" style={{fontSize:11}} onClick={()=>setAddingEntity(v=>!v)}>＋ Add property</button>
+              </div>
+              {addingEntity&&(
+                <div style={{display:"flex",gap:8,marginBottom:10}}>
+                  <input value={newEntityName} onChange={e=>setNewEntityName(e.target.value)} placeholder="e.g. Maple St duplex"
+                    autoFocus onKeyDown={e=>{if(e.key==="Enter")handleAddEntity();}}
+                    style={{flex:1,minWidth:0,padding:"8px 10px",borderRadius:8,border:"1px solid var(--border)",background:"var(--bg)",color:"var(--text)",fontSize:14,fontFamily:"inherit",outline:"none"}}/>
+                  <button onClick={handleAddEntity} disabled={!newEntityName.trim()}
+                    style={{padding:"0 14px",borderRadius:8,border:"none",background:"var(--accent)",color:"var(--accent-text)",fontFamily:"inherit",fontSize:12,fontWeight:600,cursor:newEntityName.trim()?"pointer":"default",opacity:newEntityName.trim()?1:.5}}>
+                    Add
+                  </button>
+                </div>
+              )}
+              {entities.length===0&&!addingEntity&&(
+                <div style={{fontSize:12,color:"var(--muted)",lineHeight:1.6}}>
+                  Add a property, then tag its money: assign a whole account to it from the Accounts tab,
+                  or tag single transactions in their detail sheet. This tab builds the Schedule E
+                  worksheet from whatever is tagged.
+                </div>
+              )}
+              {entities.map(e=>(
+                <div key={e.id} style={{display:"flex",alignItems:"center",gap:8,marginBottom:8,opacity:e.archived_at?.55:1}}>
+                  <span style={{width:11,height:11,borderRadius:3,background:markOn(ENTITY_CHIP,surf.card),flexShrink:0}}/>
+                  <span style={{fontSize:13,fontWeight:500,color:"var(--text)",flex:1,minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                    <EditName name={e.name} onSave={v=>renameEntity(e.id,v)}/>
+                  </span>
+                  {e.archived_at
+                    ?<button className="ibtn" style={{fontSize:10}} onClick={()=>setEntityArchived(e.id,false)}>Restore</button>
+                    :<button onClick={()=>setEntityArchived(e.id,true)} title={`Archive ${e.name}`}
+                        style={{background:"none",border:"none",cursor:"pointer",color:"var(--muted)",fontSize:18,lineHeight:1,padding:"0 2px",flexShrink:0}}>×</button>}
+                </div>
+              ))}
+              {entities.length>0&&(
+                <div style={{fontSize:10,color:"var(--muted)",lineHeight:1.5,marginTop:4}}>
+                  Archiving hides a property from pickers; its tagged history stays and past years still report.
+                </div>
+              )}
+            </div>
+
+            {busy&&(
+              <div className="card">
+                <Sk h={16}/><div style={{height:10}}/><Sk h={16} w="70%"/><div style={{height:10}}/><Sk h={16} w="45%"/>
+              </div>
+            )}
+
+            {/* One worksheet card per property */}
+            {!busy&&shownEnts.map(e=>{
+              const rows=txs.filter(t=>t.effective_entity_id===e.id);
+              const emap=emapFor(e.id);
+              const rep=scheduleEReport(rows,emap);
+              const months=entityMonthly(rows);
+              const totIn=months.reduce((s,m)=>s+m.income,0);
+              const totOut=months.reduce((s,m)=>s+m.expenses,0);
+              const catsPresent=[...new Set(rows.filter(t=>!t.is_capital).map(t=>t.category))].sort();
+              return (
+              <div className="card" key={e.id}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",gap:10}}>
+                  <div style={{fontSize:15,fontWeight:600,color:"var(--text)"}}>{e.name}</div>
+                  <div style={{fontSize:11,color:"var(--muted)",flexShrink:0}}>{rows.length} transaction{rows.length!==1?"s":""} in {taxYear}</div>
+                </div>
+                {rows.length===0?(
+                  <div style={{fontSize:12,color:"var(--muted)",marginTop:8}}>Nothing tagged to this property in {taxYear} yet.</div>
+                ):(<>
+                  <div style={{display:"flex",gap:20,margin:"10px 0 2px"}}>
+                    <div>
+                      <div style={{fontSize:10,color:"var(--muted)"}}>Money in</div>
+                      <div style={{fontSize:15,fontWeight:600,fontFamily:"'DM Mono',monospace",color:inkOn("#1D9E75",surf.card)}}>{fmtAuto(totIn)}</div>
+                    </div>
+                    <div>
+                      <div style={{fontSize:10,color:"var(--muted)"}}>Money out</div>
+                      <div style={{fontSize:15,fontWeight:600,fontFamily:"'DM Mono',monospace",color:"var(--text)"}}>{fmtAuto(totOut)}</div>
+                    </div>
+                    <div>
+                      <div style={{fontSize:10,color:"var(--muted)"}}>Net cash</div>
+                      <div style={{fontSize:15,fontWeight:600,fontFamily:"'DM Mono',monospace",color:totIn-totOut<0?inkOn("#D85A30",surf.card):"var(--text)"}}>{signed(Math.round((totIn-totOut)*100)/100)}</div>
+                    </div>
+                  </div>
+
+                  <div style={{borderTop:"1px solid var(--border)",margin:"12px 0 10px"}}/>
+                  <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em",marginBottom:8}}>Schedule E worksheet</div>
+                  <div style={{display:"flex",justifyContent:"space-between",fontSize:12,marginBottom:5}}>
+                    <span style={{color:"var(--text)"}}>3 · Rents received</span>
+                    <span style={{fontFamily:"'DM Mono',monospace",color:"var(--text)"}}>{fmtAuto(rep.rents.total)}</span>
+                  </div>
+                  {/* Line 3 goes on the return — say how much of it was a
+                      DEFAULT (unmapped money in) rather than an explicit
+                      mapping, so a refund in an unmapped category can't
+                      inflate rents invisibly. */}
+                  {rep.rents.defaulted.count>0&&(
+                    <div style={{fontSize:10,color:"var(--muted)",marginTop:-2,marginBottom:6}}>
+                      includes {fmtAuto(rep.rents.defaulted.total)} from {rep.rents.defaulted.count} unmapped
+                      deposit{rep.rents.defaulted.count!==1?"s":""} counted as rent by default — map their
+                      categories below if that's wrong
+                    </div>
+                  )}
+                  {rep.lines.filter(l=>l.total!==0).map(l=>(
+                    <div key={l.line} style={{display:"flex",justifyContent:"space-between",fontSize:12,marginBottom:5}}>
+                      <span style={{color:"var(--text)"}}>{l.line} · {l.label}</span>
+                      <span style={{fontFamily:"'DM Mono',monospace",color:"var(--text)"}}>{fmtAuto(l.total)}</span>
+                    </div>
+                  ))}
+                  <div style={{display:"flex",justifyContent:"space-between",fontSize:12,fontWeight:600,marginTop:2,paddingTop:6,borderTop:"1px solid var(--border)"}}>
+                    <span style={{color:"var(--text)"}}>Total expenses on the worksheet</span>
+                    <span style={{fontFamily:"'DM Mono',monospace",color:"var(--text)"}}>{fmtAuto(rep.totalExpenses)}</span>
+                  </div>
+
+                  {rep.unmapped.length>0&&(
+                    <div style={{marginTop:10,background:"var(--bg)",borderRadius:8,padding:"8px 10px"}}>
+                      {/* This panel is --bg, so the amber must be corrected
+                          against surf.bg — amber (card) belongs to notes that
+                          sit directly on the card. */}
+                      <div style={{fontSize:11,fontWeight:600,color:inkOn("#C08A2E",surf.bg),marginBottom:6}}>
+                        Not on any line yet — {fmtAuto(rep.unmappedTotal)}
+                      </div>
+                      {rep.unmapped.map(u=>(
+                        <div key={u.category} style={{display:"flex",justifyContent:"space-between",fontSize:11,color:"var(--muted)",marginBottom:4}}>
+                          <span>{getName(u.category)} · {u.count}</span>
+                          <span style={{fontFamily:"'DM Mono',monospace"}}>{fmtAuto(u.total)}</span>
+                        </div>
+                      ))}
+                      <div style={{fontSize:10,color:"var(--muted)",marginTop:2}}>Map these categories below and they move onto the worksheet.</div>
+                    </div>
+                  )}
+
+                  {rep.capital.items.length>0&&(
+                    <div style={{marginTop:10}}>
+                      <div style={{fontSize:11,fontWeight:600,color:"var(--text)",marginBottom:6}}>
+                        Capital expenses (depreciate, don't deduct) — {fmtAuto(rep.capital.total)}
+                      </div>
+                      {rep.capital.items.map(c=>{
+                        const row=rows.find(r=>r.id===c.id);
+                        return (
+                          <div key={c.id} onClick={row?()=>setSelTx(row):undefined}
+                            style={{display:"flex",justifyContent:"space-between",gap:8,fontSize:11,color:"var(--muted)",marginBottom:4,cursor:row?"pointer":"default"}}>
+                            <span style={{minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                              {shortDate(c.date)} · {c.description}
+                              {(!c.placed_in_service||!c.useful_life_years)&&<span style={{color:amber}}> · needs in-service date/life</span>}
+                            </span>
+                            <span style={{fontFamily:"'DM Mono',monospace",flexShrink:0}}>{fmtAuto(c.amount)}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  <div style={{borderTop:"1px solid var(--border)",margin:"12px 0 10px"}}/>
+                  <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em",marginBottom:8}}>Category → Schedule E line</div>
+                  {catsPresent.map(cat=>{
+                    const cur=emap[cat];
+                    const val=cur===RENTS_KEY?RENTS_KEY:(typeof cur==="number"?String(cur):"");
+                    return (
+                      <div key={cat} style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,marginBottom:6}}>
+                        <span style={{fontSize:12,color:"var(--text)",flex:1,minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{getName(cat)}</span>
+                        <select value={val} style={selStyleSm}
+                          onChange={ev=>{const v=ev.target.value;setEmapEntry(e.id,cat,v===""?null:(v===RENTS_KEY?RENTS_KEY:Number(v)));}}>
+                          {lineOptions.map(([v,l])=><option key={v} value={v}>{l}</option>)}
+                        </select>
+                      </div>
+                    );
+                  })}
+                  <div style={{fontSize:10,color:"var(--muted)",lineHeight:1.5,marginTop:2}}>
+                    Money in with no mapping counts as rent automatically. The mapping applies to this property only.
+                  </div>
+
+                  <button className="ibtn" style={{width:"100%",justifyContent:"center",marginTop:12}}
+                    onClick={()=>downloadCsv(`${e.name.replace(/[^\w-]+/g,"_")}_${taxYear}_scheduleE.csv`,scheduleECsv(rep,{entityName:e.name,year:taxYear}))}>
+                    Export worksheet CSV
+                  </button>
+                </>)}
+              </div>
+              );
+            })}
+
+            {/* Personal deductions */}
+            {!busy&&(
+              <div className="card">
+                <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em",marginBottom:10}}>Personal deductions</div>
+                {deductions.map(b=>(
+                  <div key={b.key} style={{display:"flex",justifyContent:"space-between",fontSize:12,marginBottom:5}}>
+                    <span style={{color:"var(--text)"}}>{b.label}{b.count>0&&<span style={{color:"var(--muted)"}}> · {b.count}</span>}</span>
+                    <span style={{fontFamily:"'DM Mono',monospace",color:"var(--text)"}}>{fmtAuto(b.total)}</span>
+                  </div>
+                ))}
+                <div style={{borderTop:"1px solid var(--border)",margin:"10px 0"}}/>
+                <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",marginBottom:8}}>Which categories count</div>
+                {Object.entries(dmap).map(([cat,bucket])=>(
+                  <div key={cat} style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,marginBottom:6}}>
+                    <span style={{fontSize:12,color:"var(--text)",flex:1,minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{getName(cat)}</span>
+                    <select value={bucket} style={selStyleSm}
+                      onChange={ev=>setDmapEntry(cat,ev.target.value||null)}>
+                      {DEDUCTION_BUCKETS.map(b=><option key={b.key} value={b.key}>{b.label}</option>)}
+                      <option value="">Remove</option>
+                    </select>
+                  </div>
+                ))}
+                <select value="" style={{...selStyleSm,maxWidth:"100%",marginTop:2}}
+                  onChange={ev=>{if(ev.target.value)setDmapEntry(ev.target.value,"charitable");}}>
+                  <option value="">＋ Count a category…</option>
+                  {allCatNames.filter(c=>!(c in dmap)).map(c=><option key={c} value={c}>{getName(c)}</option>)}
+                </select>
+                <div style={{fontSize:10,color:"var(--muted)",lineHeight:1.5,marginTop:8}}>
+                  Year totals your preparer asks about. As of 2026, charitable gifts can be deducted even
+                  without itemizing — bring the total either way. Rental-tagged rows never count here.
+                </div>
+              </div>
+            )}
+
+            {/* Mileage */}
+            {!busy&&(
+              <div className="card">
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+                  <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em"}}>Mileage</div>
+                  {!mileForm&&<button className="ibtn" style={{fontSize:11}} onClick={()=>setMileForm({on_date:localToday,miles:"",purpose:"",entity_id:activeEnts[0]?.id||""})}>＋ Log a drive</button>}
+                </div>
+                <div style={{fontSize:13,color:"var(--text)",marginBottom:4}}>
+                  <strong style={{fontFamily:"'DM Mono',monospace"}}>{mileSum.miles.toLocaleString("en-US")}</strong> mi in {taxYear} ·
+                  deduction <strong style={{fontFamily:"'DM Mono',monospace"}}>{fmtAuto(mileSum.amount)}</strong>
+                </div>
+                {mileSum.byRate.length>1&&(
+                  <div style={{fontSize:10,color:"var(--muted)",marginBottom:4}}>
+                    {mileSum.byRate.map(r=>`${r.miles.toLocaleString("en-US")} mi × ${(r.rate*100).toFixed(1)}¢`).join(" · ")}
+                  </div>
+                )}
+                {mileSum.unratedMiles>0&&(
+                  <div style={{fontSize:10,color:amber,marginBottom:4}}>
+                    {mileSum.unratedMiles} mi predate the app's rate table and are valued at $0 — give your preparer the dates.
+                  </div>
+                )}
+                {mileForm&&(
+                  <div style={{marginTop:8,background:"var(--bg)",borderRadius:8,padding:"10px 12px"}}>
+                    <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:8}}>
+                      <input type="date" value={mileForm.on_date} onChange={ev=>setMileForm(f=>({...f,on_date:ev.target.value}))}
+                        style={{flex:"1 1 130px",padding:"6px 8px",borderRadius:8,border:"1px solid var(--border)",background:"var(--card)",color:"var(--text)",fontSize:12,fontFamily:"inherit",outline:"none"}}/>
+                      <input inputMode="decimal" placeholder="Miles" value={mileForm.miles}
+                        onChange={ev=>setMileForm(f=>({...f,miles:ev.target.value.replace(/[^\d.]/g,"")}))}
+                        style={{flex:"0 1 80px",padding:"6px 8px",borderRadius:8,border:"1px solid var(--border)",background:"var(--card)",color:"var(--text)",fontSize:12,fontFamily:"inherit",outline:"none"}}/>
+                    </div>
+                    <input placeholder="Purpose (e.g. showing, repair run)" value={mileForm.purpose}
+                      onChange={ev=>setMileForm(f=>({...f,purpose:ev.target.value}))}
+                      style={{width:"100%",padding:"6px 8px",borderRadius:8,border:"1px solid var(--border)",background:"var(--card)",color:"var(--text)",fontSize:12,fontFamily:"inherit",outline:"none",marginBottom:8}}/>
+                    {activeEnts.length>0&&(
+                      <select value={mileForm.entity_id} style={{...selStyleSm,background:"var(--card)",maxWidth:"100%",marginBottom:8}}
+                        onChange={ev=>setMileForm(f=>({...f,entity_id:ev.target.value}))}>
+                        {activeEnts.map(e=><option key={e.id} value={e.id}>{e.name}</option>)}
+                        <option value="">No property</option>
+                      </select>
+                    )}
+                    <div style={{display:"flex",gap:8}}>
+                      <button className="ibtn" style={{flex:1,justifyContent:"center"}} onClick={()=>setMileForm(null)}>Cancel</button>
+                      <button onClick={handleAddMileage} disabled={!mileForm.on_date||!(Number(mileForm.miles)>0)}
+                        style={{flex:1,padding:"7px 0",borderRadius:8,border:"none",background:"var(--accent)",color:"var(--accent-text)",fontFamily:"inherit",fontSize:12,fontWeight:600,
+                          cursor:mileForm.on_date&&Number(mileForm.miles)>0?"pointer":"default",opacity:mileForm.on_date&&Number(mileForm.miles)>0?1:.5}}>
+                        Save drive
+                      </button>
+                    </div>
+                  </div>
+                )}
+                {mileage.length>0&&<div style={{height:8}}/>}
+                {mileage.map(m=>(
+                  <div key={m.id} style={{display:"flex",alignItems:"center",gap:8,fontSize:11,color:"var(--muted)",marginBottom:5}}>
+                    <span style={{flexShrink:0}}>{shortDate(m.on_date)}</span>
+                    <span style={{flex:1,minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",color:"var(--text)"}}>
+                      {m.purpose||"Drive"}{m.entity_id&&entName(m.entity_id)?` · ${entName(m.entity_id)}`:""}
+                    </span>
+                    <span style={{fontFamily:"'DM Mono',monospace",flexShrink:0}}>{Number(m.miles).toLocaleString("en-US")} mi</span>
+                    <button onClick={()=>handleDeleteMileage(m.id)} title="Delete this drive"
+                      style={{background:"none",border:"none",cursor:"pointer",color:"var(--muted)",fontSize:15,lineHeight:1,padding:"0 2px",flexShrink:0}}>×</button>
+                  </div>
+                ))}
+                <div style={{fontSize:10,color:"var(--muted)",lineHeight:1.5,marginTop:8}}>
+                  Valued at the IRS standard rate for the drive's date (2026: 72.5¢/mi Jan–Jun, 76¢/mi from
+                  Jul 1). Hand-entered — log rental and other deductible drives only.
+                </div>
+              </div>
+            )}
+          </div>
+          );
+        })()}
+
         <div style={{textAlign:"center",marginTop:18,fontSize:11,color:"var(--muted)"}}>my-money</div>
       </div>
 
@@ -2281,6 +2800,78 @@ export default function Dashboard({ refreshTick = 0 }) {
             {learnedNote&&(
               <div style={{marginTop:10,fontSize:11,color:inkOn("#1D9E75",surf.card),lineHeight:1.5}}>{learnedNote}</div>
             )}
+
+            {/* Rental property + capital flag. selTx.entity_id is the row's
+                OWN assignment; null inherits the account's default. Offered
+                once a property exists (or the row already carries one). */}
+            {(entities.some(e=>!e.archived_at)||selTx.entity_id)&&(()=>{
+              const acctEnt=a?.entity_id||null;
+              const own=selTx.entity_id||null;
+              const eff=own||acctEnt;
+              const pickable=entities.filter(e=>!e.archived_at||e.id===own);
+              return (<>
+                <div style={{borderTop:"1px solid var(--border)",margin:"12px 0"}}/>
+                <div style={{fontSize:12,color:"var(--muted)",marginBottom:8}}>Rental property</div>
+                <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:6}}>
+                  {/* With an account default there is no "None": untagging a
+                      row on a rental account just falls back to the default,
+                      so offering None would be a chip that can't stick. */}
+                  {[...(acctEnt?[]:[{id:null,name:"None"}]),...pickable].map(e=>{
+                    const active=e.id?(eff===e.id):!eff;
+                    const cs=active&&e.id?chipOn(ENTITY_CHIP,surf.card):null;
+                    return (
+                      <button key={e.id||"none"}
+                        onClick={()=>saveTx({entity_id:e.id===acctEnt?null:e.id})}
+                        style={{fontSize:11,fontWeight:600,padding:"5px 10px",borderRadius:20,fontFamily:"inherit",cursor:"pointer",
+                          background:cs?cs.bg:"var(--bg)",color:cs?cs.ink:(active?"var(--text)":"var(--muted)"),
+                          border:`1px solid ${active?(e.id?markOn(ENTITY_CHIP,surf.card):"var(--text)"):"var(--border)"}`,transition:"all .15s"}}>
+                        {e.name}{e.id&&e.id===acctEnt&&!own?" · account":""}
+                      </button>
+                    );
+                  })}
+                </div>
+                {eff&&(
+                  <div style={{marginTop:4}}>
+                    <button onClick={()=>saveTx({is_capital:!selTx.is_capital})}
+                      style={{width:"100%",padding:"8px 0",borderRadius:8,background:"none",color:"var(--text)",
+                        border:`1px solid ${selTx.is_capital?markOn(ENTITY_CHIP,surf.card):"var(--border)"}`,
+                        fontFamily:"inherit",fontSize:12,fontWeight:500,cursor:"pointer"}}>
+                      {selTx.is_capital?"✓ Capital expense (improvement)":"Mark as capital expense (improvement)"}
+                    </button>
+                    <div style={{marginTop:5,fontSize:10,color:"var(--muted)",textAlign:"center"}}>
+                      Improvements are depreciated, not deducted — the worksheet lists them separately.
+                    </div>
+                    {selTx.is_capital&&(
+                      <div style={{display:"flex",gap:8,marginTop:8}}>
+                        <label style={{flex:1,fontSize:10,color:"var(--muted)"}}>Placed in service
+                          {/* Commit on BLUR only. Typing a year in a date
+                              input yields a COMPLETE value per keystroke
+                              ("0002-…", "0020-…", …), so an onChange commit
+                              persists garbage intermediate years — and the
+                              optimistic patch then makes blur a no-op on the
+                              garbage (review-caught). The year floor rejects
+                              an abandoned partial year the same way. */}
+                          <input type="date" key={selTx.id} defaultValue={selTx.placed_in_service||""}
+                            onBlur={ev=>{const raw=ev.target.value||null;const v=raw&&raw.slice(0,4)>="1900"?raw:null;
+                              ev.target.value=v||"";
+                              if(v!==(selTx.placed_in_service||null))saveTx({placed_in_service:v});}}
+                            style={{width:"100%",marginTop:3,padding:"6px 8px",borderRadius:8,border:"1px solid var(--border)",
+                              background:"var(--bg)",color:"var(--text)",fontSize:12,fontFamily:"inherit",outline:"none"}}/>
+                        </label>
+                        <label style={{width:104,fontSize:10,color:"var(--muted)"}}>Useful life (yrs)
+                          <input inputMode="numeric" key={selTx.id} defaultValue={selTx.useful_life_years??""}
+                            onBlur={ev=>{const n=parseInt(ev.target.value,10);const v=Number.isFinite(n)&&n>0?n:null;
+                              ev.target.value=v==null?"":String(v); // show what was actually saved
+                              if(v!==(selTx.useful_life_years??null))saveTx({useful_life_years:v});}}
+                            style={{width:"100%",marginTop:3,padding:"6px 8px",borderRadius:8,border:"1px solid var(--border)",
+                              background:"var(--bg)",color:"var(--text)",fontSize:12,fontFamily:"inherit",outline:"none"}}/>
+                        </label>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </>);
+            })()}
 
             <div style={{borderTop:"1px solid var(--border)",margin:"12px 0"}}/>
             <button onClick={()=>saveTx({excluded:!selTx.excluded})}

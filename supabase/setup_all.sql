@@ -31,6 +31,8 @@ drop table if exists settings cascade;
 drop table if exists plaid_tokens cascade;
 drop table if exists simplefin_access cascade;
 drop table if exists category_rules cascade;
+drop table if exists mileage_log cascade;
+drop table if exists entities cascade;
 drop table if exists mfa_prompts cascade;
 drop table if exists pull_jobs cascade;
 drop table if exists pending_items cascade;
@@ -640,6 +642,62 @@ alter table budgets add column if not exists target_kind text not null default '
 alter table budgets add column if not exists target_date date;
 alter table budgets alter column monthly_limit drop not null;
 
+-- ============ MIGRATION 12: rental tracking + tax prep ============
+-- entities = rental properties ('business' allowed for a future side-business).
+-- accounts.entity_id is the account-level default; transactions.entity_id the
+-- per-row override (user-owned — sync/import never write either). The capital
+-- columns keep improvements off the Schedule E expense lines; mileage_log is
+-- hand-entered (SimpleFIN has no mileage, a PWA has no background GPS).
+
+create table entities (
+  id uuid primary key default gen_random_uuid(),
+  household_id uuid not null default current_household_id() references households(id) on delete cascade,
+  name text not null,
+  kind text not null default 'rental' check (kind in ('rental', 'business')),
+  created_at timestamptz not null default now(),
+  archived_at timestamptz
+);
+
+alter table entities enable row level security;
+
+create policy entities_all on entities
+  for all to authenticated
+  using (household_id = current_household_id())
+  with check (household_id = current_household_id());
+
+alter table accounts
+  add column if not exists entity_id uuid references entities(id) on delete set null;
+
+alter table transactions
+  add column if not exists entity_id uuid references entities(id) on delete set null;
+alter table transactions
+  add column if not exists is_capital boolean not null default false;
+alter table transactions
+  add column if not exists placed_in_service date;
+alter table transactions
+  add column if not exists useful_life_years integer;
+
+create index if not exists transactions_entity_idx
+  on transactions (entity_id)
+  where entity_id is not null;
+
+create table mileage_log (
+  id uuid primary key default gen_random_uuid(),
+  household_id uuid not null default current_household_id() references households(id) on delete cascade,
+  entity_id uuid references entities(id) on delete cascade,
+  on_date date not null,
+  miles numeric(7, 1) not null check (miles > 0),
+  purpose text,
+  created_at timestamptz not null default now()
+);
+
+alter table mileage_log enable row level security;
+
+create policy mileage_log_all on mileage_log
+  for all to authenticated
+  using (household_id = current_household_id())
+  with check (household_id = current_household_id());
+
 -- ============ AUTO-CREATE HOUSEHOLD ============
 -- Links the household to the first (usually only) auth user. If you haven't
 -- created the user yet, this is skipped — create the user and re-run the
@@ -733,6 +791,37 @@ begin
       where table_schema = 'public' and table_name = 'budgets'
         and column_name = 'monthly_limit' and is_nullable = 'NO') then
     missing := array_append(missing, 'budgets.monthly_limit still NOT NULL (20260729)');
+  end if;
+  if to_regclass('public.entities') is null then
+    missing := array_append(missing, 'entities table (20260730)');
+  end if;
+  if to_regclass('public.mileage_log') is null then
+    missing := array_append(missing, 'mileage_log table (20260730)');
+  end if;
+  if not exists (select 1 from information_schema.columns
+      where table_schema = 'public' and table_name = 'accounts'
+        and column_name = 'entity_id') then
+    missing := array_append(missing, 'accounts.entity_id (20260730)');
+  end if;
+  if not exists (select 1 from information_schema.columns
+      where table_schema = 'public' and table_name = 'transactions'
+        and column_name = 'entity_id') then
+    missing := array_append(missing, 'transactions.entity_id (20260730)');
+  end if;
+  if not exists (select 1 from information_schema.columns
+      where table_schema = 'public' and table_name = 'transactions'
+        and column_name = 'is_capital') then
+    missing := array_append(missing, 'transactions.is_capital (20260730)');
+  end if;
+  if not exists (select 1 from information_schema.columns
+      where table_schema = 'public' and table_name = 'transactions'
+        and column_name = 'placed_in_service') then
+    missing := array_append(missing, 'transactions.placed_in_service (20260730)');
+  end if;
+  if not exists (select 1 from information_schema.columns
+      where table_schema = 'public' and table_name = 'transactions'
+        and column_name = 'useful_life_years') then
+    missing := array_append(missing, 'transactions.useful_life_years (20260730)');
   end if;
 
   -- The two adapter-agnostic external-id columns. Plaid-named, NOT Plaid-owned:
