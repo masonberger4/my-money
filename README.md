@@ -106,10 +106,15 @@ Only `depository`, `credit`, and `loan` account types are synced — no investme
    transactions, all upserted idempotently
 5. Dashboard re-reads from Supabase and re-renders
 
-First pull reaches back up to 730 days (`SIMPLEFIN_FIRST_PULL_DAYS`), subject to
-what each bank actually exposes. Later pulls start from the last successful pull
-minus a 30-day overlap, and are throttled to one an hour — SimpleFIN refreshes
-about daily, so more often would just re-fetch the same rows.
+Every request is clamped to ~88 days (`SIMPLEFIN_MAX_LOOKBACK_DAYS`), because
+SimpleFIN serves at most 90 days per call and reports a longer request as a
+"date range was capped" notice in the response body. `SIMPLEFIN_FIRST_PULL_DAYS`
+(730) stays the reach we'd *like* on a first pull; the gap between the two is
+reported as a `coverage_shortfall` rather than silently dropped, and CSV/PDF
+statement import is how anything older gets in. The cap is SimpleFIN's, not the
+banks'. Later pulls start from the last successful pull minus a 30-day overlap,
+and are throttled to one an hour — SimpleFIN refreshes about daily, so more
+often would just re-fetch the same rows.
 
 ---
 
