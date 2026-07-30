@@ -762,11 +762,12 @@ export default function Dashboard({ refreshTick = 0 }) {
   // --- Rental & tax handlers ---
   async function saveTaxMaps(next){setTaxMaps(next);try{await setSetting("tax:maps",JSON.stringify(next));}catch(err){console.error("saving tax maps failed",err);}}
   // A fresh entity's Schedule E mapping starts from the conservative defaults;
-  // per-entity edits then live under its id.
-  const emapFor=useCallback(id=>({...DEFAULT_SCHEDULE_E_MAP,...(taxMaps?.emap?.[id]||{})}),[taxMaps]);
+  // the FIRST edit copies them into the stored map and edits that. Never merge
+  // the defaults over a stored map — that would resurrect a default the user
+  // explicitly un-mapped, making "Not mapped" a silent no-op for those rows.
+  const emapFor=useCallback(id=>taxMaps?.emap?.[id]??DEFAULT_SCHEDULE_E_MAP,[taxMaps]);
   function setEmapEntry(entityId,category,value){
-    const base=emapFor(entityId);
-    const next={...base};
+    const next={...emapFor(entityId)};
     if(value==null)delete next[category];else next[category]=value;
     saveTaxMaps({...(taxMaps||{dmap:{...DEFAULT_DEDUCTION_MAP}}),emap:{...(taxMaps?.emap||{}),[entityId]:next}});
   }
@@ -922,9 +923,14 @@ export default function Dashboard({ refreshTick = 0 }) {
 
   // The Tax tab is lazy the same way: a calendar year of rows + the mileage
   // log + the saved category→tax-line mappings, cached until the next reload
-  // or a taxYear change (the nav sets taxData back to null).
+  // or a taxYear change (the nav sets taxData back to null). The sequence ref
+  // is the same guard reloadData/search use: two fast year taps leave two
+  // loads in flight, and without it the slower one would paint its year's
+  // rows under the other year's header.
+  const taxSeq=useRef(0);
   useEffect(()=>{
     if(tab!=="tax"||taxData||taxLoading)return;
+    const seq=++taxSeq.current;
     setTaxLoading(true);
     Promise.all([
       getTaxYearTransactions(taxYear),
@@ -932,6 +938,7 @@ export default function Dashboard({ refreshTick = 0 }) {
       getSetting("tax:maps").catch(()=>null),
     ])
       .then(([t,m,maps])=>{
+        if(seq!==taxSeq.current)return;
         setTaxData(t);
         setMileage(m.mileage||[]);
         setTaxMaps(prev=>{
@@ -943,8 +950,8 @@ export default function Dashboard({ refreshTick = 0 }) {
             :{emap:{},dmap:{...DEFAULT_DEDUCTION_MAP}};
         });
       })
-      .catch(err=>{console.error(err);setTaxData({transactions:[]});})
-      .finally(()=>setTaxLoading(false));
+      .catch(err=>{if(seq===taxSeq.current){console.error(err);setTaxData({transactions:[]});}})
+      .finally(()=>{if(seq===taxSeq.current)setTaxLoading(false);});
   },[tab,taxData,taxLoading,taxYear]);
 
   // Cross-month search: debounced 300ms, min 2 chars; the sequence id drops
@@ -2409,7 +2416,10 @@ export default function Dashboard({ refreshTick = 0 }) {
 
                   {rep.unmapped.length>0&&(
                     <div style={{marginTop:10,background:"var(--bg)",borderRadius:8,padding:"8px 10px"}}>
-                      <div style={{fontSize:11,fontWeight:600,color:amber,marginBottom:6}}>
+                      {/* This panel is --bg, so the amber must be corrected
+                          against surf.bg — amber (card) belongs to notes that
+                          sit directly on the card. */}
+                      <div style={{fontSize:11,fontWeight:600,color:inkOn("#C08A2E",surf.bg),marginBottom:6}}>
                         Not on any line yet — {fmtAuto(rep.unmappedTotal)}
                       </div>
                       {rep.unmapped.map(u=>(
@@ -2714,14 +2724,21 @@ export default function Dashboard({ refreshTick = 0 }) {
                     {selTx.is_capital&&(
                       <div style={{display:"flex",gap:8,marginTop:8}}>
                         <label style={{flex:1,fontSize:10,color:"var(--muted)"}}>Placed in service
-                          <input type="date" value={selTx.placed_in_service||""}
-                            onChange={ev=>saveTx({placed_in_service:ev.target.value||null})}
+                          {/* Commit only complete, changed dates: while a date
+                              is being typed the input's value is "" and an
+                              onChange save would fire a null write (and a full
+                              reload) per keystroke. */}
+                          <input type="date" key={selTx.id} defaultValue={selTx.placed_in_service||""}
+                            onChange={ev=>{const v=ev.target.value||null;if(v&&v!==(selTx.placed_in_service||null))saveTx({placed_in_service:v});}}
+                            onBlur={ev=>{const v=ev.target.value||null;if(v!==(selTx.placed_in_service||null))saveTx({placed_in_service:v});}}
                             style={{width:"100%",marginTop:3,padding:"6px 8px",borderRadius:8,border:"1px solid var(--border)",
                               background:"var(--bg)",color:"var(--text)",fontSize:12,fontFamily:"inherit",outline:"none"}}/>
                         </label>
                         <label style={{width:104,fontSize:10,color:"var(--muted)"}}>Useful life (yrs)
                           <input inputMode="numeric" key={selTx.id} defaultValue={selTx.useful_life_years??""}
-                            onBlur={ev=>{const n=parseInt(ev.target.value,10);const v=Number.isFinite(n)&&n>0?n:null;if(v!==(selTx.useful_life_years??null))saveTx({useful_life_years:v});}}
+                            onBlur={ev=>{const n=parseInt(ev.target.value,10);const v=Number.isFinite(n)&&n>0?n:null;
+                              ev.target.value=v==null?"":String(v); // show what was actually saved
+                              if(v!==(selTx.useful_life_years??null))saveTx({useful_life_years:v});}}
                             style={{width:"100%",marginTop:3,padding:"6px 8px",borderRadius:8,border:"1px solid var(--border)",
                               background:"var(--bg)",color:"var(--text)",fontSize:12,fontFamily:"inherit",outline:"none"}}/>
                         </label>
