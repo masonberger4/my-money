@@ -233,6 +233,26 @@ test('csvCell quotes carriage returns', () => {
   assert.ok(csv.includes('"BAD\rVENDOR"'));
 });
 
+test('scheduleECsv receipt column: only with receiptTxIds, yes/MISSING per row', () => {
+  const r = scheduleEReport(
+    [
+      tx({ id: 'has', amount: 500, category: 'X', is_capital: true }),
+      tx({ id: 'lacks', amount: 300, category: 'X', is_capital: true }),
+    ],
+    {},
+  );
+  // Without receiptTxIds (feature not installed) the capital table is
+  // unchanged — no column, no MISSING stamped on anything.
+  const plain = scheduleECsv(r, {});
+  assert.ok(!plain.includes('receipt'));
+  assert.ok(!plain.includes('MISSING'));
+  const csv = scheduleECsv(r, { receiptTxIds: new Set(['has']) });
+  assert.ok(csv.includes('useful_life_years,receipt'));
+  const lines = csv.split('\n');
+  assert.ok(lines.some((l) => l.startsWith('2026-03-10,M,500.00') && l.endsWith(',yes')));
+  assert.ok(lines.some((l) => l.startsWith('2026-03-10,M,300.00') && l.endsWith(',MISSING')));
+});
+
 test('scheduleECsv escapes and carries the sign-convention column name', () => {
   const r = scheduleEReport(
     [

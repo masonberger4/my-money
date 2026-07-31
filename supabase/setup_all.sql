@@ -31,6 +31,7 @@ drop table if exists settings cascade;
 drop table if exists plaid_tokens cascade;
 drop table if exists simplefin_access cascade;
 drop table if exists category_rules cascade;
+drop table if exists receipts cascade;
 drop table if exists mileage_log cascade;
 drop table if exists entities cascade;
 drop table if exists mfa_prompts cascade;
@@ -698,6 +699,59 @@ create policy mileage_log_all on mileage_log
   using (household_id = current_household_id())
   with check (household_id = current_household_id());
 
+-- Receipt photos attached to transactions (tax substantiation). See
+-- supabase/migrations/20260731000001_receipts.sql — images live in the private
+-- 'receipts' Storage bucket, this table is the index; the bucket + its
+-- storage.objects policy are created below.
+create table receipts (
+  id uuid primary key default gen_random_uuid(),
+  household_id uuid not null default current_household_id() references households(id) on delete cascade,
+  transaction_id uuid not null references transactions(id) on delete cascade,
+  storage_path text not null,
+  mime text not null,
+  created_at timestamptz not null default now()
+);
+
+alter table receipts enable row level security;
+
+create policy receipts_all on receipts
+  for all to authenticated
+  using (household_id = current_household_id())
+  with check (household_id = current_household_id());
+
+create index receipts_transaction_idx on receipts (transaction_id);
+
+insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+values ('receipts', 'receipts', false, 5242880, array['image/jpeg', 'image/png', 'image/webp'])
+on conflict (id) do nothing;
+
+-- CREATE/DROP POLICY require OWNERSHIP of storage.objects, which on hosted
+-- Supabase belongs to supabase_storage_admin — the SQL Editor's postgres role
+-- may not have it (42501 "must be owner of table objects"). The DO block turns
+-- that into a loud NOTICE instead of a half-applied paste: if it fires, create
+-- this exact policy in Dashboard -> Storage -> Policies (bucket 'receipts',
+-- all operations, authenticated, USING and WITH CHECK both
+--   (storage.foldername(name))[1] = current_household_id()::text
+-- ), then verify an upload + signed URL round-trips before merging. Until the
+-- policy exists uploads fail with an RLS violation (private bucket denies by
+-- default — an availability gap, never a leak).
+do $storage_policy$
+begin
+  drop policy if exists receipts_objects_all on storage.objects;
+  create policy receipts_objects_all on storage.objects
+    for all to authenticated
+    using (
+      bucket_id = 'receipts'
+      and (storage.foldername(name))[1] = current_household_id()::text
+    )
+    with check (
+      bucket_id = 'receipts'
+      and (storage.foldername(name))[1] = current_household_id()::text
+    );
+exception when insufficient_privilege then
+  raise notice 'Could not create the storage.objects policy (not table owner). Create policy receipts_objects_all by hand in Dashboard -> Storage -> Policies — see the comment above this block.';
+end $storage_policy$;
+
 -- ============ AUTO-CREATE HOUSEHOLD ============
 -- Links the household to the first (usually only) auth user. If you haven't
 -- created the user yet, this is skipped — create the user and re-run the
@@ -822,6 +876,10 @@ begin
       where table_schema = 'public' and table_name = 'transactions'
         and column_name = 'useful_life_years') then
     missing := array_append(missing, 'transactions.useful_life_years (20260730)');
+  end if;
+
+  if to_regclass('public.receipts') is null then
+    missing := array_append(missing, 'receipts table (20260731)');
   end if;
 
   -- The two adapter-agnostic external-id columns. Plaid-named, NOT Plaid-owned:

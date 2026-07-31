@@ -292,7 +292,10 @@ function csvCell(v) {
   return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
-export function scheduleECsv(report, { entityName = '', year = '' } = {}) {
+// receiptTxIds: Set of transaction ids that have a receipt photo attached, or
+// null/undefined when the receipts feature isn't installed — the capital table
+// then omits the column entirely rather than stamping every row MISSING.
+export function scheduleECsv(report, { entityName = '', year = '', receiptTxIds = null } = {}) {
   const rows = [
     ['Schedule E worksheet', entityName, String(year)],
     ['Totals from categorized transactions. Not tax advice - review with your preparer.'],
@@ -313,9 +316,13 @@ export function scheduleECsv(report, { entityName = '', year = '' } = {}) {
   if (report.capital.items.length) {
     rows.push([]);
     rows.push(['', 'Capital expenses (depreciate, do not deduct)', report.capital.total.toFixed(2)]);
-    rows.push(['date', 'description', 'amount_positive_is_outflow', 'placed_in_service', 'useful_life_years']);
+    const header = ['date', 'description', 'amount_positive_is_outflow', 'placed_in_service', 'useful_life_years'];
+    if (receiptTxIds) header.push('receipt');
+    rows.push(header);
     for (const c of report.capital.items) {
-      rows.push([c.date, c.description, c.amount.toFixed(2), c.placed_in_service || '', c.useful_life_years ?? '']);
+      const row = [c.date, c.description, c.amount.toFixed(2), c.placed_in_service || '', c.useful_life_years ?? ''];
+      if (receiptTxIds) row.push(receiptTxIds.has(c.id) ? 'yes' : 'MISSING');
+      rows.push(row);
     }
   }
   return rows.map((r) => r.map(csvCell).join(',')).join('\n') + '\n';

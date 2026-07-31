@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
-import { getOverview, getSpending, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES, setCategoryRule, applyCategoryRuleToHistory, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, invalidateEnvelopeSpending, isEnvelopeSchemaMissing, targetNeed, readyToAssign, monthKey, getEntities, createEntity, updateEntity, getTaxYearTransactions, getMileage, addMileage, deleteMileage } from "../dataAdapter.js";
+import { getOverview, getSpending, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES, setCategoryRule, applyCategoryRuleToHistory, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, invalidateEnvelopeSpending, isEnvelopeSchemaMissing, targetNeed, readyToAssign, monthKey, getEntities, createEntity, updateEntity, getTaxYearTransactions, getMileage, addMileage, deleteMileage, getReceiptTxIds } from "../dataAdapter.js";
 import { SCHEDULE_E_LINES, RENTS_KEY, DEFAULT_SCHEDULE_E_MAP, scheduleEReport, entityMonthly, personalDeductionReport, DEDUCTION_BUCKETS, DEFAULT_DEDUCTION_MAP, mileageDeduction, scheduleECsv } from "../taxReport.js";
 import { merchantKey } from "../txClassify.js";
 import { detectRecurring } from "../recurring.js";
@@ -9,6 +9,7 @@ import { displayBalance, isDebtAccount as isDebtType } from "../accountBalance.j
 import { runSync } from "../sync.js";
 import CsvImport from "./CsvImport.jsx";
 import SimpleFinConnect from "./SimpleFinConnect.jsx";
+import ReceiptSection from "./ReceiptSection.jsx";
 import { getSetting, setSetting } from "../db.js";
 import { ASSISTANT_MODELS, EFFORT_LEVELS, DEFAULT_MODEL, DEFAULT_EFFORT, estimateCostRange, formatCents } from "../assistantModels.js";
 import { useTheme, readToken, THEME_PREFS } from "../theme.js";
@@ -638,6 +639,11 @@ export default function Dashboard({ refreshTick = 0 }) {
   // seq check drops whatever was in flight.
   const [taxEpoch,setTaxEpoch]=useState(0);
   const [mileage,setMileage]=useState([]);
+  // Set of transaction ids that have a receipt photo, for the capital-expense
+  // no-receipt nag + the CSV column; null = the migration isn't installed, so
+  // the nag is skipped rather than firing on everything. Rides the tax cache:
+  // loaded with taxData, invalidated by invalidateTax.
+  const [receiptTxIds,setReceiptTxIds]=useState(null);
   // {emap:{[entityId]:{category:line|'rents'}}, dmap:{category:bucketKey}} —
   // household-shared (settings table): the tax mapping is about the money, not
   // the device.
@@ -951,11 +957,13 @@ export default function Dashboard({ refreshTick = 0 }) {
       getTaxYearTransactions(taxYear),
       getMileage(taxYear).catch(err=>{console.error("mileage load failed",err);return {mileage:[]};}),
       getSetting("tax:maps").catch(()=>null),
+      getReceiptTxIds().catch(err=>{console.error("receipt ids load failed",err);return null;}),
     ])
-      .then(([t,m,maps])=>{
+      .then(([t,m,maps,rids])=>{
         if(seq!==taxSeq.current)return;
         setTaxData(t);
         setMileage(m.mileage||[]);
+        setReceiptTxIds(rids);
         setTaxMaps(prev=>{
           if(prev)return prev; // don't clobber unsaved edits with a stale read
           let parsed=null;
@@ -2565,6 +2573,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                             <span style={{minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
                               {shortDate(c.date)} · {c.description}
                               {(!c.placed_in_service||!c.useful_life_years)&&<span style={{color:amber}}> · needs in-service date/life</span>}
+                              {receiptTxIds&&!receiptTxIds.has(c.id)&&<span style={{color:amber}}> · no receipt</span>}
                             </span>
                             <span style={{fontFamily:"'DM Mono',monospace",flexShrink:0}}>{fmtAuto(c.amount)}</span>
                           </div>
@@ -2593,7 +2602,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                   </div>
 
                   <button className="ibtn" style={{width:"100%",justifyContent:"center",marginTop:12}}
-                    onClick={()=>downloadCsv(`${e.name.replace(/[^\w-]+/g,"_")}_${taxYear}_scheduleE.csv`,scheduleECsv(rep,{entityName:e.name,year:taxYear}))}>
+                    onClick={()=>downloadCsv(`${e.name.replace(/[^\w-]+/g,"_")}_${taxYear}_scheduleE.csv`,scheduleECsv(rep,{entityName:e.name,year:taxYear,receiptTxIds}))}>
                     Export worksheet CSV
                   </button>
                 </>)}
@@ -2872,6 +2881,12 @@ export default function Dashboard({ refreshTick = 0 }) {
                 )}
               </>);
             })()}
+
+            {/* Receipt photos. Owns its own load/state (not a transactions
+                column, so it's outside the saveTx patch discipline); receipt
+                changes only need the tax cache dropped for the no-receipt
+                nag. key remounts on row change so state can't bleed. */}
+            <ReceiptSection key={selTx.id} txId={selTx.id} onChanged={invalidateTax}/>
 
             <div style={{borderTop:"1px solid var(--border)",margin:"12px 0"}}/>
             <button onClick={()=>saveTx({excluded:!selTx.excluded})}

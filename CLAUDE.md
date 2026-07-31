@@ -77,7 +77,7 @@ entry once shipped.
 | `src/theme.js` | Theme selection + application: localStorage pref (`mm:theme`), `resolveTheme`, `applyTheme` (sets `<html data-theme>` + syncs the `theme-color` metas), `subscribeTheme`/`subscribeSystemTheme`, `readToken` (runtime token read), `initTheme` (called from main.jsx), and the `useTheme` hook the header toggle uses. |
 | `src/paletteContrast.js` | Pure, zero imports: WCAG math + `readableInk`/`markColor`/`chipStyle`, which hold hue fixed and bisect lightness to guarantee 4.5:1 / 3:1 against a given surface. Never throws (runs during render). Covered by `test/paletteContrast.test.js`. |
 | `src/components/Dashboard.jsx` | Almost the entire UI — single file, inline styles, tabs: overview/categories/**budget**/transactions/accounts/trends/recurring/**tax**/ask. Shared mini-components: `Pill`, `Swatch`, `EditName`, `Sk` (skeleton), `Donut`, `DrillNum` (the tap-a-number affordance) ; envelope editors `AssignEdit`/`BudgetEdit`/`IncomeEdit` + the `TargetSheet`/`MoveSheet`/`CategorySheet` modals. |
-| `src/dataAdapter.js` | All Supabase reads + shapes consumed by Dashboard. Keep return shapes stable. Also holds the CSV/PDF-import writes (`findOrCreateManualInstitution`, `createManualAccount`, `getExistingTxIds`, `importCsvTransactions`, `isManualAccount`), the comparison-mode read `getAccountTransactionsInRange`, the backfill boundary `getFeedCoverageStart`, the learned-rule CRUD (`getCategoryRules`/`setCategoryRule`/`applyCategoryRuleToHistory`/`deleteCategoryRule`), the SimpleFIN predicates (`isSimpleFinAccount`, `ACCOUNT_TYPES`/`ACCOUNT_SUBTYPES`), the envelope I/O (`getEnvelopes`, `setAssigned`, `setCategoryRollover`, `setTargetKind`, `fundTargets`, `moveMoney`, `getBudgetIncome`/`setBudgetIncome`), the rental/tax I/O (`getEntities`/`createEntity`/`updateEntity`, `getTaxYearTransactions`, `getMileage`/`addMileage`/`deleteMileage`), and re-exports the pure helpers from `cashFlow.js` and `envelopes.js` so existing importers/harnesses keep working. |
+| `src/dataAdapter.js` | All Supabase reads + shapes consumed by Dashboard. Keep return shapes stable. Also holds the CSV/PDF-import writes (`findOrCreateManualInstitution`, `createManualAccount`, `getExistingTxIds`, `importCsvTransactions`, `isManualAccount`), the comparison-mode read `getAccountTransactionsInRange`, the backfill boundary `getFeedCoverageStart`, the learned-rule CRUD (`getCategoryRules`/`setCategoryRule`/`applyCategoryRuleToHistory`/`deleteCategoryRule`), the SimpleFIN predicates (`isSimpleFinAccount`, `ACCOUNT_TYPES`/`ACCOUNT_SUBTYPES`), the envelope I/O (`getEnvelopes`, `setAssigned`, `setCategoryRollover`, `setTargetKind`, `fundTargets`, `moveMoney`, `getBudgetIncome`/`setBudgetIncome`), the rental/tax I/O (`getEntities`/`createEntity`/`updateEntity`, `getTaxYearTransactions`, `getMileage`/`addMileage`/`deleteMileage`), the receipt I/O (`getReceipts`/`addReceipt`/`deleteReceipt`/`getReceiptUrl`/`getReceiptTxIds` — the app's only Supabase **Storage** use), and re-exports the pure helpers from `cashFlow.js` and `envelopes.js` so existing importers/harnesses keep working. |
 | `src/cashFlow.js` | The Trends cash-flow model (see Conventions), extracted pure: `markInternalTransfers` + `maxMatchTransfers` (Kuhn's), `cashIncome`/`cashSpending`, account-type predicates. Zero imports — plain-Node importable; covered by `test/cashFlow.test.js` incl. the brute-force matching parity check. |
 | `src/envelopes.js` | The envelope-budgeting model (see Roadmap), pure: `walkEnvelopes` (`available = assigned + carry − spent`), `targetNeed`, `readyToAssign`, `planMove`, month-key helpers. Zero imports — dataAdapter does the I/O and hands it plain arrays. Covered by `test/envelopes.test.js`. |
 | `src/taxReport.js` | The Tax tab's pure core, zero imports: `SCHEDULE_E_LINES` + `scheduleEReport` (category→line mapping, refund netting, capital expenses pulled out of the lines, a VISIBLE unmapped bucket — the Uncategorized lesson applied to tax lines), `entityMonthly` (per-property cash P&L), `personalDeductionReport` (charitable/medical/taxes-paid buckets), `MILEAGE_RATES` (effective-dated IRS rates — data that goes stale; verify at irs.gov each January) + `mileageDeduction`, and `scheduleECsv` (exports keep the stored positive=out sign; the column name says so). Covered by `test/taxReport.test.js`. |
@@ -92,6 +92,8 @@ entry once shipped.
 | `src/pdfExtract.js` | The only file that touches pdf.js. Lazy `import()` (keeps ~1.8MB out of the main bundle) of the **legacy** build, bundled locally (no CDN, CSP/offline-safe). Runs the parser on the **main thread** via `globalThis.pdfjsWorker` so `src/pdfPolyfills.js` is in scope for it (a Worker has its own globals). |
 | `src/pdfPolyfills.js` | Feature-detected polyfills pdf.js needs on iOS Safari — **`ReadableStream` async iteration** (the load-bearing one; see Gotchas), plus `.at` and `structuredClone` for genuinely old devices. |
 | `src/components/PdfTemplateEditor.jsx` | Visual "teach it once" editor: renders the statement from its own text runs, draggable column boundaries, per-column role selectors, live parsed-row count. Saved per account as `pdftpl:<accountId>` in `settings`. |
+| `src/components/ReceiptSection.jsx` | Receipt photos inside the transaction detail sheet: thumbnails + camera/library capture + full-size view/delete. Self-contained (own load, signed URLs minted per mount); tells Dashboard only `onChanged` → `invalidateTax`. |
+| `src/receiptImage.js` | Client-side receipt compression: canvas re-encode to ≤1600px JPEG 0.8 (~150–400 KB; also strips EXIF/GPS). Browser-only — no unit tests, verify on the real phone. |
 | `src/apiClient.js` | Client → api/ fetch wrappers (JWT attached). Was `plaidClient.js`; renamed when nothing in it was Plaid-specific any more. |
 | `src/components/AddAccount.jsx` | The "add a bank" button + the SimpleFinConnect modal it owns. Replaces `LinkAccount.jsx` (Plaid Link) in BOTH places that rendered it: the EmptyState CTA and App's floating action button. Talks to the server only when pressed — LinkAccount minted a link token on mount, so every app open hit the server before the user asked for anything. |
 | `src/sync.js` | Single-flight wrapper triggering server sync. |
@@ -414,6 +416,48 @@ option; that is a decision for Mason, not an automatic upgrade.
   the UI is rental-first on purpose. CSV export goes through the share sheet
   on iOS (blob-anchor downloads are unreliable in the installed PWA).
 
+### Receipt capture (decided, don't relitigate)
+The app's ONLY use of Supabase **Storage** — everything else is Postgres.
+
+- **PRIVATE bucket, signed URLs minted per render, never stored.** Receipts are
+  financial documents; a public bucket would make every path a permanent
+  unauthenticated URL. 1h expiry outlives any open sheet.
+- **The `receipts` TABLE is the source of truth — never `storage.list()`.**
+  Listing a bucket is not a query, and the row carries the transaction link.
+- **The storage object does NOT cascade with the row.** Storage objects aren't
+  foreign-keyable, so the UI deletes the OBJECT FIRST, then the row: a
+  half-finished delete leaves a listed receipt whose image 404s until retried,
+  never an invisible orphan. Rare orphans (~200 KB) are accepted rather than
+  reconciliation machinery.
+- **User-owned by construction** — sync and the importers never touch receipts,
+  so attachments survive re-pulls without needing an omit-from-upsert rule.
+- **`getReceiptTxIds()` returns `null`, not an empty Set, pre-migration**, so
+  the Tax tab can tell "no receipts yet" from "the feature isn't installed" and
+  switch the "no receipt" nag + the CSV column OFF instead of flagging every
+  capital expense. Same reasoning as the `Uncategorized` visible-unknown rule
+  applied in reverse: don't assert an absence you can't see.
+- **`ReceiptSection` is deliberately OUTSIDE the `saveTx` optimistic-patch
+  discipline.** Receipts aren't a `transactions` column, so no tx list renders
+  them and there is nothing to patch — the sheet is the single reader. It
+  reports `onChanged` → `invalidateTax` only because the Tax tab's nag reads
+  the id set.
+- **No `capture` attribute on the file input.** Its mere presence makes iOS open
+  the camera directly and skip the Take Photo / Photo Library chooser — but a
+  receipt snapped at the store and attached at home is the common case. Also
+  never list `image/heic` in `accept`: withheld, iOS transcodes to JPEG itself;
+  listed, it hands over a real HEIC that canvas can't decode.
+- **`addReceipt` is the app's only `supabase.rpc()` call** — it needs the
+  household id to build the storage path, which the client otherwise never
+  holds (RLS defaults fill it on table inserts). `current_household_id()` is a
+  public security-definer function, so PostgREST exposes it; the value is
+  cached per session. A future schema tidy that moves that function out of
+  `public` or revokes execute would break uploads ONLY, and silently.
+- **The `storage.objects` policy may not be creatable from the SQL Editor** —
+  on hosted Supabase that table is owned by `supabase_storage_admin`, so
+  `create policy` can fail with 42501. The migration wraps it in a DO block
+  that raises a NOTICE with Dashboard instructions instead of half-applying.
+  Watch the output when pasting, and round-trip one upload before merging.
+
 ## Merged features (live on main; details in code + PRs)
 
 - **Transaction editing** — detail sheet: recategorize (`user_category`),
@@ -616,10 +660,32 @@ option; that is a decision for Mason, not an automatic upgrade.
   fourth never-refetched list for `saveTx`/`learnMerchant` to patch. No
   migration, no adapter change.
 
+- **Receipt capture (v1, dumb attachment)** — a photo of a receipt attached to a
+  transaction, for tax substantiation (IRS Rev. Proc. 97-22 accepts electronic
+  images). The app's first Supabase **Storage** use: PRIVATE bucket `receipts`,
+  paths `<household_id>/<transaction_id>/<uuid>.<ext>`, a `storage.objects` policy
+  scoping on the first path segment, and a `receipts` TABLE as the index (one
+  row per image — multi-page receipts exist). `ReceiptSection.jsx` in the
+  transaction detail sheet (next to the entity/capital fields, the receipts that
+  matter most); `receiptImage.js` compresses to ≤1600px JPEG before upload.
+  Surfaces in the Tax tab as a "no receipt" nag on capital expenses and a
+  `receipt` column in `scheduleECsv`. Migration
+  `20260731000001_receipts.sql`, **applied to PROD 2026-07-31**. Decided,
+  don't relitigate — the list is in Conventions below. No OCR in v1: the
+  upgrade path is a later `api/receipt-ocr` route on the existing Anthropic
+  key, confirm-before-write. Review caught five, two worth remembering: a
+  `capture="environment"` attribute makes the iOS photo library unreachable
+  (a receipt snapped at the store and attached at home is the common case),
+  and the paginated `getReceiptTxIds` treated PostgREST's end-of-range 416 as
+  fatal — which Dashboard folds into the "not installed" sentinel, silently
+  switching the nag off at exactly 1000 receipts.
+
 ## Pending branches
 
 None.
 
+Receipt capture merged 2026-07-31, with `20260731000001_receipts.sql` applied
+to PROD ahead of the merge (additive, so the safe order).
 Category filter chips merged 2026-07-30 (no migration). Rental tracking +
 tax prep merged 2026-07-30, with
 `20260730000001_rental_tax.sql` applied to PROD ahead of the merge (additive, so
