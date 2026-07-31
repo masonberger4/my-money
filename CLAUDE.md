@@ -456,7 +456,9 @@ The app's ONLY use of Supabase **Storage** — everything else is Postgres.
   on hosted Supabase that table is owned by `supabase_storage_admin`, so
   `create policy` can fail with 42501. The migration wraps it in a DO block
   that raises a NOTICE with Dashboard instructions instead of half-applying.
-  Watch the output when pasting, and round-trip one upload before merging.
+  **But the SQL Editor doesn't SHOW notices** (see Gotchas) — verify with the
+  `pg_policies` query in Pending, don't trust "Success", and round-trip one
+  real upload before believing receipts work.
 
 ## Merged features (live on main; details in code + PRs)
 
@@ -670,7 +672,9 @@ The app's ONLY use of Supabase **Storage** — everything else is Postgres.
   matter most); `receiptImage.js` compresses to ≤1600px JPEG before upload.
   Surfaces in the Tax tab as a "no receipt" nag on capital expenses and a
   `receipt` column in `scheduleECsv`. Migration
-  `20260731000001_receipts.sql`, **applied to PROD 2026-07-31**. Decided,
+  `20260731000001_receipts.sql`, **run against PROD 2026-07-31** (table, index
+  and bucket confirmed; the `storage.objects` policy needs the check below —
+  see Pending). Decided,
   don't relitigate — the list is in Conventions below. No OCR in v1: the
   upgrade path is a later `api/receipt-ocr` route on the existing Anthropic
   key, confirm-before-write. Review caught five, two worth remembering: a
@@ -682,10 +686,33 @@ The app's ONLY use of Supabase **Storage** — everything else is Postgres.
 
 ## Pending branches
 
-None.
+None in code. **One outstanding OPS task, not a code task:** the receipts
+migration ran clean on PROD 2026-07-31 (`Success. No rows returned`), but the
+Supabase SQL Editor does not surface `raise notice`, so it is UNKNOWN whether
+the `storage.objects` policy was created or the DO block swallowed a 42501 —
+see the Gotcha. Settle it with:
 
-Receipt capture merged 2026-07-31, with `20260731000001_receipts.sql` applied
-to PROD ahead of the merge (additive, so the safe order).
+```sql
+select
+  to_regclass('public.receipts')                              as receipts_table,
+  (select count(*) from storage.buckets where id = 'receipts') as bucket,
+  (select count(*) from pg_policies
+     where schemaname = 'storage' and tablename = 'objects'
+       and policyname = 'receipts_objects_all')               as storage_policy;
+```
+
+`storage_policy = 1` ⇒ receipts work, nothing to do. `0` ⇒ create it as the
+`supabase_storage_admin` owner (a privileged connection, or Dashboard →
+Storage → Policies on bucket `receipts`, all operations, role `authenticated`,
+the SAME expression in USING **and** WITH CHECK):
+`bucket_id = 'receipts' and (storage.foldername(name))[1] = current_household_id()::text`.
+Until it exists every upload fails with an RLS violation, surfaced in the UI
+only as "Couldn't save the receipt" — an availability gap, never a leak (a
+private bucket denies by default). Round-trip one real upload + full-size view
++ delete on the iPhone once it's in.
+
+Receipt capture merged 2026-07-31, with `20260731000001_receipts.sql` run
+against PROD ahead of the merge (additive, so the safe order).
 Category filter chips merged 2026-07-30 (no migration). Rental tracking +
 tax prep merged 2026-07-30, with
 `20260730000001_rental_tax.sql` applied to PROD ahead of the merge (additive, so
@@ -963,6 +990,16 @@ tracker is the liability half of the future net-worth feature — the
   `POST /api/sync` and require **401** (`requireUser` rejecting an
   unauthenticated call proves the module loaded and ran); a module-load failure
   is a 500.
+- **The Supabase SQL Editor does NOT surface `raise notice`** — it reports
+  `Success. No rows returned` and the notice goes nowhere. So a DO block that
+  downgrades a failure to a NOTICE is invisible in exactly the tool this
+  project pastes migrations into: the receipts migration's 42501 guard looked
+  identical to a clean run. **A guard whose only output is a NOTICE is not a
+  guard here.** Pair any such block with a SELECT that asserts the object
+  exists (`pg_policies`, `to_regclass`, `storage.buckets`) and run it as a
+  separate statement — the assertion is the part you can actually see. Same
+  family as the SimpleFIN deadlock: a failure whose only tell is the ABSENCE
+  of something has no alarm anywhere.
 - Supabase SQL Editor runs as service_role: `auth.uid()` is NULL, so
   `household_id` defaults DON'T resolve — admin inserts there must set it
   explicitly. (Client inserts are fine — `auth.uid()` resolves.) Same trap in
