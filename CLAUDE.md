@@ -420,6 +420,20 @@ option; that is a decision for Mason, not an automatic upgrade.
   side-business/Schedule C build can reuse all of this without a migration;
   the UI is rental-first on purpose. CSV export goes through the share sheet
   on iOS (blob-anchor downloads are unreliable in the installed PWA).
+- **No learned rule sets an entity — deferred, not forgotten.** A
+  merchant→property rule would false-merge on mixed merchants (HOME DEPOT is
+  both the rental's roof and the household's shelves), and a silently
+  mis-attributed expense on a tax worksheet is the confidently-wrong failure
+  this codebase repeatedly refuses. Account-level default + per-row tagging is
+  the deliberate v1; revisit only as its own decision.
+- **Two review lows live unfixed in the applied migration** (append-only
+  history, so recorded here instead): `mileage_log.entity_id` CASCADEs on
+  entity delete while `transactions.entity_id` SET NULLs — unreachable today
+  because the UI archives entities and nothing deletes them; if deletion ever
+  gets a path, first ship a migration flipping the mileage FK to `set null`.
+  And `transactions_entity_idx`'s comment credits the tax-year scan, but the
+  client filters entities in JS — the index's real work is backing the FK's
+  SET NULL lookup.
 
 ### Receipt capture (decided, don't relitigate)
 The app's ONLY use of Supabase **Storage** — everything else is Postgres.
