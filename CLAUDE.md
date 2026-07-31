@@ -416,6 +416,42 @@ option; that is a decision for Mason, not an automatic upgrade.
   the UI is rental-first on purpose. CSV export goes through the share sheet
   on iOS (blob-anchor downloads are unreliable in the installed PWA).
 
+### Receipt capture (decided, don't relitigate)
+The app's ONLY use of Supabase **Storage** — everything else is Postgres.
+
+- **PRIVATE bucket, signed URLs minted per render, never stored.** Receipts are
+  financial documents; a public bucket would make every path a permanent
+  unauthenticated URL. 1h expiry outlives any open sheet.
+- **The `receipts` TABLE is the source of truth — never `storage.list()`.**
+  Listing a bucket is not a query, and the row carries the transaction link.
+- **The storage object does NOT cascade with the row.** Storage objects aren't
+  foreign-keyable, so the UI deletes the OBJECT FIRST, then the row: a
+  half-finished delete leaves a listed receipt whose image 404s until retried,
+  never an invisible orphan. Rare orphans (~200 KB) are accepted rather than
+  reconciliation machinery.
+- **User-owned by construction** — sync and the importers never touch receipts,
+  so attachments survive re-pulls without needing an omit-from-upsert rule.
+- **`getReceiptTxIds()` returns `null`, not an empty Set, pre-migration**, so
+  the Tax tab can tell "no receipts yet" from "the feature isn't installed" and
+  switch the "no receipt" nag + the CSV column OFF instead of flagging every
+  capital expense. Same reasoning as the `Uncategorized` visible-unknown rule
+  applied in reverse: don't assert an absence you can't see.
+- **`ReceiptSection` is deliberately OUTSIDE the `saveTx` optimistic-patch
+  discipline.** Receipts aren't a `transactions` column, so no tx list renders
+  them and there is nothing to patch — the sheet is the single reader. It
+  reports `onChanged` → `invalidateTax` only because the Tax tab's nag reads
+  the id set.
+- **No `capture` attribute on the file input.** Its mere presence makes iOS open
+  the camera directly and skip the Take Photo / Photo Library chooser — but a
+  receipt snapped at the store and attached at home is the common case. Also
+  never list `image/heic` in `accept`: withheld, iOS transcodes to JPEG itself;
+  listed, it hands over a real HEIC that canvas can't decode.
+- **The `storage.objects` policy may not be creatable from the SQL Editor** —
+  on hosted Supabase that table is owned by `supabase_storage_admin`, so
+  `create policy` can fail with 42501. The migration wraps it in a DO block
+  that raises a NOTICE with Dashboard instructions instead of half-applying.
+  Watch the output when pasting, and round-trip one upload before merging.
+
 ## Merged features (live on main; details in code + PRs)
 
 - **Transaction editing** — detail sheet: recategorize (`user_category`),
@@ -618,27 +654,32 @@ option; that is a decision for Mason, not an automatic upgrade.
   fourth never-refetched list for `saveTx`/`learnMerchant` to patch. No
   migration, no adapter change.
 
+- **Receipt capture (v1, dumb attachment)** — a photo of a receipt attached to a
+  transaction, for tax substantiation (IRS Rev. Proc. 97-22 accepts electronic
+  images). The app's first Supabase **Storage** use: PRIVATE bucket `receipts`,
+  paths `<household_id>/<transaction_id>/<uuid>.jpg`, a `storage.objects` policy
+  scoping on the first path segment, and a `receipts` TABLE as the index (one
+  row per image — multi-page receipts exist). `ReceiptSection.jsx` in the
+  transaction detail sheet (next to the entity/capital fields, the receipts that
+  matter most); `receiptImage.js` compresses to ≤1600px JPEG before upload.
+  Surfaces in the Tax tab as a "no receipt" nag on capital expenses and a
+  `receipt` column in `scheduleECsv`. Migration
+  `20260731000001_receipts.sql`, **applied to PROD 2026-07-31**. Decided,
+  don't relitigate — the list is in Conventions below. No OCR in v1: the
+  upgrade path is a later `api/receipt-ocr` route on the existing Anthropic
+  key, confirm-before-write. Review caught five, two worth remembering: a
+  `capture="environment"` attribute makes the iOS photo library unreachable
+  (a receipt snapped at the store and attached at home is the common case),
+  and the paginated `getReceiptTxIds` treated PostgREST's end-of-range 416 as
+  fatal — which Dashboard folds into the "not installed" sentinel, silently
+  switching the nag off at exactly 1000 receipts.
+
 ## Pending branches
 
-- **`claude/receipt-capture-tax-records-l0lt9a` — Receipt capture (v1, dumb
-  attachment).** Photo of a receipt attached to a transaction, for tax
-  substantiation (IRS Rev. Proc. 97-22 accepts electronic images). Migration
-  `20260731000001_receipts.sql` (additive — paste BEFORE merge): `receipts`
-  table (the index; one row per image) + the app's first Supabase **Storage**
-  use — PRIVATE bucket `receipts`, paths
-  `<household_id>/<transaction_id>/<uuid>.jpg`, storage.objects policy scoped
-  on the first path segment. Decisions (don't relitigate): display only via
-  short-lived signed URLs minted per render, never stored, never a public
-  bucket; the table is the source of truth, never `storage.list()`; the
-  storage object does NOT cascade with the row — UI deletes object first, rare
-  orphans accepted; user-owned by construction (sync/importers never touch it);
-  `getReceiptTxIds()` returns **null** (not an empty Set) pre-migration so the
-  Tax tab's "no receipt" nag and the CSV's receipt column switch off instead of
-  flagging everything; iOS capture via `<input type=file>` WITHOUT image/heic
-  in accept (iOS then transcodes to JPEG itself); client compresses via canvas
-  before upload. No OCR in v1 — a later `api/receipt-ocr` route on the
-  existing Anthropic key is the upgrade path, confirm-before-write.
+None.
 
+Receipt capture merged 2026-07-31, with `20260731000001_receipts.sql` applied
+to PROD ahead of the merge (additive, so the safe order).
 Category filter chips merged 2026-07-30 (no migration). Rental tracking +
 tax prep merged 2026-07-30, with
 `20260730000001_rental_tax.sql` applied to PROD ahead of the merge (additive, so
