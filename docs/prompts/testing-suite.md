@@ -20,8 +20,10 @@ Deliver in phases, in the order below (they're ranked by value). One commit
 per phase, `npm test` green at every commit. Phases 1 and 2–3 are each a
 natural one-session unit; if the suite grows past what one session can do
 well, stop at a phase boundary, push, and say what's left — don't rush the
-later phases. Mason may choose to review and merge after Phase 2 or 3 rather
-than holding all five phases on one long-lived branch.
+later phases. Prefer merging at a natural checkpoint (after Phase 1, and
+after Phases 2–3) over holding all five phases on one long-lived branch —
+CLAUDE.md's standing authorization (2026-07-31) covers merging test-suite
+work yourself once the bar below is met.
 
 **Resuming:** if `origin/claude/feature-testing-suite` already exists, a
 previous session started this work. Check it out, read its commit log to see
@@ -96,7 +98,12 @@ green-at-every-commit check assumes this baseline.
   pure helpers it re-exports, which Phases 2–3 change); and update the `test/`
   row to describe the new coverage.
 - Push with `git push -u origin claude/feature-testing-suite`; fetch/absorb
-  `origin/main` before every push. No PR unless Mason asks.
+  `origin/main` before every push, and again right before any merge to main.
+  Per the Development workflow's standing authorization (2026-07-31) you may
+  open the PR and merge to main yourself once the Acceptance bar holds — the
+  sanctioned pure-core extractions qualify (behavior-preserving, shapes
+  stable). But a bug fix that CHANGES behavior in a decided area, or anything
+  else risky or preference-shaped, still goes past Mason before it merges.
 
 ## Phase 1 — PDF importer, in depth (`test/pdfImport.test.js`)
 
@@ -570,5 +577,8 @@ uncovered committed with its REGRESSION test.
   would be skippable while satisfying every other bullet.
 - Final report: what's now covered, bugs found and fixed (with the failing
   test that caught each), and the deliberate gaps.
-- Branch pushed; no PR, no merge — Mason reviews the preview and says
-  "merge testing-suite".
+- Merging: the standing authorization applies — absorb `origin/main`, re-run
+  `npm test` + the build, then open the PR and merge. Exception: if the work
+  included behavior-changing bug fixes (anything beyond the sanctioned
+  extractions and additive tests), hold the merge and surface those to Mason
+  first.
