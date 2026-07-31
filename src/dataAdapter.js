@@ -1349,6 +1349,11 @@ export async function getReceiptTxIds() {
         hasReceipts = false;
         return null;
       }
+      // End-of-range on an exact-multiple-of-1000 result set is end-of-data,
+      // not a failure (the learned-rule candidate scan's bug — and here a
+      // throw is worse: Dashboard folds it into null, the "not installed"
+      // sentinel, silently switching the no-receipt nag off).
+      if (isRangeExhaustedError(error)) break;
       throw error;
     }
     for (const r of data) ids.add(r.transaction_id);

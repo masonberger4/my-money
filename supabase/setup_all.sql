@@ -725,17 +725,32 @@ insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_typ
 values ('receipts', 'receipts', false, 5242880, array['image/jpeg', 'image/png', 'image/webp'])
 on conflict (id) do nothing;
 
-drop policy if exists receipts_objects_all on storage.objects;
-create policy receipts_objects_all on storage.objects
-  for all to authenticated
-  using (
-    bucket_id = 'receipts'
-    and (storage.foldername(name))[1] = current_household_id()::text
-  )
-  with check (
-    bucket_id = 'receipts'
-    and (storage.foldername(name))[1] = current_household_id()::text
-  );
+-- CREATE/DROP POLICY require OWNERSHIP of storage.objects, which on hosted
+-- Supabase belongs to supabase_storage_admin — the SQL Editor's postgres role
+-- may not have it (42501 "must be owner of table objects"). The DO block turns
+-- that into a loud NOTICE instead of a half-applied paste: if it fires, create
+-- this exact policy in Dashboard -> Storage -> Policies (bucket 'receipts',
+-- all operations, authenticated, USING and WITH CHECK both
+--   (storage.foldername(name))[1] = current_household_id()::text
+-- ), then verify an upload + signed URL round-trips before merging. Until the
+-- policy exists uploads fail with an RLS violation (private bucket denies by
+-- default — an availability gap, never a leak).
+do $storage_policy$
+begin
+  drop policy if exists receipts_objects_all on storage.objects;
+  create policy receipts_objects_all on storage.objects
+    for all to authenticated
+    using (
+      bucket_id = 'receipts'
+      and (storage.foldername(name))[1] = current_household_id()::text
+    )
+    with check (
+      bucket_id = 'receipts'
+      and (storage.foldername(name))[1] = current_household_id()::text
+    );
+exception when insufficient_privilege then
+  raise notice 'Could not create the storage.objects policy (not table owner). Create policy receipts_objects_all by hand in Dashboard -> Storage -> Policies — see the comment above this block.';
+end $storage_policy$;
 
 -- ============ AUTO-CREATE HOUSEHOLD ============
 -- Links the household to the first (usually only) auth user. If you haven't

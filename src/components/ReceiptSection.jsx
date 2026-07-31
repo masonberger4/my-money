@@ -17,10 +17,18 @@ export default function ReceiptSection({ txId, onChanged }) {
   const [viewing, setViewing] = useState(null);   // receipt being shown full-size
   const fileRef = useRef(null);
   const seq = useRef(0);
+  // Object URLs minted for just-added photos (existing receipts use signed
+  // URLs, which need no cleanup). Revoked on row change/unmount — an object
+  // URL keeps its blob alive until revoked, and an installed PWA session
+  // lives long enough for ~300 KB per photo to add up.
+  const objectUrls = useRef([]);
+  useEffect(() => () => { for (const u of objectUrls.current) URL.revokeObjectURL(u); }, []);
 
   useEffect(() => {
     const s = ++seq.current;
     setReceipts(null); setUrls({}); setErr(null); setViewing(null);
+    for (const u of objectUrls.current) URL.revokeObjectURL(u);
+    objectUrls.current = [];
     getReceipts(txId)
       .then(async ({ receipts: rows }) => {
         if (s !== seq.current) return;
@@ -49,7 +57,11 @@ export default function ReceiptSection({ txId, onChanged }) {
       const { blob, mime } = await compressReceipt(file);
       const row = await addReceipt(txId, blob, mime);
       setReceipts(prev => [...(prev || []), row]);
-      try { setUrls(prev => ({ ...prev, [row.id]: URL.createObjectURL(blob) })); } catch {}
+      try {
+        const u = URL.createObjectURL(blob);
+        objectUrls.current.push(u);
+        setUrls(prev => ({ ...prev, [row.id]: u }));
+      } catch {}
       onChanged?.();
     } catch (e) {
       console.error("receipt add failed", e);
@@ -70,6 +82,9 @@ export default function ReceiptSection({ txId, onChanged }) {
       onChanged?.();
     } catch (e) {
       console.error("receipt delete failed", e);
+      // The full-size overlay stays open on failure, so the section-body
+      // error line would sit invisibly underneath it — the overlay renders
+      // `err` itself (below).
       setErr("Couldn't delete the receipt");
     } finally {
       setBusy(false);
@@ -94,10 +109,12 @@ export default function ReceiptSection({ txId, onChanged }) {
           {busy ? "Saving…" : <>📷<br />Add</>}
         </button>
       </div>
-      {/* capture="environment" opens the rear camera directly on iPhone; the
-          picker still offers the photo library. image/heic deliberately NOT
-          listed — see src/receiptImage.js. */}
-      <input ref={fileRef} type="file" accept="image/jpeg,image/png,image/webp" capture="environment"
+      {/* NO capture attribute: its mere presence makes iOS open the rear
+          camera directly, skipping the Take Photo / Photo Library chooser —
+          and a receipt snapped at the store then attached at home is the
+          common case. Without it iOS offers both. image/heic deliberately
+          NOT listed — see src/receiptImage.js. */}
+      <input ref={fileRef} type="file" accept="image/jpeg,image/png,image/webp"
         style={{ display: "none" }} onChange={onPick} />
       <div style={{ marginTop: 5, fontSize: 10, color: "var(--muted)", textAlign: "center" }}>
         Photos are kept with the transaction for tax records.
@@ -115,6 +132,7 @@ export default function ReceiptSection({ txId, onChanged }) {
               background: "none", color: "var(--danger)", fontFamily: "inherit", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
             Delete receipt
           </button>
+          {err && <div style={{ marginTop: 10, fontSize: 12, fontWeight: 600, color: "var(--danger)" }}>{err}</div>}
         </div>
       )}
     </>
