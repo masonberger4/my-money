@@ -446,6 +446,12 @@ The app's ONLY use of Supabase **Storage** — everything else is Postgres.
   receipt snapped at the store and attached at home is the common case. Also
   never list `image/heic` in `accept`: withheld, iOS transcodes to JPEG itself;
   listed, it hands over a real HEIC that canvas can't decode.
+- **`addReceipt` is the app's only `supabase.rpc()` call** — it needs the
+  household id to build the storage path, which the client otherwise never
+  holds (RLS defaults fill it on table inserts). `current_household_id()` is a
+  public security-definer function, so PostgREST exposes it; the value is
+  cached per session. A future schema tidy that moves that function out of
+  `public` or revokes execute would break uploads ONLY, and silently.
 - **The `storage.objects` policy may not be creatable from the SQL Editor** —
   on hosted Supabase that table is owned by `supabase_storage_admin`, so
   `create policy` can fail with 42501. The migration wraps it in a DO block
@@ -657,7 +663,7 @@ The app's ONLY use of Supabase **Storage** — everything else is Postgres.
 - **Receipt capture (v1, dumb attachment)** — a photo of a receipt attached to a
   transaction, for tax substantiation (IRS Rev. Proc. 97-22 accepts electronic
   images). The app's first Supabase **Storage** use: PRIVATE bucket `receipts`,
-  paths `<household_id>/<transaction_id>/<uuid>.jpg`, a `storage.objects` policy
+  paths `<household_id>/<transaction_id>/<uuid>.<ext>`, a `storage.objects` policy
   scoping on the first path segment, and a `receipts` TABLE as the index (one
   row per image — multi-page receipts exist). `ReceiptSection.jsx` in the
   transaction detail sheet (next to the entity/capital fields, the receipts that

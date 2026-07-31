@@ -9,7 +9,11 @@
 --                            USER-OWNED by construction — sync and the
 --                            importers never touch it, so attachments survive
 --                            re-pulls the same way user_category does.
---   * storage bucket 'receipts' + its storage.objects policy — the first
+--   * receipts_transaction_idx — the Tax tab asks "which transactions have a
+--                            receipt?" for a whole year, and the FK cascade
+--                            wants it anyway.
+--   * storage bucket 'receipts' (PRIVATE, 5 MB cap, image mimes only) + its
+--                            storage.objects policy — the first
 --                            Storage use in the app. PRIVATE bucket (financial
 --                            documents; display goes through short-lived
 --                            signed URLs, never public URLs). Object paths are
