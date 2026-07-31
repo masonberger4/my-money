@@ -1284,3 +1284,124 @@ export async function deleteMileage(id) {
   const { error } = await supabase.from('mileage_log').delete().eq('id', id);
   if (error) throw error;
 }
+
+// --- Receipts (photo attachments; migration 20260731000001) ------------------
+// Images live in the PRIVATE 'receipts' Storage bucket; the receipts table is
+// the index the app trusts (never storage.list()). Paths are
+// <household_id>/<transaction_id>/<uuid>.<ext> — the first segment is what the
+// storage policy scopes on. Display always goes through short-lived signed
+// URLs minted per render; a signed URL is never stored. USER-OWNED like
+// user_category: sync and the importers never touch any of this, so
+// attachments survive re-pulls. Degrades to "not installed" pre-migration
+// like the rental-tax reads.
+
+let hasReceipts = true;
+
+// The storage path needs the household id, which the client doesn't otherwise
+// hold (RLS defaults fill it on table inserts). current_household_id() is a
+// plain public-schema function, so PostgREST exposes it as an rpc. Cached —
+// the household can't change within a session.
+let cachedHouseholdId = null;
+async function getHouseholdId() {
+  if (cachedHouseholdId) return cachedHouseholdId;
+  const { data, error } = await supabase.rpc('current_household_id');
+  if (error) throw error;
+  if (!data) throw new Error('No household for this user');
+  cachedHouseholdId = data;
+  return data;
+}
+
+export async function getReceipts(transactionId) {
+  if (!hasReceipts) return { receipts: [] };
+  const { data, error } = await supabase
+    .from('receipts')
+    .select('id, transaction_id, storage_path, mime, created_at')
+    .eq('transaction_id', transactionId)
+    .order('created_at', { ascending: true });
+  if (error) {
+    if (isMissingTableError(error)) {
+      hasReceipts = false;
+      return { receipts: [] };
+    }
+    throw error;
+  }
+  return { receipts: data };
+}
+
+// The Tax tab's "which transactions have a receipt?" read: the whole table's
+// transaction_ids as a Set. The table is one row per photo a human took —
+// paginated anyway so a decade of receipts can't silently truncate.
+// Returns null (not an empty Set) when the migration isn't installed, so the
+// Tax tab can tell "no receipts yet" from "the feature doesn't exist" and
+// skip the no-receipt nag instead of flagging every capital expense.
+export async function getReceiptTxIds() {
+  if (!hasReceipts) return null;
+  const ids = new Set();
+  const page = 1000;
+  for (let from = 0; ; from += page) {
+    const { data, error } = await supabase
+      .from('receipts')
+      .select('transaction_id')
+      .order('id', { ascending: true })
+      .range(from, from + page - 1);
+    if (error) {
+      if (isMissingTableError(error)) {
+        hasReceipts = false;
+        return null;
+      }
+      throw error;
+    }
+    for (const r of data) ids.add(r.transaction_id);
+    if (data.length < page) break;
+  }
+  return ids;
+}
+
+// blob: the ALREADY-COMPRESSED image (src/receiptImage.js) — this function
+// does no resizing. Upload the object first, then insert the index row; a
+// failure between the two orphans a blob (accepted, ~200 KB) rather than
+// creating a row pointing at nothing.
+export async function addReceipt(transactionId, blob, mime = 'image/jpeg') {
+  const householdId = await getHouseholdId();
+  const ext = mime === 'image/png' ? 'png' : mime === 'image/webp' ? 'webp' : 'jpg';
+  const path = `${householdId}/${transactionId}/${crypto.randomUUID()}.${ext}`;
+  const { error: upErr } = await supabase.storage
+    .from('receipts')
+    .upload(path, blob, { contentType: mime, upsert: false });
+  if (upErr) throw upErr;
+  const { data, error } = await supabase
+    .from('receipts')
+    .insert({ transaction_id: transactionId, storage_path: path, mime })
+    .select('id, transaction_id, storage_path, mime, created_at')
+    .single();
+  if (error) {
+    // Roll the object back so a failed insert doesn't strand a blob the index
+    // will never find. Best-effort — if this remove also fails, the orphan is
+    // the accepted outcome.
+    await supabase.storage.from('receipts').remove([path]).catch(() => {});
+    throw error;
+  }
+  return data;
+}
+
+// Object first, then row: the row is the index, so deleting it last means a
+// half-completed delete leaves a still-listed receipt whose image 404s only
+// until retried, never an invisible orphan.
+export async function deleteReceipt(receipt) {
+  const { error: rmErr } = await supabase.storage
+    .from('receipts')
+    .remove([receipt.storage_path]);
+  if (rmErr) throw rmErr;
+  const { error } = await supabase.from('receipts').delete().eq('id', receipt.id);
+  if (error) throw error;
+}
+
+// Mint a fresh signed URL per render — 1 hour outlives any open sheet, and
+// nothing caches it (the service worker passes cross-origin through).
+export async function getReceiptUrl(storagePath) {
+  const { data, error } = await supabase.storage
+    .from('receipts')
+    .createSignedUrl(storagePath, 3600);
+  if (error) throw error;
+  return data.signedUrl;
+}
