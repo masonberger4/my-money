@@ -706,9 +706,9 @@ USING/WITH CHECK. **Cross-tenant denial was observed, not assumed**: as role
 household's own path was ALLOWED and an insert under a random foreign
 household id was REJECTED with an RLS violation — both inside a transaction
 deliberately ended by `raise exception`, so the verdict rode out in the error
-message (which the Editor does display) and nothing persisted. One smoke check
-remains, confidence-only: round-trip a real receipt on the iPhone (attach →
-full-size view, which exercises the signed-URL read → delete).
+message (which the Editor does display) and nothing persisted. The iPhone
+round-trip (attach → full-size view, i.e. the signed-URL read → delete) passed
+on the real phone the same day — receipts are verified end to end.
 
 Receipt capture merged 2026-07-31, with `20260731000001_receipts.sql` run
 against PROD ahead of the merge (additive, so the safe order).
