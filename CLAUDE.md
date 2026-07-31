@@ -112,10 +112,15 @@ entry once shipped.
    deploys (preview URLs need Mason's Vercel login; **previews share the PROD
    Supabase database** — schema-dependent branches need their migration landed
    first, and preview edits are real).
-3. Mason reviews the preview → says "merge <feature>" → merge to main. Don't
-   merge without that. Don't open PRs unless asked. Delete branches after merge
-   (this sandbox can't delete remote branches — Mason clicks it in the UI;
-   GitHub MCP tools may transiently disconnect — retry before treating as fatal).
+3. **Claude opens PRs and merges to main on its own** — standing authorization
+   from Mason, 2026-07-31 (before that every merge waited on his
+   "merge <feature>" after a preview review). The bar doesn't drop with the
+   gate: absorb main + green `npm test` + build (and screenshots for UI work)
+   before merging, and anything risky, preference-shaped, or
+   migration-sequenced still goes past Mason first. Delete branches after merge
+   (this sandbox can't delete remote branches, confirmed again 2026-07-31 —
+   Mason clicks it in the UI; GitHub MCP tools may transiently disconnect —
+   retry before treating as fatal).
 4. **`git fetch origin` and absorb main before EVERY feature-branch push, and
    again right before the merge to main.** Multiple sessions land features the
    same day, so main moves while a branch is in review — during the
@@ -456,9 +461,12 @@ The app's ONLY use of Supabase **Storage** — everything else is Postgres.
   on hosted Supabase that table is owned by `supabase_storage_admin`, so
   `create policy` can fail with 42501. The migration wraps it in a DO block
   that raises a NOTICE with Dashboard instructions instead of half-applying.
-  **But the SQL Editor doesn't SHOW notices** (see Gotchas) — verify with the
-  `pg_policies` query in Pending, don't trust "Success", and round-trip one
-  real upload before believing receipts work.
+  **But the SQL Editor doesn't SHOW notices** (see Gotchas) — verify with a
+  `pg_policies` SELECT, don't trust "Success", and round-trip one real upload
+  before believing receipts work. On THIS project the Editor's `postgres` role
+  turned out to hold the privilege (the bare DDL succeeded, 2026-07-31, so the
+  DO block's 42501 guard had likely never fired) — keep the guard anyway; a
+  fresh install elsewhere can still hit it.
 
 ## Merged features (live on main; details in code + PRs)
 
@@ -672,9 +680,9 @@ The app's ONLY use of Supabase **Storage** — everything else is Postgres.
   matter most); `receiptImage.js` compresses to ≤1600px JPEG before upload.
   Surfaces in the Tax tab as a "no receipt" nag on capital expenses and a
   `receipt` column in `scheduleECsv`. Migration
-  `20260731000001_receipts.sql`, **run against PROD 2026-07-31** (table, index
-  and bucket confirmed; the `storage.objects` policy needs the check below —
-  see Pending). Decided,
+  `20260731000001_receipts.sql`, **run against PROD 2026-07-31** (table, index,
+  bucket AND the `storage.objects` policy all confirmed live, cross-tenant
+  denial verified — see Pending). Decided,
   don't relitigate — the list is in Conventions below. No OCR in v1: the
   upgrade path is a later `api/receipt-ocr` route on the existing Anthropic
   key, confirm-before-write. Review caught five, two worth remembering: a
@@ -686,30 +694,21 @@ The app's ONLY use of Supabase **Storage** — everything else is Postgres.
 
 ## Pending branches
 
-None in code. **One outstanding OPS task, not a code task:** the receipts
-migration ran clean on PROD 2026-07-31 (`Success. No rows returned`), but the
-Supabase SQL Editor does not surface `raise notice`, so it is UNKNOWN whether
-the `storage.objects` policy was created or the DO block swallowed a 42501 —
-see the Gotcha. Settle it with:
-
-```sql
-select
-  to_regclass('public.receipts')                              as receipts_table,
-  (select count(*) from storage.buckets where id = 'receipts') as bucket,
-  (select count(*) from pg_policies
-     where schemaname = 'storage' and tablename = 'objects'
-       and policyname = 'receipts_objects_all')               as storage_policy;
-```
-
-`storage_policy = 1` ⇒ receipts work, nothing to do. `0` ⇒ create it as the
-`supabase_storage_admin` owner (a privileged connection, or Dashboard →
-Storage → Policies on bucket `receipts`, all operations, role `authenticated`,
-the SAME expression in USING **and** WITH CHECK):
-`bucket_id = 'receipts' and (storage.foldername(name))[1] = current_household_id()::text`.
-Until it exists every upload fails with an RLS violation, surfaced in the UI
-only as "Couldn't save the receipt" — an availability gap, never a leak (a
-private bucket denies by default). Round-trip one real upload + full-size view
-+ delete on the iPhone once it's in.
+None in code, and no outstanding ops tasks. The receipts storage-policy
+question is **SETTLED (2026-07-31)**: Mason re-ran the policy DDL **bare** in
+the SQL Editor (role `postgres` — outside a DO block, where a privilege
+failure is a visible ERROR instead of a swallowed NOTICE) and it succeeded, so
+the Editor CAN own `storage.objects` policies on this project and the
+migration's guard had most likely never fired at all. The `pg_policies`
+assertion then returned `storage_policy = 1` with exactly the intended
+USING/WITH CHECK. **Cross-tenant denial was observed, not assumed**: as role
+`authenticated` carrying the household user's JWT claims, an insert under the
+household's own path was ALLOWED and an insert under a random foreign
+household id was REJECTED with an RLS violation — both inside a transaction
+deliberately ended by `raise exception`, so the verdict rode out in the error
+message (which the Editor does display) and nothing persisted. One smoke check
+remains, confidence-only: round-trip a real receipt on the iPhone (attach →
+full-size view, which exercises the signed-URL read → delete).
 
 Receipt capture merged 2026-07-31, with `20260731000001_receipts.sql` run
 against PROD ahead of the merge (additive, so the safe order).
