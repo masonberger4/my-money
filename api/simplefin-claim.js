@@ -32,7 +32,9 @@ export default async function handler(req, res) {
   try {
     // Users paste all three of these, so accept all three: a setup token, the
     // claim URL it decodes to, or an access URL they already hold.
-    const decoded = decodeSetupToken(setup_token);
+    // Async since the host check gained DNS resolution (a public-looking name
+    // with a private A record is rejected here, before anything is stored).
+    const decoded = await decodeSetupToken(setup_token);
     const accessUrl =
       decoded.kind === 'access' ? decoded.url : await claimAccessUrl(decoded.url);
 
