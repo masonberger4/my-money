@@ -87,6 +87,8 @@ entry once shipped.
 | `src/csvImport.js` | Pure CSV-import core (no React/Supabase): `parseCsv`, `detectHeader`, `parseMoney`/`parseDate`, transfer flagging, dedup `plaid_tx_id` hashing, `buildRows`/`analyzeCsv` (both take `rules` + `overlapFrom`). Re-exports `guessCategory`/`transferRawCategory`/`invalidRuleCategories` from `txClassify.js`, which now owns the rule table. Plus `importPlan` (which sections the modal shows, derived from the file's dates vs the feed boundary) and the audit core: `reconcileCsv` (max-matching), `descSimilarity`, `csvDateRange`. Testable in isolation. |
 | `src/txClassify.js` | Learned-rule matching (`merchantKey`, `matchLearnedRule`) + the shared descriptor→category rule table + internal-transfer tagging (`guessCategory`, `transferRawCategory`, `classifyDescription`), validated against `ERA_CATEGORIES` at load. Lifted out of `csvImport.js` when SimpleFIN became a second caller: both feeds get a descriptor and no category, so both derive `mapped_category` at WRITE time from this one table. Pure JS — imported by server code too. |
 | `src/debtPayoff.js` | The Debt tab's pure core, zero imports: monthly amortization, snowball/avalanche ordering, extra-payment what-if, stall detection (payment ≤ interest) + `MAX_MONTHS` runaway guard. Covered by `test/debtPayoff.test.js` (hand-computed constants). |
+| `src/monthMemo.js` | Per-reload range-request memo (`createRangeMemo`), zero imports: promise-keyed entries so parallel `reloadData` callers join one in-flight fetch; a range CONTAINED in another is served by slicing the wider fetch's rows (byte-equivalent to the skipped query). Returns FRESH per-row copies every call because the caller pipelines (`applyAccountRules`/`markInternalTransfers`) mutate rows in place — the purchase model gets un-marked copies, `getCashFlow` marks its own. Evicts on rejection; dataAdapter clears it on every write path. `test/monthMemo.test.js`. |
+| `api/_lib/unlink.js` | Pure remove-bank decisions, zero I/O: the `unlink:<institutionId>` settings-key namespacing, `visibleAtHide` (which account ids to record), tolerant `parseRestoreSet`, `restoreSet` (recorded ∩ still-present — deliberately-hidden and post-remove-arrival accounts never unhidden), and the `permanent:true`+`confirm:'delete'` literal gate. `test/unlink.test.js`. |
 | `src/accountBalance.js` | `isDebtAccount` / `displayBalance` — the stored-positive → displayed-negative rule for credit and loan balances. Pure JS; imported by both Dashboard.jsx and the server-side assistant context. |
 | `api/_lib/simplefin.js` | SimpleFIN protocol layer: setup-token decode, claim POST, access-URL split (creds → Authorization header), the `/accounts` GET, and `normalizeAccountSet` (reads BOTH wire shapes, and splits feed messages into errors / advisories / capped). Also the **feed-message classifier** (`classifyFeedMessage`, allowlist polarity) and the lookback clamp (`clampStartDate`/`MAX_LOOKBACK_DAYS`) — both pure, covered by `test/simplefin.test.js` — plus the pure sync-level decisions `watermarkUpdate` (advance/hold/reset `last_pulled_at`) and `coverageShortfall`, which `api/sync.js` applies (`test/syncDecisions.test.js`). Also `inferAccountType`, `normalizeBalance`, the sign flip, and the env knobs (`test/simplefinNormalize.test.js`, `test/simplefinToken.test.js`). Server-only — handles bank credentials. |
 | `api/_lib/spendingContext.js` | The assistant's context: `buildSpendingContext` does the two queries and delegates ALL formatting to the pure `formatSpendingContext(accounts, txs)` — byte-deterministic per DB state (prompt caching), the fourth `displayBalance` display site. Covered by `test/spendingContext.test.js`. |
@@ -791,6 +793,65 @@ The app's ONLY use of Supabase **Storage** — everything else is Postgres.
   balance goes through `displayBalance`; totals shown negative to match the
   per-row sign. Migration `20260801000001_debt_tracker.sql` (ADDITIVE — safe
   to paste before the merge).
+- **Backlog sweep (2026-08-01, `docs/improvement-backlog-2026-08-01.md`
+  Section 2 — all shipped, no migrations)** — six items from the audit backlog,
+  each an isolated PR after an adversarial verify pass that repeatedly caught
+  real defects pre-merge:
+  - **DNS-level SSRF hardening** (`api/_lib/simplefin.js`): `assertPublicHost`
+    now RESOLVES a hostname via `node:dns/promises` and rejects if ANY answer is
+    private/reserved (a shared `isPrivateIp` classifier covers name-path and
+    resolved IPs; adds CGN 100.64/10, bare `::`, NAT64, mapped/compat IPv6, 6to4,
+    the doc/benchmark/reserved ranges). `decodeSetupToken`/`splitAccessUrl` are
+    async now; `fetchNoOpenRedirect` re-resolves every hop incl. hop 0. Still a
+    BLOCKLIST (self-hosted SimpleFIN servers stay legitimate); the
+    resolve-then-fetch TOCTOU window is accepted and commented. First orchestration
+    coverage too: `test/syncOrchestration.test.js` drives `pullOneAccessUrl`
+    against `test/helpers/fakeSupabase.js` (real `or=` grammar + ON CONFLICT abort
+    semantics).
+  - **Remove-bank data-loss guard** (Mason's option C): Remove is now a SOFT-HIDE
+    — `api/unlink-institution.js` records the account ids visible at hide time to
+    a `settings` key `unlink:<institutionId>` (explicit `household_id`), hides all
+    the org's accounts, keeps the disabled-institution tombstone, deletes NOTHING;
+    Restore (`api/simplefin-status.js`) unhides exactly the recorded-∩-still-present
+    set and consumes the record (so deliberately-hidden accounts stay hidden and
+    arrive-hidden is intact). A separate, buried "Delete permanently" (inside the
+    removed-banks list only) does the old cascade behind a server gate requiring
+    literal `{permanent:true, confirm:'delete'}`. Pure decisions in
+    `api/_lib/unlink.js` (`test/unlink.test.js`); the manual-institution branch
+    still hard-deletes (nothing recreates a manual org).
+  - **Manual transaction quick-add**: cash and anything the feed can't see is now
+    recordable. `addManualTransaction`/pure `buildManualTxRow` (dataAdapter) mint
+    `plaid_tx_id = 'manual:'+makeUuid()` (NOT the CSV content hash — a hand-typed
+    row has no file to re-import), `source='manual'`, derive `mapped_category` at
+    write time through the shared `classifyDescription` precedence, and gate to
+    manual + non-SimpleFIN accounts (the id-space overlap rule). A `QuickAddSheet`
+    in the Transactions header: Money out/in toggle over a positive amount (in →
+    negated), blur-committed date, optional auto-detect category. The new row
+    prepends into the month list (`patchAllTxLists` only maps existing ids), then
+    `reloadData` reconciles by real id. `test/manualTx.test.js`.
+  - **Fetch each month once per reload** (`src/monthMemo.js`): `reloadData`'s four
+    range queries collapse to one — the 6-month cash-flow window serves the
+    contained current/last-month ranges by a date-slice byte-equivalent to the
+    skipped query. Promise-keyed entries dedupe in-flight parallel callers;
+    **every consumer gets fresh per-row copies** because `applyAccountRules`/
+    `markInternalTransfers` mutate rows in place (the load-bearing caution — the
+    purchase model gets un-marked copies, `getCashFlow` marks its own). Evicts on
+    rejection and is cleared by every write path (updateTransaction/updateAccount/
+    import/rule-apply) as well as the gen bump. `test/monthMemo.test.js`.
+  - **Assistant context: recurring + envelope sections** (`api/_lib/spendingContext.js`):
+    the Ask tab can now answer "what am I subscribed to?" and "am I over budget?".
+    Recurring section from the already-fetched rows (clocked off the max tx date,
+    never `Date.now()`, so byte-determinism holds); envelope section via the pure
+    `walkEnvelopes` over a paginated `budget_months` read, omitted cleanly
+    pre-migration. Determinism re-pinned in `test/spendingContext.test.js`.
+  - **Recurring price-creep + due-status signals** (`src/recurring.js`, from the
+    earlier hardening batch): additive `priceCreep`/`medianAmount`/`dueStatus`
+    (`'due-soon'`/`'overdue'`, injectable `asOf`) — module-level; the Recurring-tab
+    badge UI is a decided-but-unbuilt Section-3 item.
+  Plus a per-instance assistant throttle (10/min → 429), claim-path log
+  sanitization, and the pure `attemptThrottleFilter` with its NULL-arm regression
+  test; and two exact-page-multiple 416 pagination fixes (spendingContext's new
+  paginators and `getAssignmentsThrough`) via `isRangeExhaustedError`.
 
 ## Pending branches
 
@@ -849,9 +910,16 @@ Plaid anymore. Deleting the five `PLAID_*` Vercel env vars was already done.
 `docs/improvement-backlog-2026-08-01.md` — a prioritized, file-cited list ready
 to hand to a session as a prompt. Batch 1 + Section 1 SHIPPED 2026-08-01 (the
 "Hardening batch" in Merged features) after a claim-verification pass corrected
-several entries; the file now holds only the remaining Section 2 projects and
-the ask-Mason-first Section 3 list, with those corrections folded in. Delete
-entries as they ship.
+several entries; **Section 2 is now fully shipped** (see the "Backlog sweep"
+entry in Merged features — SSRF, remove-bank, manual quick-add, month memo,
+assistant-context sections, plus the recurring signals from the hardening
+batch). The file now holds only the Section 3 list, most of it DECIDED by Mason
+2026-08-01 but unbuilt: recurring-signal badges on the Recurring tab, the
+cycling card-balance tile, Ask-tab sessionStorage + save-chat, per-envelope pace
+warnings, Trends biggest-movers, the Uncategorized teach-queue, and a UX-polish
+set. Two carry conditions: the Dashboard.jsx decomposition is DEFERRED (keep the
+single file during active development), and prompt-injection fencing in the
+assistant system prompt AWAITS Mason's explicit go. Delete entries as they ship.
 
 **Debt tracker SHIPPED** (2026-08-01, see Merged features; its migration is
 applied to PROD — the tab is fully live). Debt follow-ups (not built): manual debts (reuse the
@@ -1017,7 +1085,14 @@ surgically, never the foundation.
   decodes to, so both outbound calls go through `fetchNoOpenRedirect`
   (`redirect: 'manual'`, re-checking scheme + host at every hop). Plain `fetch`
   follows redirects by default, which walks straight past the private-address
-  check — a public claim URL can 302 to the cloud metadata endpoint.
+  check — a public claim URL can 302 to the cloud metadata endpoint. As of
+  2026-08-01 the host check is **DNS-level, not name-level**: `assertPublicHost`
+  (async) resolves the hostname and rejects if ANY answer is private/reserved, so
+  a public name with a private A record no longer passes; `fetchNoOpenRedirect`
+  re-resolves per hop incl. hop 0. It stays a BLOCKLIST because a self-hosted
+  SimpleFIN server is legitimate, and a resolve-then-fetch TOCTOU rebinding window
+  is knowingly accepted (connect-time IP pinning is impractical in serverless) —
+  the threat model is a phished setup token, not a remote attacker.
 - A missing-COLUMN error names its table too ("column simplefin_access.
   last_attempt_at does not exist"), so the graceful-degrade checks for a missing
   table and a missing column must be **separate** tests (`isMissingTableError` /
