@@ -82,6 +82,33 @@ export function targetNeed(row, { year, month }) {
   return left > 0 ? cents(left) : 0;
 }
 
+// Pace warning (display-only, opt-in per envelope) — is a fungible envelope
+// spending AHEAD of a flat month-pace? Compares the spent-so-far the walk
+// already produced against a linear expectation: fraction-of-month-elapsed ×
+// assigned. NEVER recomputes spending and NEVER touches the walk/available —
+// purely a UI signal. `today` is the real wall-clock local day ('YYYY-MM-DD');
+// pace is a question about the present, so a past or future viewed month never
+// warns, and neither does an envelope with no assignment (a fixed bill spends
+// 100% on day 1 by design — that's why the whole feature is opt-in). Returns
+// null when there's nothing to warn about, else the pace numbers.
+export const PACE_MARGIN = 0.1; // 10% of assigned headroom before "ahead"
+
+export function envelopePace({ assigned, spent, year, month, today }) {
+  const a = Number(assigned) || 0;
+  const s = Number(spent) || 0;
+  if (a <= 0 || s <= 0) return null;
+  const parts = String(today || '').split('-').map(Number);
+  const [ty, tm, td] = parts;
+  // Only the month in progress: a completed month isn't "ahead of pace", and a
+  // future month has nothing spent yet.
+  if (ty !== year || tm !== month || !td) return null;
+  const days = new Date(year, month, 0).getDate(); // month is 1-based → last day
+  const elapsed = Math.min(Math.max(td, 1), days) / days;
+  const expected = elapsed * a;
+  if (s <= expected + PACE_MARGIN * a) return null;
+  return { elapsed, expected: cents(expected), ahead: cents(s - expected) };
+}
+
 const DEFAULT_SETTING = { target: null, targetKind: 'monthly', targetDate: null, rollover: true };
 
 // assignments: [{ category, month, assigned }]  — month may be YYYY-MM or a date

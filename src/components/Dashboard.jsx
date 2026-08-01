@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from "react";
-import { getOverview, getSpending, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES, setCategoryRule, applyCategoryRuleToHistory, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, invalidateEnvelopeSpending, isEnvelopeSchemaMissing, targetNeed, readyToAssign, monthKey, getEntities, createEntity, updateEntity, getTaxYearTransactions, getMileage, addMileage, deleteMileage, getReceiptTxIds, getDebts, getBalanceSnapshots, addManualTransaction, createManualAccount } from "../dataAdapter.js";
+import { getOverview, getSpending, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES, setCategoryRule, applyCategoryRuleToHistory, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, invalidateEnvelopeSpending, isEnvelopeSchemaMissing, targetNeed, readyToAssign, envelopePace, getEnvPace, setEnvPace as persistEnvPace, monthKey, getEntities, createEntity, updateEntity, getTaxYearTransactions, getMileage, addMileage, deleteMileage, getReceiptTxIds, getDebts, getBalanceSnapshots, addManualTransaction, createManualAccount } from "../dataAdapter.js";
 import { payoffWhatIf, debtFreeMonth, isMortgage } from "../debtPayoff.js";
 import { SCHEDULE_E_LINES, RENTS_KEY, DEFAULT_SCHEDULE_E_MAP, scheduleEReport, entityMonthly, entityLedger, personalDeductionReport, DEDUCTION_BUCKETS, DEFAULT_DEDUCTION_MAP, mileageDeduction, scheduleECsv } from "../taxReport.js";
 import { merchantKey } from "../txClassify.js";
@@ -912,6 +912,10 @@ export default function Dashboard({ refreshTick = 0 }) {
   const [customColors,setCustomColors]=useState({});
   const [customNames,setCustomNames]=useState({});
   const [customCats,setCustomCats]=useState([]);
+  // Per-envelope pace-warning opt-in — { category: true }, default OFF. Stored
+  // in the settings table under 'env:pace' (a JSON blob, like dash:colors) so
+  // no migration is needed; read once on mount below.
+  const [envPace,setEnvPace]=useState({});
   const [ready,setReady]=useState(false);
   const [addingCat,setAddingCat]=useState(false);
   const [newName,setNewName]=useState("");
@@ -972,16 +976,18 @@ export default function Dashboard({ refreshTick = 0 }) {
   useEffect(()=>{
     async function load(){
       try {
-        const [c,n,cc,am,ae]=await Promise.all([
+        const [c,n,cc,am,ae,ep]=await Promise.all([
           getSetting("dash:colors").catch(()=>null),
           getSetting("dash:names").catch(()=>null),
           getSetting("dash:cats").catch(()=>null),
           getSetting("asst:model").catch(()=>null),
           getSetting("asst:effort").catch(()=>null),
+          getEnvPace().catch(()=>({})),
         ]);
         if(c)setCustomColors(JSON.parse(c));
         if(n)setCustomNames(JSON.parse(n));
         if(cc)setCustomCats(JSON.parse(cc));
+        if(ep)setEnvPace(ep);
         if(am&&ASSISTANT_MODELS[am])setAsstModel(am);
         if(ae&&EFFORT_LEVELS.includes(ae))setAsstEffort(ae);
       } catch{}
@@ -1212,8 +1218,13 @@ export default function Dashboard({ refreshTick = 0 }) {
   useEffect(()=>{
     if(tab!=="recurring"||recurring||recLoading)return;
     setRecLoading(true);
+    // Clock for dueStatus: the real wall-clock day, computed local (not the
+    // viewed month), because "is this subscription overdue?" is a question
+    // about today, not about whatever month the dashboard is scrolled to.
+    const d=new Date();
+    const today=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
     getRecurringCandidates()
-      .then(res=>setRecurring(detectRecurring(res.transactions)))
+      .then(res=>setRecurring(detectRecurring(res.transactions,today)))
       .catch(err=>{console.error(err);setRecurring([]);})
       .finally(()=>setRecLoading(false));
   },[tab,recurring,recLoading]);
@@ -1733,6 +1744,11 @@ export default function Dashboard({ refreshTick = 0 }) {
   const fundNeeds=budgetableRows.map(r=>({row:r,need:targetNeed(r,{year,month})})).filter(x=>x.need>0);
   const fundTotal=fundNeeds.reduce((s,x)=>s+x.need,0);
   const rta=envelopes?readyToAssign(income?.income,envelopes.totals):null;
+  // Wall-clock local day for the pace warning — the SAME reasoning as the
+  // Recurring tab's clock: "is this envelope spending ahead of pace?" is a
+  // question about the present moment, so it uses today, not the viewed month
+  // (envelopePace returns null unless today falls inside the viewed month).
+  const paceToday=(()=>{const d=new Date();return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;})();
   // Categories with no envelope yet, offered by the "budget another category"
   // picker. Custom categories are budgetable too.
   const allCatNames=[...ERA_CATEGORIES,...customCatNames.filter(n=>!ERA_CATEGORIES.includes(n))];
@@ -1802,6 +1818,15 @@ export default function Dashboard({ refreshTick = 0 }) {
     if(!next&&envMap[category]?.targetKind==="by_date"&&envMap[category]?.target!=null)return;
     return runEnvelopeWrite("the rollover setting",()=>setCategoryRollover(category,next));
   };
+  // Pace warning is a pure display preference (never touches the walk), so its
+  // toggle writes settings directly and optimistically — no runEnvelopeWrite,
+  // no envelope refetch.
+  function togglePace(category){
+    const next={...envPace};
+    if(next[category])delete next[category];else next[category]=true;
+    setEnvPace(next);
+    persistEnvPace(next).catch(err=>console.error("saving pace opt-in failed",err));
+  }
   const saveIncome=(val,scope)=>runEnvelopeWrite("the income",()=>setBudgetIncome({year,month},val,{scope}));
   const doMove=(from,to,amount)=>runEnvelopeWrite("the transfer",()=>moveMoney({from,to,amount},{year,month}));
   const saveTarget=(category,{amount,kind,date})=>runEnvelopeWrite("the target",async()=>{
@@ -2134,6 +2159,11 @@ export default function Dashboard({ refreshTick = 0 }) {
                 const barW=pot>0?Math.min(ratio,1)*100:0;
                 const barColor=markOn(over?OVER_MONEY:ratio>=0.8?"#FAC775":getColor(r.category),surf.track);
                 const need=budgetable?targetNeed(r,{year,month}):0;
+                // Pace warning: opt-in, budgetable envelopes only, off the
+                // spent the walk already produced (never recomputed) against a
+                // flat month-pace. Display-only — nothing here feeds available.
+                const paceOn=budgetable&&!!envPace[r.category];
+                const pace=paceOn?envelopePace({assigned:r.assigned,spent:r.spent,year,month,today:paceToday}):null;
                 return (
                   <div key={r.category} style={{marginBottom:16}}>
                     <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:5}}>
@@ -2179,6 +2209,17 @@ export default function Dashboard({ refreshTick = 0 }) {
                             :`${fmtAuto(r.target)}/mo`}
                         </button>
                         {need>0&&<span style={{color:"var(--accent)",fontSize:10}}>needs {fmtAuto(need)}</span>}
+                        {pace&&(()=>{const cs=chipOn("#C08A2E",surf.card);return(
+                          <span style={{fontSize:10,fontWeight:600,padding:"2px 6px",borderRadius:6,
+                            color:cs.ink,background:cs.bg,flexShrink:0}}
+                            title={`Spent ${fmtAuto(r.spent)} of the ${fmtAuto(r.assigned)} assigned, ahead of the ${Math.round(pace.elapsed*100)}% of the month elapsed`}>
+                            ⏱ ahead of pace</span>);})()}
+                        <button onClick={()=>togglePace(r.category)} disabled={envBusy}
+                          title={paceOn
+                            ?"Pace warning on — flags when spending runs ahead of the month. Tap to turn off"
+                            :"Warn when this envelope is spending ahead of a flat month pace (best for fungible categories like groceries, not fixed bills)"}
+                          style={{background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",padding:"0 2px",
+                            fontSize:13,lineHeight:1,color:paceOn?"var(--accent)":"var(--border)",flexShrink:0}}>⏱</button>
                         <button onClick={()=>setMoveFrom(r.category)} disabled={envBusy}
                           title="Move money between this envelope and another"
                           style={{background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",padding:"0 2px",
@@ -2212,7 +2253,7 @@ export default function Dashboard({ refreshTick = 0 }) {
               <div style={{marginTop:16,fontSize:11,color:"var(--muted)",background:"var(--bg)",borderRadius:8,padding:"8px 12px",lineHeight:1.6}}>
                 Tap the amount to assign real dollars · tap what's been spent to see the transactions behind it ·
                 ＋ target is what you want to fund · ⇄ moves money between envelopes · ⟳ carries a category's
-                leftover (or its overspend) into next month
+                leftover (or its overspend) into next month · ⏱ warns when a fungible envelope spends ahead of pace
               </div>
             </>)}
           </div>
@@ -3016,6 +3057,16 @@ export default function Dashboard({ refreshTick = 0 }) {
                 </div>
               ):recurring.map((r,i)=>{
                 const a=acctById(r.account_id);
+                // Quiet signal badges (not a nag banner): amber warn for a
+                // price hike or a charge due within a week, red danger for an
+                // overdue one. Colours are the app's warn/danger data hexes run
+                // through the contrast helpers against the card surface, same as
+                // the Categories over/under money pair.
+                const overdue=r.dueStatus==="overdue";
+                const dueSoon=r.dueStatus==="due-soon";
+                const dueHex=overdue?"#D85A30":"#C08A2E";
+                const dueChip=chipOn(dueHex,surf.card), creepChip=chipOn("#C08A2E",surf.card);
+                const badge={display:"inline-flex",alignItems:"center",gap:3,fontSize:10,fontWeight:600,padding:"2px 6px",borderRadius:6,whiteSpace:"nowrap"};
                 return (
                 <div key={r.key} className="tx" style={{animationDelay:i*.02+"s"}}>
                   <div style={{width:34,height:34,borderRadius:10,background:"var(--bg)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:15,flexShrink:0}}>{TX_ICONS[r.category]||"🔁"}</div>
@@ -3027,6 +3078,16 @@ export default function Dashboard({ refreshTick = 0 }) {
                     <div style={{marginTop:4,display:"flex",gap:5,flexWrap:"wrap"}}>
                       <Pill label={getName(r.category)} color={getColor(r.category)} surface={surf.card}/>
                       {a&&<Pill label={acctLabel(a)} color={acctColor(a)} surface={surf.card}/>}
+                      {r.priceCreep&&(
+                        <span style={{...badge,color:creepChip.ink,background:creepChip.bg}}>
+                          ↑ was {fmtX(r.medianAmount)} now {fmtX(r.lastAmount)}
+                        </span>
+                      )}
+                      {(overdue||dueSoon)&&(
+                        <span style={{...badge,color:dueChip.ink,background:dueChip.bg}}>
+                          {overdue?"⚠ overdue":"● due soon"}
+                        </span>
+                      )}
                     </div>
                   </div>
                   <div style={{fontSize:13,fontFamily:"'DM Mono',monospace",fontWeight:500,flexShrink:0}}>

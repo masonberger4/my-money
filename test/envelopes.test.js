@@ -21,6 +21,8 @@ import {
   monthsUntil,
   cents,
   MAX_WALK_MONTHS,
+  envelopePace,
+  PACE_MARGIN,
 } from '../src/envelopes.js';
 
 const a = (category, month, assigned) => ({ category, month, assigned });
@@ -379,4 +381,41 @@ test('assignment rows with an unusable month are dropped, not walked', () => {
 
 test('MAX_WALK_MONTHS is a runaway guard, not a budgeting horizon', () => {
   assert.ok(MAX_WALK_MONTHS >= 240, 'must comfortably outlast a real sinking fund');
+});
+
+// --- Pace warning (display-only, opt-in) -----------------------------------
+// A flat month-pace signal: warn when spent runs ahead of
+// elapsedFraction × assigned by PACE_MARGIN of assigned. Never touches the walk.
+test('envelopePace warns only when spending is ahead of a flat month pace', () => {
+  // Halfway through a 30-day month: expected = 0.5 × 300 = 150, margin = 30.
+  const mid = '2026-06-15'; // day 15 of 30 → elapsed 0.5
+  // Right on pace: no warning.
+  assert.equal(envelopePace({ assigned: 300, spent: 150, year: 2026, month: 6, today: mid }), null);
+  // Ahead but inside the margin (≤180): no warning.
+  assert.equal(envelopePace({ assigned: 300, spent: 179, year: 2026, month: 6, today: mid }), null);
+  // Ahead past the margin: warns, with the numbers.
+  const warn = envelopePace({ assigned: 300, spent: 220, year: 2026, month: 6, today: mid });
+  assert.ok(warn);
+  assert.equal(warn.expected, 150);
+  assert.equal(warn.ahead, 70);
+});
+
+test('envelopePace is silent for a non-current, no-assignment or unspent envelope', () => {
+  const today = '2026-06-15';
+  // Past month (viewing May while it is June): a completed month is not "ahead".
+  assert.equal(envelopePace({ assigned: 300, spent: 300, year: 2026, month: 5, today }), null);
+  // Future month.
+  assert.equal(envelopePace({ assigned: 300, spent: 0, year: 2026, month: 7, today }), null);
+  // No assignment (a fixed bill opts out by never assigning here) → never warns.
+  assert.equal(envelopePace({ assigned: 0, spent: 500, year: 2026, month: 6, today }), null);
+  // Nothing spent yet.
+  assert.equal(envelopePace({ assigned: 300, spent: 0, year: 2026, month: 6, today }), null);
+});
+
+test('envelopePace elapsed fraction tracks the real month length', () => {
+  // Day 1 of a 31-day month: barely elapsed, so almost any spend is ahead.
+  const warn = envelopePace({ assigned: 310, spent: 100, year: 2026, month: 7, today: '2026-07-01' });
+  assert.ok(warn);
+  assert.equal(Math.round(warn.expected), 10); // 1/31 × 310
+  assert.equal(PACE_MARGIN, 0.1);
 });
