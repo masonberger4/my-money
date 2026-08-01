@@ -216,10 +216,13 @@ playwright-core screenshot (`executablePath:'/opt/pw-browsers/chromium'`,
   negates debts — a card reads −$5,127.97. Keeping storage positive is what
   keeps payoff amortization and utilization (`current_balance / credit_limit`)
   natural; only presentation flips.
-  There are exactly four display sites — three in Dashboard.jsx (Overview
-  headline, accounts list, account sheet) and the assistant context in
+  Display sites (grep `displayBalance(`): Overview headline, accounts list,
+  account sheet, and the Debt tab's total / per-debt cards / sparkline endpoints
+  in Dashboard.jsx, plus the assistant context in
   `api/_lib/spendingContext.js`, which must match or the Ask tab contradicts the
-  screen. `fmtX` renders negatives as −$1,234.56.
+  screen. (An earlier "exactly four" count went stale the day the Debt tab
+  merged — count with grep, don't trust a number here.) `fmtX` renders
+  negatives as −$1,234.56.
 - Effective category = `user_category || mapped_category` (user override wins).
 - **A custom category is a category, not a kind of category.** `dash:cats` is a
   NAME REGISTRY (so a category with no spending yet can still be offered in the
@@ -845,10 +848,11 @@ env vars is done.
 
 **Improvement backlog (2026-08-01 six-dimension audit):**
 `docs/improvement-backlog-2026-08-01.md` — a prioritized, file-cited list ready
-to hand to a session as a prompt. Top three: the sw.js ok-guard (a failed
-navigation can become the permanent cached offline shell), a top-level error
-boundary + feed-health banner, and centralizing the `saveTx` optimistic patch
-(`patchAllTxLists` + failure rollback). Delete entries as they ship.
+to hand to a session as a prompt. Batch 1 + Section 1 SHIPPED 2026-08-01 (the
+"Hardening batch" in Merged features) after a claim-verification pass corrected
+several entries; the file now holds only the remaining Section 2 projects and
+the ask-Mason-first Section 3 list, with those corrections folded in. Delete
+entries as they ship.
 
 **Debt tracker SHIPPED** (2026-08-01, see Merged features; its migration is
 applied to PROD — the tab is fully live). Debt follow-ups (not built): manual debts (reuse the
