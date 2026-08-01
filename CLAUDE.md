@@ -808,11 +808,9 @@ message (which the Editor does display) and nothing persisted. The iPhone
 round-trip (attach → full-size view, i.e. the signed-URL read → delete) passed
 on the real phone the same day — receipts are verified end to end.
 
-Debt tracker merged 2026-08-01 (PR #10). **Its migration
-`20260801000001_debt_tracker.sql` is NOT yet confirmed applied to PROD** —
-additive, safe to paste any time; until then `getDebts()`/`getBalanceSnapshots()`
-degrade and the sync skips snapshot appends. When Mason confirms the paste,
-replace this note with "applied to PROD <date>".
+Debt tracker merged 2026-08-01 (PR #10); `20260801000001_debt_tracker.sql`
+**applied to PROD 2026-08-01** (bare DDL in the SQL Editor — the Debt tab is
+fully live).
 Tax-linkage visibility merged 2026-08-01 (no migration).
 Receipt capture merged 2026-07-31, with `20260731000001_receipts.sql` run
 against PROD ahead of the merge (additive, so the safe order).
@@ -823,8 +821,7 @@ the safe order). Envelope budgeting merged 2026-07-29 the same way.
 
 Phase 4 is fully landed: code merged and deployed, and
 `20260728000002_remove_plaid.sql` **applied on 2026-07-29** after its pre-flight
-fired once (below). Every migration through `20260731000001_receipts.sql` is
-live; the debt-tracker migration's status is the note above.
+fired once (below). Every migration in `supabase/migrations/` is live.
 
 **What the pre-flight caught, because it is the kind of thing that recurs.**
 Three `plaid_tokens` rows survived a phase-3 cleanup that had gone by what was
@@ -853,9 +850,8 @@ navigation can become the permanent cached offline shell), a top-level error
 boundary + feed-health banner, and centralizing the `saveTx` optimistic patch
 (`patchAllTxLists` + failure rollback). Delete entries as they ship.
 
-**Debt tracker SHIPPED** (2026-08-01, see Merged features; migration
-`20260801000001_debt_tracker.sql` is additive — the tab degrades gracefully
-until it's pasted). Debt follow-ups (not built): manual debts (reuse the
+**Debt tracker SHIPPED** (2026-08-01, see Merged features; its migration is
+applied to PROD — the tab is fully live). Debt follow-ups (not built): manual debts (reuse the
 `is_manual` machinery), per-debt payoff schedules view, and net worth over
 time — `balance_snapshots` is its shared groundwork. The whole off-Plaid
 migration is **DONE** — phases 1–4 shipped;
