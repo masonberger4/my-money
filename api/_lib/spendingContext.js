@@ -1,9 +1,114 @@
 import { getServiceClient } from './supabase.js';
 import { applyAccountRules } from '../../src/categoryMap.js';
 import { displayBalance } from '../../src/accountBalance.js';
+import { detectRecurring } from '../../src/recurring.js';
+import { aggregateEnvelopeSpending } from '../../src/spending.js';
+import { walkEnvelopes, shiftMonthKey } from '../../src/envelopes.js';
+import { isRangeExhaustedError } from '../../src/ruleHistory.js';
 
 function monthKey(dateStr) {
   return (dateStr || '').slice(0, 7);
+}
+
+// Missing-TABLE test only (the budget tables carry no optional columns this
+// module reads, so the sync.js missing-column companion isn't needed here).
+// Kept separate-and-narrow per the sync.js gotcha: a missing-column error names
+// its table too, so a loose "mentions the table" check would misread one.
+function isMissingTableError(error, table) {
+  if (!error) return false;
+  if (error.code === 'PGRST205' || error.code === '42P01') return true;
+  const blob = `${error.message || ''} ${error.details || ''}`.toLowerCase();
+  return (
+    blob.includes(String(table).toLowerCase()) &&
+    /could not find the table|relation .* does not exist/.test(blob)
+  );
+}
+
+// Envelope inputs for formatSpendingContext, or null when the budget tables
+// aren't installed / nothing is budgeted (section omitted either way).
+//
+// Cost decision (weighed, per the backlog): the full walk needs (a) a paginated
+// budget_months read — same discipline as dataAdapter's getAssignmentsThrough,
+// no date clamp, because dropping old assignment rows drops real dollars out of
+// rollover balances — (b) one small budgets read, and (c) ONE paginated
+// transactions read from the earliest assignment month (the already-fetched
+// 90-day/1500-row context slice can't serve it: it's both too short for carry
+// and row-capped, so "spent" would silently under-count). Each is a single
+// bounded table read that grows only with budgeting history — the identical
+// price the Budget tab pays on every load — so the full walk is included rather
+// than a degraded assigned-only summary.
+async function fetchBudgetInputs(supabase, householdId, visibleIds, year, month) {
+  const targetKey = `${year}-${String(month).padStart(2, '0')}`;
+
+  // (a) every assignment through the viewed month, paginated; (b) settings.
+  const assignments = [];
+  const page = 1000;
+  for (let from = 0; ; from += page) {
+    const { data, error } = await supabase
+      .from('budget_months')
+      .select('category, month, assigned')
+      .eq('household_id', householdId)
+      .lte('month', `${targetKey}-01`)
+      .order('month', { ascending: true })
+      .order('category', { ascending: true })
+      .range(from, from + page - 1);
+    if (error) {
+      if (isRangeExhaustedError(error)) break; // 416 = end-of-data (exact page multiple)
+      if (isMissingTableError(error, 'budget_months')) return null; // pre-migration
+      throw error;
+    }
+    assignments.push(...(data || []));
+    if (!data || data.length < page) break;
+  }
+
+  const { data: budgetRows, error: bErr } = await supabase
+    .from('budgets')
+    .select('category, monthly_limit, rollover, target_kind, target_date')
+    .eq('household_id', householdId);
+  if (bErr) {
+    if (isMissingTableError(bErr, 'budgets')) return null;
+    throw bErr;
+  }
+  const settings = (budgetRows || []).map(r => ({
+    category: r.category,
+    target: r.monthly_limit,
+    targetKind: r.target_kind,
+    targetDate: r.target_date,
+    rollover: r.rollover,
+  }));
+
+  if (!assignments.length && !settings.length) return null; // nothing budgeted
+
+  // (c) spending back to the earliest non-zero assignment (the walk can't use
+  // anything older — mirrors dataAdapter.getEnvelopes), visible accounts only:
+  // the pure layer never sees hidden rows.
+  let earliestKey = targetKey;
+  for (const row of assignments) {
+    const key = String(row.month).slice(0, 7);
+    if ((Number(row.assigned) || 0) !== 0 && key < earliestKey) earliestKey = key;
+  }
+  const spendTxs = [];
+  if (visibleIds.length) {
+    for (let from = 0; ; from += page) {
+      const { data, error } = await supabase
+        .from('transactions')
+        .select('account_id, date, amount, mapped_category, user_category, excluded')
+        .eq('household_id', householdId)
+        .in('account_id', visibleIds)
+        .gte('date', `${earliestKey}-01`)
+        .lt('date', `${shiftMonthKey(targetKey, 1)}-01`)
+        .order('date', { ascending: true })
+        .order('id', { ascending: true })
+        .range(from, from + page - 1);
+      if (error) {
+        if (isRangeExhaustedError(error)) break; // 416 = end-of-data (exact page multiple)
+        throw error;
+      }
+      spendTxs.push(...(data || []));
+      if (!data || data.length < page) break;
+    }
+  }
+  return { year, month, assignments, settings, spendTxs };
 }
 
 // Builds a compact plain-text snapshot of the household's finances for the
@@ -54,14 +159,31 @@ export async function buildSpendingContext(householdId) {
     txs = data || [];
   }
 
-  return formatSpendingContext(accounts, txs);
+  // The envelope month is "now" in UTC — same clock discipline as `since`:
+  // it shapes the queries and the section's month label, never a timestamp in
+  // the text, so same DB state + same day ⇒ same bytes.
+  const now = new Date();
+  const budget = await fetchBudgetInputs(
+    supabase,
+    householdId,
+    visibleIds,
+    now.getUTCFullYear(),
+    now.getUTCMonth() + 1
+  );
+
+  return formatSpendingContext(accounts, txs, { budget });
 }
 
 // Pure formatter: rows in (the exact column shapes the queries above select),
 // deterministic text out. Same accounts + same transactions ⇒ byte-identical
 // output — any change here must preserve that, or prompt caching stops
 // hitting.
-export function formatSpendingContext(accounts, txs) {
+// extras.budget (optional): { year, month, assignments, settings, spendTxs }
+// from fetchBudgetInputs. null/absent omits the envelope section (pre-migration
+// or nothing budgeted). All new sections stay pure and deterministic: the
+// recurring clock is the newest transaction date (below), the envelope walk is
+// the pure walkEnvelopes, and every list is stably sorted.
+export function formatSpendingContext(accounts, txs, extras = {}) {
   const visible = (accounts || []).filter(a => !a.hidden);
   const acctById = new Map((accounts || []).map(a => [a.id, a]));
 
@@ -110,6 +232,88 @@ export function formatSpendingContext(accounts, txs) {
   for (const key of sortedKeys) {
     const [month, cat] = key.split('|');
     lines.push(`- ${month} ${cat}: $${byMonthCat.get(key).toFixed(2)}`);
+  }
+
+  // --- Recurring subscriptions -----------------------------------------------
+  // detectRecurring runs over the SAME edit-honoring rows as everything above
+  // (excluded/loan rows already dropped, user_category/user_description already
+  // applied), adapted to the toTxShape field names it expects. The due-status
+  // clock is the NEWEST TRANSACTION DATE in the context — not wall-clock
+  // Date.now() — so the whole section is a pure function of the queried rows:
+  // same DB state ⇒ same bytes, even across days. (The context already embeds
+  // dates, so a day rollover changing the QUERY window may change the rows and
+  // therefore the text; what must never happen is two same-state calls
+  // differing, and a wall clock in the output would break exactly that.)
+  lines.push('');
+  lines.push('## Recurring charges (detected from the transactions below)');
+  let maxDate = '';
+  for (const t of usable) if (t.date && t.date > maxDate) maxDate = t.date;
+  const recurring = detectRecurring(
+    usable.map(t => ({
+      merchant_name: t.user_description || t.merchant_name,
+      description: t.description,
+      transaction_date: t.date,
+      amount: Number(t.amount),
+      category: t.mapped_category,
+      account_id: t.account_id,
+    })),
+    maxDate || null
+  )
+    // Stable order: amount desc, then key — detectRecurring's own sort leaves
+    // equal-amount ties in Map insertion order, which follows row order.
+    .sort((a, b) => b.monthlyAmount - a.monthlyAmount || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+  if (!recurring.length) {
+    lines.push('None detected.');
+  } else {
+    lines.push(`Due dates are relative to the newest transaction (${maxDate}).`);
+    for (const r of recurring) {
+      const bits = [
+        `- ${r.name}: ~$${r.monthlyAmount.toFixed(2)}/mo (${r.category}, every ~${r.avgGapDays} days, last ${r.lastDate}, next ~${r.nextDate})`,
+      ];
+      if (r.priceCreep) bits.push(`price increased: was $${r.medianAmount.toFixed(2)}, now $${r.lastAmount.toFixed(2)}`);
+      if (r.dueStatus) bits.push(r.dueStatus === 'overdue' ? 'overdue' : 'due soon');
+      lines.push(bits.join(' — '));
+    }
+  }
+
+  // --- Budget envelopes ------------------------------------------------------
+  const budget = extras.budget || null;
+  if (budget) {
+    // Spending rows need accounts.type for isSpend's loan guard; attach it
+    // from the accounts already in hand, then aggregate through the SAME
+    // pure fold the Budget tab uses so Spent can never disagree with it.
+    const spending = aggregateEnvelopeSpending(
+      (budget.spendTxs || []).map(t => ({
+        ...t,
+        accounts: { type: acctById.get(t.account_id)?.type },
+      }))
+    );
+    const walk = walkEnvelopes({
+      assignments: budget.assignments || [],
+      spending,
+      settings: budget.settings || [],
+      year: budget.year,
+      month: budget.month,
+    });
+    lines.push('');
+    lines.push(`## Budget envelopes (${walk.month})`);
+    lines.push('Envelope model: available = assigned + carried over - spent. Assigned/target are budget dollars (positive); spent is money out this month. A negative available is overspending carried in the category.');
+    for (const r of walk.categories) {
+      let target = '';
+      if (r.target != null) {
+        target =
+          r.targetKind === 'by_date'
+            ? `, target $${Number(r.target).toFixed(2)} by ${String(r.targetDate || '').slice(0, 7)}`
+            : `, target $${Number(r.target).toFixed(2)}/mo`;
+      }
+      lines.push(
+        `- ${r.category}: assigned $${r.assigned.toFixed(2)}, carried $${r.rolledOver.toFixed(2)}, spent $${r.spent.toFixed(2)}, available $${r.available.toFixed(2)}${target}`
+      );
+    }
+    const t = walk.totals;
+    lines.push(
+      `Totals: assigned $${t.assigned.toFixed(2)}, carried $${t.rolledOver.toFixed(2)}, spent $${t.spent.toFixed(2)}, available $${t.available.toFixed(2)}`
+    );
   }
 
   lines.push('');
