@@ -20,8 +20,34 @@ How to behave:
 - You cannot take actions (no moving money, no editing transactions). If asked, explain what the user can do in the app instead.`;
 
 const MAX_TURNS = 30;
+// Size caps on the incoming conversation — abuse protection, not UX (the
+// household JWT is shared and long-lived, and every request here spends real
+// API dollars): round numbers far above any real question, so a legitimate
+// user never sees them. Measured in chars, ≈ bytes for the plain text these
+// hold.
 const MAX_MSG_CHARS = 8000;
 const MAX_TOTAL_CHARS = 60000;
+
+// Per-household request throttle. In-memory and therefore BEST-EFFORT ONLY:
+// serverless instances are ephemeral and don't share memory, so a cold start
+// resets the window and concurrent instances each allow their own quota.
+// That's the honest trade for having no table — the goal is capping the burn
+// rate of a leaked token, not exact accounting.
+const THROTTLE_WINDOW_MS = 60000;
+const THROTTLE_MAX_REQUESTS = 10; // per household per window (per instance)
+const throttleBuckets = new Map(); // householdId -> [request timestamps, ms]
+
+function isThrottled(householdId, now = Date.now()) {
+  const cutoff = now - THROTTLE_WINDOW_MS;
+  const stamps = (throttleBuckets.get(householdId) || []).filter(t => t > cutoff);
+  if (stamps.length >= THROTTLE_MAX_REQUESTS) {
+    throttleBuckets.set(householdId, stamps);
+    return true;
+  }
+  stamps.push(now);
+  throttleBuckets.set(householdId, stamps);
+  return false;
+}
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
@@ -29,6 +55,13 @@ export default async function handler(req, res) {
   }
   const user = await requireUser(req, res);
   if (!user) return;
+
+  if (isThrottled(user.householdId)) {
+    return res.status(429).json({
+      error: 'too_many_requests',
+      message: 'Too many assistant requests — wait a minute and try again.',
+    });
+  }
 
   if (!process.env.ANTHROPIC_API_KEY) {
     return res.status(500).json({

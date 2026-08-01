@@ -1,7 +1,8 @@
 // Tests for src/recurring.js — client-side subscription detection, previously
 // zero coverage. The thresholds asserted here (≥3 charges, ±20% amount band
-// with ≥80% kept, median gap 28±4 days, ≥2/3 of gaps within ±4 of the median)
-// are the ACTUAL shipped values, pinned as documentation.
+// with ≥80% kept, median gap 28±4 days, ≥2/3 of gaps within ±4 of the median,
+// price creep strictly >5% over the median, due-soon within 7 days) are the
+// ACTUAL shipped values, pinned as documentation.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { detectRecurring, normalizeMerchant } from '../src/recurring.js';
@@ -154,6 +155,22 @@ test('priceCreep: strictly more than 5% over the median flags; exactly 5% does n
   assert.equal(r3.priceCreep, false);
 });
 
+test('priceCreep: +6% over the median flags, +4% does not, medianAmount surfaced', () => {
+  // Median of [20, 20, 20, last] is 20 for any last charge inside the kept band.
+  const dates = ['2026-01-05', '2026-02-04', '2026-03-06', '2026-04-05'];
+  const upSix = dates.map((d, i) => tx(d, i === 3 ? 21.2 : 20.0, 'SIX UP'));
+  const r1 = detectRecurring(upSix)[0];
+  assert.equal(r1.medianAmount, 20.0, 'the median the creep check compares against');
+  assert.equal(r1.lastAmount, 21.2);
+  assert.equal(r1.priceCreep, true, '+6% is creep');
+
+  const upFour = dates.map((d, i) => tx(d, i === 3 ? 20.8 : 20.0, 'FOUR UP'));
+  const r2 = detectRecurring(upFour)[0];
+  assert.equal(r2.medianAmount, 20.0);
+  assert.equal(r2.lastAmount, 20.8);
+  assert.equal(r2.priceCreep, false, '+4% hides inside the 5% threshold');
+});
+
 test('due status derives from an injected today; null today keeps the fields null', () => {
   // STREAMFLIX fixture: nextDate 2026-05-03.
   const rows = [
@@ -166,26 +183,53 @@ test('due status derives from an injected today; null today keeps the fields nul
   const bare = detectRecurring(rows)[0];
   assert.equal(bare.dueSoon, null);
   assert.equal(bare.overdue, null);
+  assert.equal(bare.dueStatus, null);
 
-  // 8 days out: not yet due soon.
+  // 8 days out: not yet due soon — dueStatus stays null even with a clock.
   const far = detectRecurring(rows, '2026-04-25')[0];
   assert.equal(far.dueSoon, false);
   assert.equal(far.overdue, false);
+  assert.equal(far.dueStatus, null);
 
   // Exactly 7 days out: due soon.
   const week = detectRecurring(rows, '2026-04-26')[0];
   assert.equal(week.dueSoon, true);
   assert.equal(week.overdue, false);
+  assert.equal(week.dueStatus, 'due-soon');
 
   // On the day itself: still due soon, not overdue.
   const onDay = detectRecurring(rows, '2026-05-03')[0];
   assert.equal(onDay.dueSoon, true);
   assert.equal(onDay.overdue, false);
+  assert.equal(onDay.dueStatus, 'due-soon');
 
   // The day after: overdue, no longer due soon.
   const late = detectRecurring(rows, '2026-05-04')[0];
   assert.equal(late.dueSoon, false);
   assert.equal(late.overdue, true);
+  assert.equal(late.dueStatus, 'overdue');
+});
+
+test('item shape is stable: existing fields unchanged, new fields additive', () => {
+  const rows = [
+    tx('2026-01-05', 15.99, 'STREAMFLIX.COM'),
+    tx('2026-02-03', 15.99, 'STREAMFLIX.COM'),
+    tx('2026-03-06', 15.99, 'STREAMFLIX.COM'),
+    tx('2026-04-04', 15.99, 'STREAMFLIX.COM'),
+  ];
+  const r = detectRecurring(rows, '2026-04-26')[0];
+  // The full key set — a rename or removal here breaks Dashboard's consumers.
+  assert.deepEqual(Object.keys(r).sort(), [
+    'account_id', 'avgGapDays', 'category', 'count', 'dueSoon', 'dueStatus',
+    'key', 'lastAmount', 'lastDate', 'medianAmount', 'monthlyAmount', 'name',
+    'nextDate', 'overdue', 'priceCreep',
+  ]);
+  // Pre-existing fields keep their values from the detection heuristic.
+  assert.equal(r.key, 'STREAMFLIX COM');
+  assert.equal(r.monthlyAmount, 15.99);
+  assert.equal(r.lastDate, '2026-04-04');
+  assert.equal(r.nextDate, '2026-05-03');
+  assert.equal(r.count, 4);
 });
 
 test('name and category come from the most frequent values in the group', () => {
