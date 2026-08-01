@@ -23,6 +23,7 @@ export {
   sumSpending,
   spendingGroups,
   toTxShape,
+  patchTxShape,
   effectiveCategory,
   aggregateEnvelopeSpending,
 } from './spending.js';

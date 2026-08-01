@@ -13,6 +13,7 @@ import {
   sumSpending,
   spendingGroups,
   toTxShape,
+  patchTxShape,
   effectiveCategory,
   aggregateEnvelopeSpending,
 } from '../src/spending.js';
@@ -240,6 +241,49 @@ test('source scan: the three reads that feed toTxShape select the accounts type'
     'getTransactionsBetween and searchTransactions must join accounts(hidden, type, …)'
   );
   assert.ok(src.includes('accounts(type)'), 'getAccountTransactions must select accounts(type)');
+});
+
+// --- patchTxShape: the optimistic-patch recompute -----------------------------
+// Dashboard's patchAllTxLists applies edits to already-shaped rows; the
+// contract is that the result equals reshaping the raw row with the edit
+// applied — for everything EXCEPT `counted`, which the shape can't recompute.
+
+test('patchTxShape(shaped, edit) equals a full re-shape of the edited raw row — counted aside', () => {
+  const raw = standardLedger().visibleRows().find(t => t.id === 'chk2'); // no user overrides
+  const shaped = toTxShape(raw);
+  const edits = [
+    { user_category: 'Dining out' },          // recategorize
+    { user_category: null },                   // reset to automatic
+    { user_description: 'Corner market' },     // rename
+    { user_description: null },                // reset name
+    { excluded: true },                        // exclude toggle
+    { entity_id: 'ent-rental' },               // rental tag
+    { is_capital: true, useful_life_years: 5 },// multi-field edit
+  ];
+  for (const fields of edits) {
+    const { counted: pc, ...patched } = patchTxShape(shaped, fields);
+    const { counted: rc, ...reshaped } = toTxShape({ ...raw, ...fields });
+    assert.deepEqual(patched, reshaped, JSON.stringify(fields));
+  }
+});
+
+test('REGRESSION: patchTxShape leaves `counted` STALE — even when the edit would flip isSpend', () => {
+  // Recategorizing into the transfer bucket WOULD flip isSpend, but the shape
+  // no longer carries accounts.type, so the pre-edit value deliberately stays
+  // (the saveTx Gotcha): its one reader renders from the refetched month list.
+  const raw = standardLedger().visibleRows().find(t => t.id === 'chk2');
+  const shaped = toTxShape(raw);
+  assert.equal(shaped.counted, true, 'fixture sanity: chk2 is counted');
+  assert.equal(patchTxShape(shaped, { user_category: TRANSFER_CATEGORY }).counted, true);
+  assert.equal(toTxShape({ ...raw, user_category: TRANSFER_CATEGORY }).counted, false, 'a real re-shape WOULD flip it');
+});
+
+test('patchTxShape never mutates its input row (rollback depends on the captured original)', () => {
+  const raw = standardLedger().visibleRows().find(t => t.id === 'chk2');
+  const shaped = toTxShape(raw);
+  const frozen = JSON.stringify(shaped);
+  patchTxShape(shaped, { user_category: 'Pets', user_description: 'X', excluded: true });
+  assert.equal(JSON.stringify(shaped), frozen);
 });
 
 // --- Property tests (seeded PRNG over random ledgers) ------------------------

@@ -19,6 +19,7 @@ the code on 2026-08-01 — do not re-audit; implement.
 - Standard flow for every batch: fetch + absorb `origin/main` → green `npm test` + placeholder-env build (`VITE_SUPABASE_URL=https://placeholder.supabase.co VITE_SUPABASE_ANON_KEY=placeholder npm run build`) → push feature branch → PR → merge (auto mode). Screenshot UI work at 390px via the mock harness.
 - One branch per coherent batch, cut from current main; merge before starting the next batch. Never rebase pushed branches — merge origin/main in.
 - No migrations are needed for anything below. Do not touch the sign conventions, the two spending models, theme-token rules, or anything in the Gotchas.
+- The Debt tracker has shipped and merged (PR #10) — do not rebuild it.
 - Section 2 items are one PR each. Two of them are flagged **ask Mason first** — the fix shape is preference-shaped even though the problem is verified.
 
 ## Section 2 — high-impact projects (one PR each)
@@ -40,4 +41,8 @@ All feasibility-verified 2026-08-01; corrections inline.
 ## Dropped (verified already-done or rejected 2026-08-01)
 - `pullWasClean` tests — already thorough in test/csvImport.test.js (the advisory REGRESSION included). Only `runSync`'s single-flight is untested, and it isn't pure (network); marginal value.
 - Per-household assistant rate limiter — needs a table/KV; over-engineering for a two-user app ("pragmatic > enterprise"). Char caps shipped instead.
-- `patchAllTxLists` helper — premise was wrong; the recompute was already centralized in the `apply` closure. Failure alert + refetch shipped instead.
+- `patchAllTxLists` helper — the recompute had already been centralized in
+  saveTx's `apply` closure (PR #12), which narrowed the premise; PR #15 then
+  superseded that closure anyway: a named `patchAllTxLists` covering all four
+  tx lists (incl. `selTx`) via the pure `patchTxShape` (`src/spending.js`,
+  tested), plus exact-pre-patch-row rollback on failure instead of refetch.
