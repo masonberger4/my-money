@@ -13,7 +13,7 @@ export { markInternalTransfers, cashIncome, cashSpending } from './cashFlow.js';
 
 // Same deal for the pure envelope model (src/envelopes.js) — Dashboard and any
 // harness import the helpers from one place.
-export { targetNeed, readyToAssign, monthKey, shiftMonthKey } from './envelopes.js';
+export { targetNeed, readyToAssign, envelopePace, monthKey, shiftMonthKey } from './envelopes.js';
 
 // The purchase-based spending model lives pure in src/spending.js (isSpend,
 // sumSpending, the Categories bucketing, toTxShape, the envelope fold) — same
@@ -629,6 +629,39 @@ export async function setBudgetIncome({ year, month }, amount, { scope = 'month'
     const { error } = await supabase.from('settings').delete().eq('key', monthKeyStr);
     if (error) throw error;
   }
+}
+
+// Per-envelope pace-warning opt-in. Stored as ONE settings row keyed
+// 'env:pace' whose value is a JSON map { category: true } — the dash:colors /
+// dash:cats pattern (a name-keyed JSON blob), chosen because adding a real
+// budgets column would need a migration and this is a pure display preference.
+// Default OFF for every category (absent key ⇒ {}), so a fixed bill that spends
+// 100% on day 1 never false-alarms; opting in is a deliberate per-envelope act.
+const ENV_PACE_KEY = 'env:pace';
+
+export async function getEnvPace() {
+  const { data, error } = await supabase
+    .from('settings')
+    .select('value')
+    .eq('key', ENV_PACE_KEY)
+    .maybeSingle();
+  if (error) throw error;
+  if (!data || data.value == null || String(data.value).trim() === '') return {};
+  try {
+    const parsed = JSON.parse(data.value);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+export async function setEnvPace(map) {
+  const clean = {};
+  for (const [k, v] of Object.entries(map || {})) if (v) clean[k] = true;
+  const { error } = await supabase
+    .from('settings')
+    .upsert({ key: ENV_PACE_KEY, value: JSON.stringify(clean) }, { onConflict: 'household_id,key' });
+  if (error) throw error;
 }
 
 // Per-(category, month) spend sums for the walk's range, memoised. The walk's
