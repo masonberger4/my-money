@@ -1,6 +1,7 @@
 import { supabase } from './supabaseClient.js';
 import { applyAccountRules } from './categoryMap.js';
-import { merchantKey, matchLearnedRule } from './txClassify.js';
+import { merchantKey } from './txClassify.js';
+import { applyRuleToHistory, isRangeExhaustedError } from './ruleHistory.js';
 import { markInternalTransfers, cashIncome, cashSpending } from './cashFlow.js';
 import { walkEnvelopes, monthKey, planMove } from './envelopes.js';
 import { isSpend, sumSpending, spendingGroups, toTxShape, aggregateEnvelopeSpending } from './spending.js';
@@ -290,15 +291,6 @@ export async function deleteCategoryRule(merchantKeyValue) {
   if (error) throw error;
 }
 
-// PostgREST answers a Range whose start is past the last row with 416
-// ("Requested range not satisfiable", PGRST103). That is end-of-data, not a
-// failure, and a paging loop that treats it as one dies on any result set whose
-// size is an exact multiple of the page.
-function isRangeExhaustedError(error) {
-  if (!error) return false;
-  return error.code === 'PGRST103' || /range not satisfiable/i.test(error.message || '');
-}
-
 // Apply a freshly-taught rule to history. Writes `mapped_category` only, so a
 // per-transaction `user_category` override always still wins — this changes
 // what the classifier *would* have said, not what the user decided.
@@ -313,52 +305,29 @@ function isRangeExhaustedError(error) {
 // unless the merchant truly appears nowhere else under a different
 // mapped_category. Swallowing the throw into a 0 makes a broken preview look
 // exactly like "nothing to update", which is how this failed silently.
+//
+// The whole loop — narrowing, PGRST103 paging contract, re-matching, dryRun —
+// lives in src/ruleHistory.js (pure, tested with fakes); this wrapper only
+// binds the real client.
 export async function applyCategoryRuleToHistory(descriptor, category, { dryRun = false } = {}) {
-  const key = merchantKey(descriptor);
-  if (!key) return 0;
-
-  // The match is on the NORMALIZED descriptor, which SQL can't reproduce, so
-  // candidates are narrowed server-side with ilike on the first token and the
-  // exact rule applied here.
-  const firstToken = key.split(' ')[0];
-  const pat = `%${firstToken.replace(/([\\%_])/g, '\\$1')}%`;
-
-  const matches = [];
-  const page = 1000;
-  for (let from = 0; ; from += page) {
-    const { data, error } = await supabase
-      .from('transactions')
-      .select('id, description, merchant_name, mapped_category')
-      .or(`description.ilike.${pat},merchant_name.ilike.${pat}`)
-      // Same tiebreaker reasoning as getTransactionsBetween: paging an
-      // unordered result set can drop or repeat rows across the boundary, and
-      // a dropped row here is a transaction the rule silently fails to fix.
-      .order('id', { ascending: true })
-      .range(from, from + page - 1);
-    // Asking for a page that starts past the end is PostgREST's 416, which
-    // supabase-js reports as an error — but it just means "no more rows", and
-    // it happens whenever the match count is an exact multiple of `page`.
-    if (error && isRangeExhaustedError(error)) break;
-    if (error) throw error;
-    for (const t of data) {
-      // Classify on the same string the write path uses.
-      const descriptors = [t.merchant_name, t.description].filter(Boolean);
-      const hit = descriptors.some(d => matchLearnedRule(d, { [key]: category }));
-      if (hit && t.mapped_category !== category) matches.push(t.id);
-    }
-    if (data.length < page) break;
-  }
-  if (dryRun || matches.length === 0) return matches.length;
-
-  const batch = 200;
-  for (let i = 0; i < matches.length; i += batch) {
-    const { error } = await supabase
-      .from('transactions')
-      .update({ mapped_category: category })
-      .in('id', matches.slice(i, i + batch));
-    if (error) throw error;
-  }
-  return matches.length;
+  return applyRuleToHistory({
+    descriptor,
+    category,
+    dryRun,
+    fetchPage: (pat, from, to) =>
+      supabase
+        .from('transactions')
+        .select('id, description, merchant_name, mapped_category')
+        .or(`description.ilike.${pat},merchant_name.ilike.${pat}`)
+        // Same tiebreaker reasoning as getTransactionsBetween: paging an
+        // unordered result set can drop or repeat rows across the boundary,
+        // and a dropped row here is a transaction the rule silently fails to
+        // fix.
+        .order('id', { ascending: true })
+        .range(from, to),
+    updateBatch: (ids, cat) =>
+      supabase.from('transactions').update({ mapped_category: cat }).in('id', ids),
+  });
 }
 
 // Budgets: one monthly dollar limit per category. No row = no budget.
