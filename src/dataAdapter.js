@@ -5,6 +5,7 @@ import { applyRuleToHistory, isRangeExhaustedError } from './ruleHistory.js';
 import { markInternalTransfers, cashIncome, cashSpending } from './cashFlow.js';
 import { walkEnvelopes, monthKey, planMove } from './envelopes.js';
 import { isSpend, sumSpending, spendingGroups, toTxShape, aggregateEnvelopeSpending } from './spending.js';
+import { createRangeMemo } from './monthMemo.js';
 
 // Re-export the pure cash-flow model (src/cashFlow.js) so existing importers
 // and the CSV-import dry-run harness keep working.
@@ -63,11 +64,11 @@ const TX_TAX_COLUMNS = ', entity_id, is_capital, placed_in_service, useful_life_
 const ACCOUNT_COLUMNS =
   'id, institution_id, plaid_account_id, name, official_name, nickname, color, mask, type, subtype, current_balance, available_balance, last_balance_at, hidden, institutions(name, display_name)';
 
-// `columns` / `markTransfers` exist for the envelope walk, which can span
-// years: it needs only the spending predicate's inputs, and never reads
-// `_internal`, so it skips both the wide column list and the O(V·E) transfer
-// matching. Every other caller gets the full rows and the matching as before.
-async function getTransactionsBetween(start, end, { columns, markTransfers = true } = {}) {
+// The RAW range fetch: pagination + the entity-column fallback, NO
+// per-model pipeline (applyAccountRules / markInternalTransfers) — those
+// mutate rows in place, so they run in getTransactionsBetween on each
+// caller's own copies, never on rows the memo below might share.
+async function fetchRawBetween(start, end, columns) {
   // RLS scopes every query to the signed-in household automatically.
   // The inner join on accounts drops transactions belonging to hidden
   // accounts from every dashboard view (spending, lists, trends).
@@ -97,17 +98,38 @@ async function getTransactionsBetween(start, end, { columns, markTransfers = tru
     }
     return rows;
   };
-  let rows;
   try {
-    rows = await fetchAll(!columns && transactionsHaveEntity);
+    return await fetchAll(!columns && transactionsHaveEntity);
   } catch (error) {
     if (!columns && transactionsHaveEntity && isMissingColumnError(error, 'entity_id')) {
       transactionsHaveEntity = false;
-      rows = await fetchAll(false);
-    } else {
-      throw error;
+      return await fetchAll(false);
     }
+    throw error;
   }
+}
+
+// Per-reload memo of the wide-column raw fetch (see src/monthMemo.js):
+// reloadData fires getSpending / getTransactions / getOverview / getCashFlow
+// in parallel and their ranges overlap — the memo dedupes in-flight requests
+// per range and serves contained ranges by slicing, so each reload fetches the
+// cash-flow window once instead of refetching the current month per caller.
+// Cleared by invalidateEnvelopeSpending(), the same reload-time invalidation
+// that drops spendCache. Callers always receive per-row shallow COPIES — the
+// pipelines below mutate rows (top-level fields only), and shared rows would
+// leak getCashFlow's `_internal` marks into the purchase-based model.
+const rangeMemo = createRangeMemo((start, end) => fetchRawBetween(start, end));
+
+// `columns` / `markTransfers` exist for the envelope walk, which can span
+// years: it needs only the spending predicate's inputs, and never reads
+// `_internal`, so it skips both the wide column list and the O(V·E) transfer
+// matching (and the range memo — its aggregation is memoised separately as
+// spendCache). Every other caller gets the full rows and the matching as
+// before, each applied to its own copies.
+async function getTransactionsBetween(start, end, { columns, markTransfers = true } = {}) {
+  const rows = columns
+    ? await fetchRawBetween(start, end, columns)
+    : await rangeMemo.getCopy(start, end);
   // Credit-card refunds become "Return" — not income, not spending.
   for (const t of rows) {
     t.mapped_category = applyAccountRules(t.mapped_category, t.amount, t.accounts?.type);
@@ -175,6 +197,10 @@ export async function updateTransaction(id, fields) {
   if ('useful_life_years' in fields) allowed.useful_life_years = fields.useful_life_years;
   const { error } = await supabase.from('transactions').update(allowed).eq('id', id);
   if (error) throw error;
+  // Not every reader reloads through reloadData (which clears the memo):
+  // saveTx only bumps taxEpoch, and the Tax refetch must not be served the
+  // pre-edit rows out of a warm memo.
+  rangeMemo.clear();
 }
 
 export async function getTransactions({ year, month }) {
@@ -228,6 +254,10 @@ export async function updateAccount(id, fields) {
     if (k in fields) allowed[k] = fields[k];
   const { error } = await supabase.from('accounts').update(allowed).eq('id', id);
   if (error) throw error;
+  // hidden/type edits change which rows the raw fetch returns / how they
+  // classify — drop any memoised ranges rather than trust every caller to
+  // reload through invalidateEnvelopeSpending.
+  rangeMemo.clear();
 }
 
 // --- Debt tracker ------------------------------------------------------------
@@ -398,7 +428,7 @@ export async function deleteCategoryRule(merchantKeyValue) {
 // lives in src/ruleHistory.js (pure, tested with fakes); this wrapper only
 // binds the real client.
 export async function applyCategoryRuleToHistory(descriptor, category, { dryRun = false } = {}) {
-  return applyRuleToHistory({
+  const result = await applyRuleToHistory({
     descriptor,
     category,
     dryRun,
@@ -416,6 +446,10 @@ export async function applyCategoryRuleToHistory(descriptor, category, { dryRun 
     updateBatch: (ids, cat) =>
       supabase.from('transactions').update({ mapped_category: cat }).in('id', ids),
   });
+  // A real apply rewrites other rows' mapped_category; the recurring/tax
+  // refetches it triggers don't pass through invalidateEnvelopeSpending.
+  if (!dryRun) rangeMemo.clear();
+  return result;
 }
 
 // Budgets: one monthly dollar limit per category. No row = no budget.
@@ -607,6 +641,10 @@ let spendGen = 0;
 export function invalidateEnvelopeSpending() {
   spendCache = null;
   spendGen++;
+  // The raw range memo lives and dies by the same moment: reloadData calls
+  // this before its parallel fetches, so each reload starts from an empty memo
+  // and shares within itself only.
+  rangeMemo.clear();
 }
 
 async function getEnvelopeSpending(start, end) {
@@ -1123,6 +1161,7 @@ export async function importCsvTransactions(accountId, rows, source = 'csv') {
     if (error) throw error;
     written += slice.length;
   }
+  rangeMemo.clear(); // new rows exist — memoised ranges are stale
   return written;
 }
 
