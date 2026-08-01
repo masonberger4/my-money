@@ -760,6 +760,21 @@ The app's ONLY use of Supabase **Storage** — everything else is Postgres.
   (browser+Storage, verified on the real phone), SQL/RLS tests (worthwhile
   follow-up), live SimpleFIN/Supabase integration.
 
+- **Debt tracker (v1)** — new **Debt** tab per the settled spec (balance from
+  SimpleFIN, APR/min/limit/due-date hand-entered and user-owned): per-debt
+  cards with utilization bars, snowball/avalanche payoff projection with
+  extra-$/mo what-if (mortgages/loans excluded by default, opt-in toggle),
+  total-owed-over-time sparkline off daily `balance_snapshots` appended by the
+  sync (household_id explicit under service_role; only on balance change).
+  Pure core `src/debtPayoff.js` (stall detection when payments don't cover
+  interest, MAX_MONTHS runaway guard; `test/debtPayoff.test.js`,
+  hand-computed constants). `getDebts()`/`getBalanceSnapshots()` degrade
+  pre-migration (missing-column vs missing-table checked separately);
+  `updateAccount`'s whitelist gained the liability columns. Every displayed
+  balance goes through `displayBalance`; totals shown negative to match the
+  per-row sign. Migration `20260801000001_debt_tracker.sql` (ADDITIVE — safe
+  to paste before the merge).
+
 ## Pending branches
 
 None in code. ONE outstanding ops task (not code): the three orphan Plaid
@@ -811,8 +826,12 @@ env vars is done.
 
 ## Roadmap
 
-**Next: Debt tracker** — **balance-only + hand-entered APR/min** under SimpleFIN
-(spec below). The whole off-Plaid migration is **DONE** — phases 1–4 shipped;
+**Debt tracker SHIPPED** (2026-08-01, see Merged features; migration
+`20260801000001_debt_tracker.sql` is additive — the tab degrades gracefully
+until it's pasted). Debt follow-ups (not built): manual debts (reuse the
+`is_manual` machinery), per-debt payoff schedules view, and net worth over
+time — `balance_snapshots` is its shared groundwork. The whole off-Plaid
+migration is **DONE** — phases 1–4 shipped;
 the app is SimpleFIN + CSV/PDF import with no Plaid anywhere. Later (discussed,
 not committed): net worth over time, cash-flow forecast, savings goals, CSV/PDF
 export, sign-out button. **Envelope follow-ups** (the tab is shipped, these are
@@ -897,84 +916,6 @@ outbound-only to Supabase, `household_id` set explicitly under service_role),
 reusing the dormant `pull_jobs` / `mfa_prompts` / `pending_items` schema + the
 24h `check_pull_job_constraints` rate limiter; real ToS/lockout risk → scoped
 surgically, never the foundation.
-
-### Debt tracker — build spec
-**NOTE (data source, decided):** debt data is **balance-only + hand-entered
-APR/min** — SimpleFIN has no Liabilities feed. `current_balance` comes from
-the feed; `apr`/`minimum_payment` are user-entered (kept out of the sync
-upsert, like every user-owned column).
-
-Goal: track the household's debts (mortgage, credit cards, personal/student
-loans) with balances, APR, minimum payments, and payoff projections. Balances
-come from SimpleFIN-fed accounts (or a manual account's hand-typed balance);
-the app only ever saw the *payments* leaving checking, so connecting the debt
-accounts is the point.
-
-Foundation already shipped: `api/sync.js` `ALLOWED_TYPES` includes `'loan'`,
-so a fed mortgage/loan account syncs its balance and appears in the Accounts
-tab (`getAccounts` has no type filter; `getOverview`'s header list is still
-credit+depository by design — the Debt view owns debts).
-
-(Historical: the original spec's steps 1–2 wired Plaid's Liabilities product —
-`additional_consented_products`, `/liabilities/get`, per-APR breakdowns. Plaid
-is gone; those steps died with it and live only in git history. The schema
-below deliberately keeps the same column names so a richer feed could refill
-them later.)
-
-Build steps:
-1. **Schema (additive on `accounts`):** `apr`, `minimum_payment`,
-   `credit_limit`, `statement_balance`, `next_payment_due_date`,
-   `interest_rate`, `original_balance` (all nullable numeric/date; under
-   SimpleFIN they are hand-entered in the Debt view and NEVER written by the
-   sync). Rates are stored as **percent**; payoff/getDebts read one normalized
-   `debtRate = apr ?? interest_rate` and divide by 100 for monthly math.
-   `current_balance` is the outstanding balance, **stored** positive = owed —
-   payoff math and utilization both want that; the Debt view must render it
-   through `displayBalance` like every other balance.
-2. **Balance history:** `balance_snapshots (id, account_id, household_id,
-   captured_on date, balance numeric, unique(account_id, captured_on))` — same
-   RLS shape as other tables. **`balance` mirrors the STORED convention** (it is
-   `accounts.current_balance` at capture time, so debts positive); the chart
-   flips at render via `displayBalance` like everywhere else. Do NOT store debts
-   negative here to make a net-worth `SUM()` easier — mixing both signs in one
-   column is unrecoverable once rows accumulate. Sync appends a row only when the balance changed
-   (≤ one/day; upsert on the unique key) and — running as **service_role** —
-   must set `household_id` explicitly (the `current_household_id()` default is
-   NULL there; see Gotchas). Powers the debt-over-time chart AND seeds net worth.
-3. **`src/debtPayoff.js`** (pure, like `recurring.js`): month-by-month
-   amortization from `current_balance` + `apr` + `minimum_payment`; **snowball**
-   (smallest balance first) vs **avalanche** (highest APR first) vs extra-$/mo
-   what-if → debt-free date, total interest, interest saved.
-4. **`getDebts()` in dataAdapter:** accounts where `type in ('credit','loan')`
-   with the liability fields + computed totals (total debt, total minimums).
-   Compute totals from the STORED positives; then decide deliberately how the
-   total is shown, because a positive "total debt" sitting above negative
-   per-card rows is exactly the inconsistency `displayBalance` exists to remove.
-5. **Debt view** (new "Debt" tab): per-debt cards (balance, APR, min, due date,
-   card utilization = `current_balance/credit_limit`), totals (exclude hidden
-   accounts), payoff projection (snowball/avalanche toggle + extra-payment slider
-   → debt-free date + interest saved). **Mortgages dominate a snowball/avalanche
-   and make "debt-free date" meaningless — exclude mortgages from the payoff
-   projection by default** (still list them; keep out of the debt-free calc or
-   behind an opt-in toggle). Card progress uses utilization (cards have no
-   `original_balance`).
-
-Keep out of spending/cash-flow: loan/credit accounts are debts, not spend —
-`isCheckingAccount`/`isHouseholdDepository` already exclude them from cash-flow,
-and `sumSpending`/`getSpending`/`buildSpendingContext` now **guard
-`type === 'loan'`** (done on the SimpleFIN branch — Plaid loans carry no
-transactions, but SimpleFIN ships the servicer's real list, which double-counted
-the mortgage against the checking outflow). Never guard out `credit`, whose
-*purchases* must still count. Card *payments* from checking stay transfers.
-
-Manual fallback (FOLLOW-UP, not v1): the CSV-import manual-account machinery
-(`is_manual`, manual institution) has **shipped** — a manual debt can reuse it
-(`is_manual`, `type='credit'|'loan'`, hand-entered balance/apr/min). **v1 is
-SimpleFIN-fed debts only** (balance from the feed; APR/min hand-entered) —
-which is the point (the household wants the balances automatic).
-
-Debt tracker is the liability half of the future net-worth feature — the
-`balance_snapshots` table is shared groundwork.
 
 ## Gotchas
 
