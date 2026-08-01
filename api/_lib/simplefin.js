@@ -25,6 +25,8 @@
 // UNRESOLVED (deliberately): how a credit-card / loan balance is SIGNED. No
 // spec text, no library, and no fixture settles it — see normalizeBalance().
 
+import { lookup as dnsLookup } from 'node:dns/promises';
+
 const DEFAULT_TIMEOUT_MS = 30_000;
 
 // SimpleFIN ids are stable, so they are the dedup key. Prefixed the way CSV
@@ -120,48 +122,195 @@ function isHttpsUrl(value) {
 // household login is trusted, but a cloud metadata endpoint is one paste away
 // from a phished token, and the check is nearly free. Hosts are blocked rather
 // than allow-listed because a self-hosted SimpleFIN server is legitimate.
-const BLOCKED_HOST_RE = new RegExp(
-  [
-    '^localhost$',
-    '\\.local$',
-    '\\.internal$',
-    '^127\\.',
-    '^0\\.',
-    '^10\\.',
-    '^192\\.168\\.',
-    '^172\\.(1[6-9]|2\\d|3[01])\\.',
-    '^169\\.254\\.', // link-local, incl. 169.254.169.254 metadata
-    // IPv6 literals only — URL.hostname always brackets them, so requiring the
-    // bracket keeps the pattern from swallowing ordinary hostnames that merely
-    // start with the same letters (fdic.gov, fcu-bridge.example.com).
-    '^\\[::1\\]$',
-    '^\\[f[cd][0-9a-f]{0,2}:', // unique-local fc00::/7
-    '^\\[fe[89ab][0-9a-f]?:', // link-local fe80::/10
-    '^\\[::ffff:', // IPv4-mapped, e.g. [::ffff:127.0.0.1]
-  ].join('|'),
-  'i'
-);
+//
+// Names that are internal by convention. IP literals are deliberately NOT
+// matched here — they go through isPrivateIp below, which PARSES instead of
+// pattern-matching (a regex can't see that a range boundary like 100.64/10
+// splits mid-octet, and the WHATWG URL parser has already canonicalized the
+// creative spellings — 0177.0.0.1, 0x7f.1, 2130706433 — into dotted-quad by
+// the time we read `hostname`, so parsing the canonical form is exact).
+const BLOCKED_NAME_RE = /^localhost\.?$|\.local\.?$|\.internal\.?$/i;
 
-function assertPublicHost(value) {
+// ---------------------------------------------------------------------------
+// Private/reserved IP classification — ONE table shared by the literal-host
+// path (the URL's hostname IS an IP) and the DNS-resolved path (the hostname
+// resolved TO these IPs). Keeping both paths on the same classifier is the
+// point: a range present in one and missing from the other is exactly the
+// kind of gap the original regex-only check had.
+// ---------------------------------------------------------------------------
+
+function parseIPv4(str) {
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(String(str ?? ''));
+  if (!m) return null;
+  const octets = m.slice(1).map(Number);
+  return octets.every(o => o <= 255) ? octets : null;
+}
+
+// The special-purpose IPv4 registry (RFC 6890 lineage): every range an
+// outbound bank-feed request has no business reaching.
+function isPrivateIPv4([a, b, c]) {
+  return (
+    a === 0 || // 0.0.0.0/8 "this network" — 0.0.0.0 connects to localhost
+    a === 10 || // 10.0.0.0/8 private
+    (a === 100 && b >= 64 && b <= 127) || // 100.64.0.0/10 carrier-grade NAT
+    a === 127 || // 127.0.0.0/8 loopback
+    (a === 169 && b === 254) || // 169.254.0.0/16 link-local, incl. the metadata IP
+    (a === 172 && b >= 16 && b <= 31) || // 172.16.0.0/12 private
+    (a === 192 && b === 0 && c === 0) || // 192.0.0.0/24 IETF protocol assignments
+    (a === 192 && b === 0 && c === 2) || // 192.0.2.0/24 TEST-NET-1
+    (a === 192 && b === 88 && c === 99) || // 192.88.99.0/24 deprecated 6to4 anycast
+    (a === 192 && b === 168) || // 192.168.0.0/16 private
+    (a === 198 && (b === 18 || b === 19)) || // 198.18.0.0/15 benchmarking
+    (a === 198 && b === 51 && c === 100) || // 198.51.100.0/24 TEST-NET-2
+    (a === 203 && b === 0 && c === 113) || // 203.0.113.0/24 TEST-NET-3
+    a >= 224 // 224.0.0.0/4 multicast + 240.0.0.0/4 reserved + broadcast
+  );
+}
+
+// Expand an IPv6 address to its eight 16-bit words. Handles `::`, a zone index
+// (fe80::1%eth0 — stripped; a zone can't make an address public), and an
+// embedded dotted-quad tail (::ffff:127.0.0.1). Both spellings of a mapped
+// address must classify identically: the WHATWG URL parser serializes them in
+// HEX ([::ffff:7f00:1]) while dns.lookup results and hand-typed literals use
+// the dotted form.
+function parseIPv6(str) {
+  let s = String(str ?? '').toLowerCase();
+  const zone = s.indexOf('%');
+  if (zone !== -1) s = s.slice(0, zone);
+  if (!s || /[^0-9a-f:.]/.test(s)) return null;
+  const v4m = /^(.*:)(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/.exec(s);
+  if (v4m) {
+    const v4 = parseIPv4(v4m[2]);
+    if (!v4) return null;
+    s = `${v4m[1]}${((v4[0] << 8) | v4[1]).toString(16)}:${((v4[2] << 8) | v4[3]).toString(16)}`;
+  }
+  const halves = s.split('::');
+  if (halves.length > 2) return null;
+  const head = halves[0] ? halves[0].split(':') : [];
+  const tail = halves.length === 2 && halves[1] ? halves[1].split(':') : [];
+  const fill = 8 - head.length - tail.length;
+  if (halves.length === 2 ? fill < 1 : fill !== 0) return null;
+  const groups = [...head, ...Array(halves.length === 2 ? fill : 0).fill('0'), ...tail];
+  const words = [];
+  for (const g of groups) {
+    if (!/^[0-9a-f]{1,4}$/.test(g)) return null;
+    words.push(parseInt(g, 16));
+  }
+  return words;
+}
+
+function isPrivateIPv6(w) {
+  const zeroPrefix = n => w.slice(0, n).every(x => x === 0);
+  return (
+    zeroPrefix(6) || // ::/96 — unspecified ::, loopback ::1, deprecated IPv4-compatible
+    (zeroPrefix(5) && w[5] === 0xffff) || // ::ffff:0:0/96 IPv4-mapped
+    // NAT64: the well-known 64:ff9b::/96 plus local-use 64:ff9b:1::/48. Blocked
+    // wholesale rather than classifying the embedded IPv4 — nothing here can
+    // route them, so any appearance is an evasion attempt, not a real server.
+    (w[0] === 0x0064 && w[1] === 0xff9b && ((w[2] | w[3] | w[4] | w[5]) === 0 || w[2] === 1)) ||
+    (w[0] & 0xfe00) === 0xfc00 || // fc00::/7 unique-local
+    (w[0] & 0xffc0) === 0xfe80 || // fe80::/10 link-local
+    (w[0] & 0xffc0) === 0xfec0 || // fec0::/10 site-local (deprecated)
+    (w[0] === 0x2001 && w[1] === 0x0db8) || // 2001:db8::/32 documentation
+    w[0] === 0x2002 || // 2002::/16 deprecated 6to4 (embeds an arbitrary IPv4)
+    (w[0] & 0xff00) === 0xff00 // ff00::/8 multicast
+  );
+}
+
+// Classify one address. `true` → private/reserved; `false` → public; `null` →
+// not an IP at all (a NAME — the caller decides whether DNS applies).
+// Exported so the test suite can audit the range table directly.
+export function isPrivateIp(address) {
+  const s = String(address ?? '').trim();
+  const v4 = parseIPv4(s);
+  if (v4) return isPrivateIPv4(v4);
+  if (s.includes(':')) {
+    const v6 = parseIPv6(s);
+    if (v6) return isPrivateIPv6(v6);
+  }
+  return null;
+}
+
+// URL.hostname brackets IPv6 literals and canonicalizes every IPv4 spelling to
+// dotted-quad (see BLOCKED_NAME_RE's comment), so literal detection is exact.
+function ipLiteralOf(host) {
+  if (host.startsWith('[') && host.endsWith(']')) return host.slice(1, -1);
+  return parseIPv4(host) ? host : null;
+}
+
+// Resolve-and-classify gate on every outbound target. Two halves:
+//   1. the hostname itself — internal-by-convention names (BLOCKED_NAME_RE)
+//      and IP literals classified by isPrivateIp;
+//   2. the DNS half — a public-LOOKING name can carry a private A/AAAA record,
+//      and the old name-only check let that straight through: a phished token
+//      decoding to https://innocent.example.com with an A record of
+//      169.254.169.254 reached the metadata endpoint. The name is resolved
+//      ONCE per check (all addresses, v4+v6) and if ANY result is
+//      private/reserved the whole host is rejected — a mixed public/private
+//      answer is exactly what a rebinding setup looks like.
+//
+// KNOWN RESIDUAL RISK, accepted deliberately: this is resolve-then-fetch. The
+// socket fetch opens moments later performs its OWN resolution, so a DNS zone
+// that flips its answer between this check and the connect (classic rebinding
+// with a short TTL) can still steer the request somewhere private. Closing
+// that window means pinning the connection to the vetted IP at connect time —
+// a custom undici Agent/dispatcher with a lookup override — which is
+// nontrivial to thread through serverless fetch and deliberately out of scope.
+// The threat model is a phished setup token, not an attacker operating a
+// rebinding resolver; the per-request re-resolution in fetchNoOpenRedirect
+// keeps the window narrow.
+//
+// `lookup` is injectable (the ruleHistory.js dependency-seam style) so tests
+// can script resolutions; production always uses node:dns/promises.lookup. A
+// lookup FAILURE surfaces as a clean SimpleFinError — this runs inside sync
+// pulls too, where a genuinely-dead host must land in last_error, not escape
+// as an unhandled rejection.
+async function assertPublicHost(value, lookup = dnsLookup) {
   let host;
   try {
     host = new URL(value).hostname;
   } catch {
     throw new SimpleFinError('invalid_token', 'That is not a valid URL.');
   }
-  if (!host || BLOCKED_HOST_RE.test(host)) {
+  const rejectPrivate = () => {
     throw new SimpleFinError(
       'invalid_token',
       'That token points at a private network address, which SimpleFIN never does.'
     );
+  };
+  if (!host || BLOCKED_NAME_RE.test(host)) rejectPrivate();
+
+  const literal = ipLiteralOf(host);
+  if (literal != null) {
+    // `!== false` on purpose: an unparseable literal is blocked, not trusted.
+    if (isPrivateIp(literal) !== false) rejectPrivate();
+    return; // an IP literal has nothing to resolve
+  }
+
+  let results;
+  try {
+    results = await lookup(host, { all: true });
+  } catch (err) {
+    throw new SimpleFinError(
+      'dns_failed',
+      `Could not resolve ${host} (${err?.code || 'DNS lookup failed'}).`
+    );
+  }
+  const addrs = Array.isArray(results) ? results : [results];
+  if (addrs.length === 0) {
+    throw new SimpleFinError('dns_failed', `Could not resolve ${host} (no addresses).`);
+  }
+  for (const r of addrs) {
+    if (isPrivateIp(r && r.address) !== false) rejectPrivate();
   }
 }
 
 // A SimpleFIN setup token is a base64-encoded claim URL. Users paste it out of
 // the Bridge UI, so it arrives with stray whitespace and newlines; some paste
 // the claim URL itself, and some paste an access URL they already hold.
-// Returns { kind: 'claim'|'access', url }.
-export function decodeSetupToken(raw) {
+// Async (the host check resolves DNS); resolves to { kind: 'claim'|'access',
+// url }. `lookup` is the injectable resolver seam — see assertPublicHost.
+export async function decodeSetupToken(raw, { lookup } = {}) {
   const input = String(raw ?? '').trim();
   if (!input) throw new SimpleFinError('invalid_token', 'Paste your SimpleFIN setup token.');
 
@@ -171,7 +320,7 @@ export function decodeSetupToken(raw) {
     if (!isHttpsUrl(input)) {
       throw new SimpleFinError('invalid_token', 'SimpleFIN URLs must use https.');
     }
-    assertPublicHost(input);
+    await assertPublicHost(input, lookup);
     const parsed = new URL(input);
     return { kind: parsed.username ? 'access' : 'claim', url: input };
   }
@@ -192,7 +341,7 @@ export function decodeSetupToken(raw) {
       "That doesn't look like a SimpleFIN setup token — it should decode to an https claim URL."
     );
   }
-  assertPublicHost(decoded);
+  await assertPublicHost(decoded, lookup);
   const parsed = new URL(decoded);
   return { kind: parsed.username ? 'access' : 'claim', url: decoded };
 }
@@ -200,11 +349,15 @@ export function decodeSetupToken(raw) {
 // fetch follows redirects by default, which would walk straight past
 // assertPublicHost: a perfectly public claim URL can 302 to
 // http://169.254.169.254/. Redirects are handled by hand instead, re-checking
-// the scheme and host at every hop.
+// (and re-RESOLVING — see assertPublicHost) the scheme and host at every hop,
+// including hop 0: callers validated the initial URL when it was decoded or
+// split, but re-checking immediately before the request narrows the
+// resolve-then-fetch window that comment describes.
 const MAX_REDIRECTS = 3;
 
-async function fetchNoOpenRedirect(url, init, signal) {
+async function fetchNoOpenRedirect(url, init, signal, lookup) {
   let current = url;
+  await assertPublicHost(current, lookup);
   for (let hop = 0; ; hop++) {
     const res = await fetch(current, { ...init, redirect: 'manual', signal });
     if (res.status < 300 || res.status > 399) return res;
@@ -219,7 +372,9 @@ async function fetchNoOpenRedirect(url, init, signal) {
     if (!isHttpsUrl(next)) {
       throw new SimpleFinError('insecure_redirect', 'SimpleFIN redirected to a non-https URL.');
     }
-    assertPublicHost(next);
+    // Checked here as well as at the loop top, so a private redirect target is
+    // named as the problem before the POST-replay refusal below can claim it.
+    await assertPublicHost(next, lookup);
 
     // A POST that gets a 301/302/303 would be replayed as a GET by normal fetch
     // semantics, which is meaningless for a single-use claim — refuse instead
@@ -252,7 +407,7 @@ async function withTimeout(fn, ms = DEFAULT_TIMEOUT_MS) {
 // POST the claim URL once; the body of the response IS the durable access URL.
 // Claim URLs are single-use — a 403 means this token was already claimed
 // (possibly by an earlier attempt of ours).
-export async function claimAccessUrl(claimUrl) {
+export async function claimAccessUrl(claimUrl, { lookup } = {}) {
   const res = await withTimeout(signal =>
     fetchNoOpenRedirect(
       claimUrl,
@@ -261,7 +416,8 @@ export async function claimAccessUrl(claimUrl) {
         // Some servers reject a POST with no length header.
         headers: { 'Content-Length': '0', Accept: 'text/plain' },
       },
-      signal
+      signal,
+      lookup
     )
   );
 
@@ -288,15 +444,16 @@ export async function claimAccessUrl(claimUrl) {
   }
   // The claim response is attacker-influenced too — it decides where every
   // later pull goes, so it gets the same private-address check.
-  assertPublicHost(body);
+  await assertPublicHost(body, lookup);
   return body;
 }
 
 // Split the credentials out of the access URL. Node's fetch (undici) REFUSES a
 // URL containing userinfo — "Request cannot be constructed from a URL that
 // includes credentials" — so they have to travel as a real Authorization
-// header. Returns { base, authorization }.
-export function splitAccessUrl(accessUrl) {
+// header. Async (the host check resolves DNS); resolves to
+// { base, authorization }.
+export async function splitAccessUrl(accessUrl, { lookup } = {}) {
   let parsed;
   try {
     parsed = new URL(String(accessUrl || ''));
@@ -308,7 +465,7 @@ export function splitAccessUrl(accessUrl) {
   }
   // Re-checked on every pull, not just at claim time, so a URL stored before
   // this guard existed can't quietly keep pointing somewhere internal.
-  assertPublicHost(parsed.toString());
+  await assertPublicHost(parsed.toString(), lookup);
   // URL keeps these percent-encoded; Basic auth needs the raw bytes.
   const user = decodeURIComponent(parsed.username || '');
   const pass = decodeURIComponent(parsed.password || '');
@@ -339,7 +496,8 @@ export function toEpochSeconds(date) {
   return Math.floor(ms / 1000);
 }
 
-// opts: { startDate (Date|iso), endDate, pending, balancesOnly, accountIds[] }
+// opts: { startDate (Date|iso), endDate, pending, balancesOnly, accountIds[],
+//         lookup (injectable DNS resolver — tests only; see assertPublicHost) }
 // The `version` param is deliberately NOT sent. The spec says "the server
 // chooses the default version if this is not specified", so pinning it would
 // mean guessing which of v1/v2 the Bridge is happiest serving — and
@@ -359,7 +517,7 @@ export function buildAccountsUrl(base, opts = {}) {
 }
 
 export async function fetchAccountSet(accessUrl, opts = {}) {
-  const { base, authorization } = splitAccessUrl(accessUrl);
+  const { base, authorization } = await splitAccessUrl(accessUrl, { lookup: opts.lookup });
   // Clamp here, not at the call sites: there are two open-ended ones (the
   // incremental pull and the new-account history backfill) and the backfill asks
   // for FIRST_PULL_DAYS outright, so a clamp applied only to the incremental
@@ -387,7 +545,8 @@ export async function fetchAccountSet(accessUrl, opts = {}) {
             ...(authorization ? { Authorization: authorization } : {}),
           },
         },
-        signal
+        signal,
+        opts.lookup
       ),
     opts.timeoutMs || DEFAULT_TIMEOUT_MS
   );

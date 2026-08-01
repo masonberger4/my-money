@@ -196,7 +196,8 @@ export function attemptThrottleFilter(nowMs) {
   return `last_attempt_at.is.null,last_attempt_at.lt.${cutoff}`;
 }
 
-async function pullOneAccessUrl(supabase, householdId, accessRow, { force, categoryRules }) {
+// Exported for test/syncOrchestration.test.js only — nothing else imports it.
+export async function pullOneAccessUrl(supabase, householdId, accessRow, { force, categoryRules }) {
   const now = new Date();
   const lastPulled = accessRow.last_pulled_at ? new Date(accessRow.last_pulled_at) : null;
   // Throttle on the last ATTEMPT, not the last success — otherwise a broken
