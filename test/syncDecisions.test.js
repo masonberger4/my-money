@@ -5,12 +5,13 @@
 // while transactions kept arriving — which is exactly why it needs a test.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { isMissingTableError, isMissingColumnError } from '../api/sync.js';
+import { isMissingTableError, isMissingColumnError, attemptThrottleFilter } from '../api/sync.js';
 import {
   watermarkUpdate,
   coverageShortfall,
   normalizeAccountSet,
   MAX_LOOKBACK_DAYS,
+  MIN_PULL_MINUTES,
 } from '../api/_lib/simplefin.js';
 
 const NOW_ISO = '2026-07-31T12:00:00.000Z';
@@ -75,6 +76,31 @@ test('coverageShortfall reports the clamped window instead of stalling the water
   });
   // The steady-state incremental pull (30-day overlap) is never a shortfall.
   assert.equal(coverageShortfall(now - 30 * DAY, now), null);
+});
+
+// --- the throttle stamp filter -----------------------------------------------
+
+test('REGRESSION: the throttle filter matches NULL — a bare .lt() would deadlock the first pull', () => {
+  // The stamp-before-request write is a CONDITIONAL update (the row is the
+  // lock against two devices racing), and api/simplefin-claim.js resets
+  // last_attempt_at to NULL after a claim. A bare .lt() never matches NULL,
+  // so without the is.null arm the guarded update matches no row and every
+  // unforced pull after connecting reads as "throttled" — forever, with no
+  // alarm anywhere. Same failure shape as the advisory deadlock above.
+  const arms = attemptThrottleFilter(Date.parse(NOW_ISO)).split(',');
+  assert.equal(arms.length, 2, 'exactly two arms — a comma anywhere else breaks the or= grammar');
+  assert.equal(arms[0], 'last_attempt_at.is.null');
+});
+
+test('the throttle cutoff is exactly MIN_PULL_MINUTES before now, as a comma-free ISO string', () => {
+  const nowMs = Date.parse(NOW_ISO);
+  const [, ltArm] = attemptThrottleFilter(nowMs).split(',');
+  const value = ltArm.replace('last_attempt_at.lt.', '');
+  // PostgREST's or= grammar splits on commas and parens, so the value must
+  // stay a bare ISO timestamp (a locale-formatted date would carry a comma
+  // and silently truncate the condition).
+  assert.match(value, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+  assert.equal(Date.parse(value), nowMs - MIN_PULL_MINUTES * 60_000);
 });
 
 // --- missing table vs missing column -----------------------------------------

@@ -182,6 +182,20 @@ async function appendBalanceSnapshots(supabase, householdId, snapshots, captured
   }
 }
 
+// The PostgREST condition that makes the pre-request throttle stamp a
+// CONDITIONAL update (see its use below: the row itself is the lock against
+// two devices racing). Pure and exported for test/syncDecisions.test.js,
+// because both of its load-bearing details fail silently: the `is.null` arm
+// (a bare .lt() never matches NULL, and api/simplefin-claim.js resets the
+// stamp to null — drop the arm and the first unforced pull after a claim
+// matches no row and reads as "throttled" forever), and the cutoff value
+// (PostgREST's or= grammar splits on commas and parens, so the timestamp
+// must never contain either — an ISO string doesn't, a locale string would).
+export function attemptThrottleFilter(nowMs) {
+  const cutoff = new Date(nowMs - MIN_PULL_MINUTES * 60_000).toISOString();
+  return `last_attempt_at.is.null,last_attempt_at.lt.${cutoff}`;
+}
+
 async function pullOneAccessUrl(supabase, householdId, accessRow, { force, categoryRules }) {
   const now = new Date();
   const lastPulled = accessRow.last_pulled_at ? new Date(accessRow.last_pulled_at) : null;
@@ -238,8 +252,7 @@ async function pullOneAccessUrl(supabase, householdId, accessRow, { force, categ
       .update({ last_attempt_at: now.toISOString() })
       .eq('id', accessRow.id);
     if (!force) {
-      const cutoff = new Date(now.getTime() - MIN_PULL_MINUTES * 60_000).toISOString();
-      stamp = stamp.or(`last_attempt_at.is.null,last_attempt_at.lt.${cutoff}`);
+      stamp = stamp.or(attemptThrottleFilter(now.getTime()));
     }
     const { data: stamped, error: attemptErr } = await stamp.select('id');
     if (attemptErr) {
@@ -678,7 +691,14 @@ async function syncSimpleFin(supabase, householdId, { force }) {
         .update({ last_error: sanitizeFeedMessage(message) })
         .eq('id', row.id);
       if (recordErr) {
-        console.warn('[sync:simplefin] failed to record last_error', recordErr.message || recordErr);
+        // error, not warn: the pull failed AND the record of the failure
+        // failed, so the connect modal will show nothing — this log line is
+        // the only place the double failure is visible at all.
+        console.error(
+          '[sync:simplefin] failed to record last_error for access row %s',
+          row.id,
+          recordErr.message || recordErr
+        );
       }
       results.push({
         institution: 'SimpleFIN',
