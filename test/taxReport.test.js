@@ -18,6 +18,7 @@ import {
   RENTS_KEY,
   scheduleEReport,
   entityMonthly,
+  entityLedger,
   personalDeductionReport,
   DEDUCTION_BUCKETS,
   MILEAGE_RATES,
@@ -104,6 +105,44 @@ test('entityMonthly builds a sorted cash P&L including capital outflows', () => 
   assert.equal(m[0].income, 1800);
   assert.equal(m[0].expenses, 9200);
   assert.equal(m[0].net, -7400);
+});
+
+test('entityLedger: every row lands in exactly one section, totals match entityMonthly', () => {
+  const rows = [
+    tx({ id: 'a', amount: -1800, transaction_date: '2026-01-03' }), // money in
+    tx({ id: 'b', amount: 240.25, transaction_date: '2026-02-11' }), // money out
+    tx({ id: 'c', amount: 950, transaction_date: '2026-02-11', is_capital: true }), // capital is still cash out
+    tx({ id: 'd', amount: 55, excluded: true }), // excluded: visible, not counted
+    tx({ id: 'e', amount: 0 }), // zero: not counted
+  ];
+  const led = entityLedger(rows);
+  const placed = led.moneyIn.rows.length + led.moneyOut.rows.length + led.notCounted.rows.length;
+  assert.equal(placed, rows.length); // conservation — no row silently dropped
+  assert.deepEqual(led.moneyIn.rows.map((t) => t.id), ['a']);
+  assert.deepEqual(led.moneyOut.rows.map((t) => t.id), ['b', 'c']);
+  assert.deepEqual(led.notCounted.rows.map((t) => t.id).sort(), ['d', 'e']);
+  // The sheet's section totals ARE the card's numbers: the sheet opens from a
+  // tapped Money in / Money out, and the list must sum to what was tapped.
+  const months = entityMonthly(rows);
+  assert.equal(led.moneyIn.total, months.reduce((s, m2) => s + m2.income, 0));
+  assert.equal(led.moneyOut.total, months.reduce((s, m2) => s + m2.expenses, 0));
+});
+
+test('entityLedger orders newest first with a deterministic same-day tie-break', () => {
+  const rows = [
+    tx({ id: 'b', amount: 10, transaction_date: '2026-05-02' }),
+    tx({ id: 'a', amount: 10, transaction_date: '2026-05-02' }),
+    tx({ id: 'z', amount: 10, transaction_date: '2026-01-15' }),
+    tx({ id: 'q', amount: 10, transaction_date: '2026-11-30' }),
+  ];
+  assert.deepEqual(entityLedger(rows).moneyOut.rows.map((t) => t.id), ['q', 'a', 'b', 'z']);
+});
+
+test('entityLedger never throws on junk (it runs during render)', () => {
+  assert.deepEqual(entityLedger(null).moneyIn.rows, []);
+  assert.deepEqual(entityLedger(undefined).moneyOut.rows, []);
+  const led = entityLedger([null, tx({ id: 'a', amount: 'nonsense' })]);
+  assert.deepEqual(led.notCounted.rows.map((t) => t.id), ['a']); // NaN amount → not counted, still visible
 });
 
 test('personalDeductionReport totals mapped buckets and nets refunds', () => {

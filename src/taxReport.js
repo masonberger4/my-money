@@ -171,6 +171,55 @@ export function entityMonthly(rows) {
     .sort((a, b) => (a.ym < b.ym ? -1 : 1));
 }
 
+// The drill-in ledger behind a property card's numbers: the same rows
+// entityMonthly totals, but as inspectable lists — Money in / Money out by
+// stored sign (capital included: it is cash that left), with excluded and
+// zero-amount rows in a visible "not counted" tail instead of silently
+// dropped. The section totals MUST equal entityMonthly's year sums — the
+// sheet opens from those numbers, and a list disagreeing with the number that
+// was tapped is exactly the drift `counted` exists to prevent elsewhere
+// (a test pins the identity). Never throws (runs during render).
+export function entityLedger(rows) {
+  const moneyIn = [];
+  const moneyOut = [];
+  const notCounted = [];
+  let inTotal = 0;
+  let outTotal = 0;
+  for (const t of Array.isArray(rows) ? rows : []) {
+    if (!t) continue;
+    const amount = Number(t.amount) || 0;
+    if (t.excluded || amount === 0) {
+      notCounted.push(t);
+      continue;
+    }
+    if (amount < 0) {
+      moneyIn.push(t);
+      inTotal += -amount;
+    } else {
+      moneyOut.push(t);
+      outTotal += amount;
+    }
+  }
+  // Newest first, like every transaction list; the id tie-break keeps a day
+  // with several rows in one deterministic order.
+  const byDateDesc = (a, b) => {
+    const da = a.transaction_date || '';
+    const db = b.transaction_date || '';
+    if (da !== db) return da < db ? 1 : -1;
+    const ia = String(a.id ?? '');
+    const ib = String(b.id ?? '');
+    return ia < ib ? -1 : ia > ib ? 1 : 0;
+  };
+  moneyIn.sort(byDateDesc);
+  moneyOut.sort(byDateDesc);
+  notCounted.sort(byDateDesc);
+  return {
+    moneyIn: { rows: moneyIn, total: round2(inTotal) },
+    moneyOut: { rows: moneyOut, total: round2(outTotal) },
+    notCounted: { rows: notCounted },
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Personal deductions (the non-entity side): year totals per bucket for the
 // preparer. Buckets, not tax math — no AGI floors, no itemize-or-not logic.
