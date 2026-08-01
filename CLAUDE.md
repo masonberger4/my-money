@@ -120,10 +120,14 @@ entry once shipped.
    "merge <feature>" after a preview review). The bar doesn't drop with the
    gate: absorb main + green `npm test` + build (and screenshots for UI work)
    before merging, and anything risky, preference-shaped, or
-   migration-sequenced still goes past Mason first. Delete branches after merge
-   (this sandbox can't delete remote branches, confirmed again 2026-07-31 —
-   Mason clicks it in the UI; GitHub MCP tools may transiently disconnect —
-   retry before treating as fatal).
+   migration-sequenced still goes past Mason first. Branch cleanup is now
+   AUTOMATIC: merged head branches delete on PR merge (observed 2026-08-01;
+   the repo's "Automatically delete head branches" setting is the standard
+   mechanism — earlier that same day merges still left branches for Mason to
+   click away, so don't be surprised by either behavior in old notes).
+   Unmerged branches are untouched by it, and this sandbox still can't
+   push-delete a branch itself. GitHub MCP tools may transiently disconnect —
+   retry before treating as fatal.
 4. **`git fetch origin` and absorb main before EVERY feature-branch push, and
    again right before the merge to main.** Multiple sessions land features the
    same day, so main moves while a branch is in review — during the
