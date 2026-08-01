@@ -9,6 +9,14 @@
 
 import { TRANSFER_CATEGORY, RETURN_CATEGORY } from './categoryMap.js';
 
+// Price creep: flag when the most recent charge exceeds the group median by
+// STRICTLY more than this fraction. A Netflix-style hike (~10–15%) hides
+// comfortably inside the ±20% similar-amount band that detection needs, so
+// without this signal a raised subscription still reads as "recurring, fine".
+const PRICE_CREEP_PCT = 0.05;
+// A nextDate within this many days of the caller's clock reads 'due-soon'.
+const DUE_SOON_DAYS = 7;
+
 // 'YYYY-MM-DD' → whole days since epoch. String split, not new Date(string),
 // so day arithmetic can't pick up UTC off-by-one surprises.
 function dayNumber(iso) {
@@ -60,9 +68,11 @@ function titleCase(s) {
   return s.toLowerCase().replace(/\b[a-z]/g, c => c.toUpperCase());
 }
 
-// `today` ('YYYY-MM-DD', optional): when given, each item gains dueSoon
-// (nextDate within 7 days) / overdue (nextDate past). Null keeps the module
-// pure — callers pass the clock in; with no clock the due fields are null.
+// `today` ('YYYY-MM-DD', optional): the caller's as-of clock. When given, each
+// item gains dueSoon (nextDate within DUE_SOON_DAYS) / overdue (nextDate past)
+// plus the one-field summary dueStatus ('due-soon' | 'overdue' | null). Null
+// keeps the module pure — callers pass the clock in; with no clock every due
+// field is null.
 export function detectRecurring(transactions, today = null) {
   const groups = new Map();
   for (const t of transactions) {
@@ -117,10 +127,20 @@ export function detectRecurring(transactions, today = null) {
       nextDate: isoFromDayNumber(nextDay),
       avgGapDays: Math.round(gaps.reduce((s, g) => s + g, 0) / gaps.length),
       lastAmount,
-      // Strictly more than 5% over the median: exactly 5% is not creep.
-      priceCreep: lastAmount > 1.05 * medAmount,
-      dueSoon: todayDay == null ? null : nextDay >= todayDay && nextDay - todayDay <= 7,
+      // The value priceCreep compares against — surfaced so the UI can say
+      // "was $20.00, now $21.20" instead of a bare flag.
+      medianAmount: medAmount,
+      // Strictly more than PRICE_CREEP_PCT over the median: exactly 5% is not creep.
+      priceCreep: lastAmount > (1 + PRICE_CREEP_PCT) * medAmount,
+      dueSoon: todayDay == null ? null : nextDay >= todayDay && nextDay - todayDay <= DUE_SOON_DAYS,
       overdue: todayDay == null ? null : nextDay < todayDay,
+      // One-field summary of the two booleans above; a nextDate more than
+      // DUE_SOON_DAYS out is null even with a clock.
+      dueStatus:
+        todayDay == null ? null
+        : nextDay < todayDay ? 'overdue'
+        : nextDay - todayDay <= DUE_SOON_DAYS ? 'due-soon'
+        : null,
     });
   }
 

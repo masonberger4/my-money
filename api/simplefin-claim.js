@@ -84,14 +84,20 @@ export default async function handler(req, res) {
       const probe = await fetchAccountSet(accessUrl, { balancesOnly: true });
       accountCount = Array.isArray(probe?.accounts) ? probe.accounts.length : 0;
     } catch (probeErr) {
-      console.warn('simplefin-claim stored, first read failed:', probeErr?.code, probeErr?.message);
+      // probeErr.message can embed remote body bytes (http_error/bad_response
+      // include a slice of whatever the server sent) — sanitize even the log.
+      console.warn(
+        'simplefin-claim stored, first read failed:',
+        probeErr?.code,
+        sanitizeFeedMessage(probeErr?.message)
+      );
       warning = sanitizeFeedMessage(probeErr?.message) || 'Connected, but the first read from SimpleFIN failed.';
     }
 
     return res.status(200).json({ ok: true, accounts: accountCount, ...(warning ? { warning } : {}) });
   } catch (err) {
     if (err?.name === 'SimpleFinError') {
-      console.warn('simplefin-claim rejected:', err.code, err.message);
+      console.warn('simplefin-claim rejected:', err.code, sanitizeFeedMessage(err.message));
       return res.status(400).json({ error: err.code, message: sanitizeFeedMessage(err.message) });
     }
     console.error('simplefin-claim error', err);
