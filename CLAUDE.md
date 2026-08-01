@@ -115,19 +115,18 @@ entry once shipped.
    deploys (preview URLs need Mason's Vercel login; **previews share the PROD
    Supabase database** — schema-dependent branches need their migration landed
    first, and preview edits are real).
-3. **Claude opens PRs and merges to main on its own** — standing authorization
-   from Mason, 2026-07-31 (before that every merge waited on his
-   "merge <feature>" after a preview review). The bar doesn't drop with the
-   gate: absorb main + green `npm test` + build (and screenshots for UI work)
-   before merging, and anything risky, preference-shaped, or
-   migration-sequenced still goes past Mason first. Branch cleanup is now
-   AUTOMATIC: merged head branches delete on PR merge (observed 2026-08-01;
-   the repo's "Automatically delete head branches" setting is the standard
-   mechanism — earlier that same day merges still left branches for Mason to
-   click away, so don't be surprised by either behavior in old notes).
-   Unmerged branches are untouched by it, and this sandbox still can't
-   push-delete a branch itself. GitHub MCP tools may transiently disconnect —
-   retry before treating as fatal.
+3. **Every session runs in AUTO MODE** — standing authorization from Mason
+   (2026-07-31, reaffirmed 2026-08-01): Claude opens PRs and merges to main on
+   its own, no per-merge ask. Every piece of work follows the ONE standard
+   flow, always: **pull (fetch + absorb `origin/main`) → build (green
+   `npm test` + the placeholder-env build; screenshots for UI work) → push the
+   feature branch → open the pull request → merge**. Auto mode doesn't lower
+   the bar: anything risky, preference-shaped, or migration-sequenced still
+   goes past Mason first. Merged head branches auto-delete on PR merge (repo
+   setting, confirmed 2026-08-01); unmerged branches are untouched, and a
+   merged branch is finished — follow-up work restarts the branch from
+   current main, never stacks on merged history. GitHub MCP tools may
+   transiently disconnect — retry before treating as fatal.
 4. **`git fetch origin` and absorb main before EVERY feature-branch push, and
    again right before the merge to main.** Multiple sessions land features the
    same day, so main moves while a branch is in review — during the
@@ -138,8 +137,8 @@ entry once shipped.
    other sessions' published commits manufactures the two-bases incident),
    re-run `npm test` + the build (+ re-screenshot if the moved code touches the
    UI; check whether main added dataAdapter exports the harness mocks must
-   stub), then push. Otherwise the preview Mason reviews is built on a base
-   that no longer exists, and "merge <feature>" lands an untested combination.
+   stub), then push. Otherwise the merge lands an untested combination built
+   on a base that no longer exists.
 5. **Migrations are additive-only** on live data (`alter table … add column`).
    Hand Mason the exact SQL to paste in the Supabase SQL Editor at merge time.
    **A migration that DROPS inverts the order**: additive SQL is safe to paste
@@ -296,8 +295,9 @@ playwright-core screenshot (`executablePath:'/opt/pw-browsers/chromium'`,
   what was *bought* by category, excluding Transfers/Return **and every
   `type === 'loan'` account** (a loan debit is a payment, not a purchase, and
   the cash already counts on its way out of checking). All of them go through
-  the shared `isSpend()` predicate in `dataAdapter.js` — keep it that way so an
-  envelope's Spent can never disagree with the Categories bar.
+  the shared `isSpend()` predicate in `src/spending.js` (re-exported by
+  dataAdapter.js) — keep it that way so an envelope's Spent can never disagree
+  with the Categories bar.
 - **Joint-budget cash-flow** (Trends income-vs-spending, 6-mo bars, Cash flow
   section): `getCashFlow`. The connected accounts are two **joint** BECU
   accounts (checking + savings); real paychecks land in three **personal**
@@ -762,7 +762,8 @@ The app's ONLY use of Supabase **Storage** — everything else is Postgres.
 
 ## Pending branches
 
-None in code, and no outstanding ops tasks. The receipts storage-policy
+None in code. ONE outstanding ops task (not code): the three orphan Plaid
+Items, below. The receipts storage-policy
 question is **SETTLED (2026-07-31)**: Mason re-ran the policy DDL **bare** in
 the SQL Editor (role `postgres` — outside a DO block, where a privilege
 failure is a visible ERROR instead of a swallowed NOTICE) and it succeeded, so
@@ -897,70 +898,40 @@ reusing the dormant `pull_jobs` / `mfa_prompts` / `pending_items` schema + the
 24h `check_pull_job_constraints` rate limiter; real ToS/lockout risk → scoped
 surgically, never the foundation.
 
-Caveats: weaker categorization than Plaid (leans on `src/txClassify.js`); daily
-freshness, not real-time (same as Plaid today); $15/yr flat.
-
 ### Debt tracker — build spec
-**NOTE (data source, decided):** with the off-Plaid → SimpleFIN move, debt data
-is **balance-only + hand-entered APR/min** — SimpleFIN has no Liabilities feed.
-The Plaid `additional_consented_products` / `/liabilities/get` build steps below
-apply ONLY while Plaid is retained; under SimpleFIN, `current_balance` comes from
-the feed and `apr`/`minimum_payment` are user-entered (kept out of the sync
-upsert). Balances + `getDebts` + `debtPayoff` + the Debt view are unchanged.
+**NOTE (data source, decided):** debt data is **balance-only + hand-entered
+APR/min** — SimpleFIN has no Liabilities feed. `current_balance` comes from
+the feed; `apr`/`minimum_payment` are user-entered (kept out of the sync
+upsert, like every user-owned column).
 
 Goal: track the household's debts (mortgage, credit cards, personal/student
 loans) with balances, APR, minimum payments, and payoff projections. Balances
-come from connected accounts (Plaid now, SimpleFIN after migration); the app only
-ever saw the *payments* leaving checking, so connecting the debt accounts is the
-point.
+come from SimpleFIN-fed accounts (or a manual account's hand-typed balance);
+the app only ever saw the *payments* leaving checking, so connecting the debt
+accounts is the point.
 
-Foundation already shipped: `api/sync.js` `ALLOWED_TYPES` now includes `'loan'`,
-so a Plaid-linked mortgage/loan account syncs its balance and appears in the
-Accounts tab (`getAccounts` has no type filter; `getOverview`'s header list is
-still credit+depository by design — the Debt view owns debts).
+Foundation already shipped: `api/sync.js` `ALLOWED_TYPES` includes `'loan'`,
+so a fed mortgage/loan account syncs its balance and appears in the Accounts
+tab (`getAccounts` has no type filter; `getOverview`'s header list is still
+credit+depository by design — the Debt view owns debts).
 
-What Plaid gives beyond payments — the **Liabilities** product (`/liabilities/get`):
-- Credit cards: per-APR breakdown, `last_statement_balance`, `minimum_payment_amount`,
-  `next_payment_due_date`, last payment amount/date, overdue flag.
-- Mortgages: `interest_rate`, current `principal`, next monthly payment + due date,
-  `maturity_date`, YTD interest vs principal, origination amount.
-- Student/personal loans: interest rate, minimum payment, next due date,
-  `expected_payoff_date`, outstanding interest, servicer/status.
-- Plain balance product already gives outstanding balance + `credit_limit`
-  (→ utilization). Verify exact field names against current Plaid docs at build.
+(Historical: the original spec's steps 1–2 wired Plaid's Liabilities product —
+`additional_consented_products`, `/liabilities/get`, per-APR breakdowns. Plaid
+is gone; those steps died with it and live only in git history. The schema
+below deliberately keeps the same column names so a richer feed could refill
+them later.)
 
 Build steps:
-1. **Consent to Liabilities at link time.** `api/create-link-token.js` currently
-   `products: ['transactions']`. Add liabilities via
-   **`additional_consented_products: ['liabilities']`** (keep `products:
-   ['transactions']`) — Plaid's PFM pattern: doesn't block institutions lacking
-   Liabilities and, unlike `products`/`optional_products`, is NOT billed at Item
-   creation, only when you first call `/liabilities/get`. **Existing
-   transactions-only Items need Link update mode** (a link token minted with the
-   Item's `access_token` + liabilities in `additional_consented_products`) to
-   gain the consent — preserves the Item + transactionsSync cursor;
-   unlink→relink is the fallback. Surface a "reconnect for debt details" action;
-   detect Items needing it by credit/loan accounts whose liability fields are
-   still null.
-2. **Pull liabilities in sync.** After `transactionsSync`, call
-   `liabilitiesGet({ access_token })`; map `credit[]`/`mortgage[]`/`student[]`
-   by `account_id` onto the account row. Outstanding balance stays the account
-   `current_balance` (`balances.current`), not a liability field. Card `apr` =
-   the `aprs[]` entry where `apr_type === 'purchase_apr'` (array can be empty →
-   null). **Handle absence gracefully** — institutions without Liabilities throw
-   (`PRODUCTS_NOT_SUPPORTED` / `PRODUCT_NOT_READY`); catch per-institution, don't
-   fail the whole sync.
-3. **Schema (additive on `accounts`):** `apr`, `minimum_payment`, `credit_limit`,
-   `statement_balance`, `next_payment_due_date`, `interest_rate`,
-   `original_balance` (all nullable numeric/date). Plaid returns rates as
-   **percent**; payoff/getDebts read one normalized `debtRate = apr ??
-   interest_rate` and divide by 100 for monthly math. `current_balance` is the
-   outstanding balance, **stored** positive = owed — payoff math and utilization
-   both want that; the Debt view must render it through `displayBalance` like
-   every other balance. These are **Plaid-owned** (refreshed
-   each sync). Optional `liabilities_raw jsonb` to keep overdue/last-payment/YTD
-   fields without column sprawl (recommended).
-4. **Balance history:** `balance_snapshots (id, account_id, household_id,
+1. **Schema (additive on `accounts`):** `apr`, `minimum_payment`,
+   `credit_limit`, `statement_balance`, `next_payment_due_date`,
+   `interest_rate`, `original_balance` (all nullable numeric/date; under
+   SimpleFIN they are hand-entered in the Debt view and NEVER written by the
+   sync). Rates are stored as **percent**; payoff/getDebts read one normalized
+   `debtRate = apr ?? interest_rate` and divide by 100 for monthly math.
+   `current_balance` is the outstanding balance, **stored** positive = owed —
+   payoff math and utilization both want that; the Debt view must render it
+   through `displayBalance` like every other balance.
+2. **Balance history:** `balance_snapshots (id, account_id, household_id,
    captured_on date, balance numeric, unique(account_id, captured_on))` — same
    RLS shape as other tables. **`balance` mirrors the STORED convention** (it is
    `accounts.current_balance` at capture time, so debts positive); the chart
@@ -970,16 +941,16 @@ Build steps:
    (≤ one/day; upsert on the unique key) and — running as **service_role** —
    must set `household_id` explicitly (the `current_household_id()` default is
    NULL there; see Gotchas). Powers the debt-over-time chart AND seeds net worth.
-5. **`src/debtPayoff.js`** (pure, like `recurring.js`): month-by-month
+3. **`src/debtPayoff.js`** (pure, like `recurring.js`): month-by-month
    amortization from `current_balance` + `apr` + `minimum_payment`; **snowball**
    (smallest balance first) vs **avalanche** (highest APR first) vs extra-$/mo
    what-if → debt-free date, total interest, interest saved.
-6. **`getDebts()` in dataAdapter:** accounts where `type in ('credit','loan')`
+4. **`getDebts()` in dataAdapter:** accounts where `type in ('credit','loan')`
    with the liability fields + computed totals (total debt, total minimums).
    Compute totals from the STORED positives; then decide deliberately how the
    total is shown, because a positive "total debt" sitting above negative
    per-card rows is exactly the inconsistency `displayBalance` exists to remove.
-7. **Debt view** (new "Debt" tab): per-debt cards (balance, APR, min, due date,
+5. **Debt view** (new "Debt" tab): per-debt cards (balance, APR, min, due date,
    card utilization = `current_balance/credit_limit`), totals (exclude hidden
    accounts), payoff projection (snowball/avalanche toggle + extra-payment slider
    → debt-free date + interest saved). **Mortgages dominate a snowball/avalanche
@@ -999,12 +970,10 @@ the mortgage against the checking outflow). Never guard out `credit`, whose
 Manual fallback (FOLLOW-UP, not v1): the CSV-import manual-account machinery
 (`is_manual`, manual institution) has **shipped** — a manual debt can reuse it
 (`is_manual`, `type='credit'|'loan'`, hand-entered balance/apr/min). **v1 is
-Plaid-linked debts only** — which is the point (the household wants it automatic).
+SimpleFIN-fed debts only** (balance from the feed; APR/min hand-entered) —
+which is the point (the household wants the balances automatic).
 
-Caveats: Liabilities is a separate Plaid product (billing) with uneven
-institution coverage; existing Items need re-linking to gain it; connecting many
-debts eats Plaid Item slots (the multi-credential picker handles it). Debt
-tracker is the liability half of the future net-worth feature — the
+Debt tracker is the liability half of the future net-worth feature — the
 `balance_snapshots` table is shared groundwork.
 
 ## Gotchas
