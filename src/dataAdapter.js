@@ -562,7 +562,14 @@ async function getAssignmentsThrough(monthStart) {
       .order('month', { ascending: true })
       .order('category', { ascending: true })
       .range(from, from + page - 1);
-    if (error) throw error;
+    // A row count that is an exact multiple of `page` makes the next request
+    // start past the end, which PostgREST answers with a 416/PGRST103 rather
+    // than an empty page — treat that as end-of-data, not a failure (same fix
+    // as the ruleHistory candidate scan and the spendingContext paginators).
+    if (error) {
+      if (isRangeExhaustedError(error)) break;
+      throw error;
+    }
     rows.push(...data);
     if (data.length < page) break;
   }
