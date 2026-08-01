@@ -23,7 +23,6 @@ the code on 2026-08-01 — do not re-audit; implement.
 - Section 2 items are one PR each. Two of them are flagged **ask Mason first** — the fix shape is preference-shaped even though the problem is verified.
 
 ## Section 2 — high-impact projects (one PR each)
-- **Latent exact-page-multiple 416 in `getAssignmentsThrough`** (dataAdapter.js, client-side): same short-page-ends-loop pattern the assistant-context review fixed server-side 2026-08-01 — a `budget_months` count that is an exact multiple of the page size makes the next `.range()` hit PostgREST's PGRST103 and throw. Fix like the server did: break via `isRangeExhaustedError` (ruleHistory.js). Small, test with the fake-PostgREST pattern.
 
 ## Section 3 — later (Mason reviewed the list 2026-08-01; his decisions inline)
 All feasibility-verified 2026-08-01; corrections inline.
