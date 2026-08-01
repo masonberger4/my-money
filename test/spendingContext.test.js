@@ -71,6 +71,76 @@ test('credit-card negatives read as Return and never enter the spending sums', (
   assert.ok(!text.includes('2026-07 Return'), 'no Return line in monthly spending (money in)');
 });
 
+// --- Recurring + envelope sections -----------------------------------------
+
+// A ~monthly subscription: 4 charges ~30 days apart, similar amounts, with the
+// last one hiked >5% over the median → priceCreep must flag.
+const SUB_TXS = [
+  { account_id: 'a-card', date: '2026-04-14', amount: 19.99, merchant_name: 'STREAMFLIX', description: 'STREAMFLIX 8841', mapped_category: 'Entertainment and rec', user_category: null, user_description: null, excluded: false },
+  { account_id: 'a-card', date: '2026-05-14', amount: 19.99, merchant_name: 'STREAMFLIX', description: 'STREAMFLIX 9013', mapped_category: 'Entertainment and rec', user_category: null, user_description: null, excluded: false },
+  { account_id: 'a-card', date: '2026-06-13', amount: 19.99, merchant_name: 'STREAMFLIX', description: 'STREAMFLIX 0027', mapped_category: 'Entertainment and rec', user_category: null, user_description: null, excluded: false },
+  { account_id: 'a-card', date: '2026-07-14', amount: 21.99, merchant_name: 'STREAMFLIX', description: 'STREAMFLIX 1152', mapped_category: 'Entertainment and rec', user_category: null, user_description: null, excluded: false },
+];
+
+const BUDGET = {
+  year: 2026,
+  month: 7,
+  assignments: [
+    { category: 'Groceries', month: '2026-06-01', assigned: 100 },
+    { category: 'Groceries', month: '2026-07-01', assigned: 200 },
+  ],
+  settings: [{ category: 'Groceries', target: 250, targetKind: 'monthly', targetDate: null, rollover: true }],
+  // Raw tx rows, exactly the columns fetchBudgetInputs selects: June spends 40
+  // (carry 100−40=60), July spends 85.50 → available 200+60−85.50 = 174.50.
+  // The loan row and the excluded row must not count.
+  spendTxs: [
+    { account_id: 'a-chk', date: '2026-06-10', amount: 40, mapped_category: 'Groceries', user_category: null, excluded: false },
+    { account_id: 'a-chk', date: '2026-07-08', amount: 85.5, mapped_category: 'Groceries', user_category: null, excluded: false },
+    { account_id: 'a-chk', date: '2026-07-12', amount: 40, mapped_category: 'Groceries', user_category: null, excluded: true },
+    { account_id: 'a-loan', date: '2026-07-15', amount: 800, mapped_category: 'Groceries', user_category: null, excluded: false },
+  ],
+};
+
+test('byte-determinism holds with the recurring and envelope sections included', () => {
+  const args = () => [clone(ACCOUNTS), clone(TXS).concat(clone(SUB_TXS)), { budget: clone(BUDGET) }];
+  const first = formatSpendingContext(...args());
+  const second = formatSpendingContext(...args());
+  assert.equal(first, second, 'byte-identical or prompt caching stops hitting');
+  assert.ok(first.includes('## Recurring charges'));
+  assert.ok(first.includes('## Budget envelopes (2026-07)'));
+});
+
+test('recurring section renders the subscription, its creep flag, and the tx-derived clock', () => {
+  const text = formatSpendingContext(clone(ACCOUNTS), clone(TXS).concat(clone(SUB_TXS)));
+  assert.ok(text.includes('newest transaction (2026-07-19)'), 'clock is the max tx date, not wall clock');
+  assert.ok(/- STREAMFLIX: ~\$19\.99\/mo \(Entertainment and rec, every ~3\d days, last 2026-07-14, next ~2026-08-1\d\)/.test(text));
+  assert.ok(text.includes('price increased: was $19.99, now $21.99'));
+  // One-off merchants never read as recurring.
+  assert.ok(!text.includes('- SAFEWAY'));
+});
+
+test('recurring section says "None detected." rather than disappearing', () => {
+  const text = formatSpendingContext(clone(ACCOUNTS), clone(TXS));
+  assert.ok(text.includes('## Recurring charges'));
+  assert.ok(text.includes('None detected.'));
+});
+
+test('envelope section walks assigned/carried/spent/available for the fixture month', () => {
+  const text = formatSpendingContext(clone(ACCOUNTS), clone(TXS), { budget: clone(BUDGET) });
+  assert.ok(
+    text.includes('- Groceries: assigned $200.00, carried $60.00, spent $85.50, available $174.50, target $250.00/mo'),
+    text
+  );
+  assert.ok(text.includes('Totals: assigned $200.00, carried $60.00, spent $85.50, available $174.50'));
+});
+
+test('missing envelope schema (budget: null / absent) omits the section cleanly', () => {
+  const withNull = formatSpendingContext(clone(ACCOUNTS), clone(TXS), { budget: null });
+  const absent = formatSpendingContext(clone(ACCOUNTS), clone(TXS));
+  assert.ok(!withNull.includes('## Budget envelopes'));
+  assert.equal(withNull, absent, 'null budget and no extras render identically');
+});
+
 test('monthly sums are emitted in sorted-key order (order-independent above the transaction list)', () => {
   // The transaction list itself follows input order (the query orders it);
   // everything above it — accounts and the monthly category sums — must not
