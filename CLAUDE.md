@@ -794,8 +794,9 @@ The app's ONLY use of Supabase **Storage** — everything else is Postgres.
 
 ## Pending branches
 
-None in code. ONE outstanding ops task (not code): the three orphan Plaid
-Items, below. The receipts storage-policy
+None in code. No outstanding ops tasks — the last one (the three orphan Plaid
+Items) was CLOSED 2026-08-01: Mason deleted the Plaid account itself, which
+retires every Item under it. The receipts storage-policy
 question is **SETTLED (2026-07-31)**: Mason re-ran the policy DDL **bare** in
 the SQL Editor (role `postgres` — outside a DO block, where a privilege
 failure is a visible ERROR instead of a swallowed NOTICE) and it succeeded, so
@@ -836,13 +837,11 @@ is that "I removed everything I could see" is not the same as "the database is
 empty", and a migration that DROPS should verify rather than trust. All three
 had zero accounts and zero transactions, so clearing them lost nothing.
 
-**Still outstanding, and NOT a code task:** those three Plaid Items still exist
-on Plaid's side. A Transactions Item is a live recurring pull — Plaid keeps
-reading the bank 1–4× a day for as long as the Item exists, Items never expire,
-and no code in this repo can call `itemRemove` any more. Retiring them is a
-manual job (Plaid Dashboard keys + `POST /item/remove`, or my.plaid.com, or the
-servicer's own third-party-access screen). Deleting the five `PLAID_*` Vercel
-env vars is done.
+**RESOLVED 2026-08-01:** those three Plaid Items existed on Plaid's side as
+live recurring pulls (an Item never expires, and no code in this repo could
+call `itemRemove` any more). Mason closed it by deleting the Plaid account
+entirely, which retires every Item under it — nothing reads the banks via
+Plaid anymore. Deleting the five `PLAID_*` Vercel env vars was already done.
 
 ## Roadmap
 
