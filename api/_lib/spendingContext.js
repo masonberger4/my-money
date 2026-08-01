@@ -10,6 +10,11 @@ function monthKey(dateStr) {
 // assistant's context window. Kept deterministic (stable ordering, fixed
 // formatting) so repeat requests produce byte-identical text — that's what
 // makes prompt caching hit across the turns of a conversation.
+//
+// buildSpendingContext does the two queries (its only I/O — the `new Date()`
+// computes the query cutoff and never appears in the output text) and
+// delegates all formatting to formatSpendingContext, which is pure and
+// covered by test/spendingContext.test.js for byte-determinism.
 export async function buildSpendingContext(householdId) {
   const supabase = getServiceClient();
 
@@ -20,9 +25,6 @@ export async function buildSpendingContext(householdId) {
     .order('type', { ascending: true })
     .order('name', { ascending: true });
   if (acctErr) throw acctErr;
-
-  const visible = accounts.filter(a => !a.hidden);
-  const acctById = new Map(accounts.map(a => [a.id, a]));
 
   const since = new Date();
   since.setDate(since.getDate() - 90);
@@ -37,7 +39,7 @@ export async function buildSpendingContext(householdId) {
   // The user's EDITS come along too (user_category / user_description /
   // excluded): the assistant must describe the household's data as the
   // household has curated it, not as the feed delivered it.
-  const visibleIds = visible.map(a => a.id);
+  const visibleIds = accounts.filter(a => !a.hidden).map(a => a.id);
   let txs = [];
   if (visibleIds.length) {
     const { data, error: txErr } = await supabase
@@ -52,19 +54,30 @@ export async function buildSpendingContext(householdId) {
     txs = data || [];
   }
 
+  return formatSpendingContext(accounts, txs);
+}
+
+// Pure formatter: rows in (the exact column shapes the queries above select),
+// deterministic text out. Same accounts + same transactions ⇒ byte-identical
+// output — any change here must preserve that, or prompt caching stops
+// hitting.
+export function formatSpendingContext(accounts, txs) {
+  const visible = (accounts || []).filter(a => !a.hidden);
+  const acctById = new Map((accounts || []).map(a => [a.id, a]));
+
   // Loan-account debits are loan payments, not purchases — the cash that paid
   // them already counts on its way out of checking (mirrors sumSpending).
   // Excluded transactions are the user saying "don't count this"; honour it.
   const loanIds = new Set(visible.filter(a => a.type === 'loan').map(a => a.id));
-  const usable = txs.filter(t => !loanIds.has(t.account_id) && !t.excluded);
-  for (const t of usable) {
+  const usable = (txs || [])
+    .filter(t => !loanIds.has(t.account_id) && !t.excluded)
     // Effective category: the user's override wins over the account rules.
-    t.mapped_category = t.user_category || applyAccountRules(
-      t.mapped_category,
-      t.amount,
-      acctById.get(t.account_id)?.type
-    );
-  }
+    .map(t => ({
+      ...t,
+      mapped_category:
+        t.user_category ||
+        applyAccountRules(t.mapped_category, t.amount, acctById.get(t.account_id)?.type),
+    }));
 
   const lines = [];
 

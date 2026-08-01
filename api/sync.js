@@ -10,6 +10,8 @@ import {
   OVERLAP_DAYS,
   MAX_LOOKBACK_DAYS,
   clampStartDate,
+  coverageShortfall,
+  watermarkUpdate,
   MIN_PULL_MINUTES,
   INCLUDE_PENDING,
 } from './_lib/simplefin.js';
@@ -179,20 +181,15 @@ async function pullOneAccessUrl(supabase, householdId, accessRow, { force, categ
   // fetchAccountSet) is what lets the shortfall be reported instead of silently
   // dropped: `clamped` means there is a window we wanted and cannot get from the
   // feed at all, and statement import is the only way it ever arrives.
-  const { startMs, clamped } = clampStartDate(wantedStartMs, now.getTime());
+  const { startMs } = clampStartDate(wantedStartMs, now.getTime());
   const startDate = new Date(startMs);
-  const coverageShortfall = clamped
-    ? {
-        wanted_from: new Date(wantedStartMs).toISOString().slice(0, 10),
-        served_from: startDate.toISOString().slice(0, 10),
-      }
-    : null;
-  if (coverageShortfall) {
+  const shortfall = coverageShortfall(wantedStartMs, now.getTime());
+  if (shortfall) {
     console.warn(
       '[sync:simplefin] feed reach is %d days: wanted from %s, requesting from %s',
       MAX_LOOKBACK_DAYS,
-      coverageShortfall.wanted_from,
-      coverageShortfall.served_from
+      shortfall.wanted_from,
+      shortfall.served_from
     );
   }
 
@@ -561,17 +558,13 @@ async function pullOneAccessUrl(supabase, householdId, accessRow, { force, categ
   // re-requests full history for every account — the only way to give the new
   // account the history it missed, since it will no longer look "new".
   // last_attempt_at still holds the throttle, so this can't turn into a loop.
-  const clean = errors.length === 0;
+  //
+  // The decision itself is pure — watermarkUpdate in api/_lib/simplefin.js,
+  // pinned by test/syncDecisions.test.js, because its failure mode (the
+  // advisory deadlock) had no alarm anywhere.
   const { error: accessErr } = await supabase
     .from('simplefin_access')
-    .update({
-      ...(backfillFailed
-        ? { last_pulled_at: null }
-        : clean
-          ? { last_pulled_at: now.toISOString() }
-          : {}),
-      last_error: clean ? null : errors.join('; ').slice(0, 1000),
-    })
+    .update(watermarkUpdate({ errors, backfillFailed, nowIso: now.toISOString() }))
     .eq('id', accessRow.id);
   if (accessErr) throw accessErr;
 
@@ -590,7 +583,7 @@ async function pullOneAccessUrl(supabase, householdId, accessRow, { force, categ
     // The window we wanted and the feed cannot serve. Nothing downstream can
     // recover it — statement import is the path — so it is surfaced rather than
     // dropped.
-    ...(coverageShortfall ? { coverage_shortfall: coverageShortfall } : {}),
+    ...(shortfall ? { coverage_shortfall: shortfall } : {}),
   };
 }
 
