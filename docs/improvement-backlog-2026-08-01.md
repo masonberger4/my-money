@@ -2,10 +2,11 @@
 
 Copy everything below the line into a fresh session on masonberger4/my-money.
 
-Status 2026-08-01: the original Batch 1 and Section 1 SHIPPED (PR #12, the
-"Hardening batch" in CLAUDE.md's Merged features) after a claim-verification
-pass; what's below is what remains, with that pass's corrections folded in.
-Delete entries as they ship.
+Status end of 2026-08-01: Batch 1, Section 1 AND all of Section 2 have SHIPPED
+(PRs #12, #15-#26 — see CLAUDE.md's Merged features), plus three Section 3
+items (recurring badges, envelope pace warning, assistant fencing). Only the
+Section 3 remainder below is left; inline markers are authoritative. Delete
+entries as they ship.
 
 ---
 
@@ -20,9 +21,8 @@ the code on 2026-08-01 — do not re-audit; implement.
 - One branch per coherent batch, cut from current main; merge before starting the next batch. Never rebase pushed branches — merge origin/main in.
 - No migrations are needed for anything below. Do not touch the sign conventions, the two spending models, theme-token rules, or anything in the Gotchas.
 - The Debt tracker has shipped and merged (PR #10) — do not rebuild it.
-- Section 2 items are one PR each. Two of them are flagged **ask Mason first** — the fix shape is preference-shaped even though the problem is verified.
 
-## Section 2 — high-impact projects (one PR each)
+## Section 2 — ALL SHIPPED 2026-08-01 (entries deleted per the rule above; see CLAUDE.md's "Backlog sweep" Merged-features entry)
 
 ## Section 3 — later (Mason reviewed the list 2026-08-01; his decisions inline)
 All feasibility-verified 2026-08-01; corrections inline.
