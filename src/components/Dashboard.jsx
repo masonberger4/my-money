@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { getOverview, getSpending, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES, setCategoryRule, applyCategoryRuleToHistory, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, invalidateEnvelopeSpending, isEnvelopeSchemaMissing, targetNeed, readyToAssign, monthKey, getEntities, createEntity, updateEntity, getTaxYearTransactions, getMileage, addMileage, deleteMileage, getReceiptTxIds } from "../dataAdapter.js";
-import { SCHEDULE_E_LINES, RENTS_KEY, DEFAULT_SCHEDULE_E_MAP, scheduleEReport, entityMonthly, personalDeductionReport, DEDUCTION_BUCKETS, DEFAULT_DEDUCTION_MAP, mileageDeduction, scheduleECsv } from "../taxReport.js";
+import { SCHEDULE_E_LINES, RENTS_KEY, DEFAULT_SCHEDULE_E_MAP, scheduleEReport, entityMonthly, entityLedger, personalDeductionReport, DEDUCTION_BUCKETS, DEFAULT_DEDUCTION_MAP, mileageDeduction, scheduleECsv } from "../taxReport.js";
 import { merchantKey } from "../txClassify.js";
 import { detectRecurring } from "../recurring.js";
 import { unlinkInstitution, askAssistant } from "../apiClient.js";
@@ -565,6 +565,102 @@ function CategorySheet({name,color,when,rows,surf,getName,acctById,acctLabel,acc
   );
 }
 
+// Everything compiled under one rental property for the viewed tax year — the
+// ledger behind the worksheet card's numbers. Opened by tapping the card's
+// transaction count or its Money in / Money out; rows open the detail sheet,
+// which owns the property tag, the capital flag and the receipt. Sections come
+// from entityLedger (src/taxReport.js), whose totals are pinned by test to
+// equal the card's entityMonthly sums — the list must add up to the number
+// that was tapped. Rows come from the tax cache, which saveTx INVALIDATES
+// rather than patches (the one list that refetches itself), so `busy` shows
+// skeletons during the refetch instead of a stale list.
+function PropertySheet({name,year,rows,busy,receiptTxIds,surf,getName,getColor,acctById,acctLabel,acctColor,onPick,onClose}) {
+  const led=entityLedger(rows);
+  const amber=inkOn("#C08A2E",surf.card);
+  const c=chipOn(ENTITY_CHIP,surf.card);
+  const head=(label,total)=>(
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",fontSize:11,fontWeight:500,
+      color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em",marginBottom:4}}>
+      <span>{label}</span>
+      {total!=null&&<span style={{fontFamily:"'DM Mono',monospace"}}>{fmtAuto(total)}</span>}
+    </div>
+  );
+  function row(t,muted){
+    const a=acctById(t.account_id);
+    // null = receipts feature not installed: show NOTHING rather than nag
+    // (the getReceiptTxIds sentinel rule).
+    const hasReceipt=receiptTxIds?receiptTxIds.has(t.id):null;
+    return (
+      <div key={t.id} className="tx" onClick={()=>onPick(t)} style={{cursor:"pointer",opacity:muted?.55:1}}>
+        <div style={{width:30,height:30,borderRadius:9,background:"var(--bg)",display:"flex",alignItems:"center",
+          justifyContent:"center",fontSize:14,flexShrink:0}}>{TX_ICONS[t.category]||"🛍"}</div>
+        <div style={{flex:1,minWidth:0}}>
+          <div style={{fontSize:13,fontWeight:500,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
+            {t.merchant_name||t.description}
+          </div>
+          <div style={{fontSize:11,color:"var(--muted)",marginTop:2,display:"flex",alignItems:"center",gap:5,flexWrap:"wrap"}}>
+            <span>{shortDate(t.transaction_date)}</span>
+            <Pill label={getName(t.category)} color={getColor(t.category)} surface={surf.card}/>
+            {a&&<Pill label={acctLabel(a)} color={acctColor(a)} surface={surf.card}/>}
+            {t.is_capital&&<Pill label="Capital" color={ENTITY_CHIP} surface={surf.card}/>}
+            {hasReceipt&&<span title="Receipt attached">📎</span>}
+            {t.is_capital&&hasReceipt===false&&<span style={{color:amber}}>no receipt</span>}
+            {t.excluded&&<Pill label="Excluded" color="#888780" surface={surf.card}/>}
+          </div>
+        </div>
+        <div style={{fontSize:13,fontFamily:"'DM Mono',monospace",fontWeight:500,flexShrink:0}}>{fmtX(t.amount)}</div>
+      </div>
+    );
+  }
+  return (
+    <div className="overlay" onClick={onClose}>
+      <div className="modal" onClick={e=>e.stopPropagation()}
+        style={{width:"min(460px,92vw)",maxHeight:"82vh",overflowY:"auto"}}>
+        <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
+          <span style={{width:10,height:10,borderRadius:3,background:c.dot,flexShrink:0}}/>
+          <span style={{fontSize:16,fontWeight:600,color:"var(--text)",minWidth:0,overflow:"hidden",
+            textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{name}</span>
+          <span style={{flex:1}}/>
+          <span style={{fontSize:16,fontWeight:600,fontFamily:"'DM Mono',monospace",flexShrink:0}}>
+            {signed(Math.round((led.moneyIn.total-led.moneyOut.total)*100)/100)}
+          </span>
+        </div>
+        <div style={{fontSize:12,color:"var(--muted)",marginBottom:14}}>
+          {year} · {rows.length} transaction{rows.length!==1?"s":""} compiled under this property
+        </div>
+
+        {busy?(<>
+          <Sk h={40}/><div style={{height:8}}/><Sk h={40}/><div style={{height:8}}/><Sk h={40} w="70%"/>
+        </>):rows.length===0?(
+          <div style={{textAlign:"center",padding:"24px 0",color:"var(--muted)",fontSize:13}}>
+            Nothing tagged to this property in {year}.
+          </div>
+        ):(<>
+          {led.moneyIn.rows.length>0&&(<>
+            {head("Money in",led.moneyIn.total)}
+            {led.moneyIn.rows.map(t=>row(t,false))}
+          </>)}
+          {led.moneyOut.rows.length>0&&(<>
+            {led.moneyIn.rows.length>0&&<div style={{borderTop:"1px solid var(--border)",margin:"14px 0 10px"}}/>}
+            {head("Money out",led.moneyOut.total)}
+            {led.moneyOut.rows.map(t=>row(t,false))}
+          </>)}
+          {led.notCounted.rows.length>0&&(<>
+            <div style={{borderTop:"1px solid var(--border)",margin:"14px 0 10px"}}/>
+            {head("Not counted",null)}
+            <div style={{fontSize:10,color:"var(--muted)",lineHeight:1.5,marginBottom:6}}>
+              Excluded by hand — kept visible so a tagged row can't quietly vanish from the record.
+            </div>
+            {led.notCounted.rows.map(t=>row(t,true))}
+          </>)}
+        </>)}
+
+        <button onClick={onClose} className="ibtn" style={{width:"100%",justifyContent:"center",marginTop:16}}>Done</button>
+      </div>
+    </div>
+  );
+}
+
 // `surface` = the token value of whatever the pill sits on (every pill sits on a
 // card today). The tint, the label ink and the dot are all derived from `color`
 // against it, so the same stored colour stays legible in either theme.
@@ -661,6 +757,10 @@ export default function Dashboard({ refreshTick = 0 }) {
   // The category whose transactions are being drilled into (raw label), opened
   // from a Categories row or a Budget envelope.
   const [catDrill,setCatDrill]=useState(null);
+  // Property drill-in on the Tax tab: the entity id whose compiled ledger is
+  // open, or null. Rows come from taxData, so the sheet shows the tax cache's
+  // busy state while an edit's invalidation refetches.
+  const [taxDrill,setTaxDrill]=useState(null);
   const [chatMsgs,setChatMsgs]=useState([]);
   const [chatInput,setChatInput]=useState("");
   const [chatBusy,setChatBusy]=useState(false);
@@ -1018,6 +1118,17 @@ export default function Dashboard({ refreshTick = 0 }) {
     return ACCOUNT_COLORS[(i>=0?i:0)%ACCOUNT_COLORS.length];
   },[accounts]);
 
+  // A property pill ONLY where the ROW was tagged by hand (t.entity_id): rows
+  // inheriting a dedicated rental account's default would stamp every row of
+  // that account, where the account pill already carries the meaning. The
+  // hand-tagged rows are the surprising ones — a fridge bought on the joint
+  // card — and the pill is what makes that tag visible in the ledger.
+  const entPill=useCallback(id=>{
+    if(!id)return null;
+    const n=entities.find(x=>x.id===id)?.name;
+    return n?<Pill label={n} color={ENTITY_CHIP} surface={surf.card}/>:null;
+  },[entities,surf.card]);
+
   async function saveAccount(id,fields){
     setAccounts(prev=>prev.map(a=>a.id===id?{...a,...fields}:a));
     if(selAcct?.id===id)setSelAcct(prev=>({...prev,...fields}));
@@ -1137,6 +1248,20 @@ export default function Dashboard({ refreshTick = 0 }) {
       console.error("transaction update failed",err);
     }
     reloadData(year,month);
+  }
+
+  // From the detail sheet's "Compiled under X in the Tax tab" link: close
+  // every overlay, land on the Tax tab on the TRANSACTION'S year (the viewed
+  // tax year may differ — a January sheet showing a December row), and open
+  // that property's drill-in. The confirmation loop for "did my tag actually
+  // make the tax records?".
+  function jumpToTax(entityId){
+    const t=selTx;
+    setSelTx(null);setCatDrill(null);setSelAcct(null);
+    const y=Number((t?.transaction_date||"").slice(0,4));
+    if(y&&y!==taxYear&&y<=now.getFullYear()){setTaxYear(y);invalidateTax();}
+    setTaxDrill(entityId);
+    setTab("tax");
   }
 
   // Correcting an inferred type can cross the debt boundary (Bank ⇄ Credit
@@ -1917,6 +2042,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                     <span>·</span>
                     <Pill label={getName(t.category)} color={getColor(t.category)} surface={surf.card}/>
                     {a&&<Pill label={acctLabel(a)} color={acctColor(a)} surface={surf.card}/>}
+                    {entPill(t.entity_id)}
                     {t.excluded&&<Pill label="Excluded" color="#888780" surface={surf.card}/>}
                   </div>
                 </div>
@@ -2140,6 +2266,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                         <span>{t.transaction_date}</span>
                         <span>·</span>
                         <Pill label={getName(t.category)} color={getColor(t.category)} surface={surf.card}/>
+                        {entPill(t.entity_id)}
                         {t.excluded&&<Pill label="Excluded" color="#888780" surface={surf.card}/>}
                       </div>
                     </div>
@@ -2494,7 +2621,8 @@ export default function Dashboard({ refreshTick = 0 }) {
               <div className="card" key={e.id}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",gap:10}}>
                   <div style={{fontSize:15,fontWeight:600,color:"var(--text)"}}>{e.name}</div>
-                  <div style={{fontSize:11,color:"var(--muted)",flexShrink:0}}>{rows.length} transaction{rows.length!==1?"s":""} in {taxYear}</div>
+                  <DrillNum onClick={rows.length?()=>setTaxDrill(e.id):null} title={`Everything compiled under ${e.name}`}
+                    style={{fontSize:11,color:"var(--muted)",flexShrink:0}}>{rows.length} transaction{rows.length!==1?"s":""} in {taxYear}</DrillNum>
                 </div>
                 {rows.length===0?(
                   <div style={{fontSize:12,color:"var(--muted)",marginTop:8}}>Nothing tagged to this property in {taxYear} yet.</div>
@@ -2502,11 +2630,13 @@ export default function Dashboard({ refreshTick = 0 }) {
                   <div style={{display:"flex",gap:20,margin:"10px 0 2px"}}>
                     <div>
                       <div style={{fontSize:10,color:"var(--muted)"}}>Money in</div>
-                      <div style={{fontSize:15,fontWeight:600,fontFamily:"'DM Mono',monospace",color:inkOn("#1D9E75",surf.card)}}>{fmtAuto(totIn)}</div>
+                      <DrillNum onClick={()=>setTaxDrill(e.id)} title={`Everything compiled under ${e.name}`}
+                        style={{display:"block",fontSize:15,fontWeight:600,fontFamily:"'DM Mono',monospace",color:inkOn("#1D9E75",surf.card)}}>{fmtAuto(totIn)}</DrillNum>
                     </div>
                     <div>
                       <div style={{fontSize:10,color:"var(--muted)"}}>Money out</div>
-                      <div style={{fontSize:15,fontWeight:600,fontFamily:"'DM Mono',monospace",color:"var(--text)"}}>{fmtAuto(totOut)}</div>
+                      <DrillNum onClick={()=>setTaxDrill(e.id)} title={`Everything compiled under ${e.name}`}
+                        style={{display:"block",fontSize:15,fontWeight:600,fontFamily:"'DM Mono',monospace",color:"var(--text)"}}>{fmtAuto(totOut)}</DrillNum>
                     </div>
                     <div>
                       <div style={{fontSize:10,color:"var(--muted)"}}>Net cash</div>
@@ -2730,6 +2860,21 @@ export default function Dashboard({ refreshTick = 0 }) {
           onPick={t=>setSelTx(t)} onClose={()=>setCatDrill(null)}/>
       )}
 
+      {/* Property drill-in — same stacking rule as the category sheet above:
+          rendered before the transaction sheet so a tapped row's detail opens
+          on top, and closing it drops back to this list. */}
+      {taxDrill&&(()=>{
+        const ent=entities.find(x=>x.id===taxDrill);
+        if(!ent)return null;
+        const propRows=(taxData?.transactions||[]).filter(t=>t.effective_entity_id===taxDrill);
+        return (
+          <PropertySheet name={ent.name} year={taxYear} rows={propRows} busy={taxLoading||!taxData}
+            receiptTxIds={receiptTxIds} surf={surf} getName={getName} getColor={getColor}
+            acctById={acctById} acctLabel={acctLabel} acctColor={acctColor}
+            onPick={t=>setSelTx(t)} onClose={()=>setTaxDrill(null)}/>
+        );
+      })()}
+
       {/* Transaction detail modal */}
       {selTx&&(()=>{
         const a=acctById(selTx.account_id);
@@ -2839,6 +2984,21 @@ export default function Dashboard({ refreshTick = 0 }) {
                     );
                   })}
                 </div>
+                {/* The tag's EFFECT, said out loud — the linkage Mason asked
+                    for existed but nothing confirmed it. Tagged: a dotted
+                    link straight to the property's compiled ledger. Untagged:
+                    one line saying what tagging does. */}
+                {eff?(
+                  <button onClick={()=>jumpToTax(eff)}
+                    style={{background:"none",border:"none",padding:0,fontFamily:"inherit",fontSize:10,color:"var(--muted)",
+                      cursor:"pointer",textDecoration:"underline",textDecorationStyle:"dotted",textUnderlineOffset:3}}>
+                    Compiled under {entities.find(x=>x.id===eff)?.name||"this property"} in the Tax tab ›
+                  </button>
+                ):(
+                  <div style={{fontSize:10,color:"var(--muted)"}}>
+                    Tag a property and this transaction is compiled in the Tax tab for tax time.
+                  </div>
+                )}
                 {eff&&(
                   <div style={{marginTop:4}}>
                     <button onClick={()=>saveTx({is_capital:!selTx.is_capital})}
