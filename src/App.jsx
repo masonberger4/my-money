@@ -1,9 +1,12 @@
-import { useCallback, useEffect, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useState } from 'react';
 import { supabase, configError } from './supabaseClient.js';
 import Dashboard from './components/Dashboard.jsx';
-import AddAccount from './components/AddAccount.jsx';
-import EmptyState from './components/EmptyState.jsx';
+// Lazy: EmptyState statically imports the CsvImport modal, which Dashboard
+// loads lazily — a static import here would pull the whole import stack back
+// into the main bundle and defeat that split.
+const EmptyState = lazy(() => import('./components/EmptyState.jsx'));
 import Login from './components/Login.jsx';
+import ErrorBoundary from './components/ErrorBoundary.jsx';
 
 function ConfigErrorScreen() {
   return (
@@ -106,22 +109,18 @@ export default function App() {
   if (count === null) return null;
 
   if (count === 0) {
-    return <EmptyState onLinked={handleLinked} />;
+    return (
+      <ErrorBoundary label="empty state render failed">
+        <Suspense fallback={null}>
+          <EmptyState onLinked={handleLinked} />
+        </Suspense>
+      </ErrorBoundary>
+    );
   }
 
   return (
-    <>
+    <ErrorBoundary label="dashboard render failed">
       <Dashboard refreshTick={refreshTick} />
-      <div
-        style={{
-          position: 'fixed',
-          bottom: 'calc(16px + env(safe-area-inset-bottom))',
-          right: 'calc(16px + env(safe-area-inset-right))',
-          zIndex: 50,
-        }}
-      >
-        <AddAccount onLinked={handleLinked} />
-      </div>
-    </>
+    </ErrorBoundary>
   );
 }

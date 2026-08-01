@@ -1,4 +1,4 @@
-import { Component, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { analyzeCsv, toInsertRow, parseCsv, reconcileCsv, csvDateRange, buildRows, importPlan } from "../csvImport.js";
 import { applyTemplate, autoDetectTemplate, defaultTemplate, rowTotals, TEMPLATE_VERSION } from "../pdfImport.js";
@@ -8,6 +8,7 @@ import { runSync, pullWasClean } from "../sync.js";
 import { chipStyle, markColor, readableInk } from "../paletteContrast.js";
 import { readToken, subscribeTheme } from "../theme.js";
 import PdfTemplateEditor from "./PdfTemplateEditor.jsx";
+import ErrorBoundary from "./ErrorBoundary.jsx";
 
 // Statement import — a file-picker action on the Accounts tab, accepting a bank
 // CSV or a PDF statement. A PDF is turned into the same cell grid a CSV
@@ -93,24 +94,13 @@ const AMOUNT_DIFF = "#B7791F";
 const MATCH_DIFF = "#378ADD";
 
 // Backstop for anything unguarded that throws during render inside the modal —
-// the app has no global error boundary, so without this a render throw blanks
-// the whole PWA. Scoped to the modal body only, so it can't swallow errors
-// elsewhere in the app.
-class ModalErrorBoundary extends Component {
-  constructor(props) { super(props); this.state = { failed: false }; }
-  static getDerivedStateFromError() { return { failed: true }; }
-  componentDidCatch(err, info) { console.error("import modal render failed", err, info); }
-  render() {
-    if (this.state.failed) {
-      return (
-        <div style={{ fontSize: 12, color: "var(--danger)", background: "var(--danger-bg)", border: "1px solid var(--danger-border)", borderRadius: 8, padding: "10px 12px" }}>
-          Something went wrong rendering this step — close and retry.
-        </div>
-      );
-    }
-    return this.props.children;
-  }
-}
+// the shared ErrorBoundary, scoped here with a modal-sized fallback so it can't
+// swallow errors elsewhere in the app and doesn't take over the modal chrome.
+const modalBoundaryFallback = (
+  <div style={{ fontSize: 12, color: "var(--danger)", background: "var(--danger-bg)", border: "1px solid var(--danger-border)", borderRadius: 8, padding: "10px 12px" }}>
+    Something went wrong rendering this step — close and retry.
+  </div>
+);
 
 // Rendered through a PORTAL to document.body, and that is load-bearing rather
 // than tidy. `position: fixed` is resolved against the nearest ancestor with a
@@ -274,7 +264,7 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
   //
   // A useEffect's dependency array is evaluated during render, at the call site.
   // Referencing a `const` declared further down the component body throws a
-  // ReferenceError from CsvImport's own body — and ModalErrorBoundary is
+  // ReferenceError from CsvImport's own body — and the modal's ErrorBoundary is
   // rendered BY that body, so it cannot catch it. The result is not a broken
   // modal, it is a blank PWA. These derivations used to live ~150 lines below
   // the effect, which was survivable only because nothing down there was in its
@@ -623,7 +613,7 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
 
         {/* Body */}
         <div style={{ padding: "16px 20px", overflowY: "auto" }}>
-          <ModalErrorBoundary>
+          <ErrorBoundary label="import modal render failed" fallback={modalBoundaryFallback}>
           {result ? (
             <div style={{ textAlign: "center", padding: "12px 0" }}>
               <div style={{ fontSize: 34, marginBottom: 8 }}>✓</div>
@@ -922,7 +912,7 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
               )}
             </>
           )}
-          </ModalErrorBoundary>
+          </ErrorBoundary>
         </div>
 
         {/* Footer */}

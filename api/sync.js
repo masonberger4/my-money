@@ -224,15 +224,33 @@ async function pullOneAccessUrl(supabase, householdId, accessRow, { force, categ
   }
 
   // Stamped before the request, so a timeout or a crashed invocation still
-  // counts as an attempt and the throttle holds.
+  // counts as an attempt and the throttle holds. The stamp is CONDITIONAL and
+  // doubles as the real throttle check: the read at loadAccessRows is stale by
+  // the time we get here, so two devices syncing in the same window would both
+  // pass the check above and both hit the Bridge. Updating only where the
+  // stored stamp is still outside the window makes the row itself the lock —
+  // zero rows back means someone else stamped first. NULL must match too (a
+  // bare .lt() never matches NULL, and the post-claim reset in
+  // api/simplefin-claim.js sets it null).
   if (hasAttemptColumn) {
-    const { error: attemptErr } = await supabase
+    let stamp = supabase
       .from('simplefin_access')
       .update({ last_attempt_at: now.toISOString() })
       .eq('id', accessRow.id);
+    if (!force) {
+      const cutoff = new Date(now.getTime() - MIN_PULL_MINUTES * 60_000).toISOString();
+      stamp = stamp.or(`last_attempt_at.is.null,last_attempt_at.lt.${cutoff}`);
+    }
+    const { data: stamped, error: attemptErr } = await stamp.select('id');
     if (attemptErr) {
       if (!isMissingColumnError(attemptErr, 'last_attempt_at')) throw attemptErr;
       hasAttemptColumn = false;
+    } else if (!force && !(stamped || []).length) {
+      return {
+        institution: 'SimpleFIN',
+        skipped: 'throttled',
+        last_pulled_at: lastPulled ? lastPulled.toISOString() : null,
+      };
     }
   }
 
@@ -655,10 +673,13 @@ async function syncSimpleFin(supabase, householdId, { force }) {
       // watermark on a failed pull would skip past transactions we never read.
       // Sanitized because last_error is rendered in the connect modal and a
       // database error can quote feed-supplied text (an account name, say).
-      await supabase
+      const { error: recordErr } = await supabase
         .from('simplefin_access')
         .update({ last_error: sanitizeFeedMessage(message) })
         .eq('id', row.id);
+      if (recordErr) {
+        console.warn('[sync:simplefin] failed to record last_error', recordErr.message || recordErr);
+      }
       results.push({
         institution: 'SimpleFIN',
         error: message,

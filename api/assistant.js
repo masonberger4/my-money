@@ -20,6 +20,8 @@ How to behave:
 - You cannot take actions (no moving money, no editing transactions). If asked, explain what the user can do in the app instead.`;
 
 const MAX_TURNS = 30;
+const MAX_MSG_CHARS = 8000;
+const MAX_TOTAL_CHARS = 60000;
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
@@ -53,6 +55,18 @@ export default async function handler(req, res) {
     .map(m => ({ role: m.role, content: m.content }));
   if (history.length === 0 || history[history.length - 1].role !== 'user') {
     return res.status(400).json({ error: 'last message must be from the user' });
+  }
+  if (history.some(m => m.content.length > MAX_MSG_CHARS)) {
+    return res.status(400).json({
+      error: 'message_too_long',
+      message: `A message exceeds the ${MAX_MSG_CHARS.toLocaleString()}-character limit. Try a shorter question.`,
+    });
+  }
+  if (history.reduce((n, m) => n + m.content.length, 0) > MAX_TOTAL_CHARS) {
+    return res.status(400).json({
+      error: 'conversation_too_long',
+      message: 'This conversation is too long to send. Start a new conversation.',
+    });
   }
 
   try {

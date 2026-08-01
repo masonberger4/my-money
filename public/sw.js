@@ -10,7 +10,7 @@
 //
 // Bump CACHE_VERSION on any change to this file or the precache list.
 
-const CACHE_VERSION = 'v3';
+const CACHE_VERSION = 'v4';
 const SHELL_CACHE = `shell-${CACHE_VERSION}`;
 const ASSET_CACHE = `assets-${CACHE_VERSION}`;
 
@@ -21,6 +21,9 @@ const PRECACHE = [
   '/icon-192.png',
   '/icon-512.png',
   '/icon-maskable-512.png',
+  '/fonts/dm-sans.woff2',
+  '/fonts/dm-mono-400.woff2',
+  '/fonts/dm-mono-500.woff2',
 ];
 
 self.addEventListener('install', (event) => {
@@ -65,7 +68,7 @@ async function networkFirstShell(req) {
   try {
     const fresh = await fetch(req);
     const cache = await caches.open(SHELL_CACHE);
-    cache.put('/', fresh.clone());
+    if (fresh.ok) cache.put('/', fresh.clone());
     return fresh;
   } catch {
     const cache = await caches.open(SHELL_CACHE);

@@ -73,7 +73,7 @@ entry once shipped.
 
 | File | Role |
 |---|---|
-| `src/ui.css` | The ONLY place theme-token values live: `:root` light + a `prefers-color-scheme: dark` block (--bg/--card/--text/--muted/--border/--accent/--accent-text/--danger*/--warn*/--input-bg/--track/--shadow/--overlay), plus the font `@import` (must stay line 1), the `*` reset, keyframes, and the shared `.card`/`.tab`/`.ibtn` classes. Global so the pre-Dashboard screens get them. |
+| `src/ui.css` | The ONLY place theme-token values live: `:root` light + a `prefers-color-scheme: dark` block (--bg/--card/--text/--muted/--border/--accent/--accent-text/--danger*/--warn*/--input-bg/--track/--shadow/--overlay), plus the self-hosted `@font-face` rules (DM Sans/DM Mono woff2 in `public/fonts/`, precached by sw.js — the old Google Fonts `@import` is gone; don't reintroduce a cross-origin font), the `*` reset, keyframes, and the shared `.card`/`.tab`/`.ibtn` classes. Global so the pre-Dashboard screens get them. |
 | `src/theme.js` | Theme selection + application: localStorage pref (`mm:theme`), `resolveTheme`, `applyTheme` (sets `<html data-theme>` + syncs the `theme-color` metas), `subscribeTheme`/`subscribeSystemTheme`, `readToken` (runtime token read), `initTheme` (called from main.jsx), and the `useTheme` hook the header toggle uses. |
 | `src/paletteContrast.js` | Pure, zero imports: WCAG math + `readableInk`/`markColor`/`chipStyle`, which hold hue fixed and bisect lightness to guarantee 4.5:1 / 3:1 against a given surface. Never throws (runs during render). Covered by `test/paletteContrast.test.js`. |
 | `src/components/Dashboard.jsx` | Almost the entire UI — single file, inline styles, tabs: overview/categories/**budget**/transactions/accounts/trends/recurring/**tax**/ask. Shared mini-components: `Pill`, `Swatch`, `EditName`, `Sk` (skeleton), `Donut`, `DrillNum` (the tap-a-number affordance) ; envelope editors `AssignEdit`/`BudgetEdit`/`IncomeEdit` + the `TargetSheet`/`MoveSheet`/`CategorySheet`/`PropertySheet` modals. |
@@ -90,7 +90,7 @@ entry once shipped.
 | `src/accountBalance.js` | `isDebtAccount` / `displayBalance` — the stored-positive → displayed-negative rule for credit and loan balances. Pure JS; imported by both Dashboard.jsx and the server-side assistant context. |
 | `api/_lib/simplefin.js` | SimpleFIN protocol layer: setup-token decode, claim POST, access-URL split (creds → Authorization header), the `/accounts` GET, and `normalizeAccountSet` (reads BOTH wire shapes, and splits feed messages into errors / advisories / capped). Also the **feed-message classifier** (`classifyFeedMessage`, allowlist polarity) and the lookback clamp (`clampStartDate`/`MAX_LOOKBACK_DAYS`) — both pure, covered by `test/simplefin.test.js` — plus the pure sync-level decisions `watermarkUpdate` (advance/hold/reset `last_pulled_at`) and `coverageShortfall`, which `api/sync.js` applies (`test/syncDecisions.test.js`). Also `inferAccountType`, `normalizeBalance`, the sign flip, and the env knobs (`test/simplefinNormalize.test.js`, `test/simplefinToken.test.js`). Server-only — handles bank credentials. |
 | `api/_lib/spendingContext.js` | The assistant's context: `buildSpendingContext` does the two queries and delegates ALL formatting to the pure `formatSpendingContext(accounts, txs)` — byte-deterministic per DB state (prompt caching), the fourth `displayBalance` display site. Covered by `test/spendingContext.test.js`. |
-| `src/components/SimpleFinConnect.jsx` | The connect modal, reachable from the Accounts tab, the EmptyState and the FAB: link banks at SimpleFIN Bridge → paste the setup token → claim + first sync. Shows connection status, a disconnect action, and Restore for removed banks. |
+| `src/components/SimpleFinConnect.jsx` | The connect modal, reachable from the Accounts tab's "+ Add bank" button and the EmptyState (the global FAB was removed 2026-08-01 — adding a bank lives ONLY on the Accounts tab now, Mason's call): link banks at SimpleFIN Bridge → paste the setup token → claim + first sync. Shows connection status, a disconnect action, and Restore for removed banks. |
 | `src/components/CsvImport.jsx` | Import modal for **CSV *and* PDF**. **TWO sections, chosen by the FILE'S DATE RANGE against the feed's coverage** — not by the target account, which can no longer tell backfill from audit now that every account is manual or SimpleFIN-fed. Rows before the boundary import; rows on/after it are compared and never inserted; a straddling file does both on its respective slices. One override, "Compare only", which can only move toward not-inserting. A never-synced fed account must sync first (the first pull reaches back ~88 days — SimpleFIN's cap). |
 | `src/pdfImport.js` | Pure PDF-statement parsing core (no pdf.js/React/Supabase): text runs → lines → columns → **the same cell grid `buildRows` consumes**. Template auto-detect (`autoDetectTemplate`), `applyTemplate`, month-name dates + year inference from the statement period, `normalizeDebitCredit`, `defaultTemplate` (the fallback the modal seeds the editor with). Testable in Node. |
 | `src/pdfExtract.js` | The only file that touches pdf.js. Lazy `import()` (keeps ~1.8MB out of the main bundle) of the **legacy** build, bundled locally (no CDN, CSP/offline-safe). Runs the parser on the **main thread** via `globalThis.pdfjsWorker` so `src/pdfPolyfills.js` is in scope for it (a Worker has its own globals). |
@@ -99,7 +99,7 @@ entry once shipped.
 | `src/components/ReceiptSection.jsx` | Receipt photos inside the transaction detail sheet: thumbnails + camera/library capture + full-size view/delete. Self-contained (own load, signed URLs minted per mount); tells Dashboard only `onChanged` → `invalidateTax`. |
 | `src/receiptImage.js` | Client-side receipt compression: canvas re-encode to ≤1600px JPEG 0.8 (~150–400 KB; also strips EXIF/GPS). Browser-only — no unit tests, verify on the real phone. |
 | `src/apiClient.js` | Client → api/ fetch wrappers (JWT attached). Was `plaidClient.js`; renamed when nothing in it was Plaid-specific any more. |
-| `src/components/AddAccount.jsx` | The "add a bank" button + the SimpleFinConnect modal it owns. Replaces `LinkAccount.jsx` (Plaid Link) in BOTH places that rendered it: the EmptyState CTA and App's floating action button. Talks to the server only when pressed — LinkAccount minted a link token on mount, so every app open hit the server before the user asked for anything. |
+| `src/components/AddAccount.jsx` | The "add a bank" button + the SimpleFinConnect modal it owns (lazy-loaded). Rendered only by the EmptyState CTA since the FAB's removal (2026-08-01); the Dashboard's Accounts tab opens the same modal via its own "+ Add bank" header button (`connectingSfin`). Talks to the server only when pressed. |
 | `src/sync.js` | Single-flight wrapper triggering server sync. |
 | `src/db.js` | getSetting/setSetting on the Supabase `settings` table (dashboard prefs: colors, names, custom categories, `asst:model`/`asst:effort`). |
 | `src/assistantModels.js` | Shared client+server allowlist of assistant models + cost estimator. |
@@ -761,6 +761,19 @@ The app's ONLY use of Supabase **Storage** — everything else is Postgres.
   (browser+Storage, verified on the real phone), SQL/RLS tests (worthwhile
   follow-up), live SimpleFIN/Supabase integration.
 
+- **Hardening batch (2026-08-01, from the audited improvement backlog)** — sw.js
+  `fresh.ok` guard before caching the shell (CACHE_VERSION v4) + lockstep pins;
+  self-hosted DM Sans/DM Mono woff2 (offline-capable, no Google Fonts);
+  shared `ErrorBoundary.jsx` wrapping Dashboard/EmptyState; amber feed-health
+  banner (stale >3 days or stored `last_error`, status fetched once after the
+  initial sync only); `saveTx` failure now alerts + `refetchOpenLists`;
+  CsvImport/SimpleFinConnect/EmptyState lazy-loaded (main bundle 602→543 KB);
+  sync throttle stamp is a conditional update (NULL-safe `.or`) closing the
+  two-device race, and the `last_error` write result is checked; claim-path
+  messages sanitized; assistant per-message/total char caps; recurring gains
+  `lastAmount`/`priceCreep` (>5% over median) + `dueSoon`/`overdue` off an
+  injected `today` (UI wiring deferred). "+ Add bank" lives only at the top of
+  the Accounts tab — the global FAB is gone (Mason, 2026-08-01). No migration.
 - **Debt tracker (v1)** — new **Debt** tab per the settled spec (balance from
   SimpleFIN, APR/min/limit/due-date hand-entered and user-owned): per-debt
   cards with utilization bars, snowball/avalanche payoff projection with
@@ -1037,10 +1050,11 @@ surgically, never the foundation.
   it in. The tell: `getDocument` succeeds and `getTextContent` throws. Don't
   mistake this for an old-iOS problem — it isn't version-dependent. Emulate it
   locally by `delete ReadableStream.prototype[Symbol.asyncIterator]`.
-- Anything that runs during **render** must be try/caught — the app has **no
-  React error boundary** except `ModalErrorBoundary` inside `CsvImport.jsx`,
-  which backstops only the import-modal body. Outside the modal a render throw
-  still blanks the whole PWA instead of showing a message.
+- Anything that runs during **render** should still be try/caught — the shared
+  `src/components/ErrorBoundary.jsx` (App.jsx wraps Dashboard and EmptyState;
+  CsvImport reuses it with a modal-sized fallback, replacing its private
+  `ModalErrorBoundary`) is a backstop showing a themed "something broke — reload"
+  card, not a substitute for the discipline.
 - **`saveTx`'s optimistic patch is the only refresh some lists ever get, and it
   must recompute every DERIVED field of the tx shape.** `reloadData` refetches
   the CURRENT MONTH only, so `transactions` self-heals but `searchRes`
