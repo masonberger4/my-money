@@ -86,6 +86,7 @@ entry once shipped.
 | `src/categoryMap.js` | `ERA_CATEGORIES` (the taxonomy source of truth) + `applyAccountRules` (credit-card negatives → "Return", excluded from income); `UNCATEGORIZED`/`FALLBACK_CATEGORY` + `isBudgetableCategory`; pure JS, imported by server code too. No "Housing"/"Income" member; `Uncategorized` IS one. `mapPlaidCategory` was deleted with Plaid — nothing produces those codes now, and it was never called at read time, so historical rows are unaffected. |
 | `src/csvImport.js` | Pure CSV-import core (no React/Supabase): `parseCsv`, `detectHeader`, `parseMoney`/`parseDate`, transfer flagging, dedup `plaid_tx_id` hashing, `buildRows`/`analyzeCsv` (both take `rules` + `overlapFrom`). Re-exports `guessCategory`/`transferRawCategory`/`invalidRuleCategories` from `txClassify.js`, which now owns the rule table. Plus `importPlan` (which sections the modal shows, derived from the file's dates vs the feed boundary) and the audit core: `reconcileCsv` (max-matching), `descSimilarity`, `csvDateRange`. Testable in isolation. |
 | `src/txClassify.js` | Learned-rule matching (`merchantKey`, `matchLearnedRule`) + the shared descriptor→category rule table + internal-transfer tagging (`guessCategory`, `transferRawCategory`, `classifyDescription`), validated against `ERA_CATEGORIES` at load. Lifted out of `csvImport.js` when SimpleFIN became a second caller: both feeds get a descriptor and no category, so both derive `mapped_category` at WRITE time from this one table. Pure JS — imported by server code too. |
+| `src/debtPayoff.js` | The Debt tab's pure core, zero imports: monthly amortization, snowball/avalanche ordering, extra-payment what-if, stall detection (payment ≤ interest) + `MAX_MONTHS` runaway guard. Covered by `test/debtPayoff.test.js` (hand-computed constants). |
 | `src/accountBalance.js` | `isDebtAccount` / `displayBalance` — the stored-positive → displayed-negative rule for credit and loan balances. Pure JS; imported by both Dashboard.jsx and the server-side assistant context. |
 | `api/_lib/simplefin.js` | SimpleFIN protocol layer: setup-token decode, claim POST, access-URL split (creds → Authorization header), the `/accounts` GET, and `normalizeAccountSet` (reads BOTH wire shapes, and splits feed messages into errors / advisories / capped). Also the **feed-message classifier** (`classifyFeedMessage`, allowlist polarity) and the lookback clamp (`clampStartDate`/`MAX_LOOKBACK_DAYS`) — both pure, covered by `test/simplefin.test.js` — plus the pure sync-level decisions `watermarkUpdate` (advance/hold/reset `last_pulled_at`) and `coverageShortfall`, which `api/sync.js` applies (`test/syncDecisions.test.js`). Also `inferAccountType`, `normalizeBalance`, the sign flip, and the env knobs (`test/simplefinNormalize.test.js`, `test/simplefinToken.test.js`). Server-only — handles bank credentials. |
 | `api/_lib/spendingContext.js` | The assistant's context: `buildSpendingContext` does the two queries and delegates ALL formatting to the pure `formatSpendingContext(accounts, txs)` — byte-deterministic per DB state (prompt caching), the fourth `displayBalance` display site. Covered by `test/spendingContext.test.js`. |
@@ -794,6 +795,11 @@ message (which the Editor does display) and nothing persisted. The iPhone
 round-trip (attach → full-size view, i.e. the signed-URL read → delete) passed
 on the real phone the same day — receipts are verified end to end.
 
+Debt tracker merged 2026-08-01 (PR #10). **Its migration
+`20260801000001_debt_tracker.sql` is NOT yet confirmed applied to PROD** —
+additive, safe to paste any time; until then `getDebts()`/`getBalanceSnapshots()`
+degrade and the sync skips snapshot appends. When Mason confirms the paste,
+replace this note with "applied to PROD <date>".
 Tax-linkage visibility merged 2026-08-01 (no migration).
 Receipt capture merged 2026-07-31, with `20260731000001_receipts.sql` run
 against PROD ahead of the merge (additive, so the safe order).
@@ -804,7 +810,8 @@ the safe order). Envelope budgeting merged 2026-07-29 the same way.
 
 Phase 4 is fully landed: code merged and deployed, and
 `20260728000002_remove_plaid.sql` **applied on 2026-07-29** after its pre-flight
-fired once (below). Every migration in `supabase/migrations/` is live.
+fired once (below). Every migration through `20260731000001_receipts.sql` is
+live; the debt-tracker migration's status is the note above.
 
 **What the pre-flight caught, because it is the kind of thing that recurs.**
 Three `plaid_tokens` rows survived a phase-3 cleanup that had gone by what was
@@ -825,6 +832,13 @@ servicer's own third-party-access screen). Deleting the five `PLAID_*` Vercel
 env vars is done.
 
 ## Roadmap
+
+**Improvement backlog (2026-08-01 six-dimension audit):**
+`docs/improvement-backlog-2026-08-01.md` — a prioritized, file-cited list ready
+to hand to a session as a prompt. Top three: the sw.js ok-guard (a failed
+navigation can become the permanent cached offline shell), a top-level error
+boundary + feed-health banner, and centralizing the `saveTx` optimistic patch
+(`patchAllTxLists` + failure rollback). Delete entries as they ship.
 
 **Debt tracker SHIPPED** (2026-08-01, see Merged features; migration
 `20260801000001_debt_tracker.sql` is additive — the tab degrades gracefully
