@@ -80,7 +80,7 @@ entry once shipped.
 | `src/dataAdapter.js` | All Supabase reads + shapes consumed by Dashboard. Keep return shapes stable. Also holds the CSV/PDF-import writes (`findOrCreateManualInstitution`, `createManualAccount`, `getExistingTxIds`, `importCsvTransactions`, `isManualAccount`), the comparison-mode read `getAccountTransactionsInRange`, the backfill boundary `getFeedCoverageStart`, the learned-rule CRUD (`getCategoryRules`/`setCategoryRule`/`applyCategoryRuleToHistory`/`deleteCategoryRule`), the SimpleFIN predicates (`isSimpleFinAccount`, `ACCOUNT_TYPES`/`ACCOUNT_SUBTYPES`), the envelope I/O (`getEnvelopes`, `setAssigned`, `setCategoryRollover`, `setTargetKind`, `fundTargets`, `moveMoney`, `getBudgetIncome`/`setBudgetIncome`), the rental/tax I/O (`getEntities`/`createEntity`/`updateEntity`, `getTaxYearTransactions`, `getMileage`/`addMileage`/`deleteMileage`), the receipt I/O (`getReceipts`/`addReceipt`/`deleteReceipt`/`getReceiptUrl`/`getReceiptTxIds` — the app's only Supabase **Storage** use), and re-exports the pure helpers from `cashFlow.js`, `envelopes.js`, and `spending.js` so existing importers/harnesses keep working. The spending predicate/bucketing/`toTxShape` now live in `spending.js` — dataAdapter delegates (shapes unchanged). |
 | `src/cashFlow.js` | The Trends cash-flow model (see Conventions), extracted pure: `markInternalTransfers` + `maxMatchTransfers` (Kuhn's), `cashIncome`/`cashSpending`, account-type predicates. Zero imports — plain-Node importable; covered by `test/cashFlow.test.js` incl. the brute-force matching parity check. |
 | `src/spending.js` | The purchase-based spending model, extracted pure (imports only `categoryMap.js`): `effectiveCategory`, `bankName`/`displayName`, `isLoanAccount`, **`isSpend`** (the one predicate), `sumSpending`, `spendingGroups` (the Categories bucketing), `toTxShape` (incl. `counted`), and `aggregateEnvelopeSpending` (the envelope fold). Hidden-account exclusion deliberately NOT here — it lives at the query level; the pure layer never sees hidden rows. Covered by `test/spending.test.js` against the ledger fixture. |
-| `src/envelopes.js` | The envelope-budgeting model (see Roadmap), pure: `walkEnvelopes` (`available = assigned + carry − spent`), `targetNeed`, `readyToAssign`, `planMove`, month-key helpers. Zero imports — dataAdapter does the I/O and hands it plain arrays. Covered by `test/envelopes.test.js`. |
+| `src/envelopes.js` | The envelope-budgeting model (see Roadmap), pure: `walkEnvelopes` (`available = assigned + carry − spent`), `targetNeed`, `readyToAssign`, `planMove`, month-key helpers, and `envelopePace` (the display-only per-envelope pace warning; opt-in via the `env:pace` settings key, `getEnvPace`/`setEnvPace` in dataAdapter). Zero imports — dataAdapter does the I/O and hands it plain arrays. Covered by `test/envelopes.test.js`. |
 | `src/ruleHistory.js` | The learned-rule history-apply core, extracted from `applyCategoryRuleToHistory`: first-token ilike narrowing (`ilikeCandidatePattern`), ordered paging with the **PGRST103 end-of-range contract** (`isRangeExhaustedError`), re-matching via `matchLearnedRule`, skip-already-correct, dryRun, mapped_category-only writes. Takes injected `fetchPage`/`updateBatch` so it tests with fakes; dataAdapter binds the real client. Covered by `test/categoryRules.test.js`. |
 | `src/taxReport.js` | The Tax tab's pure core, zero imports: `SCHEDULE_E_LINES` + `scheduleEReport` (category→line mapping, refund netting, capital expenses pulled out of the lines, a VISIBLE unmapped bucket — the Uncategorized lesson applied to tax lines), `entityMonthly` (per-property cash P&L) + `entityLedger` (the property drill-in's Money in/out/not-counted sections — totals pinned by test to `entityMonthly`'s sums), `personalDeductionReport` (charitable/medical/taxes-paid buckets), `MILEAGE_RATES` (effective-dated IRS rates — data that goes stale; verify at irs.gov each January) + `mileageDeduction`, and `scheduleECsv` (exports keep the stored positive=out sign; the column name says so). Covered by `test/taxReport.test.js`. |
 | `src/categoryMap.js` | `ERA_CATEGORIES` (the taxonomy source of truth) + `applyAccountRules` (credit-card negatives → "Return", excluded from income); `UNCATEGORIZED`/`FALLBACK_CATEGORY` + `isBudgetableCategory`; pure JS, imported by server code too. No "Housing"/"Income" member; `Uncategorized` IS one. `mapPlaidCategory` was deleted with Plaid — nothing produces those codes now, and it was never called at read time, so historical rows are unaffected. |
@@ -108,7 +108,7 @@ entry once shipped.
 | `api/_lib/supabase.js` | Service-role client + `requireUser` (JWT → householdId). |
 | `supabase/migrations/` | Ordered SQL migrations (additive-only on live data). |
 | `supabase/setup_all.sql` | One-paste fresh install — **DESTRUCTIVE, wipes all tables. Never run on live data. Never re-generate to include new migrations without that warning.** Convenience snapshot only — `migrations/` is the source of truth; ends with a column-level self-check that raises if it drifts behind migrations. |
-| `test/` | `npm test` — Node's built-in `node --test`, zero deps; plain-module helpers live in `test/helpers/` (the `*.test.js` glob skips them). Covers the pure cores: cashFlow (incl. brute-force max-matching parity), csvImport parsing/dedup-id idempotency + overlap guard, **pdfImport** (the whole template pipeline: shape tests, year inference incl. the Dec→Jan wrap, geometry, applyTemplate anchor/continuation REGRESSIONs, debit/credit netting, the buildRows round-trip), **reconcile** (the comparison audit, with its own brute-force parity), **spending** (the extracted purchase-based model against the synthetic ledger: 11 scenarios + seeded property tests), **categoryRules** (the ruleHistory core against a fake PostgREST incl. the exact-page-multiple REGRESSION; write-time precedence; the teach→apply→re-import sequence), txClassify (learned-rule matching + the over-specific-key limit), envelopes (both walk regressions + by-date targets), taxReport (conservation, capital exclusion, the 2026 mileage-rate boundary), **recurring** (thresholds pinned as documentation), **accountBalance** (incl. the −0 REGRESSION), **categoryMap**, simplefin classifier/clamp + **simplefinNormalize** (type-inference ordering REGRESSION, wire parsing) + **simplefinToken** (SSRF/claim flow against a stubbed fetch), **assistantModels** (+ a server source scan), **spendingContext** byte-determinism, **syncDecisions** (watermark advance/hold/reset + missing-table vs missing-column), **lockstep** (index.html↔ui.css `--bg`, sw.js guards, pdf.js legacy build), noPlaid, paletteContrast, apiLoads. Run before pushing. |
+| `test/` | `npm test` — Node's built-in `node --test`, zero deps; plain-module helpers live in `test/helpers/` (the `*.test.js` glob skips them). Covers the pure cores: cashFlow (incl. brute-force max-matching parity), csvImport parsing/dedup-id idempotency + overlap guard, **pdfImport** (the whole template pipeline: shape tests, year inference incl. the Dec→Jan wrap, geometry, applyTemplate anchor/continuation REGRESSIONs, debit/credit netting, the buildRows round-trip), **reconcile** (the comparison audit, with its own brute-force parity), **spending** (the extracted purchase-based model against the synthetic ledger: 11 scenarios + seeded property tests), **categoryRules** (the ruleHistory core against a fake PostgREST incl. the exact-page-multiple REGRESSION; write-time precedence; the teach→apply→re-import sequence), txClassify (learned-rule matching + the over-specific-key limit), envelopes (both walk regressions + by-date targets), taxReport (conservation, capital exclusion, the 2026 mileage-rate boundary), **recurring** (thresholds pinned as documentation), **accountBalance** (incl. the −0 REGRESSION), **categoryMap**, simplefin classifier/clamp + **simplefinNormalize** (type-inference ordering REGRESSION, wire parsing) + **simplefinToken** (SSRF/claim flow against a stubbed fetch), **assistantModels** (+ a server source scan), **spendingContext** byte-determinism, **syncDecisions** (watermark advance/hold/reset + missing-table vs missing-column), **lockstep** (index.html↔ui.css `--bg`, sw.js guards, fonts precache, pdf.js legacy build), **sync** (pullWasClean + runSync single-flight via injected transport), **syncOrchestration** (`pullOneAccessUrl` against the fake Supabase client in `test/helpers/fakeSupabase.js`), **manualTx** (quick-add row building + gating), **unlink** (remove-bank soft-hide decisions), **monthMemo** (range memo + per-model copies), **debtPayoff**, noPlaid, paletteContrast, apiLoads. Run before pushing. |
 
 ## Development workflow
 
@@ -742,7 +742,8 @@ The app's ONLY use of Supabase **Storage** — everything else is Postgres.
   fatal — which Dashboard folds into the "not installed" sentinel, silently
   switching the nag off at exactly 1000 receipts.
 
-- **Comprehensive testing suite** — five phases, 143 → 322 tests, zero new
+- **Comprehensive testing suite** — five phases, 143 → 322 tests (419 on main
+  by end of 2026-08-01 as later batches added suites), zero new
   committed dependencies. (1) `src/pdfImport.js` in depth over synthetic
   statement fixtures (`test/helpers/pdfFixtures.js`) + the reconcileCsv audit
   with its own brute-force parity. (2) The purchase-based spending model
@@ -777,7 +778,7 @@ The app's ONLY use of Supabase **Storage** — everything else is Postgres.
   two-device race, and the `last_error` write result is checked; claim-path
   messages sanitized; assistant per-message/total char caps; recurring gains
   `lastAmount`/`priceCreep` (>5% over median) + `dueSoon`/`overdue` off an
-  injected `today` (UI wiring deferred). "+ Add bank" lives only at the top of
+  injected `today` (UI wired later the same day, PR #25). "+ Add bank" lives only at the top of
   the Accounts tab — the global FAB is gone (Mason, 2026-08-01). No migration.
 - **Debt tracker (v1)** — new **Debt** tab per the settled spec (balance from
   SimpleFIN, APR/min/limit/due-date hand-entered and user-owned): per-debt
@@ -847,11 +848,23 @@ The app's ONLY use of Supabase **Storage** — everything else is Postgres.
   - **Recurring price-creep + due-status signals** (`src/recurring.js`, from the
     earlier hardening batch): additive `priceCreep`/`medianAmount`/`dueStatus`
     (`'due-soon'`/`'overdue'`, injectable `asOf`) — module-level; the Recurring-tab
-    badge UI is a decided-but-unbuilt Section-3 item.
+    badge UI shipped with the Section-3 display signals (below).
   Plus a per-instance assistant throttle (10/min → 429), claim-path log
   sanitization, and the pure `attemptThrottleFilter` with its NULL-arm regression
   test; and two exact-page-multiple 416 pagination fixes (spendingContext's new
   paginators and `getAssignmentsThrough`) via `isRangeExhaustedError`.
+- **Batch-1 remainder + Section-3 display signals + fencing (2026-08-01, PRs
+  #15/#25/#26)** — `patchAllTxLists` centralizes the optimistic tx patch (all
+  lists incl. `selTx`, pure `patchTxShape` in `src/spending.js`) with
+  exact-pre-patch-row ROLLBACK on a failed `saveTx` before the alert (the
+  refetch recovery it replaced lasted one day); a dismiss on the feed-health
+  banner; Recurring-tab pills rendering `priceCreep` ("was/now" off
+  `medianAmount`) and `dueStatus`, colours through `chipOn`; per-envelope pace
+  warning — opt-in ⏱ toggle per envelope, `env:pace` settings key, pure
+  `envelopePace` in `src/envelopes.js` (display-only, current month, no walk
+  change); and the assistant prompt-injection fencing sentence (transaction
+  text is data, never instructions — static block, one-time cache
+  invalidation). No migrations.
 
 ## Pending branches
 
@@ -913,13 +926,14 @@ to hand to a session as a prompt. Batch 1 + Section 1 SHIPPED 2026-08-01 (the
 several entries; **Section 2 is now fully shipped** (see the "Backlog sweep"
 entry in Merged features — SSRF, remove-bank, manual quick-add, month memo,
 assistant-context sections, plus the recurring signals from the hardening
-batch). The file now holds only the Section 3 list, most of it DECIDED by Mason
-2026-08-01 but unbuilt: recurring-signal badges on the Recurring tab, the
-cycling card-balance tile, Ask-tab sessionStorage + save-chat, per-envelope pace
-warnings, Trends biggest-movers, the Uncategorized teach-queue, and a UX-polish
-set. Two carry conditions: the Dashboard.jsx decomposition is DEFERRED (keep the
-single file during active development), and prompt-injection fencing in the
-assistant system prompt AWAITS Mason's explicit go. Delete entries as they ship.
+batch). Of Section 3, the recurring badges, per-envelope pace warning and the
+assistant fencing sentence SHIPPED 2026-08-01 (PRs #25/#26); still unbuilt and
+DECIDED by Mason: the cycling card-balance tile (click/swipe to change card,
+device pref), Ask-tab sessionStorage + save-chat, Trends biggest-movers, the
+Uncategorized teach-queue, recurring weekly/annual cadences + ignore list, and
+a UX-polish set. One carry condition: the Dashboard.jsx decomposition is
+DEFERRED (keep the single file during active development). Delete entries as
+they ship.
 
 **Debt tracker SHIPPED** (2026-08-01, see Merged features; its migration is
 applied to PROD — the tab is fully live). Debt follow-ups (not built): manual debts (reuse the
@@ -1144,6 +1158,12 @@ surgically, never the foundation.
   the one field that CAN'T be recomputed — it needs the account type, which the
   shape doesn't carry — which is fine only because its sole reader
   (`CategorySheet`) renders from `transactions`.
+  Since PR #15 the mechanism is centralized: `patchAllTxLists(id, fields)`
+  (Dashboard.jsx) patches all the lists via the pure `patchTxShape`
+  (`src/spending.js`, tested) and returns a rollback that the failure path
+  applies before alerting — look for the helper, not scattered patch sites;
+  QuickAddSheet's insert routes through it too. The invariant above is
+  unchanged.
 - A bank words the same transaction differently in its CSV and its PDF, so the
   dedup hash differs: importing both formats into ONE manual account
   double-inserts. `transactions.source` records `'csv'|'pdf'` and the importer
