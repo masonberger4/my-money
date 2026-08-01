@@ -11,12 +11,7 @@ Work through a prioritized improvement backlog for this repo. The backlog below 
 - One branch per coherent batch, cut from current main; merge before starting the next batch. Never rebase pushed branches — merge origin/main in.
 - No migrations are needed for anything below. Do not touch the sign conventions, the two spending models, theme-token rules, or anything in the Gotchas.
 - NOTE: the Debt tracker (roadmap "Next") is ALREADY BEING BUILT in another session on branch `claude/ultracode-app-improvements-ek8nt0` — do not build it, and do not edit the Debt tab if it has merged.
-- Batch 1 is the top-3; do them first, in order. Then proceed down section 1, then section 2, checking in with Mason before anything preference-shaped.
-
-## Batch 1 — do first
-1. **sw.js ok-guard**: `networkFirstShell` (`public/sw.js:64-74`) does `cache.put('/', fresh.clone())` without checking `fresh.ok`, so a Vercel 500/404 becomes the permanent offline shell until CACHE_VERSION bumps. Guard on `fresh.ok`, bump CACHE_VERSION, pin with a `test/lockstep.test.js` assertion.
-2. **Top-level error boundary + feed-health banner** (one PR): generalize `ModalErrorBoundary` out of `CsvImport.jsx` into `src/components/ErrorBoundary.jsx`, wrap Dashboard's root in App.jsx with a themed "something broke — reload" card. And surface feed health outside the SimpleFIN modal: amber banner near Dashboard's existing error banner when `last_pulled_at` is >3 days stale or `last_error` is set, linking to the modal (status endpoint already returns everything).
-3. **Optimistic-patch hardening**: centralize the tx-list patch into one `patchAllTxLists` helper closing over all list setters with the derived-field recompute (category/merchant_name via toTxShape rules) inside it; and roll back a failed `saveTx` patch (today `Dashboard.jsx:~1245` only console.errors + reloads the current month, so `searchRes`/`acctTxs` keep asserting a save that failed). Alert like `learnMerchant` does. This unblocks any later Dashboard decomposition.
+- Proceed down section 1, then section 2, checking in with Mason before anything preference-shaped. (Batch 1 — the sw.js ok-guard, the top-level error boundary + feed-health banner, and the `patchAllTxLists` optimistic-patch hardening — has shipped; its entries are deleted per CLAUDE.md's delete-as-they-ship rule.)
 
 ## Section 1 — remaining quick wins (small, batch sensibly)
 - Check the ignored `last_error` write result in `api/sync.js:~607` (supabase-js doesn't throw); optionally make the throttle a conditional update (`.lt('last_attempt_at', cutoff)`) so two phones can't double-hit the Bridge.

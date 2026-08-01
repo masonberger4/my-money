@@ -130,6 +130,24 @@ export function toTxShape(t) {
   };
 }
 
+// Merge an EDIT into an already-shaped row (toTxShape output) — the optimistic
+// patch. The two fields toTxShape DERIVES are recomputed here, the same way it
+// derives them, so a caller can't update the raw column and leave the derived
+// one stale on screen (the shipped "a rename never appeared" / "a category
+// change made from search never appeared" bugs — the saveTx Gotcha in
+// CLAUDE.md):
+//   category      = user_category || auto_category      (effectiveCategory)
+//   merchant_name = user_description || auto_description (displayName)
+// `counted` is deliberately NOT recomputed — isSpend needs accounts.type,
+// which the shape doesn't carry. Its one reader (CategorySheet) must render
+// from a list that gets refetched (`transactions`, via reloadData).
+export function patchTxShape(t, fields) {
+  const next = { ...t, ...fields };
+  if ('user_category' in fields) next.category = fields.user_category || t.auto_category;
+  if ('user_description' in fields) next.merchant_name = fields.user_description || t.auto_description;
+  return next;
+}
+
 // The envelope-spending fold: per-(category, month) spend sums over the same
 // isSpend() predicate the Categories bars use, so an envelope's Spent can
 // never disagree with the bar rendered beside it. Keyed 'YYYY-MM' + category,

@@ -3,6 +3,7 @@ import { getOverview, getSpending, getTransactions, getCashFlow, getAccounts, up
 import { payoffWhatIf, debtFreeMonth, isMortgage } from "../debtPayoff.js";
 import { SCHEDULE_E_LINES, RENTS_KEY, DEFAULT_SCHEDULE_E_MAP, scheduleEReport, entityMonthly, entityLedger, personalDeductionReport, DEDUCTION_BUCKETS, DEFAULT_DEDUCTION_MAP, mileageDeduction, scheduleECsv } from "../taxReport.js";
 import { merchantKey } from "../txClassify.js";
+import { patchTxShape } from "../spending.js";
 import { detectRecurring } from "../recurring.js";
 import { unlinkInstitution, askAssistant, getSimpleFinStatus } from "../apiClient.js";
 import { ERA_CATEGORIES, UNCATEGORIZED, isBudgetableCategory } from "../categoryMap.js";
@@ -1305,30 +1306,51 @@ export default function Dashboard({ refreshTick = 0 }) {
     }
   }
 
-  // Optimistic transaction edit: update every local copy immediately,
-  // persist, then refresh totals in the background.
-  async function saveTx(fields){
-    if(!selTx)return;
-    const id=selTx.id;
-    // The two derived fields toTxShape computes have to be recomputed here the
-    // same way, or the row shows the pre-edit value. (`counted` can't be — it
-    // needs the account type, which the shape doesn't carry — but the only
-    // thing reading it is the category drill-in, whose rows come from
-    // `transactions`, which reloadData refetches below.)
-    const apply=t=>{
-      if(t.id!==id)return t;
-      const next={...t,...fields};
-      if("user_category" in fields)next.category=fields.user_category||t.auto_category;
-      if("user_description" in fields)next.merchant_name=fields.user_description||t.auto_description;
-      return next;
+  // The ONE optimistic patch for a transaction edit. EVERY list holding
+  // transaction rows is patched here, not at the call site — reloadData
+  // refreshes only the current month, so search results (cross-month) and the
+  // account sheet are never refetched and this patch is all they get; three
+  // shipped bugs each came from a caller forgetting one list or one derived
+  // field (the saveTx Gotcha in CLAUDE.md). The derived-field recompute
+  // (`category`, `merchant_name`) lives INSIDE patchTxShape (src/spending.js,
+  // mirroring what toTxShape derives) so a caller can't skip it. `counted`
+  // can't be recomputed — it needs the account type, which the shape doesn't
+  // carry — but its only reader is the category drill-in, whose rows come from
+  // `transactions`, which reloadData refetches.
+  // Returns a rollback that puts each list's own captured pre-patch row back,
+  // for the failed-write path — without it the lists reloadData never reaches
+  // keep asserting a save that didn't land.
+  function patchAllTxLists(id,fields){
+    const apply=t=>t.id===id?patchTxShape(t,fields):t;
+    // Capture per list — the lists hold distinct row objects, and this runs
+    // from an event handler, so the closed-over state is current.
+    const before={
+      month:transactions?.transactions.find(t=>t.id===id)||null,
+      acct:acctTxs?.find(t=>t.id===id)||null,
+      search:searchRes?.transactions.find(t=>t.id===id)||null,
+      sel:selTx&&selTx.id===id?selTx:null,
     };
-    // EVERY list holding transaction rows, not just the visible one: reloadData
-    // refreshes only the current month, so search results (cross-month) and the
-    // account sheet are never refetched and the patch is all they get.
     setTransactions(prev=>prev?{...prev,transactions:prev.transactions.map(apply)}:prev);
     setAcctTxs(prev=>prev?prev.map(apply):prev);
     setSearchRes(prev=>prev?{...prev,transactions:prev.transactions.map(apply)}:prev);
     setSelTx(prev=>prev?apply(prev):prev);
+    return()=>{
+      const put=row=>t=>t.id===id?row:t;
+      if(before.month)setTransactions(prev=>prev?{...prev,transactions:prev.transactions.map(put(before.month))}:prev);
+      if(before.acct)setAcctTxs(prev=>prev?prev.map(put(before.acct)):prev);
+      if(before.search)setSearchRes(prev=>prev?{...prev,transactions:prev.transactions.map(put(before.search))}:prev);
+      // Only if the sheet still shows this row — the user may have moved on.
+      if(before.sel)setSelTx(prev=>prev&&prev.id===id?before.sel:prev);
+    };
+  }
+
+  // Optimistic transaction edit: patch every local copy immediately, persist,
+  // then refresh totals in the background. A failed write ROLLS THE PATCH BACK
+  // and says so (learnMerchant's failure pattern) — before this, the patched
+  // lists kept showing a save that never landed.
+  async function saveTx(fields){
+    if(!selTx)return;
+    const rollback=patchAllTxLists(selTx.id,fields);
     // Any edit can move a row in or out of a tax report (category, entity,
     // capital flag, exclusion) — drop the cached year and recompute lazily.
     // This pre-write invalidation may start a load that races the UPDATE, but
@@ -1336,14 +1358,11 @@ export default function Dashboard({ refreshTick = 0 }) {
     // supersedes any pre-commit snapshot (the seq check drops it).
     invalidateTax();
     try{
-      await updateTransaction(id,fields);
+      await updateTransaction(selTx.id,fields);
     }catch(err){
-      // The optimistic patches above already painted the edit — say so and
-      // refetch the lists reloadData below never reaches (search results, the
-      // account sheet), or they keep showing a save that never landed.
       console.error("transaction update failed",err);
+      rollback();
       window.alert(`Couldn't save that change: ${err.message||err}`);
-      await refetchOpenLists();
     }
     reloadData(year,month);
   }
@@ -1674,13 +1693,20 @@ export default function Dashboard({ refreshTick = 0 }) {
         {error&&<div style={{background:"var(--danger-bg)",border:"1px solid var(--danger-border)",borderRadius:10,padding:"12px 16px",fontSize:13,color:"var(--danger)",marginBottom:14}}>{error}</div>}
 
         {/* Feed health — amber, not red: the data on screen is fine, it's just
-            getting stale. last_error is already sanitized server-side. */}
+            getting stale. last_error is already sanitized server-side. The ×
+            clears it for this session only (plain state — the status check runs
+            once per mount, so it stays gone until the next app load; a broken
+            feed re-raises it then, which is the point). */}
         {feedHealth&&(
-          <div style={{background:"var(--warn-bg)",border:"1px solid var(--warn-border)",borderRadius:10,padding:"12px 16px",fontSize:13,color:"var(--warn)",marginBottom:14,lineHeight:1.5}}>
-            {feedHealth.last_error
-              ?<>Bank feed problem: {feedHealth.last_error}</>
-              :<>Bank feed hasn't updated since {new Date(feedHealth.last_pulled_at).toLocaleDateString([],{month:"short",day:"numeric"})}.</>}
-            {" "}<button onClick={()=>setConnectingSfin(true)} style={{background:"none",border:"none",padding:0,font:"inherit",color:"inherit",textDecoration:"underline",cursor:"pointer"}}>Check connection</button>
+          <div style={{background:"var(--warn-bg)",border:"1px solid var(--warn-border)",borderRadius:10,padding:"12px 16px",fontSize:13,color:"var(--warn)",marginBottom:14,lineHeight:1.5,display:"flex",alignItems:"flex-start",gap:8}}>
+            <div style={{flex:1}}>
+              {feedHealth.last_error
+                ?<>Bank feed problem: {feedHealth.last_error}</>
+                :<>Bank feed hasn't updated since {new Date(feedHealth.last_pulled_at).toLocaleDateString([],{month:"short",day:"numeric"})}.</>}
+              {" "}<button onClick={()=>setConnectingSfin(true)} style={{background:"none",border:"none",padding:0,font:"inherit",color:"inherit",textDecoration:"underline",cursor:"pointer"}}>Check connection</button>
+            </div>
+            <button onClick={()=>setFeedHealth(null)} aria-label="Dismiss" title="Dismiss"
+              style={{background:"none",border:"none",cursor:"pointer",color:"inherit",fontSize:18,lineHeight:1,padding:"0 2px",flexShrink:0}}>×</button>
           </div>
         )}
 
