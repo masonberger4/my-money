@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
-import { getOverview, getSpending, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES, setCategoryRule, applyCategoryRuleToHistory, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, invalidateEnvelopeSpending, isEnvelopeSchemaMissing, targetNeed, readyToAssign, monthKey, getEntities, createEntity, updateEntity, getTaxYearTransactions, getMileage, addMileage, deleteMileage, getReceiptTxIds } from "../dataAdapter.js";
+import { getOverview, getSpending, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES, setCategoryRule, applyCategoryRuleToHistory, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, invalidateEnvelopeSpending, isEnvelopeSchemaMissing, targetNeed, readyToAssign, monthKey, getEntities, createEntity, updateEntity, getTaxYearTransactions, getMileage, addMileage, deleteMileage, getReceiptTxIds, getDebts, getBalanceSnapshots } from "../dataAdapter.js";
+import { payoffWhatIf, debtFreeMonth, isMortgage } from "../debtPayoff.js";
 import { SCHEDULE_E_LINES, RENTS_KEY, DEFAULT_SCHEDULE_E_MAP, scheduleEReport, entityMonthly, entityLedger, personalDeductionReport, DEDUCTION_BUCKETS, DEFAULT_DEDUCTION_MAP, mileageDeduction, scheduleECsv } from "../taxReport.js";
 import { merchantKey } from "../txClassify.js";
 import { detectRecurring } from "../recurring.js";
@@ -179,6 +180,31 @@ function numericish(s,{negative=true}={}) {
   const neg=negative&&s.trim().startsWith("-");
   const [whole,...rest]=s.replace(/[^0-9.]/g,"").split(".");
   return (neg?"-":"")+(rest.length?`${whole}.${rest.join("")}`:whole);
+}
+
+// Inline editor for a hand-entered liability figure (APR, minimum payment,
+// credit limit) on a Debt card. Uncontrolled: commits the parsed number on
+// blur (Enter just blurs), empty clears to null, and the field echoes back
+// what was actually saved. `id` keys the remount so state can't bleed
+// between accounts.
+function DebtNum({id,value,onSave,placeholder,prefix,suffix,width=74}) {
+  return (
+    <span style={{display:"inline-flex",alignItems:"center",gap:3,fontSize:12,color:"var(--muted)"}}>
+      {prefix}
+      <input key={id+":"+(value??"")} inputMode="decimal" defaultValue={value??""} placeholder={placeholder}
+        onKeyDown={e=>{if(e.key==="Enter")e.currentTarget.blur();}}
+        onBlur={e=>{
+          const t=numericish(e.target.value,{negative:false}).trim();
+          const n=t===""?null:Number(t);
+          const v=n!=null&&Number.isFinite(n)&&n>=0?n:null;
+          e.target.value=v==null?"":String(v); // show what was actually saved
+          if(v!==(value??null))onSave(v);
+        }}
+        style={{width,padding:"5px 7px",borderRadius:8,border:"1px solid var(--border)",background:"var(--bg)",
+          color:"var(--text)",fontSize:12,fontFamily:"'DM Mono',monospace",outline:"none",textAlign:"right"}}/>
+      {suffix}
+    </span>
+  );
 }
 
 function Sk({w="100%",h=16,r=6}) {
@@ -722,6 +748,16 @@ export default function Dashboard({ refreshTick = 0 }) {
   const [acctLoading,setAcctLoading]=useState(false);
   const [recurring,setRecurring]=useState(null);
   const [recLoading,setRecLoading]=useState(false);
+  // --- Debt tab (lazy like recurring) ---
+  const [debtData,setDebtData]=useState(null);   // {debts,totalDebt,totalMinimums,hasDebtColumns}
+  const [debtLoading,setDebtLoading]=useState(false);
+  const [debtSnaps,setDebtSnaps]=useState([]);   // balance_snapshots rows, oldest first (STORED sign: debts positive)
+  const [debtStrategy,setDebtStrategy]=useState("snowball");
+  const [debtExtra,setDebtExtra]=useState("");   // extra $/mo, text while typing
+  // Per-account include-in-payoff override; the DEFAULT (no entry) is: credit
+  // cards in, loans out — mortgages dominate a snowball/avalanche and make the
+  // debt-free date meaningless (spec), and v1 keeps all loans opt-in.
+  const [debtInclude,setDebtInclude]=useState({});
   // --- Rental & tax (Tax tab) ---
   const [entities,setEntities]=useState([]);
   const [taxYear,setTaxYear]=useState(now.getFullYear());
@@ -1002,6 +1038,7 @@ export default function Dashboard({ refreshTick = 0 }) {
         if(inc!==undefined)setIncome(inc);
       }
       setRecurring(null); // recompute lazily on next Recurring-tab visit
+      setDebtData(null);  // same: refetch balances/liability fields on next Debt-tab visit
       setLastUpd(new Date());
     }catch(err){
       if(seq!==loadSeq.current)return false;
@@ -1040,6 +1077,45 @@ export default function Dashboard({ refreshTick = 0 }) {
       .catch(err=>{console.error(err);setRecurring([]);})
       .finally(()=>setRecLoading(false));
   },[tab,recurring,recLoading]);
+
+  // The Debt tab is lazy the same way: the credit/loan accounts with their
+  // liability fields, plus a year of balance snapshots for the history chart
+  // (best-effort — the table may not exist yet; the adapter returns []).
+  useEffect(()=>{
+    if(tab!=="debt"||debtData||debtLoading)return;
+    setDebtLoading(true);
+    getDebts()
+      .then(async d=>{
+        try{
+          const since=new Date(Date.now()-365*86400000).toISOString().slice(0,10);
+          setDebtSnaps(await getBalanceSnapshots(d.debts.map(a=>a.id),since));
+        }catch(err){console.error("balance snapshots load failed",err);setDebtSnaps([]);}
+        setDebtData(d);
+      })
+      .catch(err=>{console.error("debt load failed",err);setDebtData({debts:[],totalDebt:0,totalMinimums:0,hasDebtColumns:false});})
+      .finally(()=>setDebtLoading(false));
+  },[tab,debtData,debtLoading]);
+
+  // Optimistic save for a hand-entered liability field (apr / minimum_payment /
+  // credit_limit / next_payment_due_date). Patches the debt cache — including
+  // the derived debtRate and the two totals, the same recompute-every-derived-
+  // field rule as saveTx — then writes; the accounts row is the client's own
+  // (RLS-scoped) so updateAccount writes it directly.
+  function saveDebt(id,fields){
+    setDebtData(prev=>{
+      if(!prev)return prev;
+      const debts=prev.debts.map(a=>{
+        if(a.id!==id)return a;
+        const next={...a,...fields};
+        next.debtRate=next.apr??next.interest_rate??null;
+        return next;
+      });
+      return {...prev,debts,
+        totalDebt:debts.reduce((s,a)=>s+(Number(a.current_balance)||0),0),
+        totalMinimums:debts.reduce((s,a)=>s+(Number(a.minimum_payment)||0),0)};
+    });
+    updateAccount(id,fields).catch(err=>console.error("debt field save failed",err));
+  }
 
   // The Tax tab is lazy the same way: a calendar year of rows + the mileage
   // log + the saved category→tax-line mappings, cached until invalidateTax
@@ -1611,7 +1687,7 @@ export default function Dashboard({ refreshTick = 0 }) {
 
         {/* Tabs */}
         <div style={{display:"flex",gap:3,background:"var(--bg)",borderRadius:24,padding:4,marginBottom:14,border:"1px solid var(--border)",overflowX:"auto"}}>
-          {["overview","categories","budget","transactions","accounts","trends","recurring","tax","ask"].map(t=>(
+          {["overview","categories","budget","transactions","accounts","debt","trends","recurring","tax","ask"].map(t=>(
             <button key={t} className={`tab${tab===t?" active":""}`}
               onClick={()=>{
                 setTab(t);
@@ -2282,6 +2358,230 @@ export default function Dashboard({ refreshTick = 0 }) {
             )}
           </div>
         )}
+
+        {/* DEBT */}
+        {tab==="debt"&&(()=>{
+          const busy=debtLoading||!debtData;
+          const debts=debtData?.debts||[];
+          const hasCols=debtData?.hasDebtColumns!==false;
+          const inPayoff=d=>debtInclude[d.id]??(d.type==="credit"); // credit in, loans (incl. mortgages) opt-in
+          const included=debts.filter(d=>(Number(d.current_balance)||0)>0&&inPayoff(d));
+          const extra=Math.max(0,Number(debtExtra)||0);
+          const missingMin=included.filter(d=>!(Number(d.minimum_payment)>0));
+          const plan=included.length?payoffWhatIf(included,{strategy:debtStrategy,extraMonthly:extra}):null;
+          const startMonth=`${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,"0")}`;
+          const freeMonth=plan?debtFreeMonth(startMonth,plan):null;
+          // Total-owed history: carry each account's last-seen snapshot forward
+          // so a day where only one bank reported doesn't read as a paydown.
+          const series=(()=>{
+            if(debtSnaps.length<2)return [];
+            const last={},pts=[];let cur=null;
+            for(const s of debtSnaps){
+              last[s.account_id]=Number(s.balance)||0;
+              const total=Object.values(last).reduce((a,b)=>a+b,0);
+              if(cur&&cur.date===s.captured_on)cur.total=total;
+              else pts.push(cur={date:s.captured_on,total});
+            }
+            return pts.length>=2?pts:[];
+          })();
+          return (
+          <div style={{display:"flex",flexDirection:"column",gap:12}}>
+            <div className="card">
+              <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em",marginBottom:5}}>Total debt</div>
+              {busy?<Sk w="50%" h={26}/>:(
+                <>
+                  {/* Rendered through displayBalance like every per-card row, so
+                      the headline and the rows agree on the sign (a positive
+                      total above negative cards is exactly the inconsistency
+                      displayBalance exists to remove). */}
+                  <div style={{fontSize:24,fontWeight:600,letterSpacing:"-.02em",fontFamily:"'DM Mono',monospace"}}>
+                    {fmtX(displayBalance(debtData.totalDebt,"credit"))}
+                  </div>
+                  <div style={{fontSize:11,color:"var(--muted)",marginTop:3}}>
+                    {debts.length} debt account{debts.length!==1?"s":""}
+                    {debtData.totalMinimums>0&&<> · {fmt(debtData.totalMinimums)}/mo in minimum payments</>}
+                    {" "}· hidden accounts excluded
+                  </div>
+                </>
+              )}
+            </div>
+
+            {!busy&&debts.length===0&&(
+              <div className="card" style={{textAlign:"center",padding:"34px 16px",color:"var(--muted)",fontSize:13,lineHeight:1.6}}>
+                No credit or loan accounts yet.<br/>
+                Link a card or loan through SimpleFIN (Accounts tab) and it shows up here with its balance synced daily.
+              </div>
+            )}
+
+            {(busy||debts.length>0)&&(
+            <div className="card">
+              <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em",marginBottom:4}}>Your debts</div>
+              {!hasCols&&!busy&&(
+                <div style={{fontSize:11,color:"var(--muted)",background:"var(--bg)",borderRadius:8,padding:"8px 12px",marginBottom:10}}>
+                  Balances are live; APR and minimum-payment entry activates once the debt-tracker migration is applied.
+                </div>
+              )}
+              {hasCols&&<div style={{fontSize:11,color:"var(--muted)",marginBottom:10}}>
+                Balances sync from the feed; APR, minimum payment and credit limit are yours to type in — they feed the payoff projection below.
+              </div>}
+              {busy?[1,2].map(i=><div key={i} style={{marginBottom:14}}><Sk h={64}/></div>):
+                debts.map((a,i)=>{
+                  const bal=Number(a.current_balance)||0;
+                  const limit=Number(a.credit_limit)||0;
+                  const util=a.type==="credit"&&limit>0?Math.min(bal/limit,1):null;
+                  const utilColor=util!=null?(util>=.8?OVER_MONEY:OK_MONEY):null;
+                  const inc=inPayoff(a);
+                  return (
+                    <div key={a.id} style={{padding:"10px 0",borderTop:i?"1px solid var(--border)":"none",animationDelay:i*.03+"s"}}>
+                      <div style={{display:"flex",alignItems:"center",gap:8}}>
+                        <span style={{width:10,height:10,borderRadius:3,background:markOn(acctColor(a),surf.card),flexShrink:0}}/>
+                        <div style={{flex:1,minWidth:0}}>
+                          <div style={{fontSize:13,fontWeight:500,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{acctLabel(a)}</div>
+                          <div style={{fontSize:11,color:"var(--muted)",marginTop:1}}>
+                            {[acctInst(a),a.type==="credit"?"Credit card":isMortgage(a)?"Mortgage":"Loan",
+                              a.next_payment_due_date?`due ${shortDate(a.next_payment_due_date)}`:null].filter(Boolean).join(" · ")}
+                          </div>
+                        </div>
+                        <div style={{textAlign:"right",flexShrink:0}}>
+                          <div style={{fontSize:14,fontFamily:"'DM Mono',monospace",fontWeight:600}}>{fmtX(displayBalance(a.current_balance,a.type))}</div>
+                          {util!=null&&<div style={{fontSize:10,color:inkOn(utilColor,surf.card),marginTop:1}}>{Math.round(util*100)}% of limit</div>}
+                        </div>
+                      </div>
+                      {util!=null&&(
+                        <div className="bar-bg" style={{marginTop:7}}>
+                          <div className="bar-fill" style={{width:(util*100)+"%",background:markOn(utilColor,surf.track)}}/>
+                        </div>
+                      )}
+                      {hasCols&&(
+                        <div style={{display:"flex",flexWrap:"wrap",alignItems:"center",gap:10,marginTop:8}}>
+                          <DebtNum id={a.id+":apr"} value={a.apr} placeholder="APR" suffix="%" width={56}
+                            onSave={v=>saveDebt(a.id,{apr:v})}/>
+                          <DebtNum id={a.id+":min"} value={a.minimum_payment} placeholder="min" prefix="$" suffix="/mo" width={64}
+                            onSave={v=>saveDebt(a.id,{minimum_payment:v})}/>
+                          {a.type==="credit"&&(
+                            <DebtNum id={a.id+":lim"} value={a.credit_limit} placeholder="limit" prefix="$" width={70}
+                              onSave={v=>saveDebt(a.id,{credit_limit:v})}/>
+                          )}
+                          {/* Commit on BLUR only — a date input emits COMPLETE
+                              garbage values while the year is typed (see the
+                              placed_in_service comment). */}
+                          <label style={{display:"inline-flex",alignItems:"center",gap:4,fontSize:12,color:"var(--muted)"}}>due
+                            <input type="date" key={a.id+":due:"+(a.next_payment_due_date||"")} defaultValue={a.next_payment_due_date||""}
+                              onBlur={ev=>{const raw=ev.target.value||null;const v=raw&&raw.slice(0,4)>="1900"?raw:null;
+                                ev.target.value=v||"";
+                                if(v!==(a.next_payment_due_date||null))saveDebt(a.id,{next_payment_due_date:v});}}
+                              style={{padding:"5px 7px",borderRadius:8,border:"1px solid var(--border)",background:"var(--bg)",
+                                color:"var(--text)",fontSize:12,fontFamily:"inherit",outline:"none"}}/>
+                          </label>
+                          <button onClick={()=>setDebtInclude(prev=>({...prev,[a.id]:!inc}))}
+                            title={inc?"Included in the payoff projection":isMortgage(a)?"Mortgages are excluded from the projection by default — they'd dominate it":"Tap to include in the payoff projection"}
+                            style={{marginLeft:"auto",fontSize:11,fontWeight:600,padding:"4px 10px",borderRadius:20,fontFamily:"inherit",cursor:"pointer",
+                              background:inc?chipOn(TYPE_CHIP,surf.card).bg:"var(--bg)",
+                              color:inc?chipOn(TYPE_CHIP,surf.card).ink:"var(--muted)",
+                              border:`1px solid ${inc?markOn(TYPE_CHIP,surf.card):"var(--border)"}`,transition:"all .15s"}}>
+                            {inc?"✓ in payoff":"＋ payoff"}
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+            </div>
+            )}
+
+            {!busy&&hasCols&&debts.length>0&&(
+            <div className="card">
+              <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em",marginBottom:10}}>Payoff projection</div>
+              <div style={{display:"flex",flexWrap:"wrap",alignItems:"center",gap:8,marginBottom:12}}>
+                {["snowball","avalanche"].map(s=>{
+                  const active=debtStrategy===s;
+                  const cs=active?chipOn(TYPE_CHIP,surf.card):null;
+                  return (
+                    <button key={s} onClick={()=>setDebtStrategy(s)}
+                      title={s==="snowball"?"Smallest balance first — quick wins":"Highest APR first — least interest"}
+                      style={{fontSize:11,fontWeight:600,padding:"5px 12px",borderRadius:20,fontFamily:"inherit",cursor:"pointer",
+                        background:cs?cs.bg:"var(--bg)",color:cs?cs.ink:"var(--muted)",
+                        border:`1px solid ${active?markOn(TYPE_CHIP,surf.card):"var(--border)"}`,transition:"all .15s"}}>
+                      {s==="snowball"?"Snowball":"Avalanche"}
+                    </button>
+                  );
+                })}
+                <span style={{marginLeft:"auto",display:"inline-flex",alignItems:"center",gap:4,fontSize:12,color:"var(--muted)"}}>
+                  extra $
+                  <input value={debtExtra} inputMode="decimal" placeholder="0"
+                    onChange={e=>setDebtExtra(numericish(e.target.value,{negative:false}))}
+                    style={{width:64,padding:"5px 7px",borderRadius:8,border:"1px solid var(--border)",background:"var(--bg)",
+                      color:"var(--text)",fontSize:12,fontFamily:"'DM Mono',monospace",outline:"none",textAlign:"right"}}/>
+                  /mo
+                </span>
+              </div>
+              {included.length===0?(
+                <div style={{fontSize:12,color:"var(--muted)"}}>
+                  Nothing is included in the projection yet — tap "＋ payoff" on a debt above.
+                  Mortgages are left out by default: they'd dominate the plan and make the debt-free date meaningless.
+                </div>
+              ):missingMin.length>0?(
+                <div style={{fontSize:12,color:"var(--muted)"}}>
+                  Enter a minimum payment for {missingMin.map(d=>acctLabel(d)).join(", ")} to project a payoff.
+                </div>
+              ):plan.stalled?(
+                <div style={{fontSize:12,color:"var(--danger)",background:"var(--danger-bg)",border:"1px solid var(--danger-border)",borderRadius:8,padding:"8px 12px"}}>
+                  At these payments the balances never fall — the minimums don't cover the monthly interest. Add an extra payment above.
+                </div>
+              ):(
+                <>
+                  <div style={{display:"flex",gap:10,flexWrap:"wrap",marginBottom:10}}>
+                    {[{label:"Debt-free",val:freeMonth?monthYear(freeMonth):"—",sub:`${plan.months} month${plan.months!==1?"s":""}`},
+                      {label:"Total interest",val:fmtAuto(plan.totalInterest),sub:`${debtStrategy} order`},
+                      ...(extra>0?[{label:"vs minimums only",val:fmtAuto(plan.interestSaved)+" saved",sub:plan.monthsSaved>0?`${plan.monthsSaved} month${plan.monthsSaved!==1?"s":""} sooner`:"same timeline",clr:inkOn(OK_MONEY,surf.bg)}]:[]),
+                    ].map((c,i)=>(
+                      <div key={i} style={{flex:"1 1 100px",background:"var(--bg)",borderRadius:10,padding:"10px 12px"}}>
+                        <div style={{fontSize:10,color:"var(--muted)",fontWeight:500,marginBottom:3}}>{c.label}</div>
+                        <div style={{fontSize:15,fontWeight:600,fontFamily:"'DM Mono',monospace",color:c.clr||"var(--text)"}}>{c.val}</div>
+                        <div style={{fontSize:10,color:"var(--muted)",marginTop:2}}>{c.sub}</div>
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{fontSize:11,color:"var(--muted)"}}>
+                    {plan.perDebt.filter(d=>d.months!=null).map(d=>`${d.name||"?"} clears month ${d.months}`).join(" · ")}
+                  </div>
+                </>
+              )}
+              <div style={{marginTop:10,fontSize:10,color:"var(--muted)"}}>
+                Projection assumes the current balances, no new charges, and a fixed monthly budget of the minimums plus any extra —
+                freed-up minimums roll onto the next debt.
+              </div>
+            </div>
+            )}
+
+            {series.length>=2&&(
+            <div className="card">
+              <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em",marginBottom:10}}>Total owed over time</div>
+              {(()=>{
+                const max=Math.max(...series.map(p=>p.total),1);
+                const min=Math.min(...series.map(p=>p.total));
+                const span=Math.max(max-min,max*.02,1);
+                const W=300,H=60;
+                const pts=series.map((p,i)=>`${(i/(series.length-1))*W},${H-4-((p.total-min)/span)*(H-8)}`).join(" ");
+                const line=markOn("#7F77DD",surf.card);
+                return (
+                  <>
+                    <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{width:"100%",height:H,display:"block"}}>
+                      <polyline points={pts} fill="none" stroke={line} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round"/>
+                    </svg>
+                    <div style={{display:"flex",justifyContent:"space-between",marginTop:6,fontSize:10,color:"var(--muted)",fontFamily:"'DM Mono',monospace"}}>
+                      <span>{shortDate(series[0].date)} · {fmt(displayBalance(series[0].total,"credit"))}</span>
+                      <span>{shortDate(series[series.length-1].date)} · {fmt(displayBalance(series[series.length-1].total,"credit"))}</span>
+                    </div>
+                  </>
+                );
+              })()}
+              <div style={{marginTop:8,fontSize:10,color:"var(--muted)"}}>Snapshots are taken by the daily sync whenever a balance changes — the line fills in over time.</div>
+            </div>
+            )}
+          </div>
+          );
+        })()}
 
         {/* ASK */}
         {tab==="ask"&&(
