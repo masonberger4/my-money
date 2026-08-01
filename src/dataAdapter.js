@@ -220,6 +220,11 @@ export async function updateAccount(id, fields) {
   // Account-level rental default: every transaction on this account belongs to
   // the entity unless the row overrides it (null = no default).
   if ('entity_id' in fields) allowed.entity_id = fields.entity_id;
+  // Debt-tracker liability fields — hand-entered in the Debt view, user-owned
+  // (never written by the sync). The view only renders their editors when
+  // getDebts reports the columns exist, so pre-migration these never arrive.
+  for (const k of ['apr', 'minimum_payment', 'credit_limit', 'statement_balance', 'next_payment_due_date', 'interest_rate', 'original_balance'])
+    if (k in fields) allowed[k] = fields[k];
   const { error } = await supabase.from('accounts').update(allowed).eq('id', id);
   if (error) throw error;
 }
@@ -273,7 +278,10 @@ export async function getDebts() {
     }));
   const totalDebt = debts.reduce((s, a) => s + (Number(a.current_balance) || 0), 0);
   const totalMinimums = debts.reduce((s, a) => s + (Number(a.minimum_payment) || 0), 0);
-  return { debts, totalDebt, totalMinimums };
+  // hasDebtColumns tells the Debt view whether the liability columns exist yet
+  // (false pre-migration → it hides the APR/min editors instead of offering
+  // edits that can't be written).
+  return { debts, totalDebt, totalMinimums, hasDebtColumns: accountsHaveDebtColumns };
 }
 
 // Balance history for the debt-over-time chart. Returns an ARRAY of

@@ -32,6 +32,7 @@ const DAY_MS = 86_400_000;
 // added to the SimpleFIN migration after it was first published.
 let txHaveSource = true;
 let hasAttemptColumn = true;
+let hasSnapshotTable = true;
 
 // PostgREST/Postgres codes for "that column/table isn't there". Previews share
 // the production database, so every read and write has to survive the window
@@ -152,6 +153,35 @@ async function resolveOrgInstitutions(supabase, householdId, orgs) {
   return byKey;
 }
 
+// Append today's balance-history rows (debt tracker groundwork; also seeds the
+// future net-worth chart). One row per account per day, only when the balance
+// changed — the caller filters, the (account_id, captured_on) upsert dedups.
+// Runs as SERVICE_ROLE, where the current_household_id() default resolves to
+// NULL, so household_id is set EXPLICITLY on every row (see Gotchas). Best
+// effort: a missing balance_snapshots table (migration not pasted yet — previews
+// share the prod database) switches it off quietly, and any other failure is
+// logged rather than allowed to break the sync — history is auxiliary, the
+// balances themselves already landed on `accounts`.
+async function appendBalanceSnapshots(supabase, householdId, snapshots, capturedOn) {
+  if (!hasSnapshotTable || !snapshots.length) return;
+  const { error } = await supabase.from('balance_snapshots').upsert(
+    snapshots.map(s => ({
+      household_id: householdId,
+      account_id: s.accountId,
+      captured_on: capturedOn,
+      balance: s.balance,
+    })),
+    { onConflict: 'account_id,captured_on' }
+  );
+  if (error) {
+    if (isMissingTableError(error, 'balance_snapshots')) {
+      hasSnapshotTable = false;
+      return;
+    }
+    console.warn('[sync:simplefin] balance snapshot append failed', error.message || error);
+  }
+}
+
 async function pullOneAccessUrl(supabase, householdId, accessRow, { force, categoryRules }) {
   const now = new Date();
   const lastPulled = accessRow.last_pulled_at ? new Date(accessRow.last_pulled_at) : null;
@@ -256,6 +286,10 @@ async function pullOneAccessUrl(supabase, householdId, accessRow, { force, categ
 
   const toInsert = [];
   const toUpdate = [];
+  // Balance-history candidates (debt tracker groundwork): externalId + the
+  // balance as STORED (debts positive — balance_snapshots mirrors
+  // accounts.current_balance, never the display sign).
+  const snapshotCandidates = [];
   const usable = [];
   const typeByExternal = new Map();
   let ignoredTypes = 0;
@@ -319,6 +353,13 @@ async function pullOneAccessUrl(supabase, householdId, accessRow, { force, categ
     // available-balance is omitted when it equals the balance, so fall back
     // rather than nulling it out.
     const available = acct.availableBalance ?? balance;
+
+    // Append a history row only when there is a balance and it actually moved
+    // (a first sight of the account counts as a move). ≤ one row per account
+    // per day — same-day re-pulls land on the (account_id, captured_on) upsert.
+    if (balance != null && (!existing || Number(existing.current_balance) !== balance)) {
+      snapshotCandidates.push({ externalId, balance });
+    }
 
     if (existing) {
       toUpdate.push({
@@ -399,6 +440,16 @@ async function pullOneAccessUrl(supabase, householdId, accessRow, { force, categ
     .like('plaid_account_id', `${SFIN_PREFIX}%`);
   if (idErr) throw idErr;
   const uuidByExternal = new Map((idRows || []).map(a => [a.plaid_account_id, a.id]));
+
+  // ---- balance snapshots (debt tracker) -------------------------------------
+  await appendBalanceSnapshots(
+    supabase,
+    householdId,
+    snapshotCandidates
+      .map(s => ({ accountId: uuidByExternal.get(s.externalId), balance: s.balance }))
+      .filter(s => s.accountId),
+    now.toISOString().slice(0, 10)
+  );
 
   const txRows = [];
   // Same duplicate hazard as accounts, one level down: a repeated transaction
