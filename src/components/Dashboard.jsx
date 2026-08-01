@@ -1,15 +1,18 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from "react";
 import { getOverview, getSpending, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES, setCategoryRule, applyCategoryRuleToHistory, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, invalidateEnvelopeSpending, isEnvelopeSchemaMissing, targetNeed, readyToAssign, monthKey, getEntities, createEntity, updateEntity, getTaxYearTransactions, getMileage, addMileage, deleteMileage, getReceiptTxIds, getDebts, getBalanceSnapshots } from "../dataAdapter.js";
 import { payoffWhatIf, debtFreeMonth, isMortgage } from "../debtPayoff.js";
 import { SCHEDULE_E_LINES, RENTS_KEY, DEFAULT_SCHEDULE_E_MAP, scheduleEReport, entityMonthly, entityLedger, personalDeductionReport, DEDUCTION_BUCKETS, DEFAULT_DEDUCTION_MAP, mileageDeduction, scheduleECsv } from "../taxReport.js";
 import { merchantKey } from "../txClassify.js";
 import { detectRecurring } from "../recurring.js";
-import { unlinkInstitution, askAssistant } from "../apiClient.js";
+import { unlinkInstitution, askAssistant, getSimpleFinStatus } from "../apiClient.js";
 import { ERA_CATEGORIES, UNCATEGORIZED, isBudgetableCategory } from "../categoryMap.js";
 import { displayBalance, isDebtAccount as isDebtType } from "../accountBalance.js";
 import { runSync } from "../sync.js";
-import CsvImport from "./CsvImport.jsx";
-import SimpleFinConnect from "./SimpleFinConnect.jsx";
+// Lazy: both are modals rendered only on user action, and CsvImport reaches the
+// whole statement-import stack — no reason for either in the initial bundle.
+// A failed chunk load throws during render; App's ErrorBoundary is the net.
+const CsvImport = lazy(() => import("./CsvImport.jsx"));
+const SimpleFinConnect = lazy(() => import("./SimpleFinConnect.jsx"));
 import ReceiptSection from "./ReceiptSection.jsx";
 import { getSetting, setSetting } from "../db.js";
 import { ASSISTANT_MODELS, EFFORT_LEVELS, DEFAULT_MODEL, DEFAULT_EFFORT, estimateCostRange, formatCents } from "../assistantModels.js";
@@ -805,6 +808,10 @@ export default function Dashboard({ refreshTick = 0 }) {
   const [asstEffort,setAsstEffort]=useState(DEFAULT_EFFORT);
   const chatEndRef=useRef(null);
   const didInitialSync=useRef(false);
+  // {last_pulled_at,last_error} when the SimpleFIN feed looks unhealthy —
+  // checked ONCE per mount, after the initial sync (never a status fetch on
+  // every dashboard load; that was the LinkAccount antipattern).
+  const [feedHealth,setFeedHealth]=useState(null);
 
   // Theme. useTheme owns the persistence (localStorage, NOT the shared
   // `settings` table — that would flip the other person's phone) and the OS
@@ -1064,7 +1071,17 @@ export default function Dashboard({ refreshTick = 0 }) {
     if(!ready)return;
     const syncFirst=!didInitialSync.current;
     if(syncFirst)didInitialSync.current=true;
-    fetchData(year,month,{sync:syncFirst});
+    fetchData(year,month,{sync:syncFirst}).then(()=>{
+      if(!syncFirst)return;
+      // The sync response can't answer "is the feed stale?" — a clean pull
+      // carries no last_pulled_at — so ask /api/simplefin-status once, in the
+      // same flow, after the sync has had its chance to freshen the watermark.
+      getSimpleFinStatus().then(s=>{
+        if(!s?.connected)return;
+        const stale=s.last_pulled_at&&Date.now()-new Date(s.last_pulled_at).getTime()>3*86_400_000;
+        if(s.last_error||stale)setFeedHealth({last_pulled_at:s.last_pulled_at,last_error:s.last_error||null});
+      }).catch(err=>console.error("feed status check failed",err));
+    });
   },[year,month,ready,refreshTick,fetchData]);
 
   // Recurring detection is lazy: fetched + computed the first time the tab
@@ -1321,7 +1338,12 @@ export default function Dashboard({ refreshTick = 0 }) {
     try{
       await updateTransaction(id,fields);
     }catch(err){
+      // The optimistic patches above already painted the edit — say so and
+      // refetch the lists reloadData below never reaches (search results, the
+      // account sheet), or they keep showing a save that never landed.
       console.error("transaction update failed",err);
+      window.alert(`Couldn't save that change: ${err.message||err}`);
+      await refetchOpenLists();
     }
     reloadData(year,month);
   }
@@ -1650,6 +1672,17 @@ export default function Dashboard({ refreshTick = 0 }) {
         </div>
 
         {error&&<div style={{background:"var(--danger-bg)",border:"1px solid var(--danger-border)",borderRadius:10,padding:"12px 16px",fontSize:13,color:"var(--danger)",marginBottom:14}}>{error}</div>}
+
+        {/* Feed health — amber, not red: the data on screen is fine, it's just
+            getting stale. last_error is already sanitized server-side. */}
+        {feedHealth&&(
+          <div style={{background:"var(--warn-bg)",border:"1px solid var(--warn-border)",borderRadius:10,padding:"12px 16px",fontSize:13,color:"var(--warn)",marginBottom:14,lineHeight:1.5}}>
+            {feedHealth.last_error
+              ?<>Bank feed problem: {feedHealth.last_error}</>
+              :<>Bank feed hasn't updated since {new Date(feedHealth.last_pulled_at).toLocaleDateString([],{month:"short",day:"numeric"})}.</>}
+            {" "}<button onClick={()=>setConnectingSfin(true)} style={{background:"none",border:"none",padding:0,font:"inherit",color:"inherit",textDecoration:"underline",cursor:"pointer"}}>Check connection</button>
+          </div>
+        )}
 
         {/* Everything is hidden — which is what a brand-new SimpleFIN connect
             looks like. New accounts arrive hidden:true (their TYPE is a guess,
@@ -2140,7 +2173,7 @@ export default function Dashboard({ refreshTick = 0 }) {
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:10,marginBottom:4}}>
               <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em"}}>Accounts</div>
               <div style={{display:"flex",gap:6,flexWrap:"wrap",justifyContent:"flex-end"}}>
-                <button className="ibtn" style={{fontSize:11}} onClick={()=>setConnectingSfin(true)}>⚡ SimpleFIN</button>
+                <button className="ibtn" style={{fontSize:11}} onClick={()=>setConnectingSfin(true)}>+ Add bank</button>
                 <button className="ibtn" style={{fontSize:11}} onClick={()=>setImporting(true)}>⤓ Import statement</button>
               </div>
             </div>
@@ -3365,19 +3398,23 @@ export default function Dashboard({ refreshTick = 0 }) {
 
       {/* CSV import (standalone) */}
       {importing&&(
-        <CsvImport
-          accounts={accounts}
-          onClose={()=>setImporting(false)}
-          onImported={()=>reloadData(year,month)}
-        />
+        <Suspense fallback={null}>
+          <CsvImport
+            accounts={accounts}
+            onClose={()=>setImporting(false)}
+            onImported={()=>reloadData(year,month)}
+          />
+        </Suspense>
       )}
 
       {/* SimpleFIN connect */}
       {connectingSfin&&(
-        <SimpleFinConnect
-          onClose={()=>setConnectingSfin(false)}
-          onConnected={()=>reloadData(year,month)}
-        />
+        <Suspense fallback={null}>
+          <SimpleFinConnect
+            onClose={()=>setConnectingSfin(false)}
+            onConnected={()=>reloadData(year,month)}
+          />
+        </Suspense>
       )}
 
       {/* Funding target (rule 2) */}

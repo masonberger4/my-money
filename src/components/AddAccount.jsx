@@ -1,5 +1,8 @@
-import { useState } from 'react';
-import SimpleFinConnect from './SimpleFinConnect.jsx';
+import { lazy, Suspense, useState } from 'react';
+
+// Lazy for the same reason Dashboard lazies it — a static import here would
+// pull the modal back into the main bundle and defeat the split.
+const SimpleFinConnect = lazy(() => import('./SimpleFinConnect.jsx'));
 
 // The "add a bank" button, and the owner of the connect modal it opens.
 //
@@ -21,12 +24,14 @@ export default function AddAccount({ label = '+ Add bank', onLinked }) {
         {label}
       </button>
       {open && (
-        <SimpleFinConnect
-          onClose={() => setOpen(false)}
-          onConnected={() => {
-            if (onLinked) onLinked();
-          }}
-        />
+        <Suspense fallback={null}>
+          <SimpleFinConnect
+            onClose={() => setOpen(false)}
+            onConnected={() => {
+              if (onLinked) onLinked();
+            }}
+          />
+        </Suspense>
       )}
     </>
   );

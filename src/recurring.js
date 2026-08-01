@@ -60,7 +60,10 @@ function titleCase(s) {
   return s.toLowerCase().replace(/\b[a-z]/g, c => c.toUpperCase());
 }
 
-export function detectRecurring(transactions) {
+// `today` ('YYYY-MM-DD', optional): when given, each item gains dueSoon
+// (nextDate within 7 days) / overdue (nextDate past). Null keeps the module
+// pure — callers pass the clock in; with no clock the due fields are null.
+export function detectRecurring(transactions, today = null) {
   const groups = new Map();
   for (const t of transactions) {
     if (!(t.amount > 0)) continue; // money in can't be a subscription
@@ -95,6 +98,14 @@ export function detectRecurring(transactions) {
 
     const keptAmounts = kept.map(t => t.amount).sort((a, b) => a - b);
     const lastDay = days[days.length - 1];
+    // Tie-break same-day charges on amount so the pick is input-order
+    // independent (the output-ordering test feeds reversed input).
+    const lastAmount = kept.reduce((best, t) => {
+      const dt = dayNumber(t.transaction_date), db = dayNumber(best.transaction_date);
+      return dt > db || (dt === db && t.amount > best.amount) ? t : best;
+    }).amount;
+    const nextDay = lastDay + Math.round(medGap);
+    const todayDay = today ? dayNumber(today) : null;
     out.push({
       key,
       name: mostFrequent(kept.map(t => t.merchant_name)) || titleCase(key),
@@ -103,8 +114,13 @@ export function detectRecurring(transactions) {
       monthlyAmount: median(keptAmounts),
       count: kept.length,
       lastDate: isoFromDayNumber(lastDay),
-      nextDate: isoFromDayNumber(lastDay + Math.round(medGap)),
+      nextDate: isoFromDayNumber(nextDay),
       avgGapDays: Math.round(gaps.reduce((s, g) => s + g, 0) / gaps.length),
+      lastAmount,
+      // Strictly more than 5% over the median: exactly 5% is not creep.
+      priceCreep: lastAmount > 1.05 * medAmount,
+      dueSoon: todayDay == null ? null : nextDay >= todayDay && nextDay - todayDay <= 7,
+      overdue: todayDay == null ? null : nextDay < todayDay,
     });
   }
 

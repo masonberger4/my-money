@@ -1,5 +1,5 @@
 import { getServiceClient, requireUser } from './_lib/supabase.js';
-import { decodeSetupToken, claimAccessUrl, fetchAccountSet } from './_lib/simplefin.js';
+import { decodeSetupToken, claimAccessUrl, fetchAccountSet, sanitizeFeedMessage } from './_lib/simplefin.js';
 
 function isMissingColumn(error, name) {
   const blob = `${error?.message || ''} ${error?.details || ''}`.toLowerCase();
@@ -85,14 +85,14 @@ export default async function handler(req, res) {
       accountCount = Array.isArray(probe?.accounts) ? probe.accounts.length : 0;
     } catch (probeErr) {
       console.warn('simplefin-claim stored, first read failed:', probeErr?.code, probeErr?.message);
-      warning = probeErr?.message || 'Connected, but the first read from SimpleFIN failed.';
+      warning = sanitizeFeedMessage(probeErr?.message) || 'Connected, but the first read from SimpleFIN failed.';
     }
 
     return res.status(200).json({ ok: true, accounts: accountCount, ...(warning ? { warning } : {}) });
   } catch (err) {
     if (err?.name === 'SimpleFinError') {
       console.warn('simplefin-claim rejected:', err.code, err.message);
-      return res.status(400).json({ error: err.code, message: err.message });
+      return res.status(400).json({ error: err.code, message: sanitizeFeedMessage(err.message) });
     }
     console.error('simplefin-claim error', err);
     return res.status(500).json({ error: err.message || 'Unknown error' });

@@ -134,6 +134,60 @@ test('output ordering is deterministic: largest monthly amount first', () => {
   assert.deepEqual(detectRecurring([...rows].reverse()), out);
 });
 
+test('priceCreep: strictly more than 5% over the median flags; exactly 5% does not', () => {
+  // Median of [20, 20, 20, 21] is 20 — a 21.00 last charge is EXACTLY 5%.
+  const dates = ['2026-01-05', '2026-02-04', '2026-03-06', '2026-04-05'];
+  const atBoundary = dates.map((d, i) => tx(d, i === 3 ? 21.0 : 20.0, 'EXACT FIVE'));
+  const r1 = detectRecurring(atBoundary)[0];
+  assert.equal(r1.lastAmount, 21.0);
+  assert.equal(r1.priceCreep, false, 'exactly 5% is not creep');
+
+  const justOver = dates.map((d, i) => tx(d, i === 3 ? 21.01 : 20.0, 'JUST OVER'));
+  const r2 = detectRecurring(justOver)[0];
+  assert.equal(r2.lastAmount, 21.01);
+  assert.equal(r2.priceCreep, true, 'a cent past 5% is creep');
+
+  // Constant amount: no creep, and lastAmount is the most recent charge.
+  const flat = dates.map(d => tx(d, 15.99, 'FLAT SUB'));
+  const r3 = detectRecurring(flat)[0];
+  assert.equal(r3.lastAmount, 15.99);
+  assert.equal(r3.priceCreep, false);
+});
+
+test('due status derives from an injected today; null today keeps the fields null', () => {
+  // STREAMFLIX fixture: nextDate 2026-05-03.
+  const rows = [
+    tx('2026-01-05', 15.99, 'STREAMFLIX.COM'),
+    tx('2026-02-03', 15.99, 'STREAMFLIX.COM'),
+    tx('2026-03-06', 15.99, 'STREAMFLIX.COM'),
+    tx('2026-04-04', 15.99, 'STREAMFLIX.COM'),
+  ];
+  // No clock passed → pure output, due fields null.
+  const bare = detectRecurring(rows)[0];
+  assert.equal(bare.dueSoon, null);
+  assert.equal(bare.overdue, null);
+
+  // 8 days out: not yet due soon.
+  const far = detectRecurring(rows, '2026-04-25')[0];
+  assert.equal(far.dueSoon, false);
+  assert.equal(far.overdue, false);
+
+  // Exactly 7 days out: due soon.
+  const week = detectRecurring(rows, '2026-04-26')[0];
+  assert.equal(week.dueSoon, true);
+  assert.equal(week.overdue, false);
+
+  // On the day itself: still due soon, not overdue.
+  const onDay = detectRecurring(rows, '2026-05-03')[0];
+  assert.equal(onDay.dueSoon, true);
+  assert.equal(onDay.overdue, false);
+
+  // The day after: overdue, no longer due soon.
+  const late = detectRecurring(rows, '2026-05-04')[0];
+  assert.equal(late.dueSoon, false);
+  assert.equal(late.overdue, true);
+});
+
 test('name and category come from the most frequent values in the group', () => {
   const rows = [
     tx('2026-01-05', 15.99, 'STREAMFLIX.COM'),

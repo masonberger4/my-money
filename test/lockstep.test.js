@@ -68,6 +68,29 @@ test('sw.js keeps the /api/ passthrough guard and a CACHE_VERSION line', () => {
   assert.match(sw, /^const CACHE_VERSION = /m);
 });
 
+test('networkFirstShell only caches an ok response', () => {
+  const sw = read('public/sw.js');
+  assert.match(
+    sw,
+    /if \(fresh\.ok\) cache\.put\('\/', fresh\.clone\(\)\)/,
+    'networkFirstShell must guard cache.put on fresh.ok, or an error page becomes the offline shell'
+  );
+});
+
+// --- (b2) self-hosted fonts --------------------------------------------------
+
+test('every ui.css @font-face file exists in public/ and is precached by sw.js', () => {
+  const css = read('src/ui.css');
+  const sw = read('public/sw.js');
+  const urls = [...css.matchAll(/url\('(\/fonts\/[^']+)'\)/g)].map(m => m[1]);
+  assert.ok(urls.length >= 3, `expected self-hosted font urls in ui.css (found ${urls.length})`);
+  assert.doesNotMatch(css, /@import[^;]*fonts\.googleapis\.com/, 'fonts must stay self-hosted');
+  for (const u of urls) {
+    statSync(join(root, 'public', u)); // throws if the file is missing
+    assert.ok(sw.includes(`'${u}'`), `${u} missing from sw.js PRECACHE`);
+  }
+});
+
 // --- (c) pdf.js legacy build -------------------------------------------------
 
 function walk(dir) {
