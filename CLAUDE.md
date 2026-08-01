@@ -732,6 +732,30 @@ The app's ONLY use of Supabase **Storage** — everything else is Postgres.
   fatal — which Dashboard folds into the "not installed" sentinel, silently
   switching the nag off at exactly 1000 receipts.
 
+- **Comprehensive testing suite** — five phases, 143 → 322 tests, zero new
+  committed dependencies. (1) `src/pdfImport.js` in depth over synthetic
+  statement fixtures (`test/helpers/pdfFixtures.js`) + the reconcileCsv audit
+  with its own brute-force parity. (2) The purchase-based spending model
+  extracted pure (`src/spending.js`) and stress-tested against a synthetic
+  multi-account household (`test/helpers/ledger.js`, hand-computed constants
+  + seeded property tests). (3) The learned-rule history core extracted
+  (`src/ruleHistory.js`) and driven against a fake implementing PostgREST's
+  real ilike/416 contract. (4) The rest: recurring thresholds, accountBalance,
+  categoryMap, SimpleFIN normalization + token/SSRF plumbing (stubbed fetch),
+  assistantModels, `formatSpendingContext` byte-determinism, the sync
+  watermark decision (`watermarkUpdate`/`coverageShortfall`, extracted), and
+  static lockstep guards. (5) A browser-harness smoke pass (29/29): rendered
+  Overview/Categories/Budget/CategorySheet totals equal the pure-suite
+  constants off the same ledger, both optimistic-patch Gotcha flows, and the
+  pdf.js pipeline under the Safari `ReadableStream` emulation. One real fix:
+  `displayBalance` returned `-0` for a zero debt balance (masked by today's
+  formatters; normalized, REGRESSION-pinned). **Recorded harness gap:** the
+  App.jsx institution-count Gotcha stays untested — the harness renders
+  Dashboard only; covering it needs a fifth full-match alias mocking
+  `supabaseClient.js`. Out of scope, deliberate: `receiptImage.js`
+  (browser+Storage, verified on the real phone), SQL/RLS tests (worthwhile
+  follow-up), live SimpleFIN/Supabase integration.
+
 ## Pending branches
 
 None in code, and no outstanding ops tasks. The receipts storage-policy
