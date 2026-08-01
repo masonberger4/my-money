@@ -1,5 +1,6 @@
 import { getServiceClient, requireUser } from './_lib/supabase.js';
 import { MIN_PULL_MINUTES } from './_lib/simplefin.js';
+import { unlinkSettingsKey, parseRestoreSet, restoreSet } from './_lib/unlink.js';
 
 // Whether this household has SimpleFIN connected, and how the last pull went.
 //
@@ -10,7 +11,8 @@ import { MIN_PULL_MINUTES } from './_lib/simplefin.js';
 // GET  → { connected, connections, last_pulled_at, last_error, institutions,
 //          accounts, hidden_accounts, removed[], min_pull_minutes }
 // POST { restore_institution_id } → undo a "Remove bank": clears the disabled
-//          tombstone so the next pull recreates its accounts.
+//          tombstone and unhides exactly the accounts the soft-hide hid
+//          (recorded in settings at hide time). Returns { unhidden }.
 // DELETE → forget the stored access URL (stops all SimpleFIN syncing; leaves
 //          already-imported accounts and transactions in place).
 export default async function handler(req, res) {
@@ -47,7 +49,50 @@ export default async function handler(req, res) {
       if (!data?.length) {
         return res.status(404).json({ error: 'No such SimpleFIN bank in this household' });
       }
-      return res.status(200).json({ ok: true, restored: data[0].name });
+
+      // Undo the soft-hide too — but ONLY the accounts that were VISIBLE when
+      // "Remove bank" hid them (recorded in settings under unlink:<id>).
+      // Unhiding everything would surface accounts the user deliberately hid
+      // pre-removal AND unconfirmed new arrivals (new SimpleFIN accounts
+      // arrive hidden until the user confirms the type guess). No recorded
+      // set (removed before this shipped, or the record was lost) → unhide
+      // none; the user can unhide by hand in Accounts.
+      let unhidden = 0;
+      const key = unlinkSettingsKey(restore_institution_id);
+      const { data: setting, error: setErr } = await supabase
+        .from('settings')
+        .select('value')
+        .eq('household_id', user.householdId)
+        .eq('key', key)
+        .maybeSingle();
+      if (setErr) throw setErr;
+      const recorded = parseRestoreSet(setting?.value);
+      if (recorded.length) {
+        const { data: acctRows, error: acctErr } = await supabase
+          .from('accounts')
+          .select('id')
+          .eq('institution_id', restore_institution_id);
+        if (acctErr) throw acctErr;
+        const toUnhide = restoreSet(recorded, (acctRows || []).map(a => a.id));
+        if (toUnhide.length) {
+          const { data: updated, error: unhideErr } = await supabase
+            .from('accounts')
+            .update({ hidden: false })
+            .in('id', toUnhide)
+            .select('id');
+          if (unhideErr) throw unhideErr;
+          unhidden = updated?.length ?? toUnhide.length;
+        }
+      }
+      // The record is consumed either way — a second Restore must not replay
+      // a stale visibility snapshot over later user edits.
+      await supabase
+        .from('settings')
+        .delete()
+        .eq('household_id', user.householdId)
+        .eq('key', key);
+
+      return res.status(200).json({ ok: true, restored: data[0].name, unhidden });
     }
 
     if (req.method === 'DELETE') {

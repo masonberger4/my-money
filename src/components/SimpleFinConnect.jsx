@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { createPortal } from "react-dom";
-import { claimSimpleFinToken, getSimpleFinStatus, disconnectSimpleFin, restoreSimpleFinInstitution } from "../apiClient.js";
+import { claimSimpleFinToken, getSimpleFinStatus, disconnectSimpleFin, restoreSimpleFinInstitution, unlinkInstitution } from "../apiClient.js";
 import { runSync, pullWasClean } from "../sync.js";
 
 // SimpleFIN connect — the modal behind "⚡ Connect with SimpleFIN", reachable
@@ -120,9 +120,11 @@ export default function SimpleFinConnect({ onClose, onConnected }) {
     setBusy(false);
   }
 
-  // "Remove bank" on the account screen only disables the bank — one access URL
-  // covers them all, so deleting the row would let the next pull recreate it.
-  // This is the way back: without it, removing a bank by mistake is permanent.
+  // "Remove bank" on the account screen is a SOFT-HIDE: accounts marked hidden,
+  // institution disabled (the tombstone that keeps the next pull from
+  // recreating it), nothing deleted. This is the way back: the server clears
+  // the tombstone and unhides exactly the accounts that were visible when the
+  // bank was removed — deliberately-hidden ones stay hidden.
   async function restore(inst) {
     setBusy(true);
     setError(null);
@@ -139,10 +141,31 @@ export default function SimpleFinConnect({ onClose, onConnected }) {
     }
   }
 
+  // The buried real delete. Two deliberate taps: the small muted "Delete
+  // permanently…" under a removed bank arms an inline confirm that says exactly
+  // what is lost, and only its danger button calls the server (which itself
+  // requires the literal confirm string — apiClient sends it).
+  const [armedDelete, setArmedDelete] = useState(null); // institution id
+  async function deleteForever(inst) {
+    setBusy(true);
+    setError(null);
+    try {
+      await unlinkInstitution(inst.id, { permanent: true });
+      setArmedDelete(null);
+      await load();
+      if (onConnected) onConnected();
+    } catch (err) {
+      console.error("simplefin permanent delete failed", err);
+      setError(describeError(err, `Could not delete ${inst.name}`));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function disconnect() {
     const ok = window.confirm(
       "Stop syncing from SimpleFIN?\n\nThe stored access URL is deleted, so no further data is pulled. " +
-        "Accounts and transactions already imported stay in the app — remove them from the account screen if you want them gone.\n\n" +
+        "Accounts and transactions already imported stay in the app — Remove bank on the account screen hides them if you don't want to see them.\n\n" +
         "Reconnecting means generating a new setup token in SimpleFIN Bridge."
     );
     if (!ok) return;
@@ -223,15 +246,46 @@ export default function SimpleFinConnect({ onClose, onConnected }) {
                   <div style={{ marginTop: 10, background: "var(--bg)", borderRadius: 10, padding: "12px 14px" }}>
                     <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>Removed banks</div>
                     <div style={{ ...note, marginBottom: 8 }}>
-                      Still linked at SimpleFIN, but not syncing here. Restoring re-imports their
-                      accounts (hidden again, as new).
+                      Hidden from every total. Removing a bank keeps its data — Restore unhides the
+                      accounts that were visible when it was removed. (A bank removed before this
+                      update had its accounts deleted; restoring it re-syncs ~90 days.)
                     </div>
                     {status.removed.map(inst => (
-                      <div key={inst.id} style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 6 }}>
-                        <span style={{ flex: 1, minWidth: 0, fontSize: 12 }}>{inst.name}</span>
-                        <button className="ibtn" disabled={busy} style={{ fontSize: 11 }} onClick={() => restore(inst)}>
-                          Restore
-                        </button>
+                      <div key={inst.id} style={{ marginTop: 6 }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          <span style={{ flex: 1, minWidth: 0, fontSize: 12 }}>{inst.name}</span>
+                          <button className="ibtn" disabled={busy} style={{ fontSize: 11 }} onClick={() => restore(inst)}>
+                            Restore
+                          </button>
+                        </div>
+                        {armedDelete === inst.id ? (
+                          <div style={{ marginTop: 8, border: "1px solid var(--danger-border)", background: "var(--danger-bg)", borderRadius: 8, padding: "10px 12px" }}>
+                            <div style={{ fontSize: 12, fontWeight: 600, color: "var(--danger)", marginBottom: 4 }}>
+                              Delete {inst.name} permanently?
+                            </div>
+                            <div style={{ fontSize: 11, color: "var(--danger)", lineHeight: 1.5 }}>
+                              Every account under this bank is deleted, along with all of its
+                              transactions — including any history imported from CSV or PDF
+                              statements. A later re-connect only reaches ~90 days back, so older
+                              history is unrecoverable. Restore cannot undo this.
+                            </div>
+                            <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+                              <button className="ibtn" disabled={busy} style={{ fontSize: 11, flex: 1, justifyContent: "center" }}
+                                onClick={() => setArmedDelete(null)}>
+                                Keep the data
+                              </button>
+                              <button disabled={busy} onClick={() => deleteForever(inst)}
+                                style={{ flex: 1, padding: "6px 0", borderRadius: 8, border: "1px solid var(--danger-border)", background: "var(--danger)", color: "var(--accent-text)", fontFamily: "inherit", fontSize: 11, fontWeight: 600, cursor: busy ? "default" : "pointer", opacity: busy ? .6 : 1 }}>
+                                Delete everything
+                              </button>
+                            </div>
+                          </div>
+                        ) : (
+                          <button disabled={busy} onClick={() => setArmedDelete(inst.id)}
+                            style={{ marginTop: 2, padding: 0, border: "none", background: "none", fontFamily: "inherit", fontSize: 10, color: "var(--muted)", textDecoration: "underline", cursor: busy ? "default" : "pointer" }}>
+                            Delete permanently…
+                          </button>
+                        )}
                       </div>
                     ))}
                   </div>

@@ -1,4 +1,10 @@
 import { getServiceClient, requireUser } from './_lib/supabase.js';
+import {
+  unlinkSettingsKey,
+  visibleAccountIds,
+  isPermanentDeleteRequest,
+  permanentDeleteAllowed,
+} from './_lib/unlink.js';
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
@@ -10,6 +16,16 @@ export default async function handler(req, res) {
   const { institution_id } = req.body || {};
   if (!institution_id) {
     return res.status(400).json({ error: 'institution_id required' });
+  }
+
+  // The buried permanent path must be asked for twice: { permanent: true,
+  // confirm: 'delete' }. permanent without the literal confirm is rejected —
+  // no client bug or fat-finger can cascade-delete a household's history.
+  const permanent = isPermanentDeleteRequest(req.body);
+  if (permanent && !permanentDeleteAllowed(req.body)) {
+    return res
+      .status(400)
+      .json({ error: "Permanent delete requires confirm: 'delete'" });
   }
 
   try {
@@ -38,17 +54,70 @@ export default async function handler(req, res) {
 
     // SimpleFIN institutions can't be unlinked by deleting the row. One access
     // URL covers EVERY bank linked at the Bridge, so the very next pull would
-    // find this org again and recreate it. Instead: drop its accounts (which
-    // cascades their transactions) and keep the institution as a disabled
-    // tombstone — api/sync.js skips disabled institutions, so the org stays out
-    // of the app until the user reconnects it. To stop the bank feeding
-    // SimpleFIN at all, they remove it at SimpleFIN Bridge.
+    // find this org again and recreate it. Instead the DEFAULT remove is a
+    // SOFT-HIDE: mark the accounts hidden (query-level exclusion from every
+    // spending view) and keep the institution as a disabled tombstone —
+    // api/sync.js skips disabled institutions, so the org stays out of the app
+    // until the user restores it. NOTHING is deleted, so csv/pdf backfill rows
+    // survive a mis-tap. The old cascade lives on only behind the explicit
+    // { permanent: true, confirm: 'delete' } mode below. To stop the bank
+    // feeding SimpleFIN at all, they remove it at SimpleFIN Bridge.
     if (inst.simplefin_org_id) {
-      const { error: acctErr } = await supabase
+      if (permanent) {
+        // Real cleanup (closed accounts): delete accounts (cascades their
+        // transactions) and keep the disabled tombstone — without it the next
+        // pull would recreate the org. Also drop any recorded restore set.
+        const { error: acctErr } = await supabase
+          .from('accounts')
+          .delete()
+          .eq('institution_id', inst.id);
+        if (acctErr) throw acctErr;
+
+        await supabase
+          .from('settings')
+          .delete()
+          .eq('household_id', user.householdId)
+          .eq('key', unlinkSettingsKey(inst.id));
+
+        const { error: disableErr } = await supabase
+          .from('institutions')
+          .update({ status: 'disabled', last_error: null, sync_state: {} })
+          .eq('id', inst.id);
+        if (disableErr) throw disableErr;
+
+        return res.status(200).json({ ok: true, disabled: true, deleted: true });
+      }
+
+      // Record which accounts were VISIBLE right now, so Restore can unhide
+      // exactly those — not the ones the user had already hidden on purpose,
+      // and not future arrivals (which arrive hidden for a reason). Settings
+      // table, no migration; service_role means household_id must be explicit
+      // (the default reads auth.uid(), NULL here — see CLAUDE.md Gotchas).
+      const { data: acctRows, error: readErr } = await supabase
         .from('accounts')
-        .delete()
+        .select('id, hidden')
         .eq('institution_id', inst.id);
-      if (acctErr) throw acctErr;
+      if (readErr) throw readErr;
+      const visible = visibleAccountIds(acctRows);
+
+      const { error: recordErr } = await supabase
+        .from('settings')
+        .upsert(
+          {
+            household_id: user.householdId,
+            key: unlinkSettingsKey(inst.id),
+            value: JSON.stringify(visible),
+            updated_at: new Date().toISOString(),
+          },
+          { onConflict: 'household_id,key' }
+        );
+      if (recordErr) throw recordErr;
+
+      const { error: hideErr } = await supabase
+        .from('accounts')
+        .update({ hidden: true })
+        .eq('institution_id', inst.id);
+      if (hideErr) throw hideErr;
 
       const { error: disableErr } = await supabase
         .from('institutions')
@@ -56,7 +125,7 @@ export default async function handler(req, res) {
         .eq('id', inst.id);
       if (disableErr) throw disableErr;
 
-      return res.status(200).json({ ok: true, disabled: true });
+      return res.status(200).json({ ok: true, disabled: true, hidden: acctRows?.length || 0 });
     }
 
     // Everything else is a MANUAL institution — the "Imported" row CSV/PDF

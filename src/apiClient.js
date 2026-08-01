@@ -38,12 +38,21 @@ export function runServerSync({ force = false } = {}) {
   return postJson('/api/sync', { force });
 }
 
-// Disconnect an institution. A SimpleFIN org is DISABLED and keeps a tombstone
-// row (one access URL covers every bank, so a deleted row would just be
-// recreated by the next pull); a manual "Imported" institution is deleted
-// outright. Either way its accounts and transactions go.
-export function unlinkInstitution(institutionId) {
-  return postJson('/api/unlink-institution', { institution_id: institutionId });
+// Disconnect an institution. A SimpleFIN org is SOFT-HIDDEN by default: its
+// accounts are marked hidden and the institution row is disabled (the tombstone
+// that keeps the next pull from recreating it — one access URL covers every
+// bank). Nothing is deleted; Restore in the SimpleFIN modal unhides the
+// accounts that were visible at remove time. A manual "Imported" institution is
+// still deleted outright (nothing recreates it, so no tombstone is needed).
+//
+// `permanent: true` is the buried real-delete path: the server requires the
+// literal confirm string 'delete' alongside it, and then removes the accounts
+// and every transaction under them (including CSV/PDF backfill) for good.
+export function unlinkInstitution(institutionId, { permanent = false } = {}) {
+  return postJson('/api/unlink-institution', {
+    institution_id: institutionId,
+    ...(permanent ? { permanent: true, confirm: 'delete' } : {}),
+  });
 }
 
 // ---- SimpleFIN --------------------------------------------------------------
@@ -68,8 +77,9 @@ export function disconnectSimpleFin() {
   return request('DELETE', '/api/simplefin-status');
 }
 
-// Undo a "Remove bank": clears the disabled tombstone so the next pull
-// recreates that bank's accounts.
+// Undo a "Remove bank": clears the disabled tombstone and unhides exactly the
+// accounts that were visible when the bank was removed (deliberately-hidden
+// ones stay hidden). Returns { ok, restored, unhidden }.
 export function restoreSimpleFinInstitution(institutionId) {
   return postJson('/api/simplefin-status', { restore_institution_id: institutionId });
 }

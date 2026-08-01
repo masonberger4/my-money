@@ -1435,23 +1435,26 @@ export default function Dashboard({ refreshTick = 0 }) {
     const siblings=accounts.filter(a=>a.institution_id===selAcct.institution_id);
     const instName=acctInst(selAcct)||"this bank";
     const list=siblings.map(a=>`  • ${acctLabel(a)}`).join("\n");
-    // SimpleFIN can't be unlinked per bank from here: one access URL covers
-    // every bank linked at the Bridge, so the app stops syncing this one and
-    // forgets its data, while the bank itself stays linked at SimpleFIN.
-    const tail=isSimpleFinAccount(selAcct)
-      ?"This bank stops syncing into the app. It stays connected at SimpleFIN Bridge — remove it there too if you want it gone for good."
-      :"The bank connection is also removed from Plaid (freeing a slot). This cannot be undone — re-linking later re-imports history from Plaid.";
-    const ok=window.confirm(
-      `${isSimpleFinAccount(selAcct)?"Remove":"Unlink"} ${instName}?\n\nThis removes ${siblings.length} account${siblings.length!==1?"s":""} and all their transactions from the app:\n${list}\n\n${tail}`
-    );
+    // SimpleFIN removal is a SOFT-HIDE: the server marks the accounts hidden
+    // and disables the institution (the tombstone that keeps the next pull from
+    // recreating it). Nothing is deleted — Restore in the SimpleFIN modal
+    // brings the visible accounts back. The buried permanent delete lives in
+    // that modal too, next to Restore, never here.
+    const ok=isSimpleFinAccount(selAcct)
+      ?window.confirm(
+        `Remove ${instName} from view?\n\nThis hides ${siblings.length} account${siblings.length!==1?"s":""} and stops them counting in any total:\n${list}\n\nNothing is deleted — all transactions (including any CSV/PDF backfill) are kept, and Restore in the SimpleFIN modal brings the bank back exactly as it was. It stays connected at SimpleFIN Bridge.`
+      )
+      :window.confirm(
+        `Unlink ${instName}?\n\nThis removes ${siblings.length} account${siblings.length!==1?"s":""} and all their transactions from the app:\n${list}\n\nThis cannot be undone.`
+      );
     if(!ok)return;
     setUnlinking(true);
     try{
       await unlinkInstitution(selAcct.institution_id);
       setSelAcct(null);
       setTxAcctFilter(null);
-      // The removed bank's rows are gone, so a category filter set from them may
-      // now describe nothing.
+      // The removed bank's rows no longer appear (hidden for SimpleFIN, deleted
+      // for manual), so a category filter set from them may now describe nothing.
       setTxCatFilter(null);
       await reloadData(year,month);
     }catch(err){
