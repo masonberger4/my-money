@@ -1,6 +1,6 @@
 import { supabase } from './supabaseClient.js';
 import { applyAccountRules } from './categoryMap.js';
-import { merchantKey } from './txClassify.js';
+import { merchantKey, classifyDescription } from './txClassify.js';
 import { applyRuleToHistory, isRangeExhaustedError } from './ruleHistory.js';
 import { markInternalTransfers, cashIncome, cashSpending } from './cashFlow.js';
 import { walkEnvelopes, monthKey, planMove } from './envelopes.js';
@@ -1163,6 +1163,104 @@ export async function importCsvTransactions(accountId, rows, source = 'csv') {
   }
   rangeMemo.clear(); // new rows exist — memoised ranges are stale
   return written;
+}
+
+// --- Manual transaction quick-add -------------------------------------------
+// Record a single cash/manual transaction by hand — the one spending path CSV/PDF
+// import can't reach (a coffee paid in cash never hits a feed). Writes ONE real
+// row onto a manual "Imported" account, running the SAME write-time
+// categorization the CSV importer and the SimpleFIN sync use.
+
+// The pure row builder: id + sign + write-time category, no I/O. Exported so a
+// test can assert the id/prefix/source, the sign storage and the category
+// precedence without a live client.
+//
+// Sign: `amount` is ALREADY in the app convention (positive = money out), same
+// as the rows importCsvTransactions stores — NO flip here. The form collects a
+// positive figure the user thinks of as "spent", which already IS positive=out;
+// a user recording money in passes a negative amount (the caller's job), exactly
+// like every stored row. The helper never reinterprets the sign.
+//
+// Category: derived at WRITE time via the shared precedence in
+// classifyDescription — learned rule (from `rules`) → keyword table →
+// Uncategorized — with `accountType` passed so a card purchase is never read as
+// a card payment. `user_category` is set ONLY when the user explicitly picked
+// one in the form; at read time it still wins over mapped_category.
+export function buildManualTxRow({ date, amount, description, category } = {}, { rules, accountType } = {}) {
+  if (!date) throw new Error('addManualTransaction requires a date');
+  const amt = Number(amount);
+  if (!Number.isFinite(amt)) throw new Error('addManualTransaction requires a numeric amount');
+  const desc = (description || '').trim();
+  const { raw_category, mapped_category } = classifyDescription(desc, amt, accountType, rules);
+  const row = {
+    // The adapter-agnostic external-id space plaid_tx_id carries (sfin:/csv:/
+    // manual:). crypto.randomUUID via makeUuid — the app's existing uuid path,
+    // no new dependency, and never the csvImport content hash (that is for
+    // idempotent re-import; a hand-typed row has no file to re-import).
+    plaid_tx_id: MANUAL_ACCOUNT_PREFIX + makeUuid(),
+    date,
+    // Stored already-signed, positive = money out (see the sign note above).
+    amount: Number(amt.toFixed(2)),
+    merchant_name: '',
+    description: desc,
+    raw_category,
+    mapped_category,
+    pending: false,
+  };
+  // Only an explicit user pick becomes a user_category override.
+  if (category) row.user_category = category;
+  return row;
+}
+
+// Insert a manual transaction and return it shaped like getTransactions rows so
+// the caller can optimistically patch its lists (saveTx Gotcha: a new row only
+// appears via that patch or a reloadData). household_id is NOT set — the client
+// insert resolves it from the column default current_household_id() (auth.uid()
+// is present); setting it explicitly is the service-role trap, the opposite
+// case. Deps are injectable for tests (default: the module client + rules read).
+export async function addManualTransaction(
+  { accountId, date, amount, description, category } = {},
+  { client = supabase, getRules = getCategoryRules } = {},
+) {
+  if (!accountId) throw new Error('addManualTransaction requires an account id');
+
+  // Gate: the target must be a manual account. A manual: id on a SimpleFIN-fed
+  // account would collide with the feed's own id space — the same overlap rule
+  // that keeps csv: history off a live feed. Reject it.
+  const { data: acct, error: acctErr } = await client
+    .from('accounts')
+    .select('id, plaid_account_id, is_manual, type, subtype')
+    .eq('id', accountId)
+    .single();
+  if (acctErr) throw acctErr;
+  if (!acct) throw new Error('Account not found');
+  if (isSimpleFinAccount(acct) || !isManualAccount(acct))
+    throw new Error('Manual transactions can only be added to a manual account');
+
+  const rules = await getRules();
+  const row = buildManualTxRow({ date, amount, description, category }, { rules, accountType: acct.type });
+  const insert = { ...row, account_id: accountId };
+
+  const attempt = async withSource => {
+    const payload = withSource ? { ...insert, source: 'manual' } : insert;
+    return client
+      .from('transactions')
+      .insert(payload)
+      .select(`${TX_COLUMNS}, accounts!inner(hidden, type, subtype)`)
+      .single();
+  };
+
+  let { data, error } = await attempt(transactionsHaveSource);
+  if (error && transactionsHaveSource && isMissingColumnError(error, 'source')) {
+    transactionsHaveSource = false;
+    ({ data, error } = await attempt(false));
+  }
+  if (error) throw error;
+
+  // Credit-card refunds become "Return" — same pipeline step every read runs.
+  data.mapped_category = applyAccountRules(data.mapped_category, data.amount, data.accounts?.type);
+  rangeMemo.clear(); // a new row exists — memoised ranges are stale
+  return toTxShape(data);
 }
 
 // --- Rental entities + tax lens ---------------------------------------------

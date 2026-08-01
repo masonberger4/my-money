@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from "react";
-import { getOverview, getSpending, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES, setCategoryRule, applyCategoryRuleToHistory, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, invalidateEnvelopeSpending, isEnvelopeSchemaMissing, targetNeed, readyToAssign, monthKey, getEntities, createEntity, updateEntity, getTaxYearTransactions, getMileage, addMileage, deleteMileage, getReceiptTxIds, getDebts, getBalanceSnapshots } from "../dataAdapter.js";
+import { getOverview, getSpending, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES, setCategoryRule, applyCategoryRuleToHistory, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, invalidateEnvelopeSpending, isEnvelopeSchemaMissing, targetNeed, readyToAssign, monthKey, getEntities, createEntity, updateEntity, getTaxYearTransactions, getMileage, addMileage, deleteMileage, getReceiptTxIds, getDebts, getBalanceSnapshots, addManualTransaction, createManualAccount } from "../dataAdapter.js";
 import { payoffWhatIf, debtFreeMonth, isMortgage } from "../debtPayoff.js";
 import { SCHEDULE_E_LINES, RENTS_KEY, DEFAULT_SCHEDULE_E_MAP, scheduleEReport, entityMonthly, entityLedger, personalDeductionReport, DEDUCTION_BUCKETS, DEFAULT_DEDUCTION_MAP, mileageDeduction, scheduleECsv } from "../taxReport.js";
 import { merchantKey } from "../txClassify.js";
@@ -437,6 +437,128 @@ function TargetSheet({name,row,busy,surf,year,month,onSave,onClose}) {
             style={{flex:1,padding:"8px 0",borderRadius:8,border:"none",background:"var(--accent)",color:"var(--accent-text)",
               fontFamily:"inherit",fontSize:14,fontWeight:500,cursor:valid&&!busy?"pointer":"default",opacity:valid&&!busy?1:.5}}>
             Save
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Manual transaction quick-add. The only way to record cash spending — the
+// feed can't see it and CSV/PDF import only backfills. Writes a manual: row via
+// addManualTransaction (write-time categorization precedence + the manual:
+// id/sign core live in the adapter; this is just the form).
+//
+// Sign: the user types a POSITIVE dollar figure — "what I spent". The app's
+// convention is positive = money out, so a spend stores as typed; a refund /
+// money-in is the negation, chosen by the direction toggle. The adapter takes
+// an already-signed amount and never reinterprets, so the flip is done here.
+//
+// Category: left blank = let the write-time classifier decide (mapped_category);
+// an explicit pick becomes user_category, which still wins at read time.
+function QuickAddSheet({accounts,manualAccounts,allCats,getName,getColor,acctLabel,acctColor,busy,surf,onSave,onClose}) {
+  const [amount,setAmount]=useState("");
+  const [dir,setDir]=useState("out"); // out = spent (positive); in = refund/income (negative)
+  // Commit-on-blur: <input type=date> emits complete garbage years while typing
+  // ("0002-..") — see the date Gotcha. `date` is the committed value; `dateRaw`
+  // tracks keystrokes and is validated (year floor) only on blur.
+  const today=new Date().toISOString().slice(0,10);
+  const [date,setDate]=useState(today);
+  const [dateRaw,setDateRaw]=useState(today);
+  const [description,setDescription]=useState("");
+  const [category,setCategory]=useState(null);
+  // Default target: the sole manual account, else none (created on save).
+  const [acctId,setAcctId]=useState(manualAccounts.length===1?manualAccounts[0].id:(manualAccounts[0]?.id||""));
+  const n=Number(amount);
+  const valid=Number.isFinite(n)&&n>0&&!!description.trim()&&/^\d{4}-\d{2}-\d{2}$/.test(date);
+  const commitDate=()=>{
+    const v=dateRaw;
+    // Year floor: reject the partial-year garbage the input emits mid-type.
+    if(/^\d{4}-\d{2}-\d{2}$/.test(v)&&Number(v.slice(0,4))>=2000){setDate(v);}
+    else setDateRaw(date); // snap back to the last good value
+  };
+  const inputStyle={width:"100%",padding:"9px 12px",borderRadius:8,border:"1px solid var(--border)",
+    background:"var(--input-bg)",color:"var(--text)",fontSize:16,fontFamily:"inherit",outline:"none"};
+  return (
+    <div className="overlay" onClick={onClose}>
+      <div className="modal" onClick={e=>e.stopPropagation()} style={{maxHeight:"85vh",overflowY:"auto"}}>
+        <div style={{fontSize:16,fontWeight:600,marginBottom:4,color:"var(--text)"}}>Add transaction</div>
+        <div style={{fontSize:12,color:"var(--muted)",marginBottom:16}}>
+          Record cash or anything the bank feed can&rsquo;t see.
+        </div>
+
+        <div style={{fontSize:12,color:"var(--muted)",marginBottom:8}}>Type</div>
+        <div style={{display:"flex",gap:8,marginBottom:14}}>
+          {[["out","Money out"],["in","Money in"]].map(([k,label])=>(
+            <button key={k} onClick={()=>setDir(k)}
+              style={{flex:1,padding:"8px 0",borderRadius:8,fontFamily:"inherit",fontSize:12,fontWeight:600,cursor:"pointer",
+                background:dir===k?"var(--accent)":"var(--input-bg)",color:dir===k?"var(--accent-text)":"var(--muted)",
+                border:`1px solid ${dir===k?"var(--accent)":"var(--border)"}`}}>{label}</button>
+          ))}
+        </div>
+
+        <div style={{fontSize:12,color:"var(--muted)",marginBottom:6}}>Amount</div>
+        <input value={amount} inputMode="decimal" autoFocus placeholder="0"
+          onChange={e=>setAmount(numericish(e.target.value,{negative:false}))}
+          style={{...inputStyle,fontFamily:"'DM Mono',monospace",marginBottom:14}}/>
+
+        <div style={{fontSize:12,color:"var(--muted)",marginBottom:6}}>Date</div>
+        <input type="date" value={dateRaw} onChange={e=>setDateRaw(e.target.value)} onBlur={commitDate}
+          style={{...inputStyle,fontSize:14,marginBottom:14}}/>
+
+        <div style={{fontSize:12,color:"var(--muted)",marginBottom:6}}>Description</div>
+        <input value={description} onChange={e=>setDescription(e.target.value)} placeholder="e.g. Farmers market"
+          style={{...inputStyle,marginBottom:14}}/>
+
+        {manualAccounts.length>1&&(<>
+          <div style={{fontSize:12,color:"var(--muted)",marginBottom:6}}>Account</div>
+          <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:14}}>
+            {manualAccounts.map(a=>{
+              const active=acctId===a.id;
+              const cs=active?chipOn(acctColor(a),surf.card):null;
+              return (
+                <button key={a.id} onClick={()=>setAcctId(a.id)}
+                  style={{fontSize:11,fontWeight:600,padding:"5px 10px",borderRadius:20,fontFamily:"inherit",cursor:"pointer",
+                    background:cs?cs.bg:"var(--bg)",color:cs?cs.ink:"var(--muted)",
+                    border:`1px solid ${active?markOn(acctColor(a),surf.card):"var(--border)"}`,transition:"all .15s"}}>
+                  {acctLabel(a)}
+                </button>
+              );
+            })}
+          </div>
+        </>)}
+
+        <div style={{fontSize:12,color:"var(--muted)",marginBottom:8}}>
+          Category <span style={{opacity:.7}}>— optional, auto-detected if left blank</span>
+        </div>
+        <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:16}}>
+          {allCats.map(cat=>{
+            const active=category===cat;
+            const cs=active?chipOn(getColor(cat),surf.card):null;
+            return (
+              <button key={cat} onClick={()=>setCategory(active?null:cat)}
+                style={{fontSize:11,fontWeight:600,padding:"5px 10px",borderRadius:20,fontFamily:"inherit",cursor:"pointer",
+                  background:cs?cs.bg:"var(--bg)",color:cs?cs.ink:"var(--muted)",
+                  border:`1px solid ${active?markOn(getColor(cat),surf.card):"var(--border)"}`,transition:"all .15s"}}>
+                {getName(cat)}
+              </button>
+            );
+          })}
+        </div>
+
+        {manualAccounts.length===0&&(
+          <div style={{fontSize:11,color:"var(--muted)",background:"var(--input-bg)",borderRadius:8,padding:"8px 12px",marginBottom:16}}>
+            This will create an &ldquo;Imported&rdquo; account to hold manual entries.
+          </div>
+        )}
+
+        <div style={{display:"flex",gap:8}}>
+          <button className="ibtn" style={{flex:1,justifyContent:"center"}} onClick={onClose}>Cancel</button>
+          <button disabled={!valid||busy}
+            onClick={()=>onSave({acctId,date,amount:dir==="in"?-n:n,description:description.trim(),category})}
+            style={{flex:1,padding:"8px 0",borderRadius:8,border:"none",background:"var(--accent)",color:"var(--accent-text)",
+              fontFamily:"inherit",fontSize:14,fontWeight:500,cursor:valid&&!busy?"pointer":"default",opacity:valid&&!busy?1:.5}}>
+            {busy?"Adding…":"Add"}
           </button>
         </div>
       </div>
@@ -1234,6 +1356,8 @@ export default function Dashboard({ refreshTick = 0 }) {
   const [selTx,setSelTx]=useState(null);
   const [importing,setImporting]=useState(false);
   const [connectingSfin,setConnectingSfin]=useState(false);
+  const [quickAdd,setQuickAdd]=useState(false); // manual transaction quick-add sheet
+  const [quickAddBusy,setQuickAddBusy]=useState(false);
 
   // Learned merchant rules: after a manual recategorization, offer to remember
   // the merchant so the correction survives the next sync/import.
@@ -1365,6 +1489,39 @@ export default function Dashboard({ refreshTick = 0 }) {
       window.alert(`Couldn't save that change: ${err.message||err}`);
     }
     reloadData(year,month);
+  }
+
+  // Manual transaction quick-add save. If no manual account exists yet, create
+  // the household "Imported" account first (reusing the CSV-import machinery),
+  // then insert. On success, optimistically SHOW the new row: patchAllTxLists
+  // only maps EXISTING rows by id, so a brand-new row can't ride it — the row
+  // is prepended straight into `transactions` when its date falls in the viewed
+  // month (the one list the tab renders), then reloadData refreshes the totals
+  // and canonical ordering. A viewed-month miss just relies on reloadData.
+  async function addManualTx({acctId,date,amount,description,category}){
+    setQuickAddBusy(true);
+    try{
+      let targetId=acctId;
+      if(!targetId){
+        const acct=await createManualAccount({name:"Imported"});
+        targetId=acct.id;
+      }
+      const row=await addManualTransaction({accountId:targetId,date,amount,description,category:category||undefined});
+      // Optimistic insert into the viewed month's list (date is YYYY-MM-DD).
+      const inView=date.slice(0,7)===`${year}-${String(month).padStart(2,"0")}`;
+      if(inView){
+        setTransactions(prev=>prev
+          ?{...prev,transactions:[row,...prev.transactions].sort((a,b)=>(b.transaction_date||"").localeCompare(a.transaction_date||""))}
+          :prev);
+      }
+      setQuickAdd(false);
+      await reloadData(year,month); // canonical totals + ordering
+    }catch(err){
+      console.error("manual transaction add failed",err);
+      window.alert(`Couldn't add that transaction: ${err.message||err}`);
+    }finally{
+      setQuickAddBusy(false);
+    }
   }
 
   // From the detail sheet's "Compiled under X in the Tax tab" link: close
@@ -2075,15 +2232,18 @@ export default function Dashboard({ refreshTick = 0 }) {
                     cursor:"pointer",color:"var(--muted)",fontSize:18,lineHeight:1,padding:"2px 6px"}}>×</button>
               )}
             </div>
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10,gap:10}}>
               <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em"}}>
                 {searchActive?"Search results · all months":monthLabel(year,month)}
               </div>
-              <span style={{fontSize:12,color:"var(--muted)"}}>
-                {searchActive
-                  ?(searching?"searching…":`${shownSearch.length} match${shownSearch.length!==1?"es":""}`)
-                  :`${shownTxs.length} transaction${shownTxs.length!==1?"s":""}`}
-              </span>
+              <div style={{display:"flex",alignItems:"center",gap:10}}>
+                <span style={{fontSize:12,color:"var(--muted)"}}>
+                  {searchActive
+                    ?(searching?"searching…":`${shownSearch.length} match${shownSearch.length!==1?"es":""}`)
+                    :`${shownTxs.length} transaction${shownTxs.length!==1?"s":""}`}
+                </span>
+                <button className="ibtn" style={{fontSize:11}} onClick={()=>setQuickAdd(true)}>+ Add transaction</button>
+              </div>
             </div>
             {accounts.filter(a=>!a.hidden).length>1&&(
               <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:12}}>
@@ -3445,6 +3605,18 @@ export default function Dashboard({ refreshTick = 0 }) {
           />
         </Suspense>
       )}
+
+      {/* Manual transaction quick-add */}
+      {quickAdd&&(()=>{
+        const manualAccounts=accounts.filter(a=>isManualAccount(a)&&!isSimpleFinAccount(a));
+        // Uncategorized is never an offerable pick (same rule as the detail sheet).
+        const allCats=[...ERA_CATEGORIES.filter(c=>c!==UNCATEGORIZED),...customCatNames.filter(n=>!ERA_CATEGORIES.includes(n))];
+        return (
+          <QuickAddSheet accounts={accounts} manualAccounts={manualAccounts} allCats={allCats}
+            getName={getName} getColor={getColor} acctLabel={acctLabel} acctColor={acctColor}
+            busy={quickAddBusy} surf={surf} onSave={addManualTx} onClose={()=>setQuickAdd(false)}/>
+        );
+      })()}
 
       {/* Funding target (rule 2) */}
       {targetEdit&&(
