@@ -76,11 +76,11 @@ entry once shipped.
 | `src/ui.css` | The ONLY place theme-token values live: `:root` light + a `prefers-color-scheme: dark` block (--bg/--card/--text/--muted/--border/--accent/--accent-text/--danger*/--warn*/--input-bg/--track/--shadow/--overlay), plus the font `@import` (must stay line 1), the `*` reset, keyframes, and the shared `.card`/`.tab`/`.ibtn` classes. Global so the pre-Dashboard screens get them. |
 | `src/theme.js` | Theme selection + application: localStorage pref (`mm:theme`), `resolveTheme`, `applyTheme` (sets `<html data-theme>` + syncs the `theme-color` metas), `subscribeTheme`/`subscribeSystemTheme`, `readToken` (runtime token read), `initTheme` (called from main.jsx), and the `useTheme` hook the header toggle uses. |
 | `src/paletteContrast.js` | Pure, zero imports: WCAG math + `readableInk`/`markColor`/`chipStyle`, which hold hue fixed and bisect lightness to guarantee 4.5:1 / 3:1 against a given surface. Never throws (runs during render). Covered by `test/paletteContrast.test.js`. |
-| `src/components/Dashboard.jsx` | Almost the entire UI — single file, inline styles, tabs: overview/categories/**budget**/transactions/accounts/trends/recurring/**tax**/ask. Shared mini-components: `Pill`, `Swatch`, `EditName`, `Sk` (skeleton), `Donut`, `DrillNum` (the tap-a-number affordance) ; envelope editors `AssignEdit`/`BudgetEdit`/`IncomeEdit` + the `TargetSheet`/`MoveSheet`/`CategorySheet` modals. |
+| `src/components/Dashboard.jsx` | Almost the entire UI — single file, inline styles, tabs: overview/categories/**budget**/transactions/accounts/trends/recurring/**tax**/ask. Shared mini-components: `Pill`, `Swatch`, `EditName`, `Sk` (skeleton), `Donut`, `DrillNum` (the tap-a-number affordance) ; envelope editors `AssignEdit`/`BudgetEdit`/`IncomeEdit` + the `TargetSheet`/`MoveSheet`/`CategorySheet`/`PropertySheet` modals. |
 | `src/dataAdapter.js` | All Supabase reads + shapes consumed by Dashboard. Keep return shapes stable. Also holds the CSV/PDF-import writes (`findOrCreateManualInstitution`, `createManualAccount`, `getExistingTxIds`, `importCsvTransactions`, `isManualAccount`), the comparison-mode read `getAccountTransactionsInRange`, the backfill boundary `getFeedCoverageStart`, the learned-rule CRUD (`getCategoryRules`/`setCategoryRule`/`applyCategoryRuleToHistory`/`deleteCategoryRule`), the SimpleFIN predicates (`isSimpleFinAccount`, `ACCOUNT_TYPES`/`ACCOUNT_SUBTYPES`), the envelope I/O (`getEnvelopes`, `setAssigned`, `setCategoryRollover`, `setTargetKind`, `fundTargets`, `moveMoney`, `getBudgetIncome`/`setBudgetIncome`), the rental/tax I/O (`getEntities`/`createEntity`/`updateEntity`, `getTaxYearTransactions`, `getMileage`/`addMileage`/`deleteMileage`), the receipt I/O (`getReceipts`/`addReceipt`/`deleteReceipt`/`getReceiptUrl`/`getReceiptTxIds` — the app's only Supabase **Storage** use), and re-exports the pure helpers from `cashFlow.js` and `envelopes.js` so existing importers/harnesses keep working. |
 | `src/cashFlow.js` | The Trends cash-flow model (see Conventions), extracted pure: `markInternalTransfers` + `maxMatchTransfers` (Kuhn's), `cashIncome`/`cashSpending`, account-type predicates. Zero imports — plain-Node importable; covered by `test/cashFlow.test.js` incl. the brute-force matching parity check. |
 | `src/envelopes.js` | The envelope-budgeting model (see Roadmap), pure: `walkEnvelopes` (`available = assigned + carry − spent`), `targetNeed`, `readyToAssign`, `planMove`, month-key helpers. Zero imports — dataAdapter does the I/O and hands it plain arrays. Covered by `test/envelopes.test.js`. |
-| `src/taxReport.js` | The Tax tab's pure core, zero imports: `SCHEDULE_E_LINES` + `scheduleEReport` (category→line mapping, refund netting, capital expenses pulled out of the lines, a VISIBLE unmapped bucket — the Uncategorized lesson applied to tax lines), `entityMonthly` (per-property cash P&L), `personalDeductionReport` (charitable/medical/taxes-paid buckets), `MILEAGE_RATES` (effective-dated IRS rates — data that goes stale; verify at irs.gov each January) + `mileageDeduction`, and `scheduleECsv` (exports keep the stored positive=out sign; the column name says so). Covered by `test/taxReport.test.js`. |
+| `src/taxReport.js` | The Tax tab's pure core, zero imports: `SCHEDULE_E_LINES` + `scheduleEReport` (category→line mapping, refund netting, capital expenses pulled out of the lines, a VISIBLE unmapped bucket — the Uncategorized lesson applied to tax lines), `entityMonthly` (per-property cash P&L) + `entityLedger` (the property drill-in's Money in/out/not-counted sections — totals pinned by test to `entityMonthly`'s sums), `personalDeductionReport` (charitable/medical/taxes-paid buckets), `MILEAGE_RATES` (effective-dated IRS rates — data that goes stale; verify at irs.gov each January) + `mileageDeduction`, and `scheduleECsv` (exports keep the stored positive=out sign; the column name says so). Covered by `test/taxReport.test.js`. |
 | `src/categoryMap.js` | `ERA_CATEGORIES` (the taxonomy source of truth) + `applyAccountRules` (credit-card negatives → "Return", excluded from income); `UNCATEGORIZED`/`FALLBACK_CATEGORY` + `isBudgetableCategory`; pure JS, imported by server code too. No "Housing"/"Income" member; `Uncategorized` IS one. `mapPlaidCategory` was deleted with Plaid — nothing produces those codes now, and it was never called at read time, so historical rows are unaffected. |
 | `src/csvImport.js` | Pure CSV-import core (no React/Supabase): `parseCsv`, `detectHeader`, `parseMoney`/`parseDate`, transfer flagging, dedup `plaid_tx_id` hashing, `buildRows`/`analyzeCsv` (both take `rules` + `overlapFrom`). Re-exports `guessCategory`/`transferRawCategory`/`invalidRuleCategories` from `txClassify.js`, which now owns the rule table. Plus `importPlan` (which sections the modal shows, derived from the file's dates vs the feed boundary) and the audit core: `reconcileCsv` (max-matching), `descSimilarity`, `csvDateRange`. Testable in isolation. |
 | `src/txClassify.js` | Learned-rule matching (`merchantKey`, `matchLearnedRule`) + the shared descriptor→category rule table + internal-transfer tagging (`guessCategory`, `transferRawCategory`, `classifyDescription`), validated against `ERA_CATEGORIES` at load. Lifted out of `csvImport.js` when SimpleFIN became a second caller: both feeds get a descriptor and no category, so both derive `mapped_category` at WRITE time from this one table. Pure JS — imported by server code too. |
@@ -670,6 +670,29 @@ The app's ONLY use of Supabase **Storage** — everything else is Postgres.
   fourth never-refetched list for `saveTx`/`learnMerchant` to patch. No
   migration, no adapter change.
 
+- **Tax-linkage visibility (property drill-in + compiled-under link)** — the
+  entity/receipt machinery existed, but nothing SHOWED the link: a fridge
+  tagged to a property read as unsaved because only the worksheet's aggregates
+  rendered. Three additions, no model change, no adapter change, no migration:
+  (1) tapping a Tax-tab property card's transaction count or its Money in/out
+  opens **`PropertySheet`** — every row compiled under that property for the
+  year, sectioned by the pure `entityLedger` (Money in / Money out / an
+  excluded "Not counted" tail; totals pinned by test to the card's
+  `entityMonthly` sums, the CategorySheet drift lesson), with category/account
+  pills, a Capital pill, 📎 when a receipt is attached and amber "no receipt"
+  on capital rows (receipt affordances only when `getReceiptTxIds` ≠ null —
+  the sentinel rule); rows open the detail sheet via the same DOM-order
+  stacking as CategorySheet. (2) The detail sheet's rental block says the
+  tag's effect out loud: tagged → a dotted "Compiled under X in the Tax tab ›"
+  link (`jumpToTax`: closes every overlay, switches the tax year to the ROW'S
+  year, opens that property's drill-in); untagged → one line saying what
+  tagging does. (3) A property `Pill` on rows tagged BY HAND (`t.entity_id`)
+  in the Transactions list and account sheet — inherited account defaults
+  deliberately unmarked (the account pill already carries it; stamping every
+  row of a dedicated rental account is noise). The sheet renders from the tax
+  cache, which `saveTx` INVALIDATES rather than patches — the one tx list
+  that refetches itself — so it shows skeletons during the refetch instead of
+  joining the optimistic-patch discipline.
 - **Receipt capture (v1, dumb attachment)** — a photo of a receipt attached to a
   transaction, for tax substantiation (IRS Rev. Proc. 97-22 accepts electronic
   images). The app's first Supabase **Storage** use: PRIVATE bucket `receipts`,
@@ -710,6 +733,7 @@ message (which the Editor does display) and nothing persisted. The iPhone
 round-trip (attach → full-size view, i.e. the signed-URL read → delete) passed
 on the real phone the same day — receipts are verified end to end.
 
+Tax-linkage visibility merged 2026-08-01 (no migration).
 Receipt capture merged 2026-07-31, with `20260731000001_receipts.sql` run
 against PROD ahead of the merge (additive, so the safe order).
 Category filter chips merged 2026-07-30 (no migration). Rental tracking +
