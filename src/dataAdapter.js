@@ -224,6 +224,85 @@ export async function updateAccount(id, fields) {
   if (error) throw error;
 }
 
+// --- Debt tracker ------------------------------------------------------------
+// The liability columns land with the debt-tracker migration (additive on
+// accounts; hand-entered under SimpleFIN, never written by the sync). Previews
+// share the prod DB, so this read must survive them not existing yet — same
+// trap as is_manual/entity_id. Rows read as field-less (nulls) until then.
+let accountsHaveDebtColumns = true;
+const DEBT_COLUMNS =
+  'apr, minimum_payment, credit_limit, statement_balance, next_payment_due_date, interest_rate, original_balance';
+
+// Debt accounts for the Debt view. Return shape:
+//   { debts: [{ ...account row (ACCOUNT_COLUMNS), apr, minimum_payment,
+//               credit_limit, statement_balance, next_payment_due_date,
+//               interest_rate, original_balance,   // null pre-migration
+//               debtRate }],                       // apr ?? interest_rate, PERCENT (e.g. 22.9)
+//     totalDebt,          // sum of current_balance, STORED convention (positive = owed)
+//     totalMinimums }     // sum of minimum_payment over rows that have one
+// Hidden accounts are excluded (their balances must not move the totals).
+// Balances stay in the stored positive convention — the view renders them
+// through displayBalance like every other balance.
+export async function getDebts() {
+  const attempt = withDebt =>
+    supabase
+      .from('accounts')
+      .select(withDebt ? `${ACCOUNT_COLUMNS}, ${DEBT_COLUMNS}` : ACCOUNT_COLUMNS)
+      .in('type', ['credit', 'loan'])
+      .order('current_balance', { ascending: false });
+  let { data, error } = await attempt(accountsHaveDebtColumns);
+  if (error && accountsHaveDebtColumns && isMissingColumnError(error, 'apr')) {
+    accountsHaveDebtColumns = false;
+    ({ data, error } = await attempt(false));
+  }
+  if (error) throw error;
+  const debts = (data || [])
+    .filter(a => !a.hidden)
+    .map(a => ({
+      ...a,
+      apr: a.apr ?? null,
+      minimum_payment: a.minimum_payment ?? null,
+      credit_limit: a.credit_limit ?? null,
+      statement_balance: a.statement_balance ?? null,
+      next_payment_due_date: a.next_payment_due_date ?? null,
+      interest_rate: a.interest_rate ?? null,
+      original_balance: a.original_balance ?? null,
+      // One normalized rate for payoff math — stored as PERCENT; divide by 100
+      // for monthly amortization (src/debtPayoff.js does).
+      debtRate: a.apr ?? a.interest_rate ?? null,
+    }));
+  const totalDebt = debts.reduce((s, a) => s + (Number(a.current_balance) || 0), 0);
+  const totalMinimums = debts.reduce((s, a) => s + (Number(a.minimum_payment) || 0), 0);
+  return { debts, totalDebt, totalMinimums };
+}
+
+// Balance history for the debt-over-time chart. Returns an ARRAY of
+//   { account_id, captured_on, balance }   // balance mirrors the STORED
+// convention (debts positive = owed), oldest first — the chart flips at render
+// via displayBalance. Returns [] when the balance_snapshots table hasn't been
+// installed yet (previews share the prod DB), never throws for that.
+let hasBalanceSnapshots = true;
+export async function getBalanceSnapshots(accountIds, sinceDate) {
+  if (!hasBalanceSnapshots || !accountIds || accountIds.length === 0) return [];
+  let q = supabase
+    .from('balance_snapshots')
+    .select('account_id, captured_on, balance')
+    .in('account_id', accountIds)
+    .order('captured_on', { ascending: true });
+  if (sinceDate) q = q.gte('captured_on', sinceDate);
+  const { data, error } = await q;
+  if (error) {
+    // Missing table: PGRST205 (PostgREST schema cache) or 42P01 (Postgres) —
+    // same pair as isEnvelopeSchemaMissing.
+    if (error.code === 'PGRST205' || error.code === '42P01') {
+      hasBalanceSnapshots = false;
+      return [];
+    }
+    throw error;
+  }
+  return data || [];
+}
+
 // All transactions for one account, newest first, capped so a huge history
 // can't lock up the phone. Returns { transactions, hasMore }.
 export async function getAccountTransactions(accountId, { limit = 500 } = {}) {
