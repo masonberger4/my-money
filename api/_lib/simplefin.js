@@ -676,6 +676,48 @@ export function classifyFeedMessage(entry) {
   return 'advisory';
 }
 
+// The sync-level consequence of message classification: what the pull writes
+// back to simplefin_access. Extracted pure (api/sync.js applies the returned
+// patch) because the failure mode it prevents — the advisory deadlock — had
+// NO alarm anywhere: a watermark that never advances just looks like a feed
+// that hasn't synced yet.
+//
+//   • No real errors → last_pulled_at advances and last_error clears.
+//     Advisories and CAPPED ranges are NOT errors — a capped range must not
+//     hold the watermark (stalling recovers nothing: the next pull computes
+//     the same start and is served the same truncated window; the shortfall
+//     is *reported* via coverageShortfall instead).
+//   • Real errors → the watermark holds (advancing would skip the broken
+//     bank's outage window once it exceeded the overlap) and last_error
+//     records them, truncated.
+//   • A failed new-account history backfill CLEARS the watermark so the next
+//     pull is a full-history one — the accounts will no longer look "new", so
+//     nothing else would ever re-trigger the backfill.
+export function watermarkUpdate({ errors = [], backfillFailed = false, nowIso }) {
+  const clean = errors.length === 0;
+  return {
+    ...(backfillFailed
+      ? { last_pulled_at: null }
+      : clean
+        ? { last_pulled_at: nowIso }
+        : {}),
+    last_error: clean ? null : errors.join('; ').slice(0, 1000),
+  };
+}
+
+// The window we wanted vs what the feed can serve, as a reportable object —
+// null when the request wasn't clamped. Nothing downstream can recover a
+// clamped window (statement import is the path), so it is surfaced rather
+// than silently dropped, and NEVER expressed by stalling the watermark.
+export function coverageShortfall(wantedStartMs, nowMs) {
+  const { startMs, clamped } = clampStartDate(wantedStartMs, nowMs);
+  if (!clamped) return null;
+  return {
+    wanted_from: new Date(wantedStartMs).toISOString().slice(0, 10),
+    served_from: new Date(startMs).toISOString().slice(0, 10),
+  };
+}
+
 // Account-type inference. SimpleFIN sends no type/subtype, but the whole
 // cash-flow model keys off them (isCheckingAccount / isHouseholdDepository in
 // dataAdapter.js), so a wrong guess quietly distorts Trends. The name is all

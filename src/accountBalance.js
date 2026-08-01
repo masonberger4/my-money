@@ -27,5 +27,10 @@ export function isDebtAccount(type) {
 export function displayBalance(balance, type) {
   const n = Number(balance ?? 0);
   if (!Number.isFinite(n)) return 0;
-  return isDebtAccount(type) ? -n : n;
+  const out = isDebtAccount(type) ? -n : n;
+  // Never return -0: a paid-off card is a common state, and while the current
+  // formatters happen to render -0 and 0 identically (fmtX tests `v < 0`,
+  // toFixed prints "0.00"), a future display site calling toLocaleString on
+  // the raw value would show "-$0.00". Normalize at the source.
+  return out === 0 ? 0 : out;
 }
