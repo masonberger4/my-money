@@ -314,14 +314,25 @@ test('dismissExpected rolls forward; { stop: true } does not', async () => {
     cadence: 'monthly',
     status: 'pending',
   };
-  // Without stop: read, update, insert (recurring_key null skips the dup read).
+  // Without stop: read, update, dup-gate select (null key gates on
+  // description+cadence, .is('recurring_key', null)), insert.
   let calls = [];
   let client = fakeClient(
-    [{ data: row, error: null }, { error: null }, { data: { ...row, id: 'e2', due_date: '2026-09-01' }, error: null }],
+    [
+      { data: row, error: null },
+      { error: null },
+      { data: [], error: null },
+      { data: { ...row, id: 'e2', due_date: '2026-09-01' }, error: null },
+    ],
     calls
   );
   const { next } = await dismissExpected('e1', {}, { client });
   assert.equal(calls[1].payload.status, 'dismissed');
+  assert.deepEqual(
+    calls[2].filters,
+    [['eq', 'status', 'pending'], ['is', 'recurring_key', null], ['eq', 'description', 'Rent'], ['eq', 'cadence', 'monthly']],
+    'null-key roll-forward dup-gates on description + cadence'
+  );
   assert.equal(next.due_date, '2026-09-01');
 
   // With stop: no insert at all.
@@ -330,6 +341,30 @@ test('dismissExpected rolls forward; { stop: true } does not', async () => {
   const stopped = await dismissExpected('e1', { stop: true }, { client });
   assert.equal(stopped.next, null);
   assert.equal(calls.length, 2);
+});
+
+test('REGRESSION: null-key roll-forward dup-gates — a concurrent device already minted the next cycle', async () => {
+  const row = {
+    id: 'e1',
+    recurring_key: null,
+    description: 'Rent',
+    category: 'Rent',
+    account_id: null,
+    amount: 2400,
+    due_date: '2026-08-01',
+    cadence: 'monthly',
+    status: 'pending',
+  };
+  // The other phone's auto-match pass already inserted the 2026-09-01 twin.
+  const twin = { ...row, id: 'e9', due_date: '2026-09-01' };
+  const calls = [];
+  const client = fakeClient(
+    [{ data: row, error: null }, { error: null }, { data: [twin], error: null }],
+    calls
+  );
+  const { next } = await dismissExpected('e1', {}, { client });
+  assert.equal(next, null, 'duplicate detected — no second pending row');
+  assert.equal(calls.length, 3, 'no insert issued');
 });
 
 test("matchExpectedManually marks the row and rolls forward; 'once' never rolls", async () => {

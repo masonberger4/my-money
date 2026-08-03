@@ -80,7 +80,8 @@ entry once shipped.
 | `src/dataAdapter.js` | All Supabase reads + shapes consumed by Dashboard. Keep return shapes stable. Also holds the CSV/PDF-import writes (`findOrCreateManualInstitution`, `createManualAccount`, `getExistingTxIds`, `importCsvTransactions`, `isManualAccount`), the comparison-mode read `getAccountTransactionsInRange`, the backfill boundary `getFeedCoverageStart`, the learned-rule CRUD (`getCategoryRules`/`setCategoryRule`/`applyCategoryRuleToHistory`/`deleteCategoryRule`), the SimpleFIN predicates (`isSimpleFinAccount`, `ACCOUNT_TYPES`/`ACCOUNT_SUBTYPES`), the envelope I/O (`getEnvelopes`, `setAssigned`, `setCategoryRollover`, `setTargetKind`, `fundTargets`, `moveMoney`, `getBudgetIncome`/`setBudgetIncome`), the rental/tax I/O (`getEntities`/`createEntity`/`updateEntity`, `getTaxYearTransactions`, `getMileage`/`addMileage`/`deleteMileage`), the receipt I/O (`getReceipts`/`addReceipt`/`deleteReceipt`/`getReceiptUrl`/`getReceiptTxIds` — the app's only Supabase **Storage** use), and re-exports the pure helpers from `cashFlow.js`, `envelopes.js`, and `spending.js` so existing importers/harnesses keep working. The spending predicate/bucketing/`toTxShape` now live in `spending.js` — dataAdapter delegates (shapes unchanged). |
 | `src/cashFlow.js` | The linked-boundary PAIRING + income side (see Conventions), pure: `markInternalTransfers` (structural equal-amount pairing, `maxMatchTransfers` Kuhn's), `cashIncome` (unpaired depository inflows), `cashSpending` (delegates to `sumSpending` — one model). Plain-Node importable; covered by `test/cashFlow.test.js` incl. the brute-force mixed-account-type parity check. |
 | `src/spending.js` | THE unified spending model, pure (imports `categoryMap.js` + `txClassify.js`): `effectiveCategory`, `bankName`/`displayName`, `isLoanAccount`, **`isSpend`** (the ONE predicate, every surface incl. Trends), `sumSpending`, `spendingGroups` (the Categories bucketing), `biggestMovers` (the Trends month-over-month deltas, same `isSpend` lineage), `toTxShape` (incl. `counted`), and `aggregateEnvelopeSpending` (the envelope fold). Rows must go through `markInternalTransfers` first — `isSpend` reads `_internal`. Hidden-account exclusion deliberately NOT here — it lives at the query level; the pure layer never sees hidden rows. Covered by `test/spending.test.js` against the ledger fixture. |
-| `src/envelopes.js` | The envelope-budgeting model (see Conventions), pure: `walkEnvelopes` (`available = assigned + carry − spent`), `targetNeed`, `readyToAssign`, `planMove`, month-key helpers, and `envelopePace` (the display-only per-envelope pace warning; opt-in via the `env:pace` settings key, `getEnvPace`/`setEnvPace` in dataAdapter). Zero imports — dataAdapter does the I/O and hands it plain arrays. Covered by `test/envelopes.test.js`. |
+| `src/envelopes.js` | The envelope-budgeting model (see Conventions), pure: `walkEnvelopes` (`available = assigned + carry − spent`), `targetNeed`, `readyToAssign`, `planMove`, month-key helpers, and `envelopePace` (the display-only per-envelope pace warning; opt-in via the `env:pace` settings key, `getEnvPace`/`setEnvPace` in dataAdapter), plus the Session 6 additions `effectiveTarget` (per-month `target_override` ?? `budgets.monthly_limit`) and `planAutoFill` (copy last month's ASSIGNED into the viewed month — skips zeros and already-assigned categories, never touches targets). Zero imports — dataAdapter does the I/O and hands it plain arrays. Covered by `test/envelopes.test.js`. |
+| `src/expectedTx.js` | Expected/scheduled transactions pure core (Session 6), DISPLAY-ONLY by contract (the `envelopePace` rule — never in Available, the walk, or any total): `matchExpected` (greedy nearest-date, deterministic), `expectedByCategory`, `rollForwardDate`/`projectFutureCycles`, `expectedStatus`/`isMissedExpected` ('overdue' is derived, never stored; nothing auto-dismisses), `seedFromRecurring` (last-amount seeding), and the two dup gates `isDuplicateExpected` (keyed rows) / `isDuplicateRollForward` (null-key roll-forwards — description+cadence+amount within tolerance, so two devices' concurrent auto-match passes can't double a hand-typed bill). dataAdapter does the I/O (`getExpectedTransactions` runs+persists the auto-match, `addExpected`, `dismissExpected` — `{stop:true}` ends the expectation, wired to the ✕'s Skip/Stop confirm — `matchExpectedManually`); reads return null pre-migration (the `getReceiptTxIds` pattern). `test/expectedTx.test.js` + `test/envelopeIO.test.js`. |
 | `src/ruleHistory.js` | The learned-rule history-apply core, extracted from `applyCategoryRuleToHistory`: first-token ilike narrowing (`ilikeCandidatePattern`), ordered paging with the **PGRST103 end-of-range contract** (`isRangeExhaustedError`), re-matching via `matchLearnedRule`, skip-already-correct, dryRun, mapped_category-only writes. Takes injected `fetchPage`/`updateBatch` so it tests with fakes; dataAdapter binds the real client. Covered by `test/categoryRules.test.js`. |
 | `src/taxReport.js` | The Tax tab's pure core, zero imports: `SCHEDULE_E_LINES` + `scheduleEReport` (category→line mapping, refund netting, capital expenses pulled out of the lines, a VISIBLE unmapped bucket — the Uncategorized lesson applied to tax lines), `entityMonthly` (per-property cash P&L) + `entityLedger` (the property drill-in's Money in/out/not-counted sections — totals pinned by test to `entityMonthly`'s sums), `personalDeductionReport` (charitable/medical/taxes-paid buckets), `MILEAGE_RATES` (effective-dated IRS rates — data that goes stale; verify at irs.gov each January) + `mileageDeduction`, and `scheduleECsv` (exports keep the stored positive=out sign; the column name says so). Covered by `test/taxReport.test.js`. |
 | `src/categoryMap.js` | `ERA_CATEGORIES` (the taxonomy source of truth) + `applyAccountRules` (credit-card negatives → "Return", excluded from income); `UNCATEGORIZED`/`FALLBACK_CATEGORY` + `isBudgetableCategory`; pure JS, imported by server code too. No "Housing"/"Income" member; `Uncategorized` IS one. `mapPlaidCategory` was deleted with Plaid — nothing produces those codes now, and it was never called at read time, so historical rows are unaffected. |
@@ -108,7 +109,7 @@ entry once shipped.
 | `api/_lib/supabase.js` | Service-role client + `requireUser` (JWT → householdId). |
 | `supabase/migrations/` | Ordered SQL migrations (additive-only on live data). |
 | `supabase/setup_all.sql` | One-paste fresh install — **DESTRUCTIVE, wipes all tables. Never run on live data. Never re-generate to include new migrations without that warning.** Convenience snapshot only — `migrations/` is the source of truth; ends with a column-level self-check that raises if it drifts behind migrations. |
-| `test/` | `npm test` — Node's built-in `node --test`, zero deps; plain-module helpers live in `test/helpers/` (the `*.test.js` glob skips them). Covers the pure cores: cashFlow (incl. brute-force max-matching parity), csvImport parsing/dedup-id idempotency + overlap guard, **pdfImport** (the whole template pipeline: shape tests, year inference incl. the Dec→Jan wrap, geometry, applyTemplate anchor/continuation REGRESSIONs, debit/credit netting, the buildRows round-trip), **reconcile** (the comparison audit, with its own brute-force parity), **spending** (the extracted purchase-based model against the synthetic ledger: 11 scenarios + seeded property tests), **categoryRules** (the ruleHistory core against a fake PostgREST incl. the exact-page-multiple REGRESSION; write-time precedence; the teach→apply→re-import sequence), txClassify (learned-rule matching + the over-specific-key limit), envelopes (both walk regressions + by-date targets), taxReport (conservation, capital exclusion, the 2026 mileage-rate boundary), **recurring** (thresholds pinned as documentation), **accountBalance** (incl. the −0 REGRESSION), **categoryMap**, simplefin classifier/clamp + **simplefinNormalize** (type-inference ordering REGRESSION, wire parsing) + **simplefinToken** (SSRF/claim flow against a stubbed fetch), **assistantModels** (+ a server source scan), **spendingContext** byte-determinism, **syncDecisions** (watermark advance/hold/reset + missing-table vs missing-column), **lockstep** (index.html↔ui.css `--bg`, sw.js guards, fonts precache, pdf.js legacy build), **sync** (pullWasClean + runSync single-flight via injected transport), **syncOrchestration** (`pullOneAccessUrl` against the fake Supabase client in `test/helpers/fakeSupabase.js`), **manualTx** (quick-add row building + gating), **unlink** (remove-bank soft-hide decisions), **monthMemo** (range memo + per-model copies), **debtPayoff**, noPlaid, paletteContrast, apiLoads. Run before pushing. |
+| `test/` | `npm test` — Node's built-in `node --test`, zero deps; plain-module helpers live in `test/helpers/` (the `*.test.js` glob skips them). Covers the pure cores: cashFlow (incl. brute-force max-matching parity), csvImport parsing/dedup-id idempotency + overlap guard, **pdfImport** (the whole template pipeline: shape tests, year inference incl. the Dec→Jan wrap, geometry, applyTemplate anchor/continuation REGRESSIONs, debit/credit netting, the buildRows round-trip), **reconcile** (the comparison audit, with its own brute-force parity), **spending** (the extracted purchase-based model against the synthetic ledger: 11 scenarios + seeded property tests), **categoryRules** (the ruleHistory core against a fake PostgREST incl. the exact-page-multiple REGRESSION; write-time precedence; the teach→apply→re-import sequence), txClassify (learned-rule matching + the over-specific-key limit), envelopes (both walk regressions + by-date targets + `effectiveTarget`/`planAutoFill`), **expectedTx** (matching, lifecycle, dup gates incl. the null-key roll-forward REGRESSION, the display-only walk-byte-identity REGRESSION), **envelopeIO** (Session 6 adapter I/O against a recording fake — the 42703 target_override retry, the conditional setAssigned(0) delete, roll-forward gating; its degrade tests run LAST, order matters), taxReport (conservation, capital exclusion, the 2026 mileage-rate boundary), **recurring** (thresholds pinned as documentation), **accountBalance** (incl. the −0 REGRESSION), **categoryMap**, simplefin classifier/clamp + **simplefinNormalize** (type-inference ordering REGRESSION, wire parsing) + **simplefinToken** (SSRF/claim flow against a stubbed fetch), **assistantModels** (+ a server source scan), **spendingContext** byte-determinism, **syncDecisions** (watermark advance/hold/reset + missing-table vs missing-column), **lockstep** (index.html↔ui.css `--bg`, sw.js guards, fonts precache, pdf.js legacy build), **sync** (pullWasClean + runSync single-flight via injected transport), **syncOrchestration** (`pullOneAccessUrl` against the fake Supabase client in `test/helpers/fakeSupabase.js`), **manualTx** (quick-add row building + gating), **unlink** (remove-bank soft-hide decisions), **monthMemo** (range memo + per-model copies), **debtPayoff**, noPlaid, paletteContrast, apiLoads. Run before pushing. |
 
 ## Development workflow
 
@@ -395,6 +396,34 @@ category's own first assignment; the pure core is `src/envelopes.js`.
 - A by-date target **forces rollover on** — a sinking fund only reaches its
   number because leftovers carry; with rollover off it would ask for the full
   share forever and never converge.
+- **Per-month target override (Session 6):** `budget_months.target_override`;
+  effective target = `target_override ?? budgets.monthly_limit`
+  (`effectiveTarget`). The zero-row-equivalence rule applies to ASSIGNED only:
+  **a row with `assigned = 0` and a non-null `target_override` is a REAL row**
+  — `setAssigned(…, 0)`'s delete is conditional so it can't drop one. Targets
+  never enter the carry walk (containment pinned by the byte-identity test).
+  Pre-migration: a 42703 naming `target_override` retries the old columns
+  inside `getAssignmentsThrough` and must NEVER trip `isEnvelopeSchemaMissing`
+  (which reads 42703 as "envelopes not installed" and would kill the tab).
+- **Auto-fill copies ASSIGNED only** (`planAutoFill`): pull viewed−1 into the
+  viewed month, skip zeros (0 row ≡ no row) and categories already assigned —
+  never `monthly_limit`, never targets. Two-step (plan → confirm), and the
+  preview is month-key-guarded so a stale promise can't render the old month
+  pair's plan under new labels (the movers month-tagging lesson).
+- **Expected transactions are DISPLAY-ONLY** (the `envelopePace` contract):
+  never in Available, the walk, or any spending/income total — a matched row
+  just points at its real transaction. Opt-in seeding (Recurring "Expect"),
+  never automatic; nothing auto-dismisses (the unmatched bill IS the alarm).
+  Roll-forwards are dup-gated on BOTH keyed rows (`isDuplicateExpected`) and
+  null-key hand-typed rows (`isDuplicateRollForward`) so two devices'
+  concurrent auto-match passes can't double a bill. The ✕ on a recurring
+  expectation opens Skip-this-cycle / Stop-expecting — the stop path
+  (`dismissExpected {stop:true}`) must stay reachable or a cancelled
+  real-world bill is permanent (the pre-Restore-unlink mis-tap shape). Reads
+  return null pre-migration (`getReceiptTxIds` pattern); the Dashboard cache
+  is an epoch counter, and a failed load RETURNS the epoch (seq-guarded) so a
+  transient error retries on the next tab visit instead of hiding the feature
+  for the session.
 
 **The income wall (why Rule 1 is hand-entered):** Ready to Assign needs
 trustworthy income. SimpleFIN syncs only what is linked *and unhidden* (new
@@ -832,6 +861,17 @@ The app's ONLY use of Supabase **Storage** — everything else is Postgres.
   laptop would silently drop the other phone to the Login screen within the
   access-token hour, contradicting the "on this device" confirm text. No
   migration.
+- **Envelope follow-ups (Session 6, 2026-08-03)** — all three decided items:
+  per-month target overrides (`budget_months.target_override`, migration
+  `20260804000001`), auto-fill from last month (`planAutoFill`/`autoFillMonth`),
+  and expected/scheduled transactions (`expected_transactions` table, migration
+  `20260804000002`; pure core `src/expectedTx.js` — Budget-tab Upcoming card,
+  Overview bills line, Recurring "Expect" seeding). Decided rules in the
+  envelope Conventions list; both migrations are additive with graceful
+  degrade, **paste BEFORE the merge**. Review fixes at merge: retryable
+  expected-tx load (epoch returned on transient failure), the ✕ Skip/Stop
+  confirm (the stop path was dead code), the null-key roll-forward dup gate,
+  and the auto-fill preview month guard.
 
 ## Pending branches
 
@@ -866,7 +906,11 @@ verified end-to-end incl. cross-tenant denial (2026-07-31); the three orphan
 Plaid Items CLOSED (2026-08-01 — Mason deleted the Plaid account, retiring
 every Item; `PLAID_*` env vars already removed).
 
-Every migration in `supabase/migrations/` is applied to PROD.
+Every migration through `20260801000001_debt_tracker.sql` is applied to PROD.
+The two Session 6 migrations (`20260804000001_budget_month_target_override.sql`,
+`20260804000002_expected_transactions.sql`) are additive and the code degrades
+gracefully without them — **paste BOTH before the Session 6 merge** (workflow
+rule 5), then move this line back to "everything applied".
 
 Lesson from the remove-plaid pre-flight (recurs): "I removed everything I
 could see" ≠ "the database is empty" — three invisible `plaid_tokens` rows
@@ -901,12 +945,11 @@ Debt follow-ups: ALL THREE SHIPPED 2026-08-03 (manual debts, per-debt payoff
 schedule drill-in, net worth over time — Mason's call recorded: net worth
 EXCLUDES hidden accounts' balances, consistent with the query-level rule).
 Later (discussed, not committed): cash-flow forecast, savings goals, CSV/PDF
-export. **Envelope follow-ups — Session 6 scope DECIDED by Mason
-(2026-08-03): build ALL THREE** — auto-filling next month's assignments from
-this month's, per-month target overrides (a target is one setting per
-category today), and scheduled/expected transactions. The latter two each
-need a migration; both stay **additive, pasted before the merge** (workflow
-rule 5). Still outside that scope: reconciliation (spec open), and Age of
+export. **Envelope follow-ups — ALL THREE SHIPPED 2026-08-03 (Session 6)** —
+auto-fill from last month, per-month target overrides, expected transactions
+(see Merged features; the two 20260804 migrations must be pasted BEFORE the
+merge — Pending section). Still outside that scope: reconciliation (spec
+open), and Age of
 Money — wants real *measured* income, so it waits on the income
 wall. **`accounts.available_balance` still holds two conventions**
 (re-verified 2026-08-03, plan Session 5 item 4: grep confirms nothing renders

@@ -11,7 +11,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   matchExpected, expectedByCategory, rollForwardDate, projectFutureCycles,
-  expectedStatus, isMissedExpected, seedFromRecurring, isDuplicateExpected,
+  expectedStatus, isMissedExpected, seedFromRecurring, isDuplicateExpected, isDuplicateRollForward,
   EXPECTED_WINDOW_DAYS, EXPECTED_STALE_DAYS, EXPECTED_DUP_TOL_DAYS,
 } from '../src/expectedTx.js';
 import { walkEnvelopes } from '../src/envelopes.js';
@@ -246,6 +246,19 @@ test('dup-gate: same key within the cadence tolerance is a duplicate — seeding
   );
   assert.equal(isDuplicateExpected({ recurring_key: null, due_date: '2026-09-04', cadence: 'once' }, pending), false,
     'hand-typed rows (null key) never gate');
+});
+
+test('REGRESSION: isDuplicateRollForward gates null-key twins on description+cadence+amount within tolerance', () => {
+  const fields = { recurring_key: null, description: 'Rent', cadence: 'monthly', amount: 2400, due_date: '2026-09-01' };
+  const twin = { status: 'pending', description: 'Rent', cadence: 'monthly', amount: 2400, due_date: '2026-09-01' };
+  assert.equal(isDuplicateRollForward(fields, [twin]), true, 'exact machine-minted twin');
+  assert.equal(isDuplicateRollForward(fields, [{ ...twin, due_date: '2026-09-05' }]), true, 'within monthly ±4');
+  assert.equal(isDuplicateRollForward(fields, [{ ...twin, due_date: '2026-09-06' }]), false, 'outside tolerance — a new cycle');
+  assert.equal(isDuplicateRollForward(fields, [{ ...twin, description: 'Rent B' }]), false, 'different bill');
+  assert.equal(isDuplicateRollForward(fields, [{ ...twin, amount: 2500 }]), false, 'different amount — not our roll-forward');
+  assert.equal(isDuplicateRollForward(fields, [{ ...twin, cadence: 'weekly' }]), false, 'different cadence');
+  assert.equal(isDuplicateRollForward(fields, [{ ...twin, status: 'dismissed' }]), false, 'only pending rows gate');
+  assert.equal(isDuplicateRollForward(null, [twin]), false);
 });
 
 // --- the display-only REGRESSION ---------------------------------------------------------

@@ -214,3 +214,25 @@ export function isDuplicateExpected(fields, existingPending) {
   }
   return false;
 }
+
+// Dup-gate for the ROLL-FORWARD path when recurring_key is null (hand-typed
+// expectations). Unlike addExpected — where two same-day rent-sized bills can
+// be genuinely distinct, so null-key rows never gate — a roll-forward row is
+// minted BY US from a deterministic rollForwardDate, so a pending row with the
+// same description, cadence and amount whose due date lands within the
+// cadence's tolerance can only be the same next cycle, inserted by the other
+// device's concurrent auto-match pass. Without this, both phones opening the
+// Budget tab in the same minute doubled a hand-typed bill on the Upcoming card.
+export function isDuplicateRollForward(fields, existingPending) {
+  if (!fields) return false;
+  const tol = EXPECTED_DUP_TOL_DAYS[fields.cadence] ?? EXPECTED_DUP_TOL_DAYS.once;
+  const day = dayNumber(String(fields.due_date));
+  for (const r of existingPending || []) {
+    if (!r || r.status !== 'pending') continue;
+    if (r.description !== fields.description) continue;
+    if (r.cadence !== fields.cadence) continue;
+    if (Number(r.amount) !== Number(fields.amount)) continue;
+    if (Math.abs(dayNumber(String(r.due_date)) - day) <= tol) return true;
+  }
+  return false;
+}

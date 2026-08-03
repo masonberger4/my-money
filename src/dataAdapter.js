@@ -4,7 +4,7 @@ import { merchantKey, classifyDescription } from './txClassify.js';
 import { applyRuleToHistory, isRangeExhaustedError } from './ruleHistory.js';
 import { markInternalTransfers, cashIncome, cashSpending } from './cashFlow.js';
 import { walkEnvelopes, monthKey, planMove, planAutoFill } from './envelopes.js';
-import { matchExpected, rollForwardDate, isDuplicateExpected } from './expectedTx.js';
+import { matchExpected, rollForwardDate, isDuplicateExpected, isDuplicateRollForward } from './expectedTx.js';
 import { isBudgetableCategory } from './categoryMap.js';
 import { isSpend, sumSpending, spendingGroups, biggestMovers, toTxShape, aggregateEnvelopeSpending } from './spending.js';
 import { createRangeMemo } from './monthMemo.js';
@@ -2011,10 +2011,14 @@ function localTodayISO() {
   return `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}`;
 }
 
-// Insert the NEXT cycle's pending row after a match/dismiss. Dup-gated on
-// recurring_key (isDuplicateExpected) so two devices matching the same cycle
-// can't double the Upcoming card; 'once' rows never roll (rollForwardDate
-// returns null). Returns the inserted row or null.
+// Insert the NEXT cycle's pending row after a match/dismiss. Dup-gated so two
+// devices matching the same cycle can't double the Upcoming card: on
+// recurring_key when the row has one (isDuplicateExpected), and on
+// description+cadence+amount within the cadence tolerance when it doesn't
+// (isDuplicateRollForward — hand-typed rows have recurring_key null, and a
+// roll-forward twin is always machine-minted, never a real second bill).
+// 'once' rows never roll (rollForwardDate returns null). Returns the inserted
+// row or null.
 async function rollForwardExpected(client, row) {
   const due_date = rollForwardDate(row.due_date, row.cadence);
   if (!due_date) return null;
@@ -2035,6 +2039,16 @@ async function rollForwardExpected(client, row) {
       .eq('recurring_key', fields.recurring_key);
     if (error) throw error;
     if (isDuplicateExpected(fields, data || [])) return null;
+  } else {
+    const { data, error } = await client
+      .from('expected_transactions')
+      .select(EXPECTED_COLUMNS)
+      .eq('status', 'pending')
+      .is('recurring_key', null)
+      .eq('description', fields.description)
+      .eq('cadence', fields.cadence);
+    if (error) throw error;
+    if (isDuplicateRollForward(fields, data || [])) return null;
   }
   const { data, error } = await client
     .from('expected_transactions')

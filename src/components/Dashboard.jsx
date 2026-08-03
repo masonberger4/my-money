@@ -1183,6 +1183,7 @@ export default function Dashboard({ refreshTick = 0 }) {
   const expLoadedEpoch=useRef(-1);
   const [expBusy,setExpBusy]=useState(false);
   const [expMatchId,setExpMatchId]=useState(null); // expectation id whose Mark-paid picker is open
+  const [expDismissId,setExpDismissId]=useState(null); // expectation id whose skip/stop confirm is open (recurring cadences only)
   // "Fill from ⟨prev month⟩" inline confirm: null (idle) | "loading" | {plan}.
   const [fillPlan,setFillPlan]=useState(null);
   // --- Data coverage panel (TEMPORARY troubleshooting aid; Accounts tab) ---
@@ -1600,8 +1601,17 @@ export default function Dashboard({ refreshTick = 0 }) {
     getExpectedTransactions({today})
       .then(res=>{if(expSeq.current===seq)setExpected(res);})
       // Transient failure: keep whatever is on screen (undefined hides the
-      // surfaces; never set null — that would read as "not installed").
-      .catch(err=>{console.error("expected transactions load failed",err);});
+      // surfaces; never set null — that would read as "not installed") but
+      // RETURN the epoch (reset the consumed-marker) so the next visit to an
+      // expected-tx tab retries. Without this, one network blip consumed the
+      // epoch forever: the surfaces stayed hidden, and the only epoch bump
+      // (invalidateExpected) lives behind buttons those hidden surfaces
+      // render — no reachable retry short of a full reload. Seq-guarded so a
+      // stale failure can't re-open an epoch a newer run already consumed.
+      .catch(err=>{
+        console.error("expected transactions load failed",err);
+        if(expSeq.current===seq)expLoadedEpoch.current=-1;
+      });
   },[ready,tab,expEpoch]);
   const invalidateExpected=useCallback(()=>{setExpEpoch(e=>e+1);},[]);
 
@@ -2331,7 +2341,7 @@ export default function Dashboard({ refreshTick = 0 }) {
   }
   async function doDismissExpected(id,opts){
     setExpBusy(true);
-    try{await dismissExpected(id,opts);setExpMatchId(null);invalidateExpected();}
+    try{await dismissExpected(id,opts);setExpMatchId(null);setExpDismissId(null);invalidateExpected();}
     catch(err){console.error("dismiss expected failed",err);}
     finally{setExpBusy(false);}
   }
@@ -2765,16 +2775,26 @@ export default function Dashboard({ refreshTick = 0 }) {
                   <button className="ibtn" disabled={envBusy}
                     title={`Copy ${prevMonthName}'s assignments into ${monthLabel(year,month)} — envelopes already assigned here are kept`}
                     onClick={async()=>{
+                      // Month-tagged like the movers list: the [year,month]
+                      // effect clears fillPlan synchronously on a month
+                      // switch, but this promise resolves LATER — without the
+                      // guard it repopulated the confirm with the OLD month
+                      // pair's counts/dollars under the new month's labels.
+                      const monthKey=monthRef.current;
                       setFillPlan("loading");
                       try{
                         const prevEnv=await getEnvelopes({year:prevYM.y,month:prevYM.m})
                           .catch(e=>{if(isEnvelopeSchemaMissing(e))return null;throw e;});
+                        if(monthRef.current!==monthKey)return;
                         setFillPlan({plan:planAutoFill({
                           source:(prevEnv?.categories||[]).map(r=>({category:r.category,assigned:r.assigned})),
                           existing:(envelopes?.categories||[]).map(r=>({category:r.category,assigned:r.assigned})),
                           isBudgetable:isBudgetableCategory,
                         })});
-                      }catch(err){console.error("auto-fill preview failed",err);setFillPlan(null);}
+                      }catch(err){
+                        console.error("auto-fill preview failed",err);
+                        if(monthRef.current===monthKey)setFillPlan(null);
+                      }
                     }}
                     style={{marginTop:8,fontSize:11,width:"100%",justifyContent:"center"}}>
                     Fill from {prevMonthName}
@@ -2831,6 +2851,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                     const overdue=st==="overdue";
                     const dueInk=overdue?inkOn("#D85A30",surf.bg):null;
                     const pickerOpen=expMatchId===r.id;
+                    const dismissOpen=expDismissId===r.id;
                     // Mark-paid candidates: this month's money-out rows within
                     // the ±20% match band, nearest amount first.
                     const cands=pickerOpen?txs
@@ -2853,13 +2874,34 @@ export default function Dashboard({ refreshTick = 0 }) {
                           {!r.projected&&(<>
                             {(missed||overdue)&&(
                               <button className="ibtn" disabled={expBusy} style={{fontSize:9,padding:"2px 7px",flexShrink:0}}
-                                onClick={()=>setExpMatchId(pickerOpen?null:r.id)}>Mark paid</button>
+                                onClick={()=>{setExpDismissId(null);setExpMatchId(pickerOpen?null:r.id);}}>Mark paid</button>
                             )}
-                            <button title={r.cadence==="once"?"Dismiss this bill":"Dismiss this cycle (the next one is still expected)"}
-                              disabled={expBusy} onClick={()=>doDismissExpected(r.id)}
+                            {/* 'once' has no next cycle, so ✕ just dismisses. A
+                                recurring cadence opens the skip/stop choice —
+                                without the stop path a cancelled real-world bill
+                                was permanent: every ✕ minted the next cycle
+                                (dismissExpected's {stop:true} was dead code, the
+                                pre-Restore-unlink unrecoverable-mis-tap shape). */}
+                            <button title={r.cadence==="once"?"Dismiss this bill":"Skip this cycle or stop expecting this bill"}
+                              disabled={expBusy}
+                              onClick={()=>{
+                                if(r.cadence==="once"){doDismissExpected(r.id);return;}
+                                setExpMatchId(null);setExpDismissId(dismissOpen?null:r.id);
+                              }}
                               style={{background:"none",border:"none",color:"var(--muted)",cursor:"pointer",fontSize:12,padding:"2px",lineHeight:1,flexShrink:0}}>✕</button>
                           </>)}
                         </div>
+                        {dismissOpen&&(
+                          <div style={{margin:"6px 0 2px 8px",borderLeft:"2px solid var(--border)",paddingLeft:8,display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
+                            <button className="ibtn" disabled={expBusy} style={{fontSize:9,padding:"2px 7px"}}
+                              title="Dismiss this cycle only — the next one is still expected"
+                              onClick={()=>doDismissExpected(r.id)}>Skip this cycle</button>
+                            <button className="ibtn" disabled={expBusy} style={{fontSize:9,padding:"2px 7px"}}
+                              title="Stop expecting this bill entirely (no next cycle)"
+                              onClick={()=>doDismissExpected(r.id,{stop:true})}>Stop expecting</button>
+                            <button className="ibtn" style={{fontSize:9,padding:"2px 7px"}} onClick={()=>setExpDismissId(null)}>Cancel</button>
+                          </div>
+                        )}
                         {pickerOpen&&(
                           <div style={{margin:"6px 0 2px 8px",borderLeft:"2px solid var(--border)",paddingLeft:8}}>
                             {cands.length===0?(
@@ -4046,7 +4088,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                     {fmtX(r.monthlyAmount)}<span style={{fontSize:10,color:"var(--muted)"}}>{perLabel[r.cadence]||"/mo"}</span>
                   </div>
                   {expectReady&&(expKeys.has(r.key)?(
-                    <span title="The next charge is expected on the Budget tab's Upcoming list"
+                    <span title="The next charge is expected on the Budget tab's Upcoming list — its ✕ there can skip a cycle or stop expecting it"
                       style={{fontSize:9,fontWeight:600,color:"var(--muted)",flexShrink:0,whiteSpace:"nowrap"}}>expected ✓</span>
                   ):(
                     <button className="ibtn" disabled={expBusy}
