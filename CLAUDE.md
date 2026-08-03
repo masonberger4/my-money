@@ -705,6 +705,13 @@ The app's ONLY use of Supabase **Storage** — everything else is Postgres.
   Budget tab). Deliberately not built: in-app saved chats and search
   refinement (both need Mason — see the backlog).
 
+- **Data coverage panel (TEMPORARY troubleshooting aid)** — collapsible card at
+  the bottom of the Accounts tab: per-account first/last tx date, row count and
+  source badges (simplefin/csv/pdf/manual), hidden accounts included on purpose.
+  Pure `src/coverage.js` (`test/coverage.test.js`) + `getDataCoverage()` in
+  dataAdapter (whole-table paged read, fetched lazily on first expand). May be
+  hidden or removed once the coverage questions settle. No migration.
+
 ## Pending branches
 
 None in code. No outstanding ops tasks. Receipts storage policy SETTLED +

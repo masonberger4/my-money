@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from "react";
-import { getOverview, getSpending, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES, setCategoryRule, applyCategoryRuleToHistory, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, invalidateEnvelopeSpending, isEnvelopeSchemaMissing, targetNeed, readyToAssign, envelopePace, getEnvPace, setEnvPace as persistEnvPace, monthKey, getEntities, createEntity, updateEntity, getTaxYearTransactions, getMileage, addMileage, deleteMileage, getReceiptTxIds, getDebts, getBalanceSnapshots, addManualTransaction, createManualAccount } from "../dataAdapter.js";
+import { getOverview, getSpending, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES, setCategoryRule, applyCategoryRuleToHistory, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, invalidateEnvelopeSpending, isEnvelopeSchemaMissing, targetNeed, readyToAssign, envelopePace, getEnvPace, setEnvPace as persistEnvPace, monthKey, getEntities, createEntity, updateEntity, getTaxYearTransactions, getMileage, addMileage, deleteMileage, getReceiptTxIds, getDebts, getBalanceSnapshots, addManualTransaction, createManualAccount, getDataCoverage } from "../dataAdapter.js";
 import { payoffWhatIf, debtFreeMonth, isMortgage } from "../debtPayoff.js";
 import { SCHEDULE_E_LINES, RENTS_KEY, DEFAULT_SCHEDULE_E_MAP, scheduleEReport, entityMonthly, entityLedger, personalDeductionReport, DEDUCTION_BUCKETS, DEFAULT_DEDUCTION_MAP, mileageDeduction, scheduleECsv } from "../taxReport.js";
 import { merchantKey } from "../txClassify.js";
@@ -960,6 +960,19 @@ export default function Dashboard({ refreshTick = 0 }) {
   const [acctLoading,setAcctLoading]=useState(false);
   const [recurring,setRecurring]=useState(null);
   const [recLoading,setRecLoading]=useState(false);
+  // --- Data coverage panel (TEMPORARY troubleshooting aid; Accounts tab) ---
+  // Lazy: the query pages the whole transactions table, so nothing is fetched
+  // until the card is first expanded.
+  const [covOpen,setCovOpen]=useState(false);
+  const [covData,setCovData]=useState(null);   // null = not fetched; object keyed by account_id
+  const [covErr,setCovErr]=useState(null);
+  const openCoverage=async()=>{
+    const next=!covOpen; setCovOpen(next);
+    if(next&&covData===null&&!covErr){
+      try{ setCovData(await getDataCoverage()); }
+      catch(e){ setCovErr(e?.message||"failed to load"); }
+    }
+  };
   // --- Debt tab (lazy like recurring) ---
   const [debtData,setDebtData]=useState(null);   // {debts,totalDebt,totalMinimums,hasDebtColumns}
   const [debtLoading,setDebtLoading]=useState(false);
@@ -2639,6 +2652,58 @@ export default function Dashboard({ refreshTick = 0 }) {
             <div style={{marginTop:14,fontSize:11,color:"var(--muted)",background:"var(--bg)",borderRadius:8,padding:"8px 12px"}}>
               Double-click a name to set a nickname · Click a swatch to change the badge color
             </div>
+          </div>
+        )}
+
+        {/* DATA COVERAGE — TEMPORARY troubleshooting aid (may be hidden or
+            removed later): per-account first/last tx date, row count and
+            source breakdown, so "what history does the app actually hold?"
+            has an answer on screen. Collapsed by default; the whole-table
+            scan only runs on first expand. Hidden accounts included on
+            purpose — coverage on hidden accounts is what gets troubleshot. */}
+        {tab==="accounts"&&!selAcct&&(
+          <div className="card" style={{marginTop:14}}>
+            <div onClick={openCoverage} style={{display:"flex",justifyContent:"space-between",alignItems:"center",cursor:"pointer"}}>
+              <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em"}}>Data coverage</div>
+              <span style={{fontSize:12,color:"var(--muted)"}}>{covOpen?"▾":"▸"}</span>
+            </div>
+            {covOpen&&(
+              <div style={{marginTop:10}}>
+                {covErr&&<div style={{fontSize:12,color:"var(--danger)"}}>Couldn't load coverage: {covErr}</div>}
+                {!covErr&&covData===null&&<div style={{marginBottom:8}}><Sk h={32}/><div style={{height:8}}/><Sk h={32}/></div>}
+                {!covErr&&covData!==null&&[...accounts].sort((a,b)=>(a.hidden?1:0)-(b.hidden?1:0)).map(a=>{
+                  const c=covData[a.id];
+                  return (
+                    <div key={a.id} style={{display:"flex",alignItems:"center",gap:8,padding:"7px 0",
+                      borderBottom:"1px solid var(--border)",opacity:a.hidden?.5:1}}>
+                      <div style={{flex:1,minWidth:0}}>
+                        <div style={{fontSize:12,fontWeight:500,color:"var(--text)",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
+                          {acctLabel(a)}{a.hidden&&<span style={{fontSize:10,color:"var(--muted)",marginLeft:6}}>hidden</span>}
+                        </div>
+                        <div style={{fontSize:10,fontFamily:"'DM Mono',monospace",color:"var(--muted)",marginTop:2}}>
+                          {c?.first?`${c.first} – ${c.last}`:"—"}
+                        </div>
+                      </div>
+                      <div style={{display:"flex",gap:4,flexShrink:0,flexWrap:"wrap",justifyContent:"flex-end",maxWidth:150}}>
+                        {c&&Object.entries(c.sources).map(([s,n])=>(
+                          <span key={s} style={{fontSize:9,fontFamily:"'DM Mono',monospace",color:"var(--muted)",
+                            background:"var(--bg)",border:"1px solid var(--border)",borderRadius:6,padding:"1px 5px"}}>{s} {n}</span>
+                        ))}
+                      </div>
+                      <div style={{fontSize:12,fontFamily:"'DM Mono',monospace",color:"var(--text)",flexShrink:0,minWidth:34,textAlign:"right"}}>
+                        {c?c.count:0}
+                      </div>
+                    </div>
+                  );
+                })}
+                {!covErr&&covData!==null&&accounts.length===0&&(
+                  <div style={{fontSize:12,color:"var(--muted)"}}>No accounts.</div>
+                )}
+                <div style={{marginTop:8,fontSize:10,color:"var(--muted)"}}>
+                  Temporary troubleshooting view — counts every stored row per account by feed source.
+                </div>
+              </div>
+            )}
           </div>
         )}
 
