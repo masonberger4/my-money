@@ -4,7 +4,7 @@ import { merchantKey, classifyDescription } from './txClassify.js';
 import { applyRuleToHistory, isRangeExhaustedError } from './ruleHistory.js';
 import { markInternalTransfers, cashIncome, cashSpending } from './cashFlow.js';
 import { walkEnvelopes, monthKey, planMove } from './envelopes.js';
-import { isSpend, sumSpending, spendingGroups, toTxShape, aggregateEnvelopeSpending } from './spending.js';
+import { isSpend, sumSpending, spendingGroups, biggestMovers, toTxShape, aggregateEnvelopeSpending } from './spending.js';
 import { createRangeMemo } from './monthMemo.js';
 import { aggregateCoverage } from './coverage.js';
 
@@ -24,6 +24,7 @@ export {
   isSpend,
   sumSpending,
   spendingGroups,
+  biggestMovers,
   toTxShape,
   patchTxShape,
   effectiveCategory,
@@ -182,6 +183,25 @@ export async function getOverview() {
 export async function getSpending({ year, month }) {
   const txs = await getMonthTransactions(year, month);
   return { groups: spendingGroups(txs) };
+}
+
+// The Trends "Biggest movers" read: the viewed month vs the month before it,
+// through the pure biggestMovers (src/spending.js — isSpend lineage, purchase
+// model ONLY). markTransfers is deliberately OFF: the purchase model never
+// reads `_internal`, so the O(V·E) matching would be pure waste here — and
+// skipping it keeps the cash-flow model out of this number entirely. Both
+// months ride the same per-reload range memo the other reads share, so inside
+// a reload the current month is served from the fetch getSpending already
+// started (and the previous month from the cash-flow window when it overlaps).
+export async function getBiggestMovers({ year, month }) {
+  const prev = shiftMonth(year, month, -1);
+  const cb = monthBounds(year, month);
+  const pb = monthBounds(prev.year, prev.month);
+  const [currRows, prevRows] = await Promise.all([
+    getTransactionsBetween(cb.start, cb.end, { markTransfers: false }),
+    getTransactionsBetween(pb.start, pb.end, { markTransfers: false }),
+  ]);
+  return { movers: biggestMovers(currRows, prevRows) };
 }
 
 // fields: { user_category } (null reverts to the automatic category),

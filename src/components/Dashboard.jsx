@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from "react";
-import { getOverview, getSpending, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES, setCategoryRule, applyCategoryRuleToHistory, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, invalidateEnvelopeSpending, isEnvelopeSchemaMissing, targetNeed, readyToAssign, envelopePace, getEnvPace, setEnvPace as persistEnvPace, monthKey, getEntities, createEntity, updateEntity, getTaxYearTransactions, getMileage, addMileage, deleteMileage, getReceiptTxIds, getDebts, getBalanceSnapshots, addManualTransaction, createManualAccount, getDataCoverage } from "../dataAdapter.js";
+import { getOverview, getSpending, getBiggestMovers, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES, setCategoryRule, applyCategoryRuleToHistory, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, invalidateEnvelopeSpending, isEnvelopeSchemaMissing, targetNeed, readyToAssign, envelopePace, getEnvPace, setEnvPace as persistEnvPace, monthKey, getEntities, createEntity, updateEntity, getTaxYearTransactions, getMileage, addMileage, deleteMileage, getReceiptTxIds, getDebts, getBalanceSnapshots, addManualTransaction, createManualAccount, getDataCoverage } from "../dataAdapter.js";
 import { payoffWhatIf, debtFreeMonth, isMortgage } from "../debtPayoff.js";
 import { SCHEDULE_E_LINES, RENTS_KEY, DEFAULT_SCHEDULE_E_MAP, scheduleEReport, entityMonthly, entityLedger, personalDeductionReport, DEDUCTION_BUCKETS, DEFAULT_DEDUCTION_MAP, mileageDeduction, scheduleECsv } from "../taxReport.js";
 import { merchantKey } from "../txClassify.js";
@@ -923,6 +923,11 @@ export default function Dashboard({ refreshTick = 0 }) {
   const [spending,setSpending]=useState(null);
   const [transactions,setTransactions]=useState(null);
   const [cashFlow,setCashFlow]=useState(null);
+  // Biggest movers (Trends): viewed month vs the month before, PURCHASE-BASED
+  // (isSpend lineage) — never mixed into the cash-flow figures. Plain reload
+  // state like `spending`: refetched by every reloadData, so it self-heals
+  // after edits (no lazy cache, no sentinel).
+  const [movers,setMovers]=useState(null);
   const [accounts,setAccounts]=useState([]);
   const [budgets,setBudgets]=useState({});
   // By-date sinking funds, kept OUT of `budgets`: their amount is a
@@ -1251,7 +1256,7 @@ export default function Dashboard({ refreshTick = 0 }) {
     invalidateEnvelopeSpending();
     const eseq=++envSeq.current;
     try{
-      const[ov,sp,tx,cf,ac,bu,en,inc,ents]=await Promise.all([
+      const[ov,sp,tx,cf,ac,bu,en,inc,ents,mv]=await Promise.all([
         cur?getOverview():Promise.resolve(null),
         getSpending({year:y,month:m}),
         getTransactions({year:y,month:m}),
@@ -1268,6 +1273,10 @@ export default function Dashboard({ refreshTick = 0 }) {
         // entity picker; degrades to [] until the rental-tax migration lands
         // (inside getEntities) — undefined = transient failure, keep state.
         getEntities().catch(()=>undefined),
+        // Movers share the month fetches above through the range memo, so a
+        // lone failure here is next to impossible — but a nice-to-have section
+        // must not take down the reload; undefined = keep what's on screen.
+        getBiggestMovers({year:y,month:m}).catch(()=>undefined),
       ]);
       if(seq!==loadSeq.current)return false;
       setOverview(ov);setSpending(sp);setTransactions(tx);setCashFlow(cf);
@@ -1276,6 +1285,7 @@ export default function Dashboard({ refreshTick = 0 }) {
       // pattern): folding it into [] would blank the entity chips and every
       // property worksheet until the next successful reload.
       if(ents!==undefined)setEntities(ents.entities||[]);
+      if(mv!==undefined)setMovers(mv.movers||[]);
       invalidateTax(); // recompute lazily on next Tax-tab visit
       // A completed envelope write may have painted fresher rows while this
       // reload was in flight — don't overwrite them (or the freshly saved
@@ -3288,6 +3298,45 @@ export default function Dashboard({ refreshTick = 0 }) {
                         <div style={{position:"absolute",top:2,height:10,borderRadius:5,background:markOn(pos?"#1D9E75":"#D85A30",surf.bg),width:w+"%",left:pos?"50%":"auto",right:pos?"auto":"50%"}}/>
                       </div>
                       <span style={{fontSize:11,fontFamily:"'DM Mono',monospace",fontWeight:500,color:inkOn(pos?"#1D9E75":"#D85A30",surf.card),width:64,textAlign:"right",flexShrink:0}}>{pos?"+":"−"}{fmt(Math.abs(n.net))}</span>
+                    </div>
+                  );
+                });
+              })()}
+            </div>
+            {/* Biggest movers — PURCHASE-BASED (isSpend lineage), its own card
+                so it never reads as part of the cash-flow figures above. Rise
+                in spending = OVER_MONEY, fall = OK_MONEY (the vs-last-month
+                tile's idiom); bars are marks on the --bg gutter, delta text
+                sits on the card — each contrast-corrected for its own surface. */}
+            <div className="card">
+              <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em",marginBottom:4}}>Biggest movers</div>
+              <div style={{fontSize:11,color:"var(--muted)",marginBottom:14}}>
+                By category (purchases) — {new Date(year,month-1,1).toLocaleString("default",{month:"short",year:"numeric"})} vs {new Date(year,month-2,1).toLocaleString("default",{month:"short",year:"numeric"})}.
+                Counts what was bought, so it won&#39;t line up with the cash-flow bars above.
+              </div>
+              {loading||!movers?<Sk h={100}/>:movers.length===0?(
+                <div style={{textAlign:"center",padding:"20px 0",color:"var(--muted)",fontSize:13}}>
+                  Not much moved — category spending looks like last month.
+                </div>
+              ):(()=>{
+                const maxAbs=Math.max(...movers.map(m=>Math.abs(m.delta)),1);
+                return movers.map(m=>{
+                  const up=m.delta>0; // more money spent than last month
+                  const w=(Math.abs(m.delta)/maxAbs)*100;
+                  return (
+                    <div key={m.label} style={{marginBottom:12}}>
+                      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,marginBottom:4}}>
+                        <Pill label={getName(m.label)} color={getColor(m.label)} surface={surf.card}/>
+                        <span style={{fontSize:11,fontFamily:"'DM Mono',monospace",fontWeight:600,color:inkOn(up?OVER_MONEY:OK_MONEY,surf.card),flexShrink:0}}>
+                          {up?"+":"−"}{fmt(Math.abs(m.delta))}
+                        </span>
+                      </div>
+                      <div style={{display:"flex",alignItems:"center",gap:8}}>
+                        <div style={{flex:1,height:6,background:"var(--bg)",borderRadius:3,overflow:"hidden"}}>
+                          <div style={{height:"100%",width:w+"%",borderRadius:3,background:markOn(up?OVER_MONEY:OK_MONEY,surf.bg)}}/>
+                        </div>
+                        <span style={{fontSize:10,fontFamily:"'DM Mono',monospace",color:"var(--muted)",flexShrink:0}}>{fmt(m.prev)} → {fmt(m.curr)}</span>
+                      </div>
                     </div>
                   );
                 });
