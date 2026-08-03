@@ -2,6 +2,14 @@
 
 Source of truth: `docs/improvement-backlog-2026-08-01.md` Section 3 remainder (Mason's decisions inline) + CLAUDE.md Roadmap. Verified against code at c06b2fa: `Dashboard.jsx` is 3,787 lines (all sessions below touch it — sequence them, never parallel, per the one-session-per-line-of-work gotcha); `api/sync.js` already snapshots **all** usable accounts into `balance_snapshots` (not just debts — line 392, balance-moved gate), which changes the net-worth sizing; no sign-out exists anywhere in `src/`.
 
+**Status 2026-08-03 (second update):** the household attached ALL accounts,
+which surfaced a $24k/quarter double count; the diagnosis session shipped the
+**unified linked-boundary spending model** (PR #32 — replaces the two-model
+design; loan payments count as spending, card payments never, hidden =
+unlinked) and the temporary **Data coverage panel** (PR #31). Outstanding
+data/ops tasks are in CLAUDE.md → Pending; the full diagnosis is archived in
+`docs/double-count-diagnosis-2026-08-03.md`.
+
 **Status 2026-08-03:** the Section 3 batch SHIPPED (card-cycling tile, Ask
 persistence + Save chat, Uncategorized teach-queue, startup skeleton + month
 jump picker) — that covers most of Session 1 (minus search refinement +
@@ -31,7 +39,7 @@ Both are "understand my categories" features sharing the `src/spending.js` / `is
 
 **Items:**
 - **Uncategorized teach-queue** — top-5 Uncategorized groups by `merchantKey` feeding the existing `learnMerchant` flow. Constraints from the backlog: inherits the over-specific-key limit (pinned REGRESSION — fine, groups are just narrow), and whatever list the queue renders must be covered by `learnMerchant`'s refetch (the `saveTx` Gotcha — likely means the queue re-derives from `transactions` after a rule applies, or gets its own refetch hook).
-- **Trends biggest movers** — per-category month-over-month deltas, built strictly inside `spendingGroups` lineage as a pure helper in `src/spending.js` + tests against the ledger fixture; renders as a purchase-based section on the Trends tab, clearly separate from the cash-flow numbers (never mix the two models in one figure).
+- **Trends biggest movers** — per-category month-over-month deltas, built strictly inside `spendingGroups` lineage as a pure helper in `src/spending.js` + tests against the ledger fixture; renders as a section on the Trends tab. (2026-08-03: the spending models were unified — Trends and Categories share `isSpend()` now, so movers reuse the one predicate; the old "never mix the two models" caveat is moot.)
 
 **Migration:** none. **Mason mid-session:** none. **Order:** after Session 1 (both edit the Categories/Trends regions of Dashboard.jsx).
 

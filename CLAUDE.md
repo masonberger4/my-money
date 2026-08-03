@@ -727,7 +727,33 @@ The app's ONLY use of Supabase **Storage** — everything else is Postgres.
 
 ## Pending branches
 
-None in code. No outstanding ops tasks. Receipts storage policy SETTLED +
+None in code. **Outstanding ops/data tasks from the 2026-08-03 double-count
+session** (diagnosis archived in `docs/double-count-diagnosis-2026-08-03.md`):
+
+- **ROTATE the Supabase `service_role` key** — it was pasted into a Claude
+  chat session (2026-08-03) to run the read-only diagnosis. Dashboard →
+  Settings → API → rotate; then update `SUPABASE_SERVICE_ROLE_KEY` in Vercel
+  (Production AND Preview) and redeploy.
+- **Verify the $2,200 payroll duplicate** — "ACH Deposit PAYROLL From POME
+  HOLISTIC PE" −$2,200 appears TWICE on 2026-07-24 on Cashback Debit (3481)
+  with two distinct `sfin:` tx ids, so the upsert can't dedup it. Check the
+  Discover statement; if duplicated, set `excluded=true` on one copy. July
+  income reads ~$2,200 high until resolved. (Small same-day Venture X dupes
+  too, ~$34 total Jun+Jul.)
+- **Resolve the Discover it (7933) twins before unhiding** — one row is
+  mistyped `depository/checking` under the Capital One org, its sibling is
+  `credit` under the Discover org. Both hidden today (contributing $0); keep
+  the credit-typed one. Eyeball the type on EVERY account at unhide time.
+- **Recategorize NEWREZ** out of "Utilities" (~$3.8k/mo, counted once,
+  wrong bucket) — learned rule or `user_category`.
+- **Statement backfill** — pre-May-2026 history for BECU savings, Cashback
+  Debit and the cards via CSV/PDF import (the coverage panel on the Accounts
+  tab shows each account's gap). Note: Checking (2644) rows end 2026-04-03
+  exactly where Checking (5481) begins — likely the SAME real BECU checking
+  re-keyed by the feed (no overlap, no double count, but pre-May history
+  lives on the old row); confirm before treating 2644 as a separate account.
+
+Receipts storage policy SETTLED +
 verified end-to-end incl. cross-tenant denial (2026-07-31); the three orphan
 Plaid Items CLOSED (2026-08-01 — Mason deleted the Plaid account, retiring
 every Item; `PLAID_*` env vars already removed).
@@ -749,10 +775,10 @@ ship, or delete it when spent.
 
 **Improvement backlog (2026-08-01 six-dimension audit):**
 `docs/improvement-backlog-2026-08-01.md` — Batch 1 + Sections 1–2 and most of
-Section 3 SHIPPED (see Merged features). Genuinely unbuilt remainder: cycling
-card-balance tile, Ask-tab sessionStorage + save-chat, Trends biggest-movers,
-Uncategorized teach-queue, recurring weekly/annual cadences + ignore list, UX
-polish (startup skeleton, month jump picker, search refinement). Carry
+Section 3 SHIPPED (see Merged features). Genuinely unbuilt remainder: Trends
+biggest-movers (now single-model — build in the `isSpend()` lineage), recurring
+weekly/annual cadences + ignore list, search refinement (needs a Mason spec),
+sign-out button, in-app saved chats (needs a Mason sizing decision). Carry
 condition: the Dashboard.jsx decomposition is DEFERRED (keep the single file
 during active development). Delete entries as they ship.
 
