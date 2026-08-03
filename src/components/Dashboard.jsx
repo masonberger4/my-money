@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from "react";
-import { getOverview, getSpending, getBiggestMovers, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES, setCategoryRule, applyCategoryRuleToHistory, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, invalidateEnvelopeSpending, isEnvelopeSchemaMissing, targetNeed, readyToAssign, envelopePace, getEnvPace, setEnvPace as persistEnvPace, getRecIgnore, updateRecIgnore, monthKey, getEntities, createEntity, updateEntity, getTaxYearTransactions, getMileage, addMileage, deleteMileage, getReceiptTxIds, getDebts, getBalanceSnapshots, addManualTransaction, createManualAccount, getDataCoverage, signOut } from "../dataAdapter.js";
-import { payoffWhatIf, debtFreeMonth, isMortgage } from "../debtPayoff.js";
+import { getOverview, getSpending, getBiggestMovers, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES, setCategoryRule, applyCategoryRuleToHistory, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, invalidateEnvelopeSpending, isEnvelopeSchemaMissing, targetNeed, readyToAssign, envelopePace, getEnvPace, setEnvPace as persistEnvPace, getRecIgnore, updateRecIgnore, monthKey, getEntities, createEntity, updateEntity, getTaxYearTransactions, getMileage, addMileage, deleteMileage, getReceiptTxIds, getDebts, getBalanceSnapshots, getNetWorthSeries, addManualTransaction, createManualAccount, updateManualBalance, getDataCoverage, signOut } from "../dataAdapter.js";
+import { payoffWhatIf, debtFreeMonth, isMortgage, amortizationSchedule, addMonths, MAX_MONTHS } from "../debtPayoff.js";
 import { SCHEDULE_E_LINES, RENTS_KEY, DEFAULT_SCHEDULE_E_MAP, scheduleEReport, entityMonthly, entityLedger, personalDeductionReport, DEDUCTION_BUCKETS, DEFAULT_DEDUCTION_MAP, mileageDeduction, scheduleECsv } from "../taxReport.js";
 import { merchantKey } from "../txClassify.js";
 import { patchTxShape } from "../spending.js";
@@ -250,6 +250,57 @@ function DebtNum({id,value,onSave,placeholder,prefix,suffix,width=74}) {
           color:"var(--text)",fontSize:12,fontFamily:"'DM Mono',monospace",outline:"none",textAlign:"right"}}/>
       {suffix}
     </span>
+  );
+}
+
+// Inline "+ Add manual debt" form (Debt tab): name, kind, hand-typed balance.
+// Reuses the is_manual machinery — the saved account is an ordinary manual
+// account (createManualAccount), so getDebts picks it up like a fed one and
+// the sync never touches it.
+function AddDebtForm({busy,surf,onSave,onClose}) {
+  const [name,setName]=useState("");
+  const [kind,setKind]=useState("loan");
+  const [bal,setBal]=useState("");
+  const balNum=bal.trim()===""?null:Number(bal);
+  const ok=name.trim()&&(balNum==null||(Number.isFinite(balNum)&&balNum>=0));
+  return (
+    <div style={{background:"var(--bg)",borderRadius:10,padding:"10px 12px",marginBottom:10}}>
+      <div style={{display:"flex",flexWrap:"wrap",alignItems:"center",gap:8}}>
+        <input value={name} placeholder="Name (e.g. Loan from Dad)" autoFocus
+          onChange={e=>setName(e.target.value)}
+          style={{flex:"1 1 140px",padding:"6px 8px",borderRadius:8,border:"1px solid var(--border)",background:"var(--card)",
+            color:"var(--text)",fontSize:12,fontFamily:"inherit",outline:"none"}}/>
+        {["loan","credit"].map(k=>{
+          const active=kind===k;
+          const cs=active?chipOn(TYPE_CHIP,surf.card):null;
+          return (
+            <button key={k} onClick={()=>setKind(k)}
+              style={{fontSize:11,fontWeight:600,padding:"5px 10px",borderRadius:20,fontFamily:"inherit",cursor:"pointer",
+                background:cs?cs.bg:"var(--card)",color:cs?cs.ink:"var(--muted)",
+                border:`1px solid ${active?markOn(TYPE_CHIP,surf.card):"var(--border)"}`,transition:"all .15s"}}>
+              {k==="loan"?"Loan":"Credit card"}
+            </button>
+          );
+        })}
+        <span style={{display:"inline-flex",alignItems:"center",gap:3,fontSize:12,color:"var(--muted)"}}>
+          owed $
+          <input value={bal} inputMode="decimal" placeholder="0"
+            onChange={e=>setBal(numericish(e.target.value,{negative:false}))}
+            style={{width:80,padding:"6px 8px",borderRadius:8,border:"1px solid var(--border)",background:"var(--card)",
+              color:"var(--text)",fontSize:12,fontFamily:"'DM Mono',monospace",outline:"none",textAlign:"right"}}/>
+        </span>
+      </div>
+      <div style={{display:"flex",gap:8,marginTop:8,justifyContent:"flex-end"}}>
+        <button className="ibtn" style={{fontSize:11}} onClick={onClose}>Cancel</button>
+        <button className="ibtn" style={{fontSize:11,fontWeight:600}} disabled={busy||!ok}
+          onClick={()=>onSave({name:name.trim(),kind,balance:balNum})}>
+          {busy?"Adding…":"Add debt"}
+        </button>
+      </div>
+      <div style={{fontSize:10,color:"var(--muted)",marginTop:6}}>
+        Tracked by hand — the balance is yours to type and never synced. APR and minimum payment can be entered after adding.
+      </div>
+    </div>
   );
 }
 
@@ -740,6 +791,104 @@ function DrillNum({onClick,title,style,children}) {
 // that are in the category but not in the total (excluded, refunds, loan
 // postings) are still shown rather than silently dropped — "where did the other
 // $40 go" is exactly the question this sheet exists to answer.
+// Per-debt payoff schedule drill-in: THIS debt alone, amortized at its own
+// minimum payment — the multi-debt snowball/avalanche interplay stays in the
+// projection card; this sheet answers "where does each payment on this card
+// actually go". All figures come stored-positive from amortizationSchedule;
+// only the header balance is a displayed BALANCE, so only it runs through
+// displayBalance. Long schedules render the first SCHED_PREVIEW rows plus a
+// "show all" toggle (390px phone is the target); a stalled schedule gets the
+// honest --danger banner instead of a fake date, and a MAX_MONTHS cap renders
+// the computed rows under a "still owing after 50 years" banner.
+const SCHED_PREVIEW=24;
+function ScheduleSheet({debt,startMonth,acctLabel,onClose}){
+  const [showAll,setShowAll]=useState(false);
+  const pay=Number(debt.minimum_payment)||0;
+  const rate=debt.apr??debt.interest_rate;
+  const sched=amortizationSchedule({balance:debt.current_balance,ratePercent:rate,payment:pay});
+  const capped=!showAll&&sched.rows.length>SCHED_PREVIEW;
+  const shown=capped?sched.rows.slice(0,SCHED_PREVIEW):sched.rows;
+  const hidden=sched.rows.length-shown.length;
+  const cell={fontSize:11,fontFamily:"'DM Mono',monospace",textAlign:"right",whiteSpace:"nowrap"};
+  const hcell={fontSize:10,color:"var(--muted)",fontWeight:500,textAlign:"right"};
+  const monthCapped=sched.stalled&&sched.rows.length>=MAX_MONTHS;
+  return (
+    <div className="overlay" onClick={onClose}>
+      <div className="modal" onClick={e=>e.stopPropagation()}
+        style={{width:"min(460px,92vw)",maxHeight:"82vh",overflowY:"auto"}}>
+        <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
+          <span style={{fontSize:16,fontWeight:600,color:"var(--text)",minWidth:0,overflow:"hidden",
+            textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{acctLabel(debt)}</span>
+          <span style={{flex:1}}/>
+          <span style={{fontSize:16,fontWeight:600,fontFamily:"'DM Mono',monospace",flexShrink:0}}>
+            {fmtX(displayBalance(debt.current_balance,debt.type))}
+          </span>
+        </div>
+        <div style={{fontSize:12,color:"var(--muted)",marginBottom:12}}>
+          Payoff schedule at {fmtAuto(pay)}/mo{Number(rate)>0?` · ${Number(rate)}% APR`:" · no interest entered"} · this debt alone
+        </div>
+
+        {sched.stalled&&!sched.rows.length?(
+          <div style={{fontSize:12,color:"var(--danger)",background:"var(--danger-bg)",border:"1px solid var(--danger-border)",borderRadius:8,padding:"8px 12px"}}>
+            At {fmtAuto(pay)}/mo the payment doesn't cover the monthly interest — this balance never falls.
+            Raise the minimum payment (or add an extra payment in the projection below) to get a payoff date.
+          </div>
+        ):(
+          <>
+            <div style={{display:"flex",gap:10,flexWrap:"wrap",marginBottom:12}}>
+              {[{label:"Paid off",val:sched.stalled?"never":monthYear(addMonths(startMonth,sched.months)+"-01"),
+                 sub:sched.stalled?"at this payment":`${sched.months} month${sched.months!==1?"s":""}`},
+                {label:"Total interest",val:fmtAuto(sched.totalInterest),sub:sched.stalled?"so far — still owing":"over the schedule"},
+              ].map((c,i)=>(
+                <div key={i} style={{flex:"1 1 100px",background:"var(--bg)",borderRadius:10,padding:"10px 12px"}}>
+                  <div style={{fontSize:10,color:"var(--muted)",fontWeight:500,marginBottom:3}}>{c.label}</div>
+                  <div style={{fontSize:15,fontWeight:600,fontFamily:"'DM Mono',monospace"}}>{c.val}</div>
+                  <div style={{fontSize:10,color:"var(--muted)",marginTop:2}}>{c.sub}</div>
+                </div>
+              ))}
+            </div>
+            {monthCapped&&(
+              <div style={{fontSize:12,color:"var(--danger)",background:"var(--danger-bg)",border:"1px solid var(--danger-border)",borderRadius:8,padding:"8px 12px",marginBottom:10}}>
+                Still owing after {Math.round(MAX_MONTHS/12)} years at this payment — the schedule below stops there.
+              </div>
+            )}
+            {/* Wide balances (a mortgage's −$400,000.00) scroll inside the
+                sheet rather than stretching it past 390px. */}
+            <div style={{overflowX:"auto"}}>
+              <div style={{display:"grid",gridTemplateColumns:"minmax(52px,1fr) auto auto auto auto",columnGap:10,rowGap:6,alignItems:"baseline",minWidth:"min-content"}}>
+                <div style={{...hcell,textAlign:"left"}}>Month</div>
+                <div style={hcell}>Payment</div>
+                <div style={hcell}>Interest</div>
+                <div style={hcell}>Principal</div>
+                <div style={hcell}>Remaining</div>
+                {shown.map(r=>(
+                  // Fragment-free: grid children must be direct, so 5 keyed divs.
+                  [<div key={r.month+"m"} style={{...cell,textAlign:"left",color:"var(--muted)"}}>{monthYear(addMonths(startMonth,r.month)+"-01")}</div>,
+                   <div key={r.month+"p"} style={cell}>{fmtX(r.payment)}</div>,
+                   <div key={r.month+"i"} style={{...cell,color:"var(--muted)"}}>{fmtX(r.interest)}</div>,
+                   <div key={r.month+"pr"} style={cell}>{fmtX(r.principal)}</div>,
+                   <div key={r.month+"b"} style={cell}>{fmtX(displayBalance(r.balance,debt.type))}</div>]
+                ))}
+              </div>
+            </div>
+            {capped&&(
+              <button className="ibtn" style={{width:"100%",justifyContent:"center",marginTop:10,fontSize:11}}
+                onClick={()=>setShowAll(true)}>
+                Show all {sched.rows.length} months ({hidden} more)
+              </button>
+            )}
+            <div style={{marginTop:10,fontSize:10,color:"var(--muted)"}}>
+              Assumes the current balance, no new charges, and this fixed payment every month.
+              The final payment shrinks to whatever is left.
+            </div>
+          </>
+        )}
+        <button onClick={onClose} className="ibtn" style={{width:"100%",justifyContent:"center",marginTop:16}}>Done</button>
+      </div>
+    </div>
+  );
+}
+
 function CategorySheet({name,color,when,rows,surf,getName,acctById,acctLabel,acctColor,onPick,onClose}) {
   const counted=rows.filter(t=>t.counted);
   const other=rows.filter(t=>!t.counted);
@@ -993,12 +1142,16 @@ export default function Dashboard({ refreshTick = 0 }) {
   const [debtData,setDebtData]=useState(null);   // {debts,totalDebt,totalMinimums,hasDebtColumns}
   const [debtLoading,setDebtLoading]=useState(false);
   const [debtSnaps,setDebtSnaps]=useState([]);   // balance_snapshots rows, oldest first (STORED sign: debts positive)
+  const [nwSeries,setNwSeries]=useState([]);     // [{date,total}] oldest first, total already SIGNED (never re-displayBalance)
   const [debtStrategy,setDebtStrategy]=useState("snowball");
   const [debtExtra,setDebtExtra]=useState("");   // extra $/mo, text while typing
   // Per-account include-in-payoff override; the DEFAULT (no entry) is: credit
   // cards in, loans out — mortgages dominate a snowball/avalanche and make the
   // debt-free date meaningless (spec), and v1 keeps all loans opt-in.
   const [debtInclude,setDebtInclude]=useState({});
+  const [schedDebtId,setSchedDebtId]=useState(null); // per-debt payoff schedule sheet (account id — looked up live so a DebtNum edit refreshes the open sheet)
+  const [addDebt,setAddDebt]=useState(false);      // "+ Add manual debt" inline form
+  const [addDebtBusy,setAddDebtBusy]=useState(false);
   // --- Rental & tax (Tax tab) ---
   const [entities,setEntities]=useState([]);
   const [taxYear,setTaxYear]=useState(now.getFullYear());
@@ -1382,6 +1535,10 @@ export default function Dashboard({ refreshTick = 0 }) {
           const since=new Date(Date.now()-365*86400000).toISOString().slice(0,10);
           setDebtSnaps(await getBalanceSnapshots(d.debts.map(a=>a.id),since));
         }catch(err){console.error("balance snapshots load failed",err);setDebtSnaps([]);}
+        try{
+          const since=new Date(Date.now()-365*86400000).toISOString().slice(0,10);
+          setNwSeries(await getNetWorthSeries(since));
+        }catch(err){console.error("net worth load failed",err);setNwSeries([]);}
         setDebtData(d);
       })
       .catch(err=>{console.error("debt load failed",err);setDebtData({debts:[],totalDebt:0,totalMinimums:0,hasDebtColumns:false});})
@@ -1407,6 +1564,64 @@ export default function Dashboard({ refreshTick = 0 }) {
         totalMinimums:debts.reduce((s,a)=>s+(Number(a.minimum_payment)||0),0)};
     });
     updateAccount(id,fields).catch(err=>console.error("debt field save failed",err));
+  }
+
+  // Hand-typed balance edit on a MANUAL debt (fed balances are never
+  // hand-edited — updateManualBalance enforces it). Optimistic patch of the
+  // debt cache incl. totalDebt AND the accounts list (Accounts tab/Overview
+  // read the same balance through displayBalance — patching only debtData is
+  // the saveTx "only refresh some lists ever get" gotcha recurring), then the
+  // write, which also appends today's balance_snapshots row; on success the
+  // same-tab net-worth card + sparkline are refetched so they don't sit two
+  // cards below visibly totalling the pre-edit balance.
+  function saveManualBalance(a,v){
+    if(v==null)return; // a balance can be corrected, not cleared
+    const prevBal=a.current_balance;
+    const patchBal=bal=>{
+      setDebtData(prev=>{
+        if(!prev)return prev;
+        const debts=prev.debts.map(d=>d.id===a.id?{...d,current_balance:bal}:d);
+        return {...prev,debts,totalDebt:debts.reduce((s,d)=>s+(Number(d.current_balance)||0),0)};
+      });
+      setAccounts(prev=>prev.map(x=>x.id===a.id?{...x,current_balance:bal}:x));
+      setOverview(prev=>prev?{...prev,accounts:prev.accounts.map(x=>x.id===a.id?{...x,balance:{current:bal}}:x)}:prev);
+    };
+    patchBal(v);
+    updateManualBalance(a,v).then(async()=>{
+      // History refresh, best-effort: the write appended a snapshot row.
+      const since=new Date(Date.now()-365*86400000).toISOString().slice(0,10);
+      try{setNwSeries(await getNetWorthSeries(since));}
+      catch(err){console.error("net worth refresh failed",err);}
+      try{
+        const ids=(debtData?.debts||[]).map(d=>d.id);
+        if(ids.length)setDebtSnaps(await getBalanceSnapshots(ids,since));
+      }catch(err){console.error("balance snapshots refresh failed",err);}
+    }).catch(err=>{
+      console.error("manual balance save failed",err);
+      patchBal(prevBal);
+      window.alert(`Couldn't save that balance: ${err.message||err}`);
+    });
+  }
+
+  // "+ Add manual debt": an ordinary manual account (is_manual machinery) of
+  // type credit/loan with a hand-typed balance. On success the lazy debt cache
+  // is dropped (debtData is non-null here — the form only renders on a loaded
+  // tab — so the null sentinel reliably refires the effect) and reloadData
+  // refreshes the accounts list everywhere else.
+  async function addManualDebt({name,kind,balance}){
+    setAddDebtBusy(true);
+    try{
+      await createManualAccount({name,subtype:kind,balance});
+      setAddDebt(false);
+      setDebtSnaps([]);
+      setDebtData(null);
+      reloadData(year,month);
+    }catch(err){
+      console.error("manual debt add failed",err);
+      window.alert(`Couldn't add that debt: ${err.message||err}`);
+    }finally{
+      setAddDebtBusy(false);
+    }
   }
 
   // The Tax tab is lazy the same way: a calendar year of rows + the mileage
@@ -2980,20 +3195,30 @@ export default function Dashboard({ refreshTick = 0 }) {
             {!busy&&debts.length===0&&(
               <div className="card" style={{textAlign:"center",padding:"34px 16px",color:"var(--muted)",fontSize:13,lineHeight:1.6}}>
                 No credit or loan accounts yet.<br/>
-                Link a card or loan through SimpleFIN (Accounts tab) and it shows up here with its balance synced daily.
+                Link a card or loan through SimpleFIN (Accounts tab) and it shows up here with its balance synced daily —
+                or track one by hand below.
+                <div style={{marginTop:12}}>
+                  {addDebt
+                    ?<div style={{textAlign:"left"}}><AddDebtForm busy={addDebtBusy} surf={surf} onSave={addManualDebt} onClose={()=>setAddDebt(false)}/></div>
+                    :<button className="ibtn" style={{fontSize:11}} onClick={()=>setAddDebt(true)}>+ Add manual debt</button>}
+                </div>
               </div>
             )}
 
             {(busy||debts.length>0)&&(
             <div className="card">
-              <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em",marginBottom:4}}>Your debts</div>
+              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:4}}>
+                <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em"}}>Your debts</div>
+                {!busy&&!addDebt&&<button className="ibtn" style={{fontSize:11}} onClick={()=>setAddDebt(true)}>+ Add manual debt</button>}
+              </div>
+              {addDebt&&!busy&&<AddDebtForm busy={addDebtBusy} surf={surf} onSave={addManualDebt} onClose={()=>setAddDebt(false)}/>}
               {!hasCols&&!busy&&(
                 <div style={{fontSize:11,color:"var(--muted)",background:"var(--bg)",borderRadius:8,padding:"8px 12px",marginBottom:10}}>
                   Balances are live; APR and minimum-payment entry activates once the debt-tracker migration is applied.
                 </div>
               )}
               {hasCols&&<div style={{fontSize:11,color:"var(--muted)",marginBottom:10}}>
-                Balances sync from the feed; APR, minimum payment and credit limit are yours to type in — they feed the payoff projection below.
+                Balances sync from the feed (manual debts: typed by hand); APR, minimum payment and credit limit are yours to type in — they feed the payoff projection below.
               </div>}
               {busy?[1,2].map(i=><div key={i} style={{marginBottom:14}}><Sk h={64}/></div>):
                 debts.map((a,i)=>{
@@ -3023,8 +3248,16 @@ export default function Dashboard({ refreshTick = 0 }) {
                           <div className="bar-fill" style={{width:(util*100)+"%",background:markOn(utilColor,surf.track)}}/>
                         </div>
                       )}
-                      {hasCols&&(
+                      {(hasCols||isManualAccount(a))&&(
                         <div style={{display:"flex",flexWrap:"wrap",alignItems:"center",gap:10,marginTop:8}}>
+                          {/* A manual debt's balance is hand-typed (no feed restates
+                              it) — the one balance editor in the app; fed balances
+                              deliberately get none. */}
+                          {isManualAccount(a)&&(
+                            <DebtNum id={a.id+":bal"} value={a.current_balance} placeholder="owed" prefix="$" width={80}
+                              onSave={v=>saveManualBalance(a,v)}/>
+                          )}
+                          {hasCols&&<>
                           <DebtNum id={a.id+":apr"} value={a.apr} placeholder="APR" suffix="%" width={56}
                             onSave={v=>saveDebt(a.id,{apr:v})}/>
                           <DebtNum id={a.id+":min"} value={a.minimum_payment} placeholder="min" prefix="$" suffix="/mo" width={64}
@@ -3044,6 +3277,12 @@ export default function Dashboard({ refreshTick = 0 }) {
                               style={{padding:"5px 7px",borderRadius:8,border:"1px solid var(--border)",background:"var(--bg)",
                                 color:"var(--text)",fontSize:12,fontFamily:"inherit",outline:"none"}}/>
                           </label>
+                          {bal>0&&Number(a.minimum_payment)>0&&(
+                            <button className="ibtn" style={{fontSize:11}} onClick={()=>setSchedDebtId(a.id)}
+                              title="Month-by-month payoff schedule for this debt at its minimum payment">
+                              Schedule ›
+                            </button>
+                          )}
                           <button onClick={()=>setDebtInclude(prev=>({...prev,[a.id]:!inc}))}
                             title={inc?"Included in the payoff projection":isMortgage(a)?"Mortgages are excluded from the projection by default — they'd dominate it":"Tap to include in the payoff projection"}
                             style={{marginLeft:"auto",fontSize:11,fontWeight:600,padding:"4px 10px",borderRadius:20,fontFamily:"inherit",cursor:"pointer",
@@ -3052,6 +3291,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                               border:`1px solid ${inc?markOn(TYPE_CHIP,surf.card):"var(--border)"}`,transition:"all .15s"}}>
                             {inc?"✓ in payoff":"＋ payoff"}
                           </button>
+                          </>}
                         </div>
                       )}
                     </div>
@@ -3148,6 +3388,44 @@ export default function Dashboard({ refreshTick = 0 }) {
                 );
               })()}
               <div style={{marginTop:8,fontSize:10,color:"var(--muted)"}}>Snapshots are taken by the daily sync whenever a balance changes — the line fills in over time.</div>
+            </div>
+            )}
+
+            {/* NET WORTH — assets minus debts off balance_snapshots, hidden
+                accounts excluded (Mason 2026-08-03). Totals arrive SIGNED from
+                the adapter (each account already through displayBalance inside
+                the pure fold) — rendered directly, never re-flipped. */}
+            {nwSeries.length>0&&(
+            <div className="card">
+              <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em",marginBottom:5}}>Net worth</div>
+              <div style={{fontSize:24,fontWeight:600,letterSpacing:"-.02em",fontFamily:"'DM Mono',monospace"}}>
+                {fmtX(nwSeries[nwSeries.length-1].total)}
+              </div>
+              <div style={{fontSize:11,color:"var(--muted)",marginTop:3}}>
+                assets − debts across unhidden accounts · history since {shortDate(nwSeries[0].date)}
+              </div>
+              {nwSeries.length>=2&&(()=>{
+                const max=Math.max(...nwSeries.map(p=>p.total));
+                const min=Math.min(...nwSeries.map(p=>p.total));
+                const span=Math.max(max-min,Math.abs(max)*.02,1);
+                const W=300,H=60;
+                const pts=nwSeries.map((p,i)=>`${(i/(nwSeries.length-1))*W},${H-4-((p.total-min)/span)*(H-8)}`).join(" ");
+                const line=markOn("#7F77DD",surf.card);
+                return (
+                  <>
+                    <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{width:"100%",height:H,display:"block",marginTop:10}}>
+                      <polyline points={pts} fill="none" stroke={line} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round"/>
+                    </svg>
+                    <div style={{display:"flex",justifyContent:"space-between",marginTop:6,fontSize:10,color:"var(--muted)",fontFamily:"'DM Mono',monospace"}}>
+                      <span>{shortDate(nwSeries[0].date)} · {fmt(nwSeries[0].total)}</span>
+                      <span>{shortDate(nwSeries[nwSeries.length-1].date)} · {fmt(nwSeries[nwSeries.length-1].total)}</span>
+                    </div>
+                  </>
+                );
+              })()}
+              <div style={{marginTop:8,fontSize:10,color:"var(--muted)"}}>
+                Snapshots only started accruing on 2026-08-01, so the line is honest but shallow — it deepens daily.
+              </div>
             </div>
             )}
           </div>
@@ -3857,6 +4135,17 @@ export default function Dashboard({ refreshTick = 0 }) {
         );
       })()}
 
+      {/* Per-debt payoff schedule drill-in — looked up live from debtData so a
+          just-saved APR/minimum re-amortizes the open sheet; a debt that
+          vanished (refresh) simply closes it. */}
+      {schedDebtId&&(()=>{
+        const d=(debtData?.debts||[]).find(x=>x.id===schedDebtId);
+        if(!d)return null;
+        const sm=`${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,"0")}`;
+        return <ScheduleSheet debt={d} startMonth={sm} acctLabel={acctLabel}
+          onClose={()=>setSchedDebtId(null)}/>;
+      })()}
+
       {/* Transaction detail modal */}
       {selTx&&(()=>{
         const a=acctById(selTx.account_id);
@@ -4068,7 +4357,10 @@ export default function Dashboard({ refreshTick = 0 }) {
 
       {/* Manual transaction quick-add */}
       {quickAdd&&(()=>{
-        const manualAccounts=accounts.filter(a=>isManualAccount(a)&&!isSimpleFinAccount(a));
+        // Loan accounts excluded: a loan's own ledger rows never count as
+        // spending (isLoanAccount), so a hand-typed cash purchase parked there
+        // would silently vanish from every total.
+        const manualAccounts=accounts.filter(a=>isManualAccount(a)&&!isSimpleFinAccount(a)&&a.type!=="loan");
         // Uncategorized is never an offerable pick (same rule as the detail sheet).
         const allCats=[...ERA_CATEGORIES.filter(c=>c!==UNCATEGORIZED),...customCatNames.filter(n=>!ERA_CATEGORIES.includes(n))];
         return (

@@ -11,6 +11,7 @@ import {
   isMortgage,
   orderDebts,
   amortizeOne,
+  amortizationSchedule,
   simulatePayoff,
   payoffWhatIf,
   addMonths,
@@ -186,4 +187,71 @@ test('isMortgage matches loan subtype or name, never a credit card', () => {
   assert.equal(isMortgage(debt({ type: 'loan', name: 'NewRez Mortgage' })), true);
   assert.equal(isMortgage(debt({ type: 'loan', name: 'Student loan' })), false);
   assert.equal(isMortgage(debt({ type: 'credit', name: 'Mortgage Rewards Card' })), false);
+});
+
+// --- amortizationSchedule (the per-debt drill-in's rows) ---------------------
+
+test('amortizationSchedule: linear payoff, zero rate — hand-computed', () => {
+  const s = amortizationSchedule({ balance: 1000, ratePercent: 0, payment: 100 });
+  assert.equal(s.stalled, false);
+  assert.equal(s.months, 10);
+  assert.equal(s.totalInterest, 0);
+  assert.equal(s.rows.length, 10);
+  assert.deepEqual(s.rows[0], { month: 1, payment: 100, interest: 0, principal: 100, balance: 900 });
+  assert.deepEqual(s.rows[9], { month: 10, payment: 100, interest: 0, principal: 100, balance: 0 });
+});
+
+test('amortizationSchedule: 12% APR, $1200 @ $200/mo — hand-computed rows', () => {
+  // r = 0.01/mo. m1: i=12.00, bal 1012.00; m2: i=10.12, bal 822.12;
+  // m3: i=8.22, bal 630.34; m4: i=6.30, bal 436.64; m5: i=4.37, bal 241.01;
+  // m6: i=2.41, bal 43.42; m7: i=0.43, final payment capped at 43.85, bal 0.
+  const s = amortizationSchedule({ balance: 1200, ratePercent: 12, payment: 200 });
+  assert.equal(s.stalled, false);
+  assert.equal(s.months, 7);
+  assert.equal(s.totalInterest, 43.85);
+  assert.deepEqual(s.rows[0], { month: 1, payment: 200, interest: 12, principal: 188, balance: 1012 });
+  assert.deepEqual(s.rows[5], { month: 6, payment: 200, interest: 2.41, principal: 197.59, balance: 43.42 });
+  // Final payment is capped at balance + interest — never an overpay row.
+  assert.deepEqual(s.rows[6], { month: 7, payment: 43.85, interest: 0.43, principal: 43.42, balance: 0 });
+});
+
+test('amortizationSchedule conserves the starting balance and its own totals', () => {
+  const s = amortizationSchedule({ balance: 1200, ratePercent: 12, payment: 200 });
+  const round2 = x => Math.round(x * 100) / 100;
+  assert.equal(round2(s.rows.reduce((a, r) => a + r.principal, 0)), 1200);
+  assert.equal(round2(s.rows.reduce((a, r) => a + r.interest, 0)), s.totalInterest);
+  for (const r of s.rows) assert.equal(round2(r.interest + r.principal), r.payment);
+});
+
+test('amortizationSchedule months/interest agree with amortizeOne', () => {
+  for (const c of [
+    { balance: 1200, ratePercent: 12, payment: 200 },
+    { balance: 5127.97, ratePercent: 24.99, payment: 150 },
+    { balance: 1000, ratePercent: 0, payment: 100 },
+    { balance: 333.33, ratePercent: 18, payment: 40 },
+  ]) {
+    const one = amortizeOne(c);
+    const s = amortizationSchedule(c);
+    assert.equal(s.months, one.months, JSON.stringify(c));
+    assert.equal(s.totalInterest, one.totalInterest, JSON.stringify(c));
+    assert.equal(s.stalled, one.stalled, JSON.stringify(c));
+  }
+});
+
+test('amortizationSchedule: stall states are honest, never a fake schedule', () => {
+  // Payment doesn't beat month-1 interest ($1000 @ 24% -> $20/mo interest).
+  const stall = amortizationSchedule({ balance: 1000, ratePercent: 24, payment: 20 });
+  assert.equal(stall.stalled, true);
+  assert.equal(stall.rows.length, 0);
+  assert.equal(stall.totalInterest, 0);
+  // Zero / absent payment stalls immediately; zero balance is a clean no-op.
+  assert.equal(amortizationSchedule({ balance: 500, payment: 0 }).stalled, true);
+  assert.deepEqual(amortizationSchedule({ balance: 0, payment: 50 }),
+    { rows: [], months: 0, totalInterest: 0, stalled: false });
+  // MAX_MONTHS runaway cap: still owing after 600 months flags stalled with
+  // the rows it DID compute (the view renders them plus the honest banner).
+  const cap = amortizationSchedule({ balance: 100000, ratePercent: 0, payment: 1 });
+  assert.equal(cap.stalled, true);
+  assert.equal(cap.rows.length, MAX_MONTHS);
+  assert.equal(cap.rows[MAX_MONTHS - 1].balance, 100000 - MAX_MONTHS);
 });

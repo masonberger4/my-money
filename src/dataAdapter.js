@@ -8,6 +8,7 @@ import { isSpend, sumSpending, spendingGroups, biggestMovers, toTxShape, aggrega
 import { createRangeMemo } from './monthMemo.js';
 import { parseIgnoreList, toggleIgnoreKey, CANDIDATE_WINDOW_MONTHS } from './recurring.js';
 import { aggregateCoverage } from './coverage.js';
+import { netWorthSeries, clampSeries } from './netWorth.js';
 
 // Re-export the pure cash-flow model (src/cashFlow.js) so existing importers
 // and the CSV-import dry-run harness keep working.
@@ -273,6 +274,10 @@ export const ACCOUNT_SUBTYPES = ['checking', 'savings'];
 
 export async function updateAccount(id, fields) {
   const allowed = {};
+  // current_balance is deliberately NOT in this whitelist: a fed balance is
+  // never hand-edited (the sync restates it). A MANUAL account's balance IS
+  // typed by hand — that path is updateManualBalance below, which requires the
+  // account row so it can prove is_manual before writing.
   if ('nickname' in fields) allowed.nickname = fields.nickname;
   if ('color' in fields) allowed.color = fields.color;
   if ('hidden' in fields) allowed.hidden = fields.hidden;
@@ -357,23 +362,62 @@ export async function getDebts() {
 let hasBalanceSnapshots = true;
 export async function getBalanceSnapshots(accountIds, sinceDate) {
   if (!hasBalanceSnapshots || !accountIds || accountIds.length === 0) return [];
-  let q = supabase
-    .from('balance_snapshots')
-    .select('account_id, captured_on, balance')
-    .in('account_id', accountIds)
-    .order('captured_on', { ascending: true });
-  if (sinceDate) q = q.gte('captured_on', sinceDate);
-  const { data, error } = await q;
-  if (error) {
-    // Missing table: PGRST205 (PostgREST schema cache) or 42P01 (Postgres) —
-    // same pair as isEnvelopeSchemaMissing.
-    if (error.code === 'PGRST205' || error.code === '42P01') {
-      hasBalanceSnapshots = false;
-      return [];
+  // Paged: PostgREST caps unranged reads at 1000 rows and truncation here
+  // would drop the NEWEST snapshots (ascending order) — the exact rows the
+  // headline/sparkline endpoints read. Ordinal tiebreak on account_id keeps
+  // pages deterministic; PGRST103 on an exact page multiple = cleanly done
+  // (the same end-of-range contract as ruleHistory).
+  const page = 1000;
+  const rows = [];
+  for (let from = 0; ; from += page) {
+    let q = supabase
+      .from('balance_snapshots')
+      .select('account_id, captured_on, balance')
+      .in('account_id', accountIds)
+      .order('captured_on', { ascending: true })
+      .order('account_id', { ascending: true })
+      .range(from, from + page - 1);
+    if (sinceDate) q = q.gte('captured_on', sinceDate);
+    const { data, error } = await q;
+    if (error) {
+      if (isRangeExhaustedError(error)) break;
+      // Missing table: PGRST205 (PostgREST schema cache) or 42P01 (Postgres) —
+      // same pair as isEnvelopeSchemaMissing.
+      if (error.code === 'PGRST205' || error.code === '42P01') {
+        hasBalanceSnapshots = false;
+        return [];
+      }
+      throw error;
     }
-    throw error;
+    rows.push(...(data || []));
+    if (!data || data.length < page) break;
   }
-  return data || [];
+  return rows;
+}
+
+// Net worth over time: assets minus debts off balance_snapshots, one point
+// per snapshot date, oldest first — [{ date, total }], total already SIGNED
+// (each account through displayBalance inside the fold; render it directly,
+// never through displayBalance again). Hidden accounts are EXCLUDED (Mason
+// 2026-08-03, the query-level rule) — filtered here so the pure fold never
+// sees them or their snapshots. Degrades like getBalanceSnapshots: [] when
+// the snapshots table isn't installed yet (previews share the prod DB), and
+// [] on no accounts. `hidden` is an original accounts column, so there is no
+// missing-column arm to check here.
+//
+// sinceDate is a DISPLAY window, never a fetch window: snapshots are written
+// on balance CHANGE only, so an account that hasn't moved inside the window
+// has zero rows there and a windowed fetch would silently drop its entire
+// balance from every point — headline included (a manual loan typed once ages
+// out of a 365-day window after a year, with no error and no visual tell).
+// So the fold always runs over FULL history and clampSeries trims the points
+// afterwards, keeping the boundary-crossing carry.
+export async function getNetWorthSeries(sinceDate) {
+  const { data, error } = await supabase.from('accounts').select('id, type, hidden');
+  if (error) throw error;
+  const accounts = (data || []).filter(a => !a.hidden);
+  const snaps = await getBalanceSnapshots(accounts.map(a => a.id), null);
+  return clampSeries(netWorthSeries(snaps, accounts), sinceDate);
 }
 
 // All transactions for one account, newest first, capped so a huge history
@@ -1154,22 +1198,48 @@ export async function findOrCreateManualInstitution() {
   return data.id;
 }
 
-// Create one manual account. kind is 'checking' | 'savings' | 'credit'.
+// Create one manual account. kind is 'checking' | 'savings' | 'credit' | 'loan'.
 // checking/savings are depository (and drive the Trends checking-vs-savings
 // split); 'credit' is a credit-card account, for a card whose statements are
 // only available as CSV/PDF — its purchases count as spending by category and
 // applyAccountRules turns its negatives into "Return" (never income), exactly
-// like a SimpleFIN-fed card. Returns the inserted account row.
-export async function createManualAccount({ name, subtype = 'checking' }) {
+// like a SimpleFIN-fed card. 'loan' is a hand-tracked debt (a private loan, a
+// servicer no feed reaches): its balance is typed by hand and its own ledger
+// rows never count as spending (isLoanAccount — the counted leg is the
+// depository payment). Returns the inserted account row.
+
+// Pure row builder, exported for tests. `balance` is the hand-typed amount
+// OWED for a credit/loan kind — stored POSITIVE (the app-wide debt
+// convention; displayBalance flips at render). Ignored for depository kinds
+// (nothing sets a manual depository balance today). Negative balances are
+// rejected rather than abs()'d — a minus sign here means the user is thinking
+// in display convention, and silently flipping it would hide that.
+export const MANUAL_ACCOUNT_KINDS = ['checking', 'savings', 'credit', 'loan'];
+export function buildManualAccountRow({ name, subtype = 'checking', balance } = {}) {
+  const kind = MANUAL_ACCOUNT_KINDS.includes(subtype) ? subtype : 'checking';
+  const row = {
+    name: (name || 'Imported account').trim(),
+    type: kind === 'credit' ? 'credit' : kind === 'loan' ? 'loan' : 'depository',
+    subtype: kind === 'credit' ? 'credit card' : kind,
+  };
+  if (kind === 'credit' || kind === 'loan') {
+    const bal = Number(balance);
+    if (balance != null && balance !== '' && Number.isFinite(bal)) {
+      if (bal < 0)
+        throw new Error('Enter the balance as a positive amount owed');
+      row.current_balance = Number(bal.toFixed(2));
+    }
+  }
+  return row;
+}
+
+export async function createManualAccount({ name, subtype = 'checking', balance } = {}) {
   const institutionId = await findOrCreateManualInstitution();
   const plaidAccountId = MANUAL_ACCOUNT_PREFIX + makeUuid();
-  const isCredit = subtype === 'credit';
   const base = {
     institution_id: institutionId,
     plaid_account_id: plaidAccountId,
-    name: (name || 'Imported account').trim(),
-    type: isCredit ? 'credit' : 'depository',
-    subtype: isCredit ? 'credit card' : subtype === 'savings' ? 'savings' : 'checking',
+    ...buildManualAccountRow({ name, subtype, balance }),
   };
 
   const attempt = async withFlag => {
@@ -1183,7 +1253,64 @@ export async function createManualAccount({ name, subtype = 'checking' }) {
     ({ data, error } = await attempt(false));
   }
   if (error) throw error;
+  // First sight of a hand-typed debt balance counts as a move (same rule as
+  // the sync) — seed its history so the sparkline/net-worth start truthfully.
+  if (data && data.current_balance != null) {
+    await appendClientSnapshot(data.id, Number(data.current_balance));
+  }
   return data;
+}
+
+// --- Manual debt balance ------------------------------------------------------
+// The pure decision for a hand-typed balance edit: only a MANUAL account's
+// balance may be typed (a fed balance is restated by every pull — hand-editing
+// it would just be overwritten, so the distinction is enforced, not advisory).
+// Returns { balance, snapshot } — balance rounded to cents in the STORED
+// convention (debts positive = owed), snapshot true when the value actually
+// moved (mirrors api/sync.js's only-on-change rule; the per-day upsert dedups
+// same-day edits anyway). Exported for tests.
+export function manualBalanceUpdate(account, balance) {
+  if (!account || isSimpleFinAccount(account) || !isManualAccount(account))
+    throw new Error('Only a manual account balance can be edited by hand');
+  const bal = Number(balance);
+  if (!Number.isFinite(bal)) throw new Error('Balance must be a number');
+  if ((account.type === 'credit' || account.type === 'loan') && bal < 0)
+    throw new Error('Enter the balance as a positive amount owed');
+  const rounded = Number(bal.toFixed(2));
+  return { balance: rounded, snapshot: Number(account.current_balance) !== rounded };
+}
+
+// Best-effort client-side balance_snapshots append. Unlike api/sync.js (which
+// runs as SERVICE_ROLE and must set household_id explicitly), this is an
+// authenticated client write, so household_id is OMITTED and the column
+// default current_household_id() fills it — the normal RLS path. A missing
+// table (previews share the prod DB) switches it off quietly; any other
+// failure is logged, never thrown — history is auxiliary, the balance itself
+// already landed on `accounts`.
+async function appendClientSnapshot(accountId, balance) {
+  if (!hasBalanceSnapshots) return;
+  const { error } = await supabase.from('balance_snapshots').upsert(
+    { account_id: accountId, captured_on: new Date().toISOString().slice(0, 10), balance },
+    { onConflict: 'account_id,captured_on' },
+  );
+  if (error) {
+    if (error.code === 'PGRST205' || error.code === '42P01') hasBalanceSnapshots = false;
+    else console.warn('balance snapshot append failed', error.message || error);
+  }
+}
+
+// Write a hand-typed balance onto a MANUAL account (the Debt tab's balance
+// editor) and append today's history row. Takes the account ROW, not just an
+// id — manualBalanceUpdate needs it to prove the account is manual.
+export async function updateManualBalance(account, balance) {
+  const { balance: bal, snapshot } = manualBalanceUpdate(account, balance);
+  const { error } = await supabase
+    .from('accounts')
+    .update({ current_balance: bal })
+    .eq('id', account.id);
+  if (error) throw error;
+  if (snapshot) await appendClientSnapshot(account.id, bal);
+  return bal;
 }
 
 // plaid_tx_ids already stored for an account, so the preview can grey out rows
