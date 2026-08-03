@@ -1,5 +1,9 @@
 import { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from "react";
-import { getOverview, getSpending, getBiggestMovers, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES, setCategoryRule, applyCategoryRuleToHistory, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, invalidateEnvelopeSpending, isEnvelopeSchemaMissing, targetNeed, readyToAssign, envelopePace, getEnvPace, setEnvPace as persistEnvPace, getRecIgnore, updateRecIgnore, monthKey, getEntities, createEntity, updateEntity, getTaxYearTransactions, getMileage, addMileage, deleteMileage, getReceiptTxIds, getDebts, getBalanceSnapshots, getNetWorthSeries, addManualTransaction, createManualAccount, updateManualBalance, getDataCoverage, signOut } from "../dataAdapter.js";
+import { getOverview, getSpending, getBiggestMovers, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES, setCategoryRule, applyCategoryRuleToHistory, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, invalidateEnvelopeSpending, isEnvelopeSchemaMissing, targetNeed, readyToAssign, envelopePace, getEnvPace, setEnvPace as persistEnvPace, getRecIgnore, updateRecIgnore, monthKey, getEntities, createEntity, updateEntity, getTaxYearTransactions, getMileage, addMileage, deleteMileage, getReceiptTxIds, getDebts, getBalanceSnapshots, getNetWorthSeries, addManualTransaction, createManualAccount, updateManualBalance, getDataCoverage, signOut, autoFillMonth, setTargetOverride, effectiveTarget, getExpectedTransactions, addExpected, dismissExpected, matchExpectedManually } from "../dataAdapter.js";
+// Pure cores imported directly (never Supabase — the mock-harness alias rule
+// only covers dataAdapter/sync/db/apiClient; pure modules are safe).
+import { planAutoFill } from "../envelopes.js";
+import { expectedByCategory, expectedStatus, isMissedExpected, seedFromRecurring, projectFutureCycles } from "../expectedTx.js";
 import { payoffWhatIf, debtFreeMonth, isMortgage, amortizationSchedule, addMonths, MAX_MONTHS } from "../debtPayoff.js";
 import { SCHEDULE_E_LINES, RENTS_KEY, DEFAULT_SCHEDULE_E_MAP, scheduleEReport, entityMonthly, entityLedger, personalDeductionReport, DEDUCTION_BUCKETS, DEFAULT_DEDUCTION_MAP, mileageDeduction, scheduleECsv } from "../taxReport.js";
 import { merchantKey } from "../txClassify.js";
@@ -512,15 +516,38 @@ function IncomeEdit({value,isDefault,onSave}) {
 // month; a by-date target is a sinking fund — the amount you want to have by a
 // deadline, which the app spreads over the months remaining.
 function TargetSheet({name,row,busy,surf,year,month,onSave,onClose}) {
-  const [amount,setAmount]=useState(row?.target!=null?String(row.target):"");
+  const hasOverride=row?.targetOverride!=null;
+  // Scope: "all" edits the category-level target (budgets); "month" edits ONLY
+  // the viewed month's target_override (budget_months) — it never touches
+  // budgets. Opens in month scope when an override is already active.
+  const [scope,setScope]=useState(hasOverride?"month":"all");
+  const [amount,setAmount]=useState(
+    hasOverride?String(row.targetOverride):row?.target!=null?String(row.target):"");
   const [kind,setKind]=useState(row?.targetKind==="by_date"?"by_date":"monthly");
   const [ym,setYm]=useState(row?.targetDate?String(row.targetDate).slice(0,7):"");
+  const mName=new Date(year,month-1,1).toLocaleString("default",{month:"long"});
   const n=Number(amount);
-  const valid=Number.isFinite(n)&&n>0&&(kind==="monthly"||/^\d{4}-\d{2}$/.test(ym));
+  // Month scope allows 0 — "ask nothing this month" is a real override,
+  // distinct from clearing it.
+  const valid=scope==="month"
+    ?amount.trim()!==""&&Number.isFinite(n)&&n>=0
+    :Number.isFinite(n)&&n>0&&(kind==="monthly"||/^\d{4}-\d{2}$/.test(ym));
+  const pickScope=s=>{
+    if(s===scope)return;
+    setScope(s);
+    // Pre-fill each scope with the value it edits.
+    setAmount(s==="month"
+      ?(row?.targetOverride!=null?String(row.targetOverride):row?.target!=null?String(row.target):"")
+      :(row?.target!=null?String(row.target):""));
+  };
   // Mirrors targetNeed()'s by-date arithmetic so the sheet can't promise a
   // number the funder won't produce.
   const preview=(()=>{
     if(!valid) return null;
+    if(scope==="month"){
+      if(n===0) return `Asks for nothing in ${mName} — the regular target resumes next month.`;
+      return `Asks for ${fmtAuto(n)} in ${mName} only${row?.target!=null?` — other months keep ${fmtAuto(row.target)}${row?.targetKind==="by_date"?"":"/mo"}`:""}.`;
+    }
     if(kind==="monthly") return `Tops this category up to ${fmtAuto(n)} every month.`;
     // Months left count from the month BEING VIEWED, exactly as targetNeed
     // will — when budgeting ahead, "today" would overstate the runway.
@@ -542,17 +569,29 @@ function TargetSheet({name,row,busy,surf,year,month,onSave,onClose}) {
           style={{width:"100%",padding:"9px 12px",borderRadius:8,border:"1px solid var(--border)",background:"var(--input-bg)",
             color:"var(--text)",fontSize:16,fontFamily:"'DM Mono',monospace",outline:"none",marginBottom:14}}/>
 
-        <div style={{fontSize:12,color:"var(--muted)",marginBottom:8}}>How to fund it</div>
+        <div style={{fontSize:12,color:"var(--muted)",marginBottom:8}}>Applies</div>
         <div style={{display:"flex",gap:8,marginBottom:14}}>
-          {[["monthly","Every month"],["by_date","By a date"]].map(([k,label])=>(
-            <button key={k} onClick={()=>setKind(k)}
+          {[["all","Every month"],["month",`Only ${mName}`]].map(([k,label])=>(
+            <button key={k} onClick={()=>pickScope(k)}
               style={{flex:1,padding:"8px 0",borderRadius:8,fontFamily:"inherit",fontSize:12,fontWeight:600,cursor:"pointer",
-                background:kind===k?"var(--accent)":"var(--input-bg)",color:kind===k?"var(--accent-text)":"var(--muted)",
-                border:`1px solid ${kind===k?"var(--accent)":"var(--border)"}`}}>{label}</button>
+                background:scope===k?"var(--accent)":"var(--input-bg)",color:scope===k?"var(--accent-text)":"var(--muted)",
+                border:`1px solid ${scope===k?"var(--accent)":"var(--border)"}`}}>{label}</button>
           ))}
         </div>
 
-        {kind==="by_date"&&(<>
+        {scope==="all"&&(<>
+          <div style={{fontSize:12,color:"var(--muted)",marginBottom:8}}>How to fund it</div>
+          <div style={{display:"flex",gap:8,marginBottom:14}}>
+            {[["monthly","Every month"],["by_date","By a date"]].map(([k,label])=>(
+              <button key={k} onClick={()=>setKind(k)}
+                style={{flex:1,padding:"8px 0",borderRadius:8,fontFamily:"inherit",fontSize:12,fontWeight:600,cursor:"pointer",
+                  background:kind===k?"var(--accent)":"var(--input-bg)",color:kind===k?"var(--accent-text)":"var(--muted)",
+                  border:`1px solid ${kind===k?"var(--accent)":"var(--border)"}`}}>{label}</button>
+            ))}
+          </div>
+        </>)}
+
+        {scope==="all"&&kind==="by_date"&&(<>
           <div style={{fontSize:12,color:"var(--muted)",marginBottom:6}}>Needed by</div>
           <input type="month" value={ym} onChange={e=>setYm(e.target.value)}
             style={{width:"100%",padding:"9px 12px",borderRadius:8,border:"1px solid var(--border)",background:"var(--input-bg)",
@@ -564,13 +603,19 @@ function TargetSheet({name,row,busy,surf,year,month,onSave,onClose}) {
         </div>
 
         <div style={{display:"flex",gap:8}}>
-          {row?.target!=null&&(
+          {scope==="all"&&row?.target!=null&&(
             <button className="ibtn" disabled={busy} style={{justifyContent:"center"}}
-              onClick={()=>onSave({amount:"",kind:"monthly",date:null})}>Remove</button>
+              onClick={()=>onSave({scope:"all",amount:"",kind:"monthly",date:null})}>Remove</button>
+          )}
+          {scope==="month"&&hasOverride&&(
+            <button className="ibtn" disabled={busy} style={{justifyContent:"center"}}
+              onClick={()=>onSave({scope:"month",amount:""})}>Remove this month&rsquo;s override</button>
           )}
           <button className="ibtn" style={{flex:1,justifyContent:"center"}} onClick={onClose}>Cancel</button>
           <button disabled={!valid||busy}
-            onClick={()=>onSave({amount,kind,date:kind==="by_date"?`${ym}-01`:null})}
+            onClick={()=>onSave(scope==="month"
+              ?{scope:"month",amount}
+              :{scope:"all",amount,kind,date:kind==="by_date"?`${ym}-01`:null})}
             style={{flex:1,padding:"8px 0",borderRadius:8,border:"none",background:"var(--accent)",color:"var(--accent-text)",
               fontFamily:"inherit",fontSize:14,fontWeight:500,cursor:valid&&!busy?"pointer":"default",opacity:valid&&!busy?1:.5}}>
             Save
@@ -1125,6 +1170,22 @@ export default function Dashboard({ refreshTick = 0 }) {
   // null-means-refetch sentinel (the setState(null) gotcha stays untriggered).
   const [recIgnore,setRecIgnore]=useState([]);
   const [recIgnoredOpen,setRecIgnoredOpen]=useState(false);
+  // --- Expected transactions (DISPLAY-ONLY — the envelopePace contract:
+  // nothing here ever feeds the walk, `available`, or any total) ---
+  // undefined = not loaded yet; null = the migration isn't installed (the
+  // getReceiptTxIds pattern — this is the ONE place null means "feature
+  // absent", so every surface simply doesn't render); {pending,matched} =
+  // loaded. Refetches are driven by an EPOCH counter, never a null sentinel
+  // (the setState(null) gotcha): null must keep meaning "not installed".
+  const [expected,setExpected]=useState(undefined);
+  const [expEpoch,setExpEpoch]=useState(0);
+  const expSeq=useRef(0);
+  const expLoadedEpoch=useRef(-1);
+  const [expBusy,setExpBusy]=useState(false);
+  const [expMatchId,setExpMatchId]=useState(null); // expectation id whose Mark-paid picker is open
+  const [expDismissId,setExpDismissId]=useState(null); // expectation id whose skip/stop confirm is open (recurring cadences only)
+  // "Fill from ⟨prev month⟩" inline confirm: null (idle) | "loading" | {plan}.
+  const [fillPlan,setFillPlan]=useState(null);
   // --- Data coverage panel (TEMPORARY troubleshooting aid; Accounts tab) ---
   // Lazy: the query pages the whole transactions table, so nothing is fetched
   // until the card is first expanded.
@@ -1522,6 +1583,37 @@ export default function Dashboard({ refreshTick = 0 }) {
       .catch(err=>{console.error(err);setRecurring([]);})
       .finally(()=>setRecLoading(false));
   },[tab,recurring,recLoading]);
+
+  // Expected transactions load lazily on the tabs that render them.
+  // getExpectedTransactions is NOT a pure read — it runs the auto-match pass
+  // (persisting matches + roll-forwards) — so it fetches once per epoch,
+  // tracked in a ref; invalidateExpected bumps the epoch after a write
+  // commits (never a null sentinel — the setState(null) gotcha, and here
+  // null already means "migration not installed").
+  useEffect(()=>{
+    if(!ready)return;
+    if(tab!=="budget"&&tab!=="recurring"&&tab!=="overview")return;
+    if(expLoadedEpoch.current===expEpoch)return;
+    expLoadedEpoch.current=expEpoch;
+    const seq=++expSeq.current;
+    const d=new Date();
+    const today=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+    getExpectedTransactions({today})
+      .then(res=>{if(expSeq.current===seq)setExpected(res);})
+      // Transient failure: keep whatever is on screen (undefined hides the
+      // surfaces; never set null — that would read as "not installed") but
+      // RETURN the epoch (reset the consumed-marker) so the next visit to an
+      // expected-tx tab retries. Without this, one network blip consumed the
+      // epoch forever: the surfaces stayed hidden, and the only epoch bump
+      // (invalidateExpected) lives behind buttons those hidden surfaces
+      // render — no reachable retry short of a full reload. Seq-guarded so a
+      // stale failure can't re-open an epoch a newer run already consumed.
+      .catch(err=>{
+        console.error("expected transactions load failed",err);
+        if(expSeq.current===seq)expLoadedEpoch.current=-1;
+      });
+  },[ready,tab,expEpoch]);
+  const invalidateExpected=useCallback(()=>{setExpEpoch(e=>e+1);},[]);
 
   // The Debt tab is lazy the same way: the credit/loan accounts with their
   // liability fields, plus a year of balance snapshots for the history chart
@@ -2114,11 +2206,36 @@ export default function Dashboard({ refreshTick = 0 }) {
   const fundNeeds=budgetableRows.map(r=>({row:r,need:targetNeed(r,{year,month})})).filter(x=>x.need>0);
   const fundTotal=fundNeeds.reduce((s,x)=>s+x.need,0);
   const rta=envelopes?readyToAssign(income?.income,envelopes.totals):null;
+  // "Fill from ⟨prev month⟩" — the auto-fill's source month and its label.
+  const prevYM=month===1?{y:year-1,m:12}:{y:year,m:month-1};
+  const prevMonthName=new Date(prevYM.y,prevYM.m-1,1).toLocaleString("default",{month:"long"});
+  const monShort=new Date(year,month-1,1).toLocaleString("default",{month:"short"});
   // Wall-clock local day for the pace warning — the SAME reasoning as the
   // Recurring tab's clock: "is this envelope spending ahead of pace?" is a
   // question about the present moment, so it uses today, not the viewed month
   // (envelopePace returns null unless today falls inside the viewed month).
   const paceToday=(()=>{const d=new Date();return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;})();
+  // --- Expected transactions, DISPLAY-ONLY derivations (the envelopePace
+  // contract: none of this ever feeds the walk, available, or any total).
+  // Shown in the viewed month: pending rows due that month, plus — only when
+  // viewing the CURRENT month — overdue rows from earlier months (they are
+  // still expected to hit this month's cash). Future months additionally
+  // render projected cycles, lighter, never persisted.
+  const monthKeyStr=`${year}-${String(month).padStart(2,"0")}`;
+  const curMonthKey=paceToday.slice(0,7);
+  const expPending=expected?.pending||[];
+  const expShown=expPending.filter(r=>{
+    const k=String(r.due_date).slice(0,7);
+    return k===monthKeyStr||(monthKeyStr===curMonthKey&&k<monthKeyStr);
+  });
+  const expProjected=monthKeyStr>curMonthKey
+    ?expPending.flatMap(r=>projectFutureCycles(r,monthKeyStr)
+        .filter(dt=>dt.slice(0,7)===monthKeyStr)
+        .map(dt=>({...r,id:`${r.id}:${dt}`,due_date:dt,projected:true})))
+    :[];
+  const expMatchedShown=(expected?.matched||[]).filter(r=>String(r.due_date).slice(0,7)===monthKeyStr);
+  const expByCat=expectedByCategory(expShown);
+  const expShownTotal=expShown.reduce((s,r)=>s+(Number(r.amount)||0),0);
   // Categories with no envelope yet, offered by the "budget another category"
   // picker. Custom categories are budgetable too.
   const allCatNames=[...ERA_CATEGORIES,...customCatNames.filter(n=>!ERA_CATEGORIES.includes(n))];
@@ -2127,7 +2244,7 @@ export default function Dashboard({ refreshTick = 0 }) {
   // Assigning during render is a side effect; the ref has to track the
   // *committed* month so an in-flight envelope write can tell it landed on a
   // stale one.
-  useEffect(()=>{monthRef.current=`${year}-${month}`;},[year,month]);
+  useEffect(()=>{monthRef.current=`${year}-${month}`;setFillPlan(null);},[year,month]);
 
   // Every envelope write goes through here. It re-reads what it wrote rather
   // than updating state optimistically: a budget that shows a number it failed
@@ -2211,9 +2328,39 @@ export default function Dashboard({ refreshTick = 0 }) {
       .then(merged=>setRecIgnore(merged))
       .catch(err=>console.error("saving recurring ignore list failed",err));
   }
+  // Expected-transaction writes: plain awaits (they never touch envelope
+  // state, so runEnvelopeWrite's re-read discipline doesn't apply); the epoch
+  // bump AFTER the commit refetches the lists (never a pre-write invalidation).
+  async function seedExpected(item){
+    setExpBusy(true);
+    try{
+      const res=await addExpected(seedFromRecurring(item));
+      if(res)invalidateExpected(); // null = pre-migration; nothing to refresh
+    }catch(err){console.error("expect seed failed",err);}
+    finally{setExpBusy(false);}
+  }
+  async function doDismissExpected(id,opts){
+    setExpBusy(true);
+    try{await dismissExpected(id,opts);setExpMatchId(null);setExpDismissId(null);invalidateExpected();}
+    catch(err){console.error("dismiss expected failed",err);}
+    finally{setExpBusy(false);}
+  }
+  async function doMarkPaid(id,txId){
+    setExpBusy(true);
+    try{await matchExpectedManually(id,txId);setExpMatchId(null);invalidateExpected();}
+    catch(err){console.error("mark paid failed",err);}
+    finally{setExpBusy(false);}
+  }
   const saveIncome=(val,scope)=>runEnvelopeWrite("the income",()=>setBudgetIncome({year,month},val,{scope}));
   const doMove=(from,to,amount)=>runEnvelopeWrite("the transfer",()=>moveMoney({from,to,amount},{year,month}));
-  const saveTarget=(category,{amount,kind,date})=>runEnvelopeWrite("the target",async()=>{
+  const saveTarget=(category,{scope,amount,kind,date})=>runEnvelopeWrite("the target",async()=>{
+    if(scope==="month"){
+      // Month-only scope writes budget_months.target_override for the viewed
+      // month and NEVER touches budgets ('' clears the override; the adapter
+      // deletes the row only when it carries nothing else).
+      await setTargetOverride(category,{year,month},amount);
+      return;
+    }
     await setBudget(category,amount);
     await setTargetKind(category,kind,date);
     // A sinking fund only reaches its number because each month's leftover
@@ -2373,6 +2520,20 @@ export default function Dashboard({ refreshTick = 0 }) {
         {/* OVERVIEW */}
         {tab==="overview"&&(
           <div style={{display:"flex",flexDirection:"column",gap:12}}>
+            {/* At most ONE expected-bills line, only when nonzero; hidden
+                entirely pre-migration (expected null) or before load. */}
+            {expected&&(()=>{
+              const limit=(()=>{const d=new Date();d.setDate(d.getDate()+7);
+                return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;})();
+              const due=expected.pending.filter(r=>String(r.due_date)<=limit);
+              if(!due.length)return null;
+              const tot=due.reduce((s,r)=>s+(Number(r.amount)||0),0);
+              return (
+                <div className="card" style={{padding:"10px 16px",fontSize:12,color:"var(--muted)"}}>
+                  📅 {due.length} bill{due.length===1?"":"s"} expected in the next 7 days · <span style={{fontFamily:"'DM Mono',monospace",color:"var(--text)"}}>{fmtAuto(tot)}</span>
+                </div>
+              );
+            })()}
             <div className="card">
               <div style={{display:"flex",alignItems:"center",gap:20}}>
                 {loading?<Sk w={130} h={130} r={65}/>:<Donut data={donutData} size={130}/>}
@@ -2605,12 +2766,168 @@ export default function Dashboard({ refreshTick = 0 }) {
                     Fund targets · {fmtAuto(fundTotal)} into {fundNeeds.length} categor{fundNeeds.length===1?"y":"ies"}
                   </button>
                 )}
+                {/* Auto-fill: copy last month's assignments into this month.
+                    Two-step: the first tap PLANS (a read — planAutoFill over
+                    both months' rows) and shows the inline confirm; the
+                    confirm runs autoFillMonth through runEnvelopeWrite, which
+                    replans server-side and re-reads the month. */}
+                {fillPlan==null&&(
+                  <button className="ibtn" disabled={envBusy}
+                    title={`Copy ${prevMonthName}'s assignments into ${monthLabel(year,month)} — envelopes already assigned here are kept`}
+                    onClick={async()=>{
+                      // Month-tagged like the movers list: the [year,month]
+                      // effect clears fillPlan synchronously on a month
+                      // switch, but this promise resolves LATER — without the
+                      // guard it repopulated the confirm with the OLD month
+                      // pair's counts/dollars under the new month's labels.
+                      const monthKey=monthRef.current;
+                      setFillPlan("loading");
+                      try{
+                        const prevEnv=await getEnvelopes({year:prevYM.y,month:prevYM.m})
+                          .catch(e=>{if(isEnvelopeSchemaMissing(e))return null;throw e;});
+                        if(monthRef.current!==monthKey)return;
+                        setFillPlan({plan:planAutoFill({
+                          source:(prevEnv?.categories||[]).map(r=>({category:r.category,assigned:r.assigned})),
+                          existing:(envelopes?.categories||[]).map(r=>({category:r.category,assigned:r.assigned})),
+                          isBudgetable:isBudgetableCategory,
+                        })});
+                      }catch(err){
+                        console.error("auto-fill preview failed",err);
+                        if(monthRef.current===monthKey)setFillPlan(null);
+                      }
+                    }}
+                    style={{marginTop:8,fontSize:11,width:"100%",justifyContent:"center"}}>
+                    Fill from {prevMonthName}
+                  </button>
+                )}
+                {fillPlan==="loading"&&(
+                  <div style={{marginTop:8,fontSize:11,color:"var(--muted)",textAlign:"center"}}>Reading {prevMonthName}…</div>
+                )}
+                {fillPlan&&fillPlan!=="loading"&&(fillPlan.plan.rows.length===0?(
+                  <div style={{marginTop:8,fontSize:11,color:"var(--muted)",display:"flex",gap:8,alignItems:"center",justifyContent:"center",flexWrap:"wrap"}}>
+                    <span>Nothing to copy from {prevMonthName}{fillPlan.plan.skipped.length>0?` — ${fillPlan.plan.skipped.length} envelope${fillPlan.plan.skipped.length===1?" is":"s are"} already set here`:""}.</span>
+                    <button className="ibtn" style={{fontSize:10,padding:"3px 8px"}} onClick={()=>setFillPlan(null)}>OK</button>
+                  </div>
+                ):(
+                  <div style={{marginTop:8,fontSize:11,color:"var(--muted)",display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+                    <span style={{flex:1,minWidth:160}}>
+                      Copy {fillPlan.plan.rows.length} assignment{fillPlan.plan.rows.length===1?"":"s"} · {fmtAuto(fillPlan.plan.total)} from {prevMonthName}?
+                      {fillPlan.plan.skipped.length>0&&` ${fillPlan.plan.skipped.length} already set ${fillPlan.plan.skipped.length===1?"is":"are"} kept.`}
+                    </span>
+                    <button className="ibtn" style={{fontSize:10,padding:"3px 8px"}} onClick={()=>setFillPlan(null)}>Cancel</button>
+                    <button disabled={envBusy}
+                      onClick={()=>{setFillPlan(null);runEnvelopeWrite("the auto-fill",()=>autoFillMonth({year,month}));}}
+                      style={{padding:"4px 12px",borderRadius:8,border:"none",background:"var(--accent)",color:"var(--accent-text)",
+                        fontFamily:"inherit",fontSize:11,fontWeight:600,cursor:envBusy?"default":"pointer",opacity:envBusy?.5:1}}>
+                      Fill
+                    </button>
+                  </div>
+                ))}
               </div>
 
               {isFuture&&(
                 <div style={{fontSize:11,color:"var(--muted)",background:"var(--bg)",borderRadius:8,padding:"8px 12px",marginBottom:12}}>
                   Budgeting ahead for {monthLabel(year,month)}. Nothing has been spent yet — balances carry in from
                   the months before it.
+                </div>
+              )}
+
+              {/* Upcoming expected bills — DISPLAY-ONLY (the envelopePace
+                  contract): nothing here is in Available, the walk, or any
+                  total. expected null/undefined ⇒ the card simply doesn't
+                  render (pre-migration / not yet loaded). */}
+              {expected&&(expShown.length>0||expProjected.length>0||expMatchedShown.length>0)&&(
+                <div style={{background:"var(--bg)",borderRadius:10,padding:"12px 14px",marginBottom:14}}>
+                  <div style={{display:"flex",alignItems:"baseline",gap:8,marginBottom:2}}>
+                    <span style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em"}}>Upcoming bills</span>
+                    {expShownTotal>0&&<span style={{fontSize:11,fontFamily:"'DM Mono',monospace",color:"var(--muted)"}}>{fmtAuto(expShownTotal)} expected</span>}
+                  </div>
+                  <div style={{fontSize:10,color:"var(--muted)",marginBottom:8}}>
+                    Display only — never counted in Available or spending; a paid bill just points at its real transaction.
+                  </div>
+                  {[...expShown,...expProjected].map(r=>{
+                    const st=r.projected?"projected":expectedStatus(r,paceToday);
+                    const missed=!r.projected&&isMissedExpected(r,paceToday);
+                    const overdue=st==="overdue";
+                    const dueInk=overdue?inkOn("#D85A30",surf.bg):null;
+                    const pickerOpen=expMatchId===r.id;
+                    const dismissOpen=expDismissId===r.id;
+                    // Mark-paid candidates: this month's money-out rows within
+                    // the ±20% match band, nearest amount first.
+                    const cands=pickerOpen?txs
+                      .filter(t=>t.amount>0&&Math.abs(t.amount-r.amount)<=0.2*r.amount)
+                      .sort((a,b)=>Math.abs(a.amount-r.amount)-Math.abs(b.amount-r.amount))
+                      .slice(0,6):[];
+                    return (
+                      <div key={r.id} style={{marginBottom:8,opacity:r.projected?.55:1}}>
+                        <div style={{display:"flex",alignItems:"center",gap:8}}>
+                          <div style={{flex:1,minWidth:0}}>
+                            <div style={{fontSize:12,fontWeight:500,color:"var(--text)",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{r.description}</div>
+                            <div style={{fontSize:10,color:dueInk||"var(--muted)",marginTop:1,display:"flex",gap:5,alignItems:"center",flexWrap:"wrap"}}>
+                              <span>{r.projected?`~${shortDate(r.due_date)} (projected)`:overdue?`was due ${shortDate(r.due_date)}`:`due ${shortDate(r.due_date)}`}</span>
+                              <Pill label={getName(r.category)} color={getColor(r.category)} surface={surf.bg}/>
+                              {missed&&(()=>{const cs=chipOn("#D85A30",surf.bg);return(
+                                <span style={{fontSize:9,fontWeight:600,padding:"1px 5px",borderRadius:5,color:cs.ink,background:cs.bg}}>missed?</span>);})()}
+                            </div>
+                          </div>
+                          <span style={{fontSize:12,fontFamily:"'DM Mono',monospace",fontWeight:500,color:dueInk||"var(--text)",flexShrink:0}}>{fmtX(r.amount)}</span>
+                          {!r.projected&&(<>
+                            {(missed||overdue)&&(
+                              <button className="ibtn" disabled={expBusy} style={{fontSize:9,padding:"2px 7px",flexShrink:0}}
+                                onClick={()=>{setExpDismissId(null);setExpMatchId(pickerOpen?null:r.id);}}>Mark paid</button>
+                            )}
+                            {/* 'once' has no next cycle, so ✕ just dismisses. A
+                                recurring cadence opens the skip/stop choice —
+                                without the stop path a cancelled real-world bill
+                                was permanent: every ✕ minted the next cycle
+                                (dismissExpected's {stop:true} was dead code, the
+                                pre-Restore-unlink unrecoverable-mis-tap shape). */}
+                            <button title={r.cadence==="once"?"Dismiss this bill":"Skip this cycle or stop expecting this bill"}
+                              disabled={expBusy}
+                              onClick={()=>{
+                                if(r.cadence==="once"){doDismissExpected(r.id);return;}
+                                setExpMatchId(null);setExpDismissId(dismissOpen?null:r.id);
+                              }}
+                              style={{background:"none",border:"none",color:"var(--muted)",cursor:"pointer",fontSize:12,padding:"2px",lineHeight:1,flexShrink:0}}>✕</button>
+                          </>)}
+                        </div>
+                        {dismissOpen&&(
+                          <div style={{margin:"6px 0 2px 8px",borderLeft:"2px solid var(--border)",paddingLeft:8,display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
+                            <button className="ibtn" disabled={expBusy} style={{fontSize:9,padding:"2px 7px"}}
+                              title="Dismiss this cycle only — the next one is still expected"
+                              onClick={()=>doDismissExpected(r.id)}>Skip this cycle</button>
+                            <button className="ibtn" disabled={expBusy} style={{fontSize:9,padding:"2px 7px"}}
+                              title="Stop expecting this bill entirely (no next cycle)"
+                              onClick={()=>doDismissExpected(r.id,{stop:true})}>Stop expecting</button>
+                            <button className="ibtn" style={{fontSize:9,padding:"2px 7px"}} onClick={()=>setExpDismissId(null)}>Cancel</button>
+                          </div>
+                        )}
+                        {pickerOpen&&(
+                          <div style={{margin:"6px 0 2px 8px",borderLeft:"2px solid var(--border)",paddingLeft:8}}>
+                            {cands.length===0?(
+                              <div style={{fontSize:10,color:"var(--muted)"}}>No similar transaction in {monthLabel(year,month)} — it may not have synced yet.</div>
+                            ):cands.map(t=>(
+                              <button key={t.id} disabled={expBusy} onClick={()=>doMarkPaid(r.id,t.id)}
+                                style={{display:"flex",gap:8,alignItems:"center",width:"100%",background:"none",border:"none",cursor:"pointer",
+                                  padding:"3px 0",fontFamily:"inherit",textAlign:"left"}}>
+                                <span style={{fontSize:11,color:"var(--text)",flex:1,minWidth:0,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{t.merchant_name||t.description}</span>
+                                <span style={{fontSize:10,color:"var(--muted)",flexShrink:0}}>{shortDate(t.transaction_date)}</span>
+                                <span style={{fontSize:11,fontFamily:"'DM Mono',monospace",color:"var(--text)",flexShrink:0}}>{fmtX(t.amount)}</span>
+                              </button>
+                            ))}
+                            <button className="ibtn" style={{fontSize:9,padding:"2px 7px",marginTop:3}} onClick={()=>setExpMatchId(null)}>Cancel</button>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                  {expMatchedShown.map(r=>(
+                    <div key={r.id} style={{display:"flex",alignItems:"center",gap:8,marginBottom:6,opacity:.6}}>
+                      <span style={{fontSize:11,color:inkOn("#1D9E75",surf.bg),flexShrink:0}}>✓</span>
+                      <span style={{fontSize:12,color:"var(--muted)",flex:1,minWidth:0,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{r.description}</span>
+                      <span style={{fontSize:11,fontFamily:"'DM Mono',monospace",color:"var(--muted)",flexShrink:0}}>{fmtX(r.amount)}</span>
+                    </div>
+                  ))}
                 </div>
               )}
 
@@ -2669,16 +2986,31 @@ export default function Dashboard({ refreshTick = 0 }) {
                           <DrillNum onClick={openDrill(r.category)} title={`See the ${getName(r.category)} transactions`}>
                             {fmtAuto(r.spent)} spent
                           </DrillNum></>)}
+                        {/* Expected bills still to come — DISPLAY-ONLY, never
+                            part of Available (the envelopePace contract). */}
+                        {expByCat[r.category]>0&&(<>
+                          <span>·</span>
+                          <span title="Expected bills still to come this month — display only, never counted in Available">
+                            {fmtAuto(expByCat[r.category])} expected
+                          </span>
+                          {r.available<expByCat[r.category]&&(()=>{const cs=chipOn("#C08A2E",surf.card);return(
+                            <span style={{fontSize:10,fontWeight:600,padding:"2px 6px",borderRadius:6,
+                              color:cs.ink,background:cs.bg,flexShrink:0}}
+                              title={`${fmtAuto(expByCat[r.category])} still expected but only ${fmtAuto(r.available)} available`}>
+                              may run short</span>);})()}
+                        </>)}
                         <span style={{flex:1}}/>
+                        {(()=>{const eff=effectiveTarget(r);const hasOv=r.targetOverride!=null;return(
                         <button onClick={()=>setTargetEdit(r.category)} disabled={envBusy}
-                          title="Set a funding target for this category"
-                          style={{background:"none",border:`1px solid ${r.target!=null?"var(--accent)":"var(--border)"}`,
+                          title={hasOv?`This month's target is overridden — other months keep ${r.target!=null?fmtAuto(r.target):"no target"}`:"Set a funding target for this category"}
+                          style={{background:"none",border:`1px solid ${eff!=null?"var(--accent)":"var(--border)"}`,
                             borderRadius:20,cursor:"pointer",fontFamily:"inherit",padding:"2px 8px",fontSize:10,
-                            color:r.target!=null?"var(--accent)":"var(--muted)",flexShrink:0}}>
-                          {r.target==null?"＋ target"
+                            color:eff!=null?"var(--accent)":"var(--muted)",flexShrink:0}}>
+                          {eff==null?"＋ target"
+                            :hasOv?<>{fmtAuto(r.targetOverride)}<span style={{opacity:.7,fontWeight:500}}> · {monShort} only</span></>
                             :r.targetKind==="by_date"?`${fmtAuto(r.target)} by ${monthYear(r.targetDate)}`
                             :`${fmtAuto(r.target)}/mo`}
-                        </button>
+                        </button>);})()}
                         {need>0&&<span style={{color:"var(--accent)",fontSize:10}}>needs {fmtAuto(need)}</span>}
                         {pace&&(()=>{const cs=chipOn("#C08A2E",surf.card);return(
                           <span style={{fontSize:10,fontWeight:600,padding:"2px 6px",borderRadius:6,
@@ -3683,6 +4015,11 @@ export default function Dashboard({ refreshTick = 0 }) {
           // Per-row amounts keep the per-charge figure with a cadence suffix;
           // the headline sums monthlyEquivalent so mixed cadences stay honest.
           const perLabel={weekly:"/wk",monthly:"/mo",annual:"/yr"};
+          // "Expect" seeding: only when the expected-transactions feature is
+          // installed AND loaded (null/undefined hides it — the null-means-
+          // not-installed sentinel). Ignored rows never show the button.
+          const expectReady=expected!=null;
+          const expKeys=new Set((expected?.pending||[]).map(x=>x.recurring_key).filter(Boolean));
           return (
           <div style={{display:"flex",flexDirection:"column",gap:12}}>
             <div className="card">
@@ -3750,6 +4087,15 @@ export default function Dashboard({ refreshTick = 0 }) {
                   <div style={{fontSize:13,fontFamily:"'DM Mono',monospace",fontWeight:500,flexShrink:0}}>
                     {fmtX(r.monthlyAmount)}<span style={{fontSize:10,color:"var(--muted)"}}>{perLabel[r.cadence]||"/mo"}</span>
                   </div>
+                  {expectReady&&(expKeys.has(r.key)?(
+                    <span title="The next charge is expected on the Budget tab's Upcoming list — its ✕ there can skip a cycle or stop expecting it"
+                      style={{fontSize:9,fontWeight:600,color:"var(--muted)",flexShrink:0,whiteSpace:"nowrap"}}>expected ✓</span>
+                  ):(
+                    <button className="ibtn" disabled={expBusy}
+                      title={`Expect the next ${r.name} charge (~${shortDate(r.nextDate)}) on the Budget tab — display only, never counted as spending`}
+                      onClick={()=>seedExpected(r)}
+                      style={{fontSize:9,padding:"2px 7px",flexShrink:0}}>Expect</button>
+                  ))}
                   <button title={`Ignore ${r.name} (hides it for the whole household)`} onClick={()=>toggleRecIgnore(r.key)}
                     style={{background:"none",border:"none",color:"var(--muted)",cursor:"pointer",fontSize:13,padding:"4px 2px",lineHeight:1,flexShrink:0}}>✕</button>
                 </div>

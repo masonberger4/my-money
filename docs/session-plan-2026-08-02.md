@@ -23,7 +23,9 @@ chats: BUILD** (settings-table storage — the Session 4 sizing question is
 answered, needs its own session); **search refinement spec DECIDED**:
 amount-range filter + date-range filter + load-more past the 200 cap (needs
 its own session); **Session 6 scope DECIDED: all three** (see Session 6).
-Remaining: saved chats, search refinement, Session 6.
+**Session 6 SHIPPED 2026-08-03** (all three items — see the Session 6 section).
+Remaining: saved chats, search refinement. When both ship, this plan is spent —
+delete it.
 
 All sessions follow the standard flow (fetch/absorb main → green `npm test` + placeholder-env build → screenshots at 390px for UI → branch → PR → merge, auto mode).
 
@@ -78,15 +80,32 @@ The `balance_snapshots` groundwork session. As built (see CLAUDE.md's three Merg
 
 **Migration:** none, as expected.
 
-## Session 6 — "Envelope follow-ups" — **L** — **scope DECIDED by Mason 2026-08-03: build ALL THREE** (auto-fill next month, per-month target overrides, scheduled transactions; reconciliation stays out)
+## Session 6 — "Envelope follow-ups" — **SHIPPED 2026-08-03** (all three; reconciliation stayed out)
 
-**Items:**
-- **Per-month target overrides** — a target is one setting per category today; per-month likely means an additive column on `budget_months` → **migration (additive, paste before merge)**.
-- **Auto-fill next month's assignments from this month's** — pure `envelopes.js` + one write path; must respect the "missing row = 0, never fall back to target" REGRESSION-pinned rule.
-- **Scheduled/expected transactions** — new table → **migration (additive)**; interacts with recurring detection (Session 3 lands first so cadences exist to seed expectations).
-- **Reconciliation** — OUT of the decided scope; spec entirely open; may be its own later session.
+What actually shipped (truthful against the diffs):
+- ~~**Per-month target overrides**~~ **SHIPPED** — additive `budget_months.target_override`
+  (`20260804000001`); month scope in the `TargetSheet`, `effectiveTarget` in
+  `envelopes.js` resolves override → `budgets.monthly_limit`. `setAssigned(…, 0)`'s
+  delete is now conditional so it can't drop a row carrying only an override; a
+  42703 naming `target_override` retries with the old columns and never trips
+  `isEnvelopeSchemaMissing` (pre-migration the whole Budget tab must stay up).
+- ~~**Auto-fill from last month**~~ **SHIPPED** — pure `planAutoFill` (`envelopes.js`):
+  copies ASSIGNED only (never targets), skips zeros (0 row ≡ no row) and
+  categories already assigned in the viewed month; two-step confirm in the
+  Budget tab, write via `autoFillMonth`. Direction is pull viewed−1 → viewed.
+- ~~**Scheduled/expected transactions**~~ **SHIPPED** — `expected_transactions`
+  table (`20260804000002`), pure core `src/expectedTx.js`. DISPLAY-ONLY (the
+  `envelopePace` contract — never in Available/the walk/any total); opt-in
+  seeding from the Recurring tab ("Expect"); greedy nearest-date auto-match →
+  status lifecycle pending/matched/dismissed ('overdue' derived); roll-forward
+  dup-gated on both keyed AND null-key rows; ✕ on a recurring row offers
+  Skip-this-cycle / Stop-expecting; reads return null pre-migration
+  (`getReceiptTxIds` pattern).
+- **Reconciliation** — still OUT; spec open, its own later session if ever.
 
-**Migration:** yes — TWO additive migrations (per-month overrides on `budget_months`, a scheduled-transactions table); both stay additive and paste BEFORE the merge (workflow rule 5). **Mason mid-session:** none — scope decided 2026-08-03 (all three); the standing envelope don't-relitigate list constrains everything (no walk clamp, no derived income, `isSpend()` only).
+**Migrations:** the TWO 20260804 files are additive and the code degrades
+gracefully without them — **paste BOTH in the Supabase SQL Editor BEFORE the
+merge** (workflow rule 5).
 
 ---
 
