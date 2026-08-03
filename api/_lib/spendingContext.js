@@ -3,6 +3,7 @@ import { applyAccountRules } from '../../src/categoryMap.js';
 import { displayBalance } from '../../src/accountBalance.js';
 import { detectRecurring } from '../../src/recurring.js';
 import { aggregateEnvelopeSpending } from '../../src/spending.js';
+import { markInternalTransfers } from '../../src/cashFlow.js';
 import { walkEnvelopes, shiftMonthKey } from '../../src/envelopes.js';
 import { isRangeExhaustedError } from '../../src/ruleHistory.js';
 
@@ -92,7 +93,9 @@ async function fetchBudgetInputs(supabase, householdId, visibleIds, year, month)
     for (let from = 0; ; from += page) {
       const { data, error } = await supabase
         .from('transactions')
-        .select('account_id, date, amount, mapped_category, user_category, excluded')
+        // description/merchant_name feed the unified isSpend()'s card-payment
+        // veto; account_id feeds markInternalTransfers' different-account rule.
+        .select('account_id, date, amount, description, merchant_name, mapped_category, user_category, excluded')
         .eq('household_id', householdId)
         .in('account_id', visibleIds)
         .gte('date', `${earliestKey}-01`)
@@ -280,14 +283,16 @@ export function formatSpendingContext(accounts, txs, extras = {}) {
   const budget = extras.budget || null;
   if (budget) {
     // Spending rows need accounts.type for isSpend's loan guard; attach it
-    // from the accounts already in hand, then aggregate through the SAME
-    // pure fold the Budget tab uses so Spent can never disagree with it.
-    const spending = aggregateEnvelopeSpending(
-      (budget.spendTxs || []).map(t => ({
-        ...t,
-        accounts: { type: acctById.get(t.account_id)?.type },
-      }))
-    );
+    // from the accounts already in hand, run the SAME linked-boundary pairing
+    // the app runs (markInternalTransfers is deterministic — sorted inputs —
+    // so byte-determinism holds), then aggregate through the SAME pure fold
+    // the Budget tab uses so Spent can never disagree with it.
+    const spendRows = (budget.spendTxs || []).map(t => ({
+      ...t,
+      accounts: { type: acctById.get(t.account_id)?.type },
+    }));
+    markInternalTransfers(spendRows);
+    const spending = aggregateEnvelopeSpending(spendRows);
     const walk = walkEnvelopes({
       assignments: budget.assignments || [],
       spending,

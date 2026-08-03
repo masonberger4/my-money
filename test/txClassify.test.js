@@ -4,7 +4,7 @@
 // stayed invisible: every part of it looks reasonable read one line at a time.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { merchantKey, matchLearnedRule, guessCategory } from '../src/txClassify.js';
+import { merchantKey, matchLearnedRule, guessCategory, isCardPaymentDescriptor } from '../src/txClassify.js';
 
 // --- merchantKey: what collapses and what stays distinct --------------------
 
@@ -104,4 +104,33 @@ test('learned rules beat the keyword table but never the transfer guards', () =>
     guessCategory('CAPITAL ONE AUTOPAY', { rules }),
     'Transfers and card payments',
   );
+});
+
+// --- 2026-08-03 classifier gaps found live (double-count findings F2) --------
+
+test('REGRESSION: the live BofA / Wells Fargo card-payment descriptors classify as card payments', () => {
+  // Exact live descriptors that missed the guard: BANK OF AMERICA / WELLS
+  // FARGO were absent from CARD_ISSUER_RE and BECU's unspaced CCPYMT from
+  // STANDALONE_PAYMENT_RE, so $1,109.57 of card payments counted as purchases.
+  assert.equal(
+    guessCategory('External Withdrawal - BANK OF AMERICA - PAYMENT', {}),
+    'Transfers and card payments'
+  );
+  assert.equal(
+    guessCategory('External Withdrawal - WELLS FARGO CARD - CCPYMT', {}),
+    'Transfers and card payments'
+  );
+  // The verdict the spending model's veto uses agrees.
+  assert.equal(isCardPaymentDescriptor('External Withdrawal - BANK OF AMERICA - PAYMENT'), true);
+  assert.equal(isCardPaymentDescriptor('External Withdrawal - WELLS FARGO CARD - CCPYMT'), true);
+});
+
+test('isCardPaymentDescriptor: transfer wording naming a card is a payment; plain transfers and purchases are not', () => {
+  assert.equal(isCardPaymentDescriptor('ONLINE BANKING TRANSFER TO VISA'), true);
+  assert.equal(isCardPaymentDescriptor('ONLINE BANKING TRANSFER TO SAVINGS'), false);
+  // Issuer-named PURCHASES stay purchases — the co-occurrence guard holds.
+  assert.equal(isCardPaymentDescriptor('CAPITAL ONE TRAVEL PORTLAND'), false);
+  assert.equal(isCardPaymentDescriptor('DISCOVER TIRE AND AUTO CENTER'), false);
+  // A Wells Fargo BANK deposit is not a card payment (issuer without payment wording).
+  assert.equal(isCardPaymentDescriptor('WELLS FARGO DES:DEPOSIT'), false);
 });

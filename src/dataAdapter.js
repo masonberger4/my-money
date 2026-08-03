@@ -121,13 +121,14 @@ async function fetchRawBetween(start, end, columns) {
 // leak getCashFlow's `_internal` marks into the purchase-based model.
 const rangeMemo = createRangeMemo((start, end) => fetchRawBetween(start, end));
 
-// `columns` / `markTransfers` exist for the envelope walk, which can span
-// years: it needs only the spending predicate's inputs, and never reads
-// `_internal`, so it skips both the wide column list and the O(V·E) transfer
-// matching (and the range memo — its aggregation is memoised separately as
-// spendCache). Every other caller gets the full rows and the matching as
-// before, each applied to its own copies.
-async function getTransactionsBetween(start, end, { columns, markTransfers = true } = {}) {
+// `columns` exists for the envelope walk, which can span years: it needs only
+// the spending predicate's inputs, so it skips the wide column list (and the
+// range memo — its aggregation is memoised separately as spendCache).
+// EVERY caller gets markInternalTransfers: under the unified linked-boundary
+// model isSpend() reads `_internal`, so the pairing is part of establishing
+// the row shape, not a Trends-only step. It stays cheap because matching runs
+// per equal-amount bucket (near-linear) with binary-searched date windows.
+async function getTransactionsBetween(start, end, { columns } = {}) {
   const rows = columns
     ? await fetchRawBetween(start, end, columns)
     : await rangeMemo.getCopy(start, end);
@@ -135,14 +136,17 @@ async function getTransactionsBetween(start, end, { columns, markTransfers = tru
   for (const t of rows) {
     t.mapped_category = applyAccountRules(t.mapped_category, t.amount, t.accounts?.type);
   }
-  if (markTransfers) markInternalTransfers(rows);
+  markInternalTransfers(rows);
   return rows;
 }
 
-// The subset of TX_COLUMNS that isSpend() + effectiveCategory() actually read
-// (plus `id`, which the pagination tiebreaker orders by). isLoanAccount reads
-// accounts.type, which the inner join already selects.
-const SPEND_TX_COLUMNS = 'id, date, amount, mapped_category, user_category, excluded';
+// The subset of TX_COLUMNS that isSpend() + effectiveCategory() +
+// markInternalTransfers actually read (plus `id`, which the pagination
+// tiebreaker orders by). account_id feeds the pairing (different-account
+// rule); description/merchant_name feed the card-payment veto. isLoanAccount
+// reads accounts.type, which the inner join already selects.
+const SPEND_TX_COLUMNS =
+  'id, account_id, date, amount, description, merchant_name, mapped_category, user_category, excluded';
 
 function getMonthTransactions(year, month) {
   const { start, end } = monthBounds(year, month);
@@ -234,9 +238,9 @@ export async function getAccounts() {
   return { accounts: data };
 }
 
-// type/subtype are editable for feeds that don't send one (SimpleFIN) — see
-// ACCOUNT_TYPES. Never expose them for Plaid accounts: the Plaid sync upserts
-// both columns, so an edit there would be silently reverted on the next sync.
+// type/subtype are editable — SimpleFIN sends neither, so the type is guessed
+// at first insert and user-owned thereafter (the sync writes it on INSERT
+// only); manual accounts get theirs once at creation. See ACCOUNT_TYPES.
 export const ACCOUNT_TYPES = ['depository', 'credit', 'loan'];
 export const ACCOUNT_SUBTYPES = ['checking', 'savings'];
 
@@ -695,10 +699,10 @@ async function getEnvelopeSpending(start, end) {
   if (spendCache && spendCache.key === cacheKey) return spendCache.spending;
 
   const gen = spendGen;
-  const txs = await getTransactionsBetween(start, end, {
-    columns: SPEND_TX_COLUMNS,
-    markTransfers: false,
-  });
+  // Narrow columns, but the FULL pipeline: the unified isSpend() reads
+  // `_internal`, so the envelope fold needs the pairing too (it used to skip
+  // it for perf; per-amount bucketing keeps it near-linear).
+  const txs = await getTransactionsBetween(start, end, { columns: SPEND_TX_COLUMNS });
 
   // Aggregate on the same predicate the Categories bars use, so an envelope's
   // Spent can never disagree with the bar rendered beside it — the fold itself
@@ -969,8 +973,8 @@ export async function getCashFlow({ num_periods = 6 } = {}) {
 }
 
 // --- CSV import (standalone mode) --------------------------------------------
-// Creates real transactions on a manual (non-Plaid) account so the un-synced
-// personal-account income becomes visible. All writes go through the
+// Creates real transactions on a manual account so history no feed reaches
+// becomes visible. All writes go through the
 // authenticated client: the *_all RLS policies allow it because household_id
 // resolves from the column default current_household_id() (never sent from the
 // client — same pattern as setBudget/setSetting). api/sync.js never touches
@@ -1057,7 +1061,7 @@ export async function findOrCreateManualInstitution() {
 // split); 'credit' is a credit-card account, for a card whose statements are
 // only available as CSV/PDF — its purchases count as spending by category and
 // applyAccountRules turns its negatives into "Return" (never income), exactly
-// like a Plaid-linked card. Returns the inserted account row.
+// like a SimpleFIN-fed card. Returns the inserted account row.
 export async function createManualAccount({ name, subtype = 'checking' }) {
   const institutionId = await findOrCreateManualInstitution();
   const plaidAccountId = MANUAL_ACCOUNT_PREFIX + makeUuid();
@@ -1154,7 +1158,7 @@ export async function getFeedCoverageStart(accountId) {
 // Raw transactions on one account within a date range, for CSV reconciliation
 // (comparison mode, Phase 2). Returns the columns reconcileCsv compares — not
 // the shaped toTxShape form — scoped to the CSV's period so a one-month CSV
-// isn't compared against years of Plaid history.
+// isn't compared against years of feed history.
 export async function getAccountTransactionsInRange(accountId, start, end) {
   const rows = [];
   if (!accountId || !start || !end) return rows;
@@ -1179,7 +1183,8 @@ export async function getAccountTransactionsInRange(accountId, start, end) {
 // (account_id, plaid_tx_id) means a re-import of overlapping rows updates in
 // place instead of duplicating; user-owned columns (user_category, excluded,
 // user_description) are omitted from the payload so those edits survive the
-// re-import, exactly like Plaid syncs. Returns the number of rows written.
+// re-import, exactly like the SimpleFIN sync's upserts. Returns the number of
+// rows written.
 export async function importCsvTransactions(accountId, rows, source = 'csv') {
   if (!accountId) throw new Error('importCsvTransactions requires an account id');
   if (!rows || rows.length === 0) return 0;
