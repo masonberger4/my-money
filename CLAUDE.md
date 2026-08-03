@@ -811,6 +811,18 @@ The app's ONLY use of Supabase **Storage** — everything else is Postgres.
   all"; remaining-balance column and the header run through `displayBalance`.
   Sheet state is the account ID, looked up live in `debtData` so a saved
   APR/min re-amortizes the open sheet. No migration.
+- **Net worth over time (2026-08-03, plan Session 5 — completes the debt
+  follow-ups trio)** — Debt-tab card off `balance_snapshots`: pure
+  `netWorthSeries` (`src/netWorth.js`, only import is `displayBalance`) folds
+  snapshots into `[{date,total}]`, carrying each account's LAST value forward
+  (a day where only one bank reported must not read as the others at zero;
+  no snapshot yet ⇒ contributes 0). **Hidden accounts EXCLUDED** (Mason
+  2026-08-03, consistent with the query-level rule) — filtered in
+  `getNetWorthSeries` (dataAdapter) so the pure fold never sees them or their
+  snapshots. Totals arrive SIGNED (debts negated inside the fold) — render
+  directly, never through `displayBalance` again. Degrades to `[]`
+  pre-snapshots-table. Sparkline stroke via `markOn`. `test/netWorth.test.js`.
+  No migration.
 - **Sign-out button (2026-08-03)** — header button next to Refresh,
   confirm-gated; `signOut()` passthrough in dataAdapter (Dashboard never
   imports supabaseClient.js — the mock-harness alias rule) calling
@@ -875,28 +887,36 @@ Section 3 SHIPPED (see Merged features — the Section 3 batch covered the
 card-balance tile, Ask-tab persistence + save-chat, the Uncategorized
 teach-queue, the startup skeleton and the month jump picker; recurring v2,
 Trends biggest movers and the sign-out button shipped 2026-08-03, movers
-reconciled to the unified single-model `isSpend()` lineage at merge). Genuinely
-unbuilt remainder: client-side search refinement (needs a Mason spec) and
-in-app saved chats (needs Mason's sizing call). Carry
+reconciled to the unified single-model `isSpend()` lineage at merge; the
+Session 5 debt trio — manual debts, payoff schedule drill-in, net worth —
+shipped 2026-08-03). Genuinely unbuilt remainder, both now DECIDED by Mason
+(2026-08-03), each needing its own session: **in-app saved chats — BUILD**
+(settings-table storage, per his earlier sizing question resolved yes) and
+**search refinement — spec decided**: amount-range filter + date-range filter
++ load-more past the 200 cap. Carry
 condition: the Dashboard.jsx decomposition is DEFERRED (keep the single file
 during active development). Delete entries as they ship.
 
-Debt follow-ups (not built): net worth over
-time — `balance_snapshots` is its shared groundwork (manual debts and the
-per-debt payoff schedule drill-in shipped
-2026-08-03; Mason's call: net worth EXCLUDES hidden accounts' balances,
-consistent with the query-level rule). Later (discussed,
-not committed): net worth over time, cash-flow forecast, savings goals, CSV/PDF
-export. **Envelope follow-ups** (the tab is shipped, these are
-not): Age of Money — wants real *measured* income, so it waits on the income
-wall; scheduled/expected transactions; reconciliation; per-month target
-overrides (a target is one setting per category today, not per month);
-auto-filling next month's assignments from this month's. **`accounts.available_balance` holds two conventions**
-— SimpleFIN's raw feed value when it sends `available-balance`, and the
-*normalized* balance when it doesn't (`api/sync.js`'s `?? balance` fallback).
-Invisible today (nothing renders it) but it surfaces the moment the Debt view
-shows utilization; sort it out then, and never run it through `displayBalance`
-— for a card it means available *credit*, not a debt.
+Debt follow-ups: ALL THREE SHIPPED 2026-08-03 (manual debts, per-debt payoff
+schedule drill-in, net worth over time — Mason's call recorded: net worth
+EXCLUDES hidden accounts' balances, consistent with the query-level rule).
+Later (discussed, not committed): cash-flow forecast, savings goals, CSV/PDF
+export. **Envelope follow-ups — Session 6 scope DECIDED by Mason
+(2026-08-03): build ALL THREE** — auto-filling next month's assignments from
+this month's, per-month target overrides (a target is one setting per
+category today), and scheduled/expected transactions. The latter two each
+need a migration; both stay **additive, pasted before the merge** (workflow
+rule 5). Still outside that scope: reconciliation (spec open), and Age of
+Money — wants real *measured* income, so it waits on the income
+wall. **`accounts.available_balance` still holds two conventions**
+(re-verified 2026-08-03, plan Session 5 item 4: grep confirms nothing renders
+it — the Debt tab reads `current_balance` and net worth reads
+`balance_snapshots.balance`, so the ambiguity stays invisible) — SimpleFIN's
+raw feed value when it sends `available-balance`, the *normalized* balance
+when it doesn't (`api/sync.js`'s `?? balance` fallback). It surfaces the
+moment anything shows utilization or available credit; sort it out THEN
+(likely: normalize at sync time in `api/_lib/simplefin.js`), and never run it
+through `displayBalance` — for a card it means available *credit*, not a debt.
 
 ### Off-Plaid: SimpleFIN — COMPLETE (phases 1–4 shipped)
 Decision (settled, executed): **SimpleFIN Bridge** replaced Plaid — ~$15/yr
