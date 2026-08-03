@@ -13,6 +13,8 @@ import assert from 'node:assert/strict';
 import {
   walkEnvelopes,
   targetNeed,
+  effectiveTarget,
+  planAutoFill,
   readyToAssign,
   planMove,
   monthKey,
@@ -418,4 +420,251 @@ test('envelopePace elapsed fraction tracks the real month length', () => {
   assert.ok(warn);
   assert.equal(Math.round(warn.expected), 10); // 1/31 × 310
   assert.equal(PACE_MARGIN, 0.1);
+});
+
+// --- planAutoFill: copy last month's assignments into the viewed month -------
+
+test('planAutoFill copies source assignments, sums, and totals them', () => {
+  const plan = planAutoFill({
+    source: [
+      { category: 'Groceries', assigned: 500 },
+      { category: 'Fun', assigned: 100 },
+      { category: 'Fun', assigned: 50 }, // duplicate rows sum, like the walk's byMonth
+    ],
+    existing: [],
+  });
+  assert.deepEqual(plan.rows.sort((a, b) => (a.category < b.category ? -1 : 1)), [
+    { category: 'Fun', assigned: 150 },
+    { category: 'Groceries', assigned: 500 },
+  ]);
+  assert.deepEqual(plan.skipped, []);
+  assert.equal(plan.total, 650);
+});
+
+test('REGRESSION: a zero source assignment is never copied (0 row ≡ no row)', () => {
+  // moveMoney can leave a 0 row in the source month. Copying it forward would
+  // write a new 0 row into the viewed month — which must stay equivalent to no
+  // row — and duplicate rows that SUM to zero are just as absent.
+  const plan = planAutoFill({
+    source: [
+      { category: 'Dining', assigned: 0 },
+      { category: 'Gifts', assigned: 40 },
+      { category: 'Gifts', assigned: -40 }, // sums to zero → dropped too
+      { category: 'Groceries', assigned: 300 },
+    ],
+    existing: [],
+  });
+  assert.deepEqual(plan.rows, [{ category: 'Groceries', assigned: 300 }]);
+  assert.equal(plan.total, 300);
+});
+
+test('planAutoFill filters non-budgetable categories', () => {
+  const plan = planAutoFill({
+    source: [
+      { category: 'Uncategorized', assigned: 200 },
+      { category: 'Groceries', assigned: 300 },
+    ],
+    existing: [],
+    isBudgetable: c => c !== 'Uncategorized',
+  });
+  assert.deepEqual(plan.rows, [{ category: 'Groceries', assigned: 300 }]);
+  assert.deepEqual(plan.skipped, [], 'non-budgetable is filtered, not "skipped"');
+});
+
+test('planAutoFill skips categories already assigned this month, reporting them', () => {
+  const plan = planAutoFill({
+    source: [
+      { category: 'Groceries', assigned: 500 },
+      { category: 'Fun', assigned: 100 },
+    ],
+    existing: [{ category: 'Groceries', assigned: 450 }],
+  });
+  assert.deepEqual(plan.rows, [{ category: 'Fun', assigned: 100 }]);
+  assert.deepEqual(plan.skipped, [{ category: 'Groceries', assigned: 500 }]);
+  assert.equal(plan.total, 100, 'total covers only what will be written');
+});
+
+test('an existing 0 row counts as absent and gets filled', () => {
+  // A 0 row (left behind by moveMoney) is not "the user already budgeted here".
+  const plan = planAutoFill({
+    source: [{ category: 'Dining', assigned: 120 }],
+    existing: [{ category: 'Dining', assigned: 0 }],
+  });
+  assert.deepEqual(plan.rows, [{ category: 'Dining', assigned: 120 }]);
+  assert.deepEqual(plan.skipped, []);
+});
+
+test('negative source assignments are copied as-is', () => {
+  const plan = planAutoFill({
+    source: [{ category: 'Fun', assigned: -75 }],
+    existing: [],
+  });
+  assert.deepEqual(plan.rows, [{ category: 'Fun', assigned: -75 }]);
+  assert.equal(plan.total, -75);
+});
+
+test('planAutoFill amounts go through cents()', () => {
+  const plan = planAutoFill({
+    source: [
+      { category: 'Coffee', assigned: 0.1 },
+      { category: 'Coffee', assigned: 0.2 },
+    ],
+    existing: [],
+  });
+  assert.deepEqual(plan.rows, [{ category: 'Coffee', assigned: 0.3 }]);
+  assert.equal(plan.total, 0.3);
+});
+
+test('REGRESSION: auto-fill composed through the walk — a skipped gap month still contributes 0, never the target', () => {
+  // May was budgeted, June was never filled (auto-fill not run), July is filled
+  // from May's shape. The June gap must contribute 0 to the carry — the
+  // missing-row=0 rule restated through the feature. If the walk fell back to
+  // the $600 target for June, July would open $600 richer than reality.
+  const settings = [{ category: 'Groceries', target: 600, rollover: true }];
+  const may = [{ category: 'Groceries', assigned: 600 }];
+  const plan = planAutoFill({ source: may, existing: [] });
+  const assignments = [
+    a('Groceries', '2026-05', 600),
+    // June: nothing — the household never budgeted it.
+    ...plan.rows.map(r => a(r.category, '2026-07', r.assigned)),
+  ];
+  const spending = [s('Groceries', '2026-05', 600), s('Groceries', '2026-06', 400)];
+  const jul = row(walkEnvelopes({ assignments, spending, settings, year: 2026, month: 7 }), 'Groceries');
+  assert.equal(jul.assigned, 600, 'the auto-filled copy of May');
+  assert.equal(jul.rolledOver, -400, 'June contributed 0 assigned; its spending carries as overspend');
+  assert.equal(jul.available, 200);
+});
+
+// --- per-month target override (targetOverride) -------------------------------
+
+test('effectiveTarget prefers the month override, falls back to target, else null', () => {
+  assert.equal(effectiveTarget({ targetOverride: 250, target: 400 }), 250);
+  assert.equal(effectiveTarget({ targetOverride: 0, target: 400 }), 0, 'override 0 is a real answer');
+  assert.equal(effectiveTarget({ targetOverride: null, target: 400 }), 400);
+  assert.equal(effectiveTarget({ targetOverride: null, target: null }), null);
+  assert.equal(effectiveTarget(null), null);
+});
+
+test('targetNeed uses the override when set; override 0 asks for nothing (≠ null)', () => {
+  const at = { year: 2026, month: 6 };
+  const base = { target: 400, targetKind: 'monthly', rolledOver: 0 };
+  assert.equal(targetNeed({ ...base, targetOverride: 250, assigned: 0 }, at), 250);
+  assert.equal(targetNeed({ ...base, targetOverride: 250, assigned: 100 }, at), 150);
+  assert.equal(targetNeed({ ...base, targetOverride: 250, assigned: 300 }, at), 0, 'over the override asks nothing');
+  assert.equal(targetNeed({ ...base, targetOverride: 0, assigned: 0 }, at), 0, 'override 0 = "ask nothing"');
+  assert.equal(targetNeed({ ...base, targetOverride: null, assigned: 0 }, at), 400, 'null falls back to the target');
+  assert.equal(
+    targetNeed({ target: null, targetKind: 'monthly', targetOverride: 150, rolledOver: 0, assigned: 0 }, at),
+    150,
+    'an override works even with no category target'
+  );
+});
+
+test('an override forces monthly-top-up semantics even on a by_date target', () => {
+  // The by-date spread would ask (2400 − 1200) / 6 = 200; the override says
+  // THIS month wants exactly 500, so it asks max(0, 500 − assigned).
+  const base = { target: 2400, targetKind: 'by_date', targetDate: '2027-06-01', rolledOver: 1200 };
+  const at = { year: 2027, month: 1 };
+  assert.equal(targetNeed({ ...base, targetOverride: 500, assigned: 0 }, at), 500);
+  assert.equal(targetNeed({ ...base, targetOverride: 500, assigned: 500 }, at), 0);
+  assert.equal(targetNeed({ ...base, targetOverride: null, assigned: 0 }, at), 200, 'no override → by-date spread');
+});
+
+test('REGRESSION: assigned 0 + target_override is a REAL row but does not open an envelope', () => {
+  // The zero-row-equivalence rule applies to ASSIGNED only: a 0-assigned row
+  // carrying an override must surface the override for the viewed month while
+  // contributing nothing to the walk — and it must not set the category's
+  // start month (its earlier spending must not become rolled-over debt).
+  const result = walkEnvelopes({
+    assignments: [
+      { category: 'Dining', month: '2026-01', assigned: 0, targetOverride: 300 },
+      { category: 'Dining', month: '2026-02', assigned: 0, targetOverride: 300 },
+    ],
+    spending: [s('Dining', '2026-01', 250), s('Dining', '2026-02', 100)],
+    year: 2026,
+    month: 2,
+  });
+  const feb = row(result, 'Dining');
+  assert.equal(feb.targetOverride, 300, 'the viewed month sees its override');
+  assert.equal(feb.rolledOver, 0, 'the January 0 row did not open the envelope');
+  assert.equal(feb.available, -100, 'this month only — identical to no rows at all');
+});
+
+test('the output row carries the VIEWED month override only; past overrides never leak forward', () => {
+  const assignments = [
+    { category: 'Fun', month: '2026-01', assigned: 300, targetOverride: 999 },
+    { category: 'Fun', month: '2026-02', assigned: 300 },
+  ];
+  const spending = [s('Fun', '2026-01', 100)];
+
+  const feb = row(walkEnvelopes({ assignments, spending, year: 2026, month: 2 }), 'Fun');
+  assert.equal(feb.targetOverride, null, 'January override does not leak into February');
+
+  const jan = row(walkEnvelopes({ assignments, spending, year: 2026, month: 1 }), 'Fun');
+  assert.equal(jan.targetOverride, 999, 'January itself sees it');
+});
+
+test('REGRESSION: carry math never reads overrides — the walk is byte-identical with and without them', () => {
+  // Overrides change what funding ASKS for, never what any month rolled. Strip
+  // targetOverride from both output rows and the walks must match exactly.
+  const spending = [s('Groceries', '2026-01', 450), s('Groceries', '2026-02', 500), s('Groceries', '2026-03', 480)];
+  const settings = [{ category: 'Groceries', target: 600, rollover: true }];
+  const plain = [
+    a('Groceries', '2026-01', 500),
+    a('Groceries', '2026-02', 500),
+    a('Groceries', '2026-03', 500),
+  ];
+  const withOverrides = plain.map((r0, i) => ({ ...r0, targetOverride: 100 * (i + 1) }));
+
+  const strip = res => ({
+    ...res,
+    categories: res.categories.map(({ targetOverride, ...rest }) => rest),
+  });
+  for (const view of [{ year: 2026, month: 2 }, { year: 2026, month: 3 }]) {
+    const without = walkEnvelopes({ assignments: plain, spending, settings, ...view });
+    const withOv = walkEnvelopes({ assignments: withOverrides, spending, settings, ...view });
+    // totals.target differs by design (it sums effectiveTarget) — compare the
+    // carry-bearing numbers and every row field except targetOverride.
+    assert.deepEqual(strip(withOv).categories, strip(without).categories);
+    assert.equal(withOv.totals.available, without.totals.available);
+    assert.equal(withOv.totals.rolledOver, without.totals.rolledOver);
+    assert.equal(withOv.totals.assigned, without.totals.assigned);
+  }
+});
+
+test('totals.target sums the effective target, not the raw category target', () => {
+  const result = walkEnvelopes({
+    assignments: [
+      { category: 'Groceries', month: '2026-06', assigned: 100, targetOverride: 250 },
+      { category: 'Fun', month: '2026-06', assigned: 50 },
+    ],
+    spending: [],
+    settings: [
+      { category: 'Groceries', target: 600 },
+      { category: 'Fun', target: 200 },
+    ],
+    year: 2026,
+    month: 6,
+  });
+  assert.equal(result.totals.target, 450, '250 (override) + 200 (plain target)');
+
+  // An override of 0 zeroes that category's contribution — real, not null.
+  const zeroed = walkEnvelopes({
+    assignments: [{ category: 'Groceries', month: '2026-06', assigned: 100, targetOverride: 0 }],
+    spending: [],
+    settings: [{ category: 'Groceries', target: 600 }],
+    year: 2026,
+    month: 6,
+  });
+  assert.equal(zeroed.totals.target, 0);
+});
+
+test('rows without overrides carry targetOverride null (shape is stable)', () => {
+  const result = walkEnvelopes({
+    assignments: [a('Fun', '2026-06', 100)],
+    spending: [],
+    year: 2026,
+    month: 6,
+  });
+  assert.equal(row(result, 'Fun').targetOverride, null);
 });

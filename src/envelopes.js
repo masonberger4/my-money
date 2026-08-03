@@ -66,13 +66,33 @@ export function monthsUntil(dateStr, year, month) {
   return diff > 0 ? diff : 1;
 }
 
+// The target the viewed month actually answers to: this month's override when
+// one is set, else the category-level target. An override of 0 is a REAL
+// answer ("ask nothing this month"), distinct from null (no override).
+export function effectiveTarget(row) {
+  if (!row) return null;
+  return row.targetOverride ?? row.target ?? null;
+}
+
 // What this month still needs for the category to hit its target. A monthly
 // target wants topping up to the target every month. A by-date target spreads
 // what's still missing (counting money already carried in, not what's been
 // spent out) over the months left, then asks only for THIS month's share — so
 // funding it twice in one month is a no-op rather than a double payment.
+//
+// Resolution order: (1) a per-month targetOverride, when non-null — and an
+// override always uses monthly-top-up semantics for that month, even on a
+// by_date category (the user typed THIS month's number; spreading it over the
+// remaining months would ask for a fraction of what they asked for). An
+// override of 0 asks for nothing. (2) the category target, per its kind.
+// (3) no target → 0. By-date carry math is untouched by overrides.
 export function targetNeed(row, { year, month }) {
-  if (!row || row.target == null) return 0;
+  if (!row) return 0;
+  if (row.targetOverride != null) {
+    const left = Number(row.targetOverride) - row.assigned;
+    return left > 0 ? cents(left) : 0;
+  }
+  if (row.target == null) return 0;
   if (row.targetKind === 'by_date') {
     const share = (row.target - row.rolledOver) / monthsUntil(row.targetDate, year, month);
     const need = share - row.assigned;
@@ -111,7 +131,9 @@ export function envelopePace({ assigned, spent, year, month, today }) {
 
 const DEFAULT_SETTING = { target: null, targetKind: 'monthly', targetDate: null, rollover: true };
 
-// assignments: [{ category, month, assigned }]  — month may be YYYY-MM or a date
+// assignments: [{ category, month, assigned, targetOverride? }] — month may be
+//              YYYY-MM or a date; targetOverride is the per-month funding
+//              target override (budget_months.target_override), optional.
 // spending:    [{ category, month, spent }]     — pre-aggregated by the adapter
 // settings:    [{ category, target, targetKind, targetDate, rollover }]
 export function walkEnvelopes({ assignments = [], spending = [], settings = [], year, month }) {
@@ -119,6 +141,12 @@ export function walkEnvelopes({ assignments = [], spending = [], settings = [], 
 
   // category -> 'YYYY-MM' -> dollars, plus the earliest month anyone assigned in.
   const assigned = new Map();
+  // Per-month target overrides ride the assignment rows, but ONLY the viewed
+  // month's override reaches the output row — a past month's override is that
+  // month's business and never leaks forward, and the carry math below never
+  // reads overrides at all (they change what funding ASKS for, not what any
+  // month rolled).
+  const overrides = new Map(); // category -> viewed month's targetOverride
   let earliestKey = targetKey;
   for (const row of assignments) {
     const key = normalizeMonthKey(row.month);
@@ -129,6 +157,9 @@ export function walkEnvelopes({ assignments = [], spending = [], settings = [], 
     if (!assigned.has(row.category)) assigned.set(row.category, new Map());
     const byMonth = assigned.get(row.category);
     byMonth.set(key, (byMonth.get(key) || 0) + amount);
+    if (key === targetKey && row.targetOverride != null) {
+      overrides.set(row.category, Number(row.targetOverride));
+    }
     // Only a non-zero assignment opens an envelope — see catStart below.
     if (amount !== 0 && key < earliestKey) earliestKey = key;
   }
@@ -205,6 +236,9 @@ export function walkEnvelopes({ assignments = [], spending = [], settings = [], 
           spent: cents(s),
           available: cents(available),
           ...setting,
+          // Only the VIEWED month's override — past overrides never leak
+          // forward, and the carry math above never read this.
+          targetOverride: overrides.has(category) ? overrides.get(category) : null,
         };
       }
       carry = setting.rollover ? available : 0;
@@ -218,14 +252,16 @@ export function walkEnvelopes({ assignments = [], spending = [], settings = [], 
   // have an envelope or a target — spending in an unbudgeted category is not
   // "over" anything.
   const totals = rows
-    .filter(r => r.assigned !== 0 || r.rolledOver !== 0 || r.target != null)
+    .filter(r => r.assigned !== 0 || r.rolledOver !== 0 || effectiveTarget(r) != null)
     .reduce(
       (acc, r) => ({
         assigned: cents(acc.assigned + r.assigned),
         rolledOver: cents(acc.rolledOver + r.rolledOver),
         spent: cents(acc.spent + r.spent),
         available: cents(acc.available + r.available),
-        target: cents(acc.target + (r.target || 0)),
+        // The month's headline target is what THIS month actually asks for,
+        // so an override replaces the category target in the sum.
+        target: cents(acc.target + (effectiveTarget(r) || 0)),
       }),
       { assigned: 0, rolledOver: 0, spent: 0, available: 0, target: 0 }
     );
@@ -251,6 +287,53 @@ export function readyToAssign(income, totals) {
 // overspent category from one that has room. Pure so the arithmetic (and the
 // "leaves exactly zero" case, which must delete the row rather than store a 0)
 // is testable without a database.
+// Auto-fill: copy last month's assignments into the viewed month ("Fill from
+// July"). MERGE semantics, deliberately not fundTargets': an envelope the user
+// already assigned in this month is theirs and is skipped, and a zero sum is
+// never written (a 0 row must stay equivalent to no row). An existing 0 row
+// counts as absent — moveMoney can leave one behind, and filling it is exactly
+// the sent-columns-only upsert that leaves any target_override on it intact.
+// Negative source assignments are copied as-is: the user put the envelope in
+// debt on purpose last month, and "helpfully" zeroing it would misstate the plan.
+//
+// source / existing: [{ category, assigned }] — the previous / viewed month's
+// budget_months rows. Duplicate source categories sum first (mirroring the
+// walk's byMonth accumulation). Returns:
+//   { rows:    [{ category, assigned }],  // what to upsert into the viewed month
+//     skipped: [{ category, assigned }],  // source amounts NOT copied (already set)
+//     total }                             // sum of rows' assigned
+export function planAutoFill({ source = [], existing = [], isBudgetable = () => true }) {
+  // Sum duplicates, exactly like the walk does per month.
+  const byCategory = new Map();
+  for (const row of source) {
+    const amount = Number(row.assigned) || 0;
+    byCategory.set(row.category, (byCategory.get(row.category) || 0) + amount);
+  }
+
+  // Viewed-month categories that already hold a NON-ZERO assignment; a 0 row
+  // is equivalent to no row and gets filled.
+  const taken = new Set();
+  for (const row of existing) {
+    if ((Number(row.assigned) || 0) !== 0) taken.add(row.category);
+  }
+
+  const rows = [];
+  const skipped = [];
+  let total = 0;
+  for (const [category, sum] of byCategory) {
+    const amount = cents(sum);
+    if (amount === 0) continue; // zero sums are dropped, never written
+    if (!isBudgetable(category)) continue;
+    if (taken.has(category)) {
+      skipped.push({ category, assigned: amount });
+      continue;
+    }
+    rows.push({ category, assigned: amount });
+    total += amount;
+  }
+  return { rows, skipped, total: cents(total) };
+}
+
 export function planMove({ from, to, amount, assignedByCategory = {} }) {
   const n = Number(amount);
   if (!Number.isFinite(n) || n <= 0) return null;
