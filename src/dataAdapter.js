@@ -1630,3 +1630,14 @@ export async function getDataCoverage() {
   }
   return aggregateCoverage(rows);
 }
+
+// Sign out the shared household session on this device. A passthrough so
+// Dashboard never imports supabaseClient.js directly — the gitignored mock
+// harness aliases dataAdapter/sync/db/apiClient by full-match regex, and a
+// direct supabaseClient import would escape the mocks and break harness
+// rendering. App.jsx's onAuthStateChange sees the session end and renders the
+// Login screen, so callers don't navigate — they just await this.
+export async function signOut() {
+  const { error } = await supabase.auth.signOut();
+  if (error) throw error;
+}
