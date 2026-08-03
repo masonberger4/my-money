@@ -273,6 +273,10 @@ export const ACCOUNT_SUBTYPES = ['checking', 'savings'];
 
 export async function updateAccount(id, fields) {
   const allowed = {};
+  // current_balance is deliberately NOT in this whitelist: a fed balance is
+  // never hand-edited (the sync restates it). A MANUAL account's balance IS
+  // typed by hand — that path is updateManualBalance below, which requires the
+  // account row so it can prove is_manual before writing.
   if ('nickname' in fields) allowed.nickname = fields.nickname;
   if ('color' in fields) allowed.color = fields.color;
   if ('hidden' in fields) allowed.hidden = fields.hidden;
@@ -1154,22 +1158,48 @@ export async function findOrCreateManualInstitution() {
   return data.id;
 }
 
-// Create one manual account. kind is 'checking' | 'savings' | 'credit'.
+// Create one manual account. kind is 'checking' | 'savings' | 'credit' | 'loan'.
 // checking/savings are depository (and drive the Trends checking-vs-savings
 // split); 'credit' is a credit-card account, for a card whose statements are
 // only available as CSV/PDF — its purchases count as spending by category and
 // applyAccountRules turns its negatives into "Return" (never income), exactly
-// like a SimpleFIN-fed card. Returns the inserted account row.
-export async function createManualAccount({ name, subtype = 'checking' }) {
+// like a SimpleFIN-fed card. 'loan' is a hand-tracked debt (a private loan, a
+// servicer no feed reaches): its balance is typed by hand and its own ledger
+// rows never count as spending (isLoanAccount — the counted leg is the
+// depository payment). Returns the inserted account row.
+
+// Pure row builder, exported for tests. `balance` is the hand-typed amount
+// OWED for a credit/loan kind — stored POSITIVE (the app-wide debt
+// convention; displayBalance flips at render). Ignored for depository kinds
+// (nothing sets a manual depository balance today). Negative balances are
+// rejected rather than abs()'d — a minus sign here means the user is thinking
+// in display convention, and silently flipping it would hide that.
+export const MANUAL_ACCOUNT_KINDS = ['checking', 'savings', 'credit', 'loan'];
+export function buildManualAccountRow({ name, subtype = 'checking', balance } = {}) {
+  const kind = MANUAL_ACCOUNT_KINDS.includes(subtype) ? subtype : 'checking';
+  const row = {
+    name: (name || 'Imported account').trim(),
+    type: kind === 'credit' ? 'credit' : kind === 'loan' ? 'loan' : 'depository',
+    subtype: kind === 'credit' ? 'credit card' : kind,
+  };
+  if (kind === 'credit' || kind === 'loan') {
+    const bal = Number(balance);
+    if (balance != null && balance !== '' && Number.isFinite(bal)) {
+      if (bal < 0)
+        throw new Error('Enter the balance as a positive amount owed');
+      row.current_balance = Number(bal.toFixed(2));
+    }
+  }
+  return row;
+}
+
+export async function createManualAccount({ name, subtype = 'checking', balance } = {}) {
   const institutionId = await findOrCreateManualInstitution();
   const plaidAccountId = MANUAL_ACCOUNT_PREFIX + makeUuid();
-  const isCredit = subtype === 'credit';
   const base = {
     institution_id: institutionId,
     plaid_account_id: plaidAccountId,
-    name: (name || 'Imported account').trim(),
-    type: isCredit ? 'credit' : 'depository',
-    subtype: isCredit ? 'credit card' : subtype === 'savings' ? 'savings' : 'checking',
+    ...buildManualAccountRow({ name, subtype, balance }),
   };
 
   const attempt = async withFlag => {
@@ -1183,7 +1213,64 @@ export async function createManualAccount({ name, subtype = 'checking' }) {
     ({ data, error } = await attempt(false));
   }
   if (error) throw error;
+  // First sight of a hand-typed debt balance counts as a move (same rule as
+  // the sync) — seed its history so the sparkline/net-worth start truthfully.
+  if (data && data.current_balance != null) {
+    await appendClientSnapshot(data.id, Number(data.current_balance));
+  }
   return data;
+}
+
+// --- Manual debt balance ------------------------------------------------------
+// The pure decision for a hand-typed balance edit: only a MANUAL account's
+// balance may be typed (a fed balance is restated by every pull — hand-editing
+// it would just be overwritten, so the distinction is enforced, not advisory).
+// Returns { balance, snapshot } — balance rounded to cents in the STORED
+// convention (debts positive = owed), snapshot true when the value actually
+// moved (mirrors api/sync.js's only-on-change rule; the per-day upsert dedups
+// same-day edits anyway). Exported for tests.
+export function manualBalanceUpdate(account, balance) {
+  if (!account || isSimpleFinAccount(account) || !isManualAccount(account))
+    throw new Error('Only a manual account balance can be edited by hand');
+  const bal = Number(balance);
+  if (!Number.isFinite(bal)) throw new Error('Balance must be a number');
+  if ((account.type === 'credit' || account.type === 'loan') && bal < 0)
+    throw new Error('Enter the balance as a positive amount owed');
+  const rounded = Number(bal.toFixed(2));
+  return { balance: rounded, snapshot: Number(account.current_balance) !== rounded };
+}
+
+// Best-effort client-side balance_snapshots append. Unlike api/sync.js (which
+// runs as SERVICE_ROLE and must set household_id explicitly), this is an
+// authenticated client write, so household_id is OMITTED and the column
+// default current_household_id() fills it — the normal RLS path. A missing
+// table (previews share the prod DB) switches it off quietly; any other
+// failure is logged, never thrown — history is auxiliary, the balance itself
+// already landed on `accounts`.
+async function appendClientSnapshot(accountId, balance) {
+  if (!hasBalanceSnapshots) return;
+  const { error } = await supabase.from('balance_snapshots').upsert(
+    { account_id: accountId, captured_on: new Date().toISOString().slice(0, 10), balance },
+    { onConflict: 'account_id,captured_on' },
+  );
+  if (error) {
+    if (error.code === 'PGRST205' || error.code === '42P01') hasBalanceSnapshots = false;
+    else console.warn('balance snapshot append failed', error.message || error);
+  }
+}
+
+// Write a hand-typed balance onto a MANUAL account (the Debt tab's balance
+// editor) and append today's history row. Takes the account ROW, not just an
+// id — manualBalanceUpdate needs it to prove the account is manual.
+export async function updateManualBalance(account, balance) {
+  const { balance: bal, snapshot } = manualBalanceUpdate(account, balance);
+  const { error } = await supabase
+    .from('accounts')
+    .update({ current_balance: bal })
+    .eq('id', account.id);
+  if (error) throw error;
+  if (snapshot) await appendClientSnapshot(account.id, bal);
+  return bal;
 }
 
 // plaid_tx_ids already stored for an account, so the preview can grey out rows

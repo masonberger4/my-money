@@ -718,6 +718,23 @@ The app's ONLY use of Supabase **Storage** — everything else is Postgres.
   WELLS FARGO in `CARD_ISSUER_RE`, unspaced CCPYMT in
   `STANDALONE_PAYMENT_RE`, `isCardPaymentDescriptor` exported. No migration —
   read-time model only.
+- **Manual debts (2026-08-03, plan Session 5 item 1)** — the `is_manual`
+  machinery extended to hand-tracked debts, no migration: `createManualAccount`
+  gained kind `'loan'` + an optional hand-typed `balance` (pure
+  `buildManualAccountRow`; balance stored POSITIVE = owed, negative input
+  rejected, ignored for depository kinds); Debt tab "+ Add manual debt" inline
+  form (`AddDebtForm`) and a per-row balance editor rendered ONLY on manual
+  debts. The balance-edit path is `updateManualBalance(account, balance)` —
+  NOT `updateAccount`, whose whitelist deliberately still omits
+  `current_balance` (a fed balance is restated by every pull; the manual path
+  takes the account ROW so the pure `manualBalanceUpdate` gate can prove
+  is_manual before writing). A moved balance (and a first-typed one at create)
+  appends a `balance_snapshots` row CLIENT-side — household_id omitted so the
+  RLS default fills it (the opposite of api/sync.js's service-role explicit
+  set), per-day upsert, best-effort like the sync's. QuickAdd's target list
+  now also excludes loan-typed manual accounts (`isLoanAccount` — a cash
+  purchase parked there would vanish from every total). Sync untouched: the
+  manual institution stays `status='disabled'`. `test/manualDebt.test.js`.
 - **Data coverage panel (TEMPORARY troubleshooting aid)** — collapsible card at
   the bottom of the Accounts tab: per-account first/last tx date, row count and
   source badges (simplefin/csv/pdf/manual), hidden accounts included on purpose.
@@ -852,9 +869,10 @@ in-app saved chats (needs Mason's sizing call). Carry
 condition: the Dashboard.jsx decomposition is DEFERRED (keep the single file
 during active development). Delete entries as they ship.
 
-Debt follow-ups (not built): manual debts (reuse the
-`is_manual` machinery), per-debt payoff schedules view, and net worth over
-time — `balance_snapshots` is its shared groundwork. Later (discussed,
+Debt follow-ups (not built): per-debt payoff schedules view, and net worth over
+time — `balance_snapshots` is its shared groundwork (manual debts shipped
+2026-08-03; Mason's call: net worth EXCLUDES hidden accounts' balances,
+consistent with the query-level rule). Later (discussed,
 not committed): net worth over time, cash-flow forecast, savings goals, CSV/PDF
 export. **Envelope follow-ups** (the tab is shipped, these are
 not): Age of Money — wants real *measured* income, so it waits on the income

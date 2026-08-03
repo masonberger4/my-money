@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from "react";
-import { getOverview, getSpending, getBiggestMovers, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES, setCategoryRule, applyCategoryRuleToHistory, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, invalidateEnvelopeSpending, isEnvelopeSchemaMissing, targetNeed, readyToAssign, envelopePace, getEnvPace, setEnvPace as persistEnvPace, getRecIgnore, updateRecIgnore, monthKey, getEntities, createEntity, updateEntity, getTaxYearTransactions, getMileage, addMileage, deleteMileage, getReceiptTxIds, getDebts, getBalanceSnapshots, addManualTransaction, createManualAccount, getDataCoverage, signOut } from "../dataAdapter.js";
+import { getOverview, getSpending, getBiggestMovers, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES, setCategoryRule, applyCategoryRuleToHistory, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, invalidateEnvelopeSpending, isEnvelopeSchemaMissing, targetNeed, readyToAssign, envelopePace, getEnvPace, setEnvPace as persistEnvPace, getRecIgnore, updateRecIgnore, monthKey, getEntities, createEntity, updateEntity, getTaxYearTransactions, getMileage, addMileage, deleteMileage, getReceiptTxIds, getDebts, getBalanceSnapshots, addManualTransaction, createManualAccount, updateManualBalance, getDataCoverage, signOut } from "../dataAdapter.js";
 import { payoffWhatIf, debtFreeMonth, isMortgage } from "../debtPayoff.js";
 import { SCHEDULE_E_LINES, RENTS_KEY, DEFAULT_SCHEDULE_E_MAP, scheduleEReport, entityMonthly, entityLedger, personalDeductionReport, DEDUCTION_BUCKETS, DEFAULT_DEDUCTION_MAP, mileageDeduction, scheduleECsv } from "../taxReport.js";
 import { merchantKey } from "../txClassify.js";
@@ -250,6 +250,57 @@ function DebtNum({id,value,onSave,placeholder,prefix,suffix,width=74}) {
           color:"var(--text)",fontSize:12,fontFamily:"'DM Mono',monospace",outline:"none",textAlign:"right"}}/>
       {suffix}
     </span>
+  );
+}
+
+// Inline "+ Add manual debt" form (Debt tab): name, kind, hand-typed balance.
+// Reuses the is_manual machinery — the saved account is an ordinary manual
+// account (createManualAccount), so getDebts picks it up like a fed one and
+// the sync never touches it.
+function AddDebtForm({busy,surf,onSave,onClose}) {
+  const [name,setName]=useState("");
+  const [kind,setKind]=useState("loan");
+  const [bal,setBal]=useState("");
+  const balNum=bal.trim()===""?null:Number(bal);
+  const ok=name.trim()&&(balNum==null||(Number.isFinite(balNum)&&balNum>=0));
+  return (
+    <div style={{background:"var(--bg)",borderRadius:10,padding:"10px 12px",marginBottom:10}}>
+      <div style={{display:"flex",flexWrap:"wrap",alignItems:"center",gap:8}}>
+        <input value={name} placeholder="Name (e.g. Loan from Dad)" autoFocus
+          onChange={e=>setName(e.target.value)}
+          style={{flex:"1 1 140px",padding:"6px 8px",borderRadius:8,border:"1px solid var(--border)",background:"var(--card)",
+            color:"var(--text)",fontSize:12,fontFamily:"inherit",outline:"none"}}/>
+        {["loan","credit"].map(k=>{
+          const active=kind===k;
+          const cs=active?chipOn(TYPE_CHIP,surf.card):null;
+          return (
+            <button key={k} onClick={()=>setKind(k)}
+              style={{fontSize:11,fontWeight:600,padding:"5px 10px",borderRadius:20,fontFamily:"inherit",cursor:"pointer",
+                background:cs?cs.bg:"var(--card)",color:cs?cs.ink:"var(--muted)",
+                border:`1px solid ${active?markOn(TYPE_CHIP,surf.card):"var(--border)"}`,transition:"all .15s"}}>
+              {k==="loan"?"Loan":"Credit card"}
+            </button>
+          );
+        })}
+        <span style={{display:"inline-flex",alignItems:"center",gap:3,fontSize:12,color:"var(--muted)"}}>
+          owed $
+          <input value={bal} inputMode="decimal" placeholder="0"
+            onChange={e=>setBal(numericish(e.target.value,{negative:false}))}
+            style={{width:80,padding:"6px 8px",borderRadius:8,border:"1px solid var(--border)",background:"var(--card)",
+              color:"var(--text)",fontSize:12,fontFamily:"'DM Mono',monospace",outline:"none",textAlign:"right"}}/>
+        </span>
+      </div>
+      <div style={{display:"flex",gap:8,marginTop:8,justifyContent:"flex-end"}}>
+        <button className="ibtn" style={{fontSize:11}} onClick={onClose}>Cancel</button>
+        <button className="ibtn" style={{fontSize:11,fontWeight:600}} disabled={busy||!ok}
+          onClick={()=>onSave({name:name.trim(),kind,balance:balNum})}>
+          {busy?"Adding…":"Add debt"}
+        </button>
+      </div>
+      <div style={{fontSize:10,color:"var(--muted)",marginTop:6}}>
+        Tracked by hand — the balance is yours to type and never synced. APR and minimum payment can be entered after adding.
+      </div>
+    </div>
   );
 }
 
@@ -999,6 +1050,8 @@ export default function Dashboard({ refreshTick = 0 }) {
   // cards in, loans out — mortgages dominate a snowball/avalanche and make the
   // debt-free date meaningless (spec), and v1 keeps all loans opt-in.
   const [debtInclude,setDebtInclude]=useState({});
+  const [addDebt,setAddDebt]=useState(false);      // "+ Add manual debt" inline form
+  const [addDebtBusy,setAddDebtBusy]=useState(false);
   // --- Rental & tax (Tax tab) ---
   const [entities,setEntities]=useState([]);
   const [taxYear,setTaxYear]=useState(now.getFullYear());
@@ -1407,6 +1460,50 @@ export default function Dashboard({ refreshTick = 0 }) {
         totalMinimums:debts.reduce((s,a)=>s+(Number(a.minimum_payment)||0),0)};
     });
     updateAccount(id,fields).catch(err=>console.error("debt field save failed",err));
+  }
+
+  // Hand-typed balance edit on a MANUAL debt (fed balances are never
+  // hand-edited — updateManualBalance enforces it). Optimistic patch of the
+  // debt cache incl. totalDebt, then the write, which also appends today's
+  // balance_snapshots row so the sparkline/net-worth history stays truthful.
+  function saveManualBalance(a,v){
+    if(v==null)return; // a balance can be corrected, not cleared
+    const prevBal=a.current_balance;
+    setDebtData(prev=>{
+      if(!prev)return prev;
+      const debts=prev.debts.map(d=>d.id===a.id?{...d,current_balance:v}:d);
+      return {...prev,debts,totalDebt:debts.reduce((s,d)=>s+(Number(d.current_balance)||0),0)};
+    });
+    updateManualBalance(a,v).catch(err=>{
+      console.error("manual balance save failed",err);
+      setDebtData(prev=>{
+        if(!prev)return prev;
+        const debts=prev.debts.map(d=>d.id===a.id?{...d,current_balance:prevBal}:d);
+        return {...prev,debts,totalDebt:debts.reduce((s,d)=>s+(Number(d.current_balance)||0),0)};
+      });
+      window.alert(`Couldn't save that balance: ${err.message||err}`);
+    });
+  }
+
+  // "+ Add manual debt": an ordinary manual account (is_manual machinery) of
+  // type credit/loan with a hand-typed balance. On success the lazy debt cache
+  // is dropped (debtData is non-null here — the form only renders on a loaded
+  // tab — so the null sentinel reliably refires the effect) and reloadData
+  // refreshes the accounts list everywhere else.
+  async function addManualDebt({name,kind,balance}){
+    setAddDebtBusy(true);
+    try{
+      await createManualAccount({name,subtype:kind,balance});
+      setAddDebt(false);
+      setDebtSnaps([]);
+      setDebtData(null);
+      reloadData(year,month);
+    }catch(err){
+      console.error("manual debt add failed",err);
+      window.alert(`Couldn't add that debt: ${err.message||err}`);
+    }finally{
+      setAddDebtBusy(false);
+    }
   }
 
   // The Tax tab is lazy the same way: a calendar year of rows + the mileage
@@ -2980,20 +3077,30 @@ export default function Dashboard({ refreshTick = 0 }) {
             {!busy&&debts.length===0&&(
               <div className="card" style={{textAlign:"center",padding:"34px 16px",color:"var(--muted)",fontSize:13,lineHeight:1.6}}>
                 No credit or loan accounts yet.<br/>
-                Link a card or loan through SimpleFIN (Accounts tab) and it shows up here with its balance synced daily.
+                Link a card or loan through SimpleFIN (Accounts tab) and it shows up here with its balance synced daily —
+                or track one by hand below.
+                <div style={{marginTop:12}}>
+                  {addDebt
+                    ?<div style={{textAlign:"left"}}><AddDebtForm busy={addDebtBusy} surf={surf} onSave={addManualDebt} onClose={()=>setAddDebt(false)}/></div>
+                    :<button className="ibtn" style={{fontSize:11}} onClick={()=>setAddDebt(true)}>+ Add manual debt</button>}
+                </div>
               </div>
             )}
 
             {(busy||debts.length>0)&&(
             <div className="card">
-              <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em",marginBottom:4}}>Your debts</div>
+              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:4}}>
+                <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em"}}>Your debts</div>
+                {!busy&&!addDebt&&<button className="ibtn" style={{fontSize:11}} onClick={()=>setAddDebt(true)}>+ Add manual debt</button>}
+              </div>
+              {addDebt&&!busy&&<AddDebtForm busy={addDebtBusy} surf={surf} onSave={addManualDebt} onClose={()=>setAddDebt(false)}/>}
               {!hasCols&&!busy&&(
                 <div style={{fontSize:11,color:"var(--muted)",background:"var(--bg)",borderRadius:8,padding:"8px 12px",marginBottom:10}}>
                   Balances are live; APR and minimum-payment entry activates once the debt-tracker migration is applied.
                 </div>
               )}
               {hasCols&&<div style={{fontSize:11,color:"var(--muted)",marginBottom:10}}>
-                Balances sync from the feed; APR, minimum payment and credit limit are yours to type in — they feed the payoff projection below.
+                Balances sync from the feed (manual debts: typed by hand); APR, minimum payment and credit limit are yours to type in — they feed the payoff projection below.
               </div>}
               {busy?[1,2].map(i=><div key={i} style={{marginBottom:14}}><Sk h={64}/></div>):
                 debts.map((a,i)=>{
@@ -3023,8 +3130,16 @@ export default function Dashboard({ refreshTick = 0 }) {
                           <div className="bar-fill" style={{width:(util*100)+"%",background:markOn(utilColor,surf.track)}}/>
                         </div>
                       )}
-                      {hasCols&&(
+                      {(hasCols||isManualAccount(a))&&(
                         <div style={{display:"flex",flexWrap:"wrap",alignItems:"center",gap:10,marginTop:8}}>
+                          {/* A manual debt's balance is hand-typed (no feed restates
+                              it) — the one balance editor in the app; fed balances
+                              deliberately get none. */}
+                          {isManualAccount(a)&&(
+                            <DebtNum id={a.id+":bal"} value={a.current_balance} placeholder="owed" prefix="$" width={80}
+                              onSave={v=>saveManualBalance(a,v)}/>
+                          )}
+                          {hasCols&&<>
                           <DebtNum id={a.id+":apr"} value={a.apr} placeholder="APR" suffix="%" width={56}
                             onSave={v=>saveDebt(a.id,{apr:v})}/>
                           <DebtNum id={a.id+":min"} value={a.minimum_payment} placeholder="min" prefix="$" suffix="/mo" width={64}
@@ -3052,6 +3167,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                               border:`1px solid ${inc?markOn(TYPE_CHIP,surf.card):"var(--border)"}`,transition:"all .15s"}}>
                             {inc?"✓ in payoff":"＋ payoff"}
                           </button>
+                          </>}
                         </div>
                       )}
                     </div>
@@ -4068,7 +4184,10 @@ export default function Dashboard({ refreshTick = 0 }) {
 
       {/* Manual transaction quick-add */}
       {quickAdd&&(()=>{
-        const manualAccounts=accounts.filter(a=>isManualAccount(a)&&!isSimpleFinAccount(a));
+        // Loan accounts excluded: a loan's own ledger rows never count as
+        // spending (isLoanAccount), so a hand-typed cash purchase parked there
+        // would silently vanish from every total.
+        const manualAccounts=accounts.filter(a=>isManualAccount(a)&&!isSimpleFinAccount(a)&&a.type!=="loan");
         // Uncategorized is never an offerable pick (same rule as the detail sheet).
         const allCats=[...ERA_CATEGORIES.filter(c=>c!==UNCATEGORIZED),...customCatNames.filter(n=>!ERA_CATEGORIES.includes(n))];
         return (
