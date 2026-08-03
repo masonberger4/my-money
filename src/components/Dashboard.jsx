@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from "react";
 import { getOverview, getSpending, getBiggestMovers, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES, setCategoryRule, applyCategoryRuleToHistory, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, invalidateEnvelopeSpending, isEnvelopeSchemaMissing, targetNeed, readyToAssign, envelopePace, getEnvPace, setEnvPace as persistEnvPace, getRecIgnore, updateRecIgnore, monthKey, getEntities, createEntity, updateEntity, getTaxYearTransactions, getMileage, addMileage, deleteMileage, getReceiptTxIds, getDebts, getBalanceSnapshots, addManualTransaction, createManualAccount, updateManualBalance, getDataCoverage, signOut } from "../dataAdapter.js";
-import { payoffWhatIf, debtFreeMonth, isMortgage } from "../debtPayoff.js";
+import { payoffWhatIf, debtFreeMonth, isMortgage, amortizationSchedule, addMonths, MAX_MONTHS } from "../debtPayoff.js";
 import { SCHEDULE_E_LINES, RENTS_KEY, DEFAULT_SCHEDULE_E_MAP, scheduleEReport, entityMonthly, entityLedger, personalDeductionReport, DEDUCTION_BUCKETS, DEFAULT_DEDUCTION_MAP, mileageDeduction, scheduleECsv } from "../taxReport.js";
 import { merchantKey } from "../txClassify.js";
 import { patchTxShape } from "../spending.js";
@@ -791,6 +791,104 @@ function DrillNum({onClick,title,style,children}) {
 // that are in the category but not in the total (excluded, refunds, loan
 // postings) are still shown rather than silently dropped — "where did the other
 // $40 go" is exactly the question this sheet exists to answer.
+// Per-debt payoff schedule drill-in: THIS debt alone, amortized at its own
+// minimum payment — the multi-debt snowball/avalanche interplay stays in the
+// projection card; this sheet answers "where does each payment on this card
+// actually go". All figures come stored-positive from amortizationSchedule;
+// only the header balance is a displayed BALANCE, so only it runs through
+// displayBalance. Long schedules render the first SCHED_PREVIEW rows plus a
+// "show all" toggle (390px phone is the target); a stalled schedule gets the
+// honest --danger banner instead of a fake date, and a MAX_MONTHS cap renders
+// the computed rows under a "still owing after 50 years" banner.
+const SCHED_PREVIEW=24;
+function ScheduleSheet({debt,startMonth,acctLabel,onClose}){
+  const [showAll,setShowAll]=useState(false);
+  const pay=Number(debt.minimum_payment)||0;
+  const rate=debt.apr??debt.interest_rate;
+  const sched=amortizationSchedule({balance:debt.current_balance,ratePercent:rate,payment:pay});
+  const capped=!showAll&&sched.rows.length>SCHED_PREVIEW;
+  const shown=capped?sched.rows.slice(0,SCHED_PREVIEW):sched.rows;
+  const hidden=sched.rows.length-shown.length;
+  const cell={fontSize:11,fontFamily:"'DM Mono',monospace",textAlign:"right",whiteSpace:"nowrap"};
+  const hcell={fontSize:10,color:"var(--muted)",fontWeight:500,textAlign:"right"};
+  const monthCapped=sched.stalled&&sched.rows.length>=MAX_MONTHS;
+  return (
+    <div className="overlay" onClick={onClose}>
+      <div className="modal" onClick={e=>e.stopPropagation()}
+        style={{width:"min(460px,92vw)",maxHeight:"82vh",overflowY:"auto"}}>
+        <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
+          <span style={{fontSize:16,fontWeight:600,color:"var(--text)",minWidth:0,overflow:"hidden",
+            textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{acctLabel(debt)}</span>
+          <span style={{flex:1}}/>
+          <span style={{fontSize:16,fontWeight:600,fontFamily:"'DM Mono',monospace",flexShrink:0}}>
+            {fmtX(displayBalance(debt.current_balance,debt.type))}
+          </span>
+        </div>
+        <div style={{fontSize:12,color:"var(--muted)",marginBottom:12}}>
+          Payoff schedule at {fmtAuto(pay)}/mo{Number(rate)>0?` · ${Number(rate)}% APR`:" · no interest entered"} · this debt alone
+        </div>
+
+        {sched.stalled&&!sched.rows.length?(
+          <div style={{fontSize:12,color:"var(--danger)",background:"var(--danger-bg)",border:"1px solid var(--danger-border)",borderRadius:8,padding:"8px 12px"}}>
+            At {fmtAuto(pay)}/mo the payment doesn't cover the monthly interest — this balance never falls.
+            Raise the minimum payment (or add an extra payment in the projection below) to get a payoff date.
+          </div>
+        ):(
+          <>
+            <div style={{display:"flex",gap:10,flexWrap:"wrap",marginBottom:12}}>
+              {[{label:"Paid off",val:sched.stalled?"never":monthYear(addMonths(startMonth,sched.months)+"-01"),
+                 sub:sched.stalled?"at this payment":`${sched.months} month${sched.months!==1?"s":""}`},
+                {label:"Total interest",val:fmtAuto(sched.totalInterest),sub:sched.stalled?"so far — still owing":"over the schedule"},
+              ].map((c,i)=>(
+                <div key={i} style={{flex:"1 1 100px",background:"var(--bg)",borderRadius:10,padding:"10px 12px"}}>
+                  <div style={{fontSize:10,color:"var(--muted)",fontWeight:500,marginBottom:3}}>{c.label}</div>
+                  <div style={{fontSize:15,fontWeight:600,fontFamily:"'DM Mono',monospace"}}>{c.val}</div>
+                  <div style={{fontSize:10,color:"var(--muted)",marginTop:2}}>{c.sub}</div>
+                </div>
+              ))}
+            </div>
+            {monthCapped&&(
+              <div style={{fontSize:12,color:"var(--danger)",background:"var(--danger-bg)",border:"1px solid var(--danger-border)",borderRadius:8,padding:"8px 12px",marginBottom:10}}>
+                Still owing after {Math.round(MAX_MONTHS/12)} years at this payment — the schedule below stops there.
+              </div>
+            )}
+            {/* Wide balances (a mortgage's −$400,000.00) scroll inside the
+                sheet rather than stretching it past 390px. */}
+            <div style={{overflowX:"auto"}}>
+              <div style={{display:"grid",gridTemplateColumns:"minmax(52px,1fr) auto auto auto auto",columnGap:10,rowGap:6,alignItems:"baseline",minWidth:"min-content"}}>
+                <div style={{...hcell,textAlign:"left"}}>Month</div>
+                <div style={hcell}>Payment</div>
+                <div style={hcell}>Interest</div>
+                <div style={hcell}>Principal</div>
+                <div style={hcell}>Remaining</div>
+                {shown.map(r=>(
+                  // Fragment-free: grid children must be direct, so 5 keyed divs.
+                  [<div key={r.month+"m"} style={{...cell,textAlign:"left",color:"var(--muted)"}}>{monthYear(addMonths(startMonth,r.month)+"-01")}</div>,
+                   <div key={r.month+"p"} style={cell}>{fmtX(r.payment)}</div>,
+                   <div key={r.month+"i"} style={{...cell,color:"var(--muted)"}}>{fmtX(r.interest)}</div>,
+                   <div key={r.month+"pr"} style={cell}>{fmtX(r.principal)}</div>,
+                   <div key={r.month+"b"} style={cell}>{fmtX(displayBalance(r.balance,debt.type))}</div>]
+                ))}
+              </div>
+            </div>
+            {capped&&(
+              <button className="ibtn" style={{width:"100%",justifyContent:"center",marginTop:10,fontSize:11}}
+                onClick={()=>setShowAll(true)}>
+                Show all {sched.rows.length} months ({hidden} more)
+              </button>
+            )}
+            <div style={{marginTop:10,fontSize:10,color:"var(--muted)"}}>
+              Assumes the current balance, no new charges, and this fixed payment every month.
+              The final payment shrinks to whatever is left.
+            </div>
+          </>
+        )}
+        <button onClick={onClose} className="ibtn" style={{width:"100%",justifyContent:"center",marginTop:16}}>Done</button>
+      </div>
+    </div>
+  );
+}
+
 function CategorySheet({name,color,when,rows,surf,getName,acctById,acctLabel,acctColor,onPick,onClose}) {
   const counted=rows.filter(t=>t.counted);
   const other=rows.filter(t=>!t.counted);
@@ -1050,6 +1148,7 @@ export default function Dashboard({ refreshTick = 0 }) {
   // cards in, loans out — mortgages dominate a snowball/avalanche and make the
   // debt-free date meaningless (spec), and v1 keeps all loans opt-in.
   const [debtInclude,setDebtInclude]=useState({});
+  const [schedDebtId,setSchedDebtId]=useState(null); // per-debt payoff schedule sheet (account id — looked up live so a DebtNum edit refreshes the open sheet)
   const [addDebt,setAddDebt]=useState(false);      // "+ Add manual debt" inline form
   const [addDebtBusy,setAddDebtBusy]=useState(false);
   // --- Rental & tax (Tax tab) ---
@@ -3159,6 +3258,12 @@ export default function Dashboard({ refreshTick = 0 }) {
                               style={{padding:"5px 7px",borderRadius:8,border:"1px solid var(--border)",background:"var(--bg)",
                                 color:"var(--text)",fontSize:12,fontFamily:"inherit",outline:"none"}}/>
                           </label>
+                          {bal>0&&Number(a.minimum_payment)>0&&(
+                            <button className="ibtn" style={{fontSize:11}} onClick={()=>setSchedDebtId(a.id)}
+                              title="Month-by-month payoff schedule for this debt at its minimum payment">
+                              Schedule ›
+                            </button>
+                          )}
                           <button onClick={()=>setDebtInclude(prev=>({...prev,[a.id]:!inc}))}
                             title={inc?"Included in the payoff projection":isMortgage(a)?"Mortgages are excluded from the projection by default — they'd dominate it":"Tap to include in the payoff projection"}
                             style={{marginLeft:"auto",fontSize:11,fontWeight:600,padding:"4px 10px",borderRadius:20,fontFamily:"inherit",cursor:"pointer",
@@ -3971,6 +4076,17 @@ export default function Dashboard({ refreshTick = 0 }) {
             acctById={acctById} acctLabel={acctLabel} acctColor={acctColor}
             onPick={t=>setSelTx(t)} onClose={()=>setTaxDrill(null)}/>
         );
+      })()}
+
+      {/* Per-debt payoff schedule drill-in — looked up live from debtData so a
+          just-saved APR/minimum re-amortizes the open sheet; a debt that
+          vanished (refresh) simply closes it. */}
+      {schedDebtId&&(()=>{
+        const d=(debtData?.debts||[]).find(x=>x.id===schedDebtId);
+        if(!d)return null;
+        const sm=`${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,"0")}`;
+        return <ScheduleSheet debt={d} startMonth={sm} acctLabel={acctLabel}
+          onClose={()=>setSchedDebtId(null)}/>;
       })()}
 
       {/* Transaction detail modal */}

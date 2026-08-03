@@ -81,6 +81,37 @@ export function amortizeOne({ balance, ratePercent = 0, payment }) {
   return { months, totalInterest: round2(interest), stalled: bal > 0 };
 }
 
+// Month-by-month schedule for ONE debt at a fixed payment — amortizeOne's
+// exact math, kept row by row for the drill-in view. Same guards: immediate
+// stall when the payment doesn't beat the month's interest (rows stop there),
+// MAX_MONTHS runaway cap flags `stalled` with the rows it did compute. The
+// one presentational difference: the FINAL payment is capped at balance +
+// interest (nobody overpays the last month), so sum(principal) conserves the
+// starting balance exactly while months/totalInterest stay identical to
+// amortizeOne (the cap only fires in the month the loop ends anyway).
+// Returns { rows: [{ month, payment, interest, principal, balance }],
+//           months, totalInterest, stalled } — month is 1-based, balance is
+// the remaining stored-positive owed after that month's payment.
+export function amortizationSchedule({ balance, ratePercent = 0, payment }) {
+  let bal = round2(Number(balance) || 0);
+  const pct = Number(ratePercent);
+  const r = Number.isFinite(pct) && pct > 0 ? pct / 100 / 12 : 0;
+  const pay = Number(payment) || 0;
+  const rows = [];
+  if (bal <= 0) return { rows, months: 0, totalInterest: 0, stalled: false };
+  if (pay <= 0) return { rows, months: 0, totalInterest: 0, stalled: true };
+  let totalInterest = 0;
+  while (bal > 0 && rows.length < MAX_MONTHS) {
+    const i = round2(bal * r);
+    if (pay <= i) return { rows, months: rows.length, totalInterest, stalled: true };
+    const p = Math.min(pay, round2(bal + i));
+    totalInterest = round2(totalInterest + i);
+    bal = round2(bal + i - p);
+    rows.push({ month: rows.length + 1, payment: p, interest: i, principal: round2(p - i), balance: bal });
+  }
+  return { rows, months: rows.length, totalInterest, stalled: bal > 0 };
+}
+
 // Multi-debt payoff simulation. Each month: interest accrues on every open
 // debt; every debt gets its minimum; the leftover budget (extraMonthly plus
 // every already-cleared debt's freed minimum — the "snowball" mechanic, which

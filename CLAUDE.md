@@ -799,6 +799,18 @@ The app's ONLY use of Supabase **Storage** — everything else is Postgres.
   year/month, so an untagged list surviving a movers-only transient failure
   after a month switch would render the old pair's deltas under the new
   labels. No migration.
+- **Per-debt payoff schedule drill-in (2026-08-03, plan Session 5)** —
+  "Schedule ›" on a Debt-tab card (shown when balance > 0 and a minimum
+  payment is typed) opens `ScheduleSheet`: this ONE debt amortized at its own
+  minimum via the new pure `amortizationSchedule` (`src/debtPayoff.js` —
+  amortizeOne's exact math kept row-by-row; final payment capped at
+  balance+interest so principal conserves the starting balance; months/
+  totalInterest test-pinned identical to `amortizeOne`). Stall renders the
+  honest `--danger` banner (no rows, no fake date); the MAX_MONTHS cap renders
+  its rows under a "still owing after 50 years" banner. First 24 rows + "Show
+  all"; remaining-balance column and the header run through `displayBalance`.
+  Sheet state is the account ID, looked up live in `debtData` so a saved
+  APR/min re-amortizes the open sheet. No migration.
 - **Sign-out button (2026-08-03)** — header button next to Refresh,
   confirm-gated; `signOut()` passthrough in dataAdapter (Dashboard never
   imports supabaseClient.js — the mock-harness alias rule) calling
@@ -869,8 +881,9 @@ in-app saved chats (needs Mason's sizing call). Carry
 condition: the Dashboard.jsx decomposition is DEFERRED (keep the single file
 during active development). Delete entries as they ship.
 
-Debt follow-ups (not built): per-debt payoff schedules view, and net worth over
-time — `balance_snapshots` is its shared groundwork (manual debts shipped
+Debt follow-ups (not built): net worth over
+time — `balance_snapshots` is its shared groundwork (manual debts and the
+per-debt payoff schedule drill-in shipped
 2026-08-03; Mason's call: net worth EXCLUDES hidden accounts' balances,
 consistent with the query-level rule). Later (discussed,
 not committed): net worth over time, cash-flow forecast, savings goals, CSV/PDF
