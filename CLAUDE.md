@@ -689,6 +689,22 @@ The app's ONLY use of Supabase **Storage** — everything else is Postgres.
   read-only assistant's worst case was a misleading answer, not an action).
   Colours run through `chipOn` against the card surface. No migrations.
 
+- **Section 3 batch (2026-08-02 prompt, shipped 2026-08-03)** — four items,
+  no migrations: **cycling card-balance tile** (Overview; unhidden credit
+  accounts, click/swipe with horizontal-intent threshold, selection a device
+  pref `mm:cardTile` in localStorage, stale selection falls back credit-first;
+  `getOverview` gained an additive `id`); **Ask-tab persistence** —
+  sessionStorage scrollback (trimmed to ≤29 user-first messages so a restored
+  history + the new turn never trips the server's `slice(-MAX_TURNS)` into an
+  assistant-first history, which the API 400s) + "Save chat" share-sheet
+  export + "New chat"; **Uncategorized teach-queue** (Categories tab, top-5
+  merchant groups by `merchantKey(txDescriptor(t))`, derived in render from
+  the month's rows — no cache — feeding `learnMerchant`); **startup skeleton**
+  (App.jsx, token-styled, decision order untouched) + **month jump picker**
+  (tap the month label; tap-a-month grid, future months clamped outside the
+  Budget tab). Deliberately not built: in-app saved chats and search
+  refinement (both need Mason — see the backlog).
+
 ## Pending branches
 
 None in code. No outstanding ops tasks. Receipts storage policy SETTLED +
@@ -705,13 +721,11 @@ migration that DROPS should verify rather than trust.
 
 ## Roadmap
 
-**Session plan:** `docs/session-plan-2026-08-02.md` sequences ALL remaining
-work into six proposed sessions (UI-polish cluster first; envelopes last,
-gated on Mason's scoping; explicit not-planned list). The ready-to-paste
-prompt for the next session is `docs/next-session-prompt-2026-08-02.md`
-(card-cycling tile, Ask persistence + save-chat, teach-queue, startup
-skeleton + month jump picker — pointers verified against c06b2fa). Keep both
-current as sessions ship, or delete them when they're spent.
+**Session plan:** `docs/session-plan-2026-08-02.md` sequences the remaining
+work (status header shows what's shipped; envelopes last, gated on Mason's
+scoping; explicit not-planned list). The 2026-08-02 next-session prompt was
+spent by the Section 3 batch and deleted. Keep the plan current as sessions
+ship, or delete it when spent.
 
 **Improvement backlog (2026-08-01 six-dimension audit):**
 `docs/improvement-backlog-2026-08-01.md` — Batch 1 + Sections 1–2 and most of

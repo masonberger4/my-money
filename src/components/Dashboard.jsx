@@ -145,9 +145,9 @@ function signed(n) { return `${n>0?"+":""}${fmtAuto(n)}`; }
 // downloads are unreliable — the share sheet (→ Save to Files / AirDrop / a
 // mail draft to the CPA) is the path that actually works there, so try it
 // first and fall back to the anchor click for desktop browsers.
-async function downloadCsv(filename,text){
+async function downloadCsv(filename,text,mime="text/csv"){
   try{
-    const file=new File([text],filename,{type:"text/csv"});
+    const file=new File([text],filename,{type:mime});
     if(navigator.canShare&&navigator.canShare({files:[file]})){
       await navigator.share({files:[file],title:filename});
       return;
@@ -157,7 +157,7 @@ async function downloadCsv(filename,text){
     console.error("share failed, falling back to download",err);
   }
   try{
-    const url=URL.createObjectURL(new Blob([text],{type:"text/csv"}));
+    const url=URL.createObjectURL(new Blob([text],{type:mime}));
     const a=document.createElement("a");
     a.href=url;a.download=filename;
     document.body.appendChild(a);a.click();a.remove();
@@ -165,6 +165,48 @@ async function downloadCsv(filename,text){
   }catch(err){
     console.error("csv download failed",err);
   }
+}
+// Ask-tab scrollback: sessionStorage (device-local ephemera, per-tab scoping is
+// the point — NOT localStorage, NOT the shared settings table). Every access is
+// try/caught (Safari private mode throws on ACCESS). Only {role,content} pairs
+// are ever persisted — chatBusy/chatError are transient and never stored.
+// Trimmed to sit comfortably under api/assistant.js's caps (MAX_TURNS 30,
+// MAX_MSG_CHARS 8000, MAX_TOTAL_CHARS 60000) so a restored history can always
+// ride the next send without a 400. Two invariants keep that true: at most
+// CHAT_MAX_TURNS-1 messages are stored (so [...restored, new user] is ≤
+// MAX_TURNS and the server's slice(-MAX_TURNS) drops nothing), and the stored
+// array always starts with a USER turn (Anthropic rejects an assistant-first
+// history with a 400).
+const CHAT_SS_KEY="mm:askChat";
+const CHAT_MAX_TURNS=30,CHAT_MSG_CHARS=8000,CHAT_TOTAL_CHARS=48000;
+function trimChatForStorage(msgs){
+  let out=(Array.isArray(msgs)?msgs:[])
+    .filter(m=>m&&(m.role==="user"||m.role==="assistant")&&typeof m.content==="string")
+    .map(m=>({role:m.role,content:m.content.slice(0,CHAT_MSG_CHARS)}))
+    .slice(-(CHAT_MAX_TURNS-1));
+  let total=out.reduce((s,m)=>s+m.content.length,0);
+  while(out.length>1&&total>CHAT_TOTAL_CHARS){total-=out[0].content.length;out.shift();}
+  // Never store an assistant-first history — drop leading assistant turns.
+  while(out.length&&out[0].role!=="user")out.shift();
+  return out;
+}
+function readStoredChat(){
+  try{
+    const raw=sessionStorage.getItem(CHAT_SS_KEY);
+    if(!raw)return [];
+    return trimChatForStorage(JSON.parse(raw));
+  }catch{return [];}
+}
+function writeStoredChat(msgs){
+  try{
+    if(!msgs.length)sessionStorage.removeItem(CHAT_SS_KEY);
+    else sessionStorage.setItem(CHAT_SS_KEY,JSON.stringify(trimChatForStorage(msgs)));
+  }catch{/* Safari private mode / quota — scrollback just stays in-memory */}
+}
+// Plain-markdown transcript for the "Save chat" export.
+function chatTranscript(msgs){
+  const head=`# Spending assistant chat — ${new Date().toLocaleString()}\n`;
+  return head+msgs.map(m=>`\n**${m.role==="user"?"You":"Assistant"}:**\n${m.content}\n`).join("");
 }
 // "Jun 2027" from a 'YYYY-MM-DD' target date.
 function monthYear(dateStr) {
@@ -213,6 +255,50 @@ function DebtNum({id,value,onSave,placeholder,prefix,suffix,width=74}) {
 
 function Sk({w="100%",h=16,r=6}) {
   return <div style={{width:w,height:h,borderRadius:r,background:"var(--border)",animation:"pulse 1.5s ease-in-out infinite"}} />;
+}
+
+// Month jump picker — opened by tapping the header month label. A tap-a-month
+// grid + year stepper, deliberately NOT <input type="month"> (the free-typed
+// date-input mid-typing-garbage Gotcha). Future months are only pickable when
+// maxAhead allows them — the caller passes the same 12-on-budget / 0-elsewhere
+// rule that gates canNext, so the picker can never reach a month ‹/› can't.
+function MonthJumpSheet({year,month,now,maxAhead,onPick,onClose}) {
+  const [py,setPy]=useState(year);
+  const nowY=now.getFullYear(),nowM=now.getMonth()+1;
+  const maxIdx=nowY*12+(nowM-1)+maxAhead; // absolute month index cap
+  const maxYear=Math.floor(maxIdx/12);
+  const names=Array.from({length:12},(_,i)=>new Date(2000,i,1).toLocaleString("default",{month:"short"}));
+  return (
+    <div className="overlay" onClick={onClose}>
+      <div className="modal" onClick={e=>e.stopPropagation()} style={{width:"min(340px,92vw)"}}>
+        <div style={{fontSize:12,color:"var(--muted)",marginBottom:10,textAlign:"center"}}>Jump to a month</div>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:10,marginBottom:14}}>
+          <button className="nbtn" onClick={()=>setPy(y=>y-1)} aria-label="Previous year">‹</button>
+          <div style={{fontSize:16,fontWeight:600,minWidth:70,textAlign:"center",color:"var(--text)"}}>{py}</div>
+          <button className="nbtn" onClick={()=>setPy(y=>y+1)} disabled={py>=maxYear} aria-label="Next year">›</button>
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8}}>
+          {names.map((n,i)=>{
+            const m=i+1;
+            const disabled=py*12+i>maxIdx;
+            const active=py===year&&m===month;
+            const isNow=py===nowY&&m===nowM;
+            return (
+              <button key={m} className="ibtn" disabled={disabled} onClick={()=>onPick(py,m)}
+                style={{justifyContent:"center",padding:"10px 0",
+                  fontWeight:active||isNow?600:400,
+                  opacity:disabled?.35:1,
+                  ...(active?{background:"var(--accent)",color:"var(--accent-text)",borderColor:"var(--accent)"}:{}),
+                  ...(!active&&isNow?{borderColor:"var(--accent)"}:{})}}>
+                {n}
+              </button>
+            );
+          })}
+        </div>
+        <button onClick={onClose} className="ibtn" style={{width:"100%",justifyContent:"center",marginTop:14}}>Cancel</button>
+      </div>
+    </div>
+  );
 }
 
 function Donut({data,size=130}) {
@@ -927,7 +1013,16 @@ export default function Dashboard({ refreshTick = 0 }) {
   // open, or null. Rows come from taxData, so the sheet shows the tax cache's
   // busy state while an edit's invalidation refetches.
   const [taxDrill,setTaxDrill]=useState(null);
-  const [chatMsgs,setChatMsgs]=useState([]);
+  // Cycling card-balance tile: id of the credit account the Overview tile
+  // shows. DEVICE pref (localStorage, the mm:theme precedent — a settings-table
+  // pref would flip the other phone). A stale/unresolvable id falls back to the
+  // credit-first default at render time; every storage access is try/caught
+  // (Safari private mode throws on ACCESS).
+  const [cardTileId,setCardTileId]=useState(()=>{try{return localStorage.getItem("mm:cardTile")||null;}catch{return null;}});
+  const cardSwipe=useRef(null);
+  // Hydrated from sessionStorage on mount, written back on change (see
+  // CHAT_SS_KEY above) — scrollback survives a same-tab reload, not tab close.
+  const [chatMsgs,setChatMsgs]=useState(readStoredChat);
   const [chatInput,setChatInput]=useState("");
   const [chatBusy,setChatBusy]=useState(false);
   const [chatError,setChatError]=useState(null);
@@ -953,6 +1048,11 @@ export default function Dashboard({ refreshTick = 0 }) {
   const themeTitle=`Theme: ${themeUi.label}${themePref==="system"?` — following your device, ${themeResolved} right now`:""}. Tap for ${themeNext.label}.`;
 
   useEffect(()=>{chatEndRef.current?.scrollIntoView({behavior:"smooth"});},[chatMsgs,chatBusy]);
+  useEffect(()=>{writeStoredChat(chatMsgs);},[chatMsgs]);
+  function clearChat(){
+    setChatMsgs([]);setChatError(null);setChatInput("");
+    try{sessionStorage.removeItem(CHAT_SS_KEY);}catch{/* private mode */}
+  }
 
   async function sendChat(text){
     const q=(text??chatInput).trim();
@@ -1367,6 +1467,7 @@ export default function Dashboard({ refreshTick = 0 }) {
   const [selTx,setSelTx]=useState(null);
   const [importing,setImporting]=useState(false);
   const [connectingSfin,setConnectingSfin]=useState(false);
+  const [monthPicker,setMonthPicker]=useState(false);
   const [quickAdd,setQuickAdd]=useState(false); // manual transaction quick-add sheet
   const [quickAddBusy,setQuickAddBusy]=useState(false);
 
@@ -1656,7 +1757,20 @@ export default function Dashboard({ refreshTick = 0 }) {
   const totalSpent=cats.reduce((s,c)=>s+c.amount,0);
   // Debts read negative (see src/accountBalance.js). getOverview orders credit
   // accounts first, so this headline is usually a card — and it carries `type`.
-  const balance=displayBalance(overview?.accounts?.[0]?.balance?.current,overview?.accounts?.[0]?.type);
+  // The tile cycles over unhidden CREDIT accounts only; the remembered pick is
+  // a device pref (mm:cardTile). 0 credit accounts -> today's behavior (first
+  // ordered account / em-dash); a stored id that no longer resolves falls back
+  // to the credit-first default, never a blank tile.
+  const creditAccts=(overview?.accounts||[]).filter(a=>a.type==="credit");
+  const tileAcct=creditAccts.find(a=>a.id===cardTileId)||creditAccts[0]||overview?.accounts?.[0];
+  const tileIdx=Math.max(0,creditAccts.indexOf(tileAcct));
+  const balance=displayBalance(tileAcct?.balance?.current,tileAcct?.type);
+  const cycleCard=(dir)=>{
+    if(creditAccts.length<2)return;
+    const next=creditAccts[(tileIdx+dir+creditAccts.length)%creditAccts.length];
+    setCardTileId(next.id);
+    try{localStorage.setItem("mm:cardTile",next.id);}catch{/* private mode: session-only */}
+  };
   const lastSpent=overview?.last_month?.spending?.amount;
   const delta=lastSpent!=null?totalSpent-lastSpent:null;
   // Donut slices are non-text marks on the card -> 3:1.
@@ -1852,7 +1966,10 @@ export default function Dashboard({ refreshTick = 0 }) {
             <div style={{fontSize:11,fontWeight:600,letterSpacing:".08em",color:"var(--muted)",textTransform:"uppercase",marginBottom:4}}>Spending Dashboard</div>
             <div style={{display:"flex",alignItems:"center",gap:10}}>
               <button className="nbtn" onClick={prevMonth}>‹</button>
-              <h1 style={{fontSize:20,fontWeight:600,letterSpacing:"-.02em",minWidth:190,textAlign:"center",color:"var(--text)"}}>
+              <h1 role="button" tabIndex={0} title="Jump to a month" aria-label="Jump to a month"
+                onClick={()=>setMonthPicker(true)}
+                onKeyDown={e=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();setMonthPicker(true);}}}
+                style={{fontSize:20,fontWeight:600,letterSpacing:"-.02em",minWidth:190,textAlign:"center",color:"var(--text)",cursor:"pointer"}}>
                 {loading&&!lastUpd?<span style={{opacity:.4}}>Loading…</span>:monthLabel(year,month)}
               </h1>
               <button className="nbtn" onClick={nextMonth} disabled={!canNext}>›</button>
@@ -1874,6 +1991,13 @@ export default function Dashboard({ refreshTick = 0 }) {
             </button>
           </div>
         </div>
+
+        {monthPicker&&(
+          <MonthJumpSheet year={year} month={month} now={now}
+            maxAhead={tab==="budget"?12:0}
+            onPick={(y,m)=>{setYear(y);setMonth(m);setMonthPicker(false);}}
+            onClose={()=>setMonthPicker(false)}/>
+        )}
 
         {error&&<div style={{background:"var(--danger-bg)",border:"1px solid var(--danger-border)",borderRadius:10,padding:"12px 16px",fontSize:13,color:"var(--danger)",marginBottom:14}}>{error}</div>}
 
@@ -1918,13 +2042,34 @@ export default function Dashboard({ refreshTick = 0 }) {
             // Whole dollars like its neighbours: a negative card balance with
             // cents is too wide for a third of a 390px screen and wrapped the
             // minus sign onto its own line.
-            {label:"Card balance",val:loading?null:fmt(balance),sub:overview?.accounts?.[0]?.name||"Linked account"},
+            // Cycles through unhidden credit accounts: click/tap advances,
+            // horizontal swipe goes either way (with an intent threshold so it
+            // never claims a vertical page scroll). Selection is a device pref.
+            {label:"Card balance",val:loading?null:fmt(balance),sub:tileAcct?.name||"Linked account",cycle:!loading&&creditAccts.length>1},
             {label:"vs last month",val:loading||delta==null?null:`${delta>=0?"+":""}${fmt(delta)}`,sub:delta==null?"—":delta>=0?"↑ more spending":"↓ less spending",clr:delta==null?"var(--muted)":inkOn(delta>=0?"#D85A30":"#1D9E75",surf.card)},
           ].map((c,i)=>(
-            <div key={i} className="card" style={{animationDelay:i*.04+"s"}}>
+            <div key={i} className="card" style={{animationDelay:i*.04+"s",...(c.cycle?{cursor:"pointer",userSelect:"none"}:{})}}
+              onClick={c.cycle?()=>cycleCard(1):undefined}
+              onTouchStart={c.cycle?(e)=>{const t=e.touches[0];cardSwipe.current={x:t.clientX,y:t.clientY};}:undefined}
+              onTouchEnd={c.cycle?(e)=>{
+                const s=cardSwipe.current;cardSwipe.current=null;if(!s)return;
+                const t=e.changedTouches[0];const dx=t.clientX-s.x,dy=t.clientY-s.y;
+                // Horizontal intent only: |dx| must beat |dy| AND clear a
+                // minimum, so a vertical scroll is never claimed. A real swipe
+                // suppresses the synthetic click; a plain tap falls through to
+                // onClick above.
+                if(Math.abs(dx)>Math.abs(dy)&&Math.abs(dx)>30){e.preventDefault();cycleCard(dx<0?1:-1);}
+              }:undefined}>
               <div style={{fontSize:11,color:"var(--muted)",fontWeight:500,marginBottom:5}}>{c.label}</div>
               {loading?<Sk w="70%" h={22}/>:<div style={{fontSize:20,fontWeight:600,letterSpacing:"-.02em",marginBottom:3}}>{c.val??"—"}</div>}
-              <div style={{fontSize:11,color:c.clr||"var(--muted)"}}>{loading?<Sk w="80%" h={10}/>:c.sub}</div>
+              <div style={{fontSize:11,color:c.clr||"var(--muted)",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{loading?<Sk w="80%" h={10}/>:c.sub}</div>
+              {c.cycle&&(
+                <div style={{display:"flex",gap:4,marginTop:6,alignItems:"center"}}>
+                  {creditAccts.map((a,j)=>(
+                    <span key={a.id??j} style={{width:5,height:5,borderRadius:"50%",background:j===tileIdx?"var(--accent)":"var(--border)"}}/>
+                  ))}
+                </div>
+              )}
             </div>
           ))}
         </div>
@@ -2058,6 +2203,52 @@ export default function Dashboard({ refreshTick = 0 }) {
                       and set its category, and it'll remember that merchant next time.
                     </div>
                   )}
+                  {/* Teach-queue: the month's top Uncategorized merchants, derived
+                      in render from txsByCategory (no cached state — the
+                      setState(null) gotcha never applies, and the list self-heals
+                      through learnMerchant's reloadData). Grouped by the SAME key
+                      the classifier uses (merchantKey over txDescriptor, not raw
+                      description) so a taught rule fires on the next pull. Tapping
+                      a row opens the detail sheet for the group's most recent
+                      transaction — the existing pick-a-category → offerToLearn →
+                      learnMerchant flow, dry-run preview and all; Uncategorized
+                      is never offerable there. */}
+                  {c.label===UNCATEGORIZED&&(()=>{
+                    const rows=txsByCategory.get(UNCATEGORIZED)||[];
+                    const groups=new Map();
+                    for(const t of rows){
+                      const k=merchantKey(txDescriptor(t));
+                      if(!k)continue;
+                      const g=groups.get(k);
+                      if(g){g.count++;if(t.amount>0)g.out+=t.amount;if(t.transaction_date>g.tx.transaction_date)g.tx=t;}
+                      else groups.set(k,{key:k,count:1,out:t.amount>0?t.amount:0,tx:t});
+                    }
+                    // Top 5 by count (ties broken by summed outflow): repetition,
+                    // not size, is what makes a merchant worth teaching.
+                    const top=[...groups.values()].sort((a,b)=>b.count-a.count||b.out-a.out).slice(0,5);
+                    if(top.length===0)return null;
+                    return (
+                      <div style={{marginTop:8,background:"var(--bg)",borderRadius:8,padding:"8px 10px"}}>
+                        <div style={{fontSize:10,fontWeight:600,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em",marginBottom:6}}>
+                          Teach it — this month's top unknowns
+                        </div>
+                        {top.map(g=>(
+                          <button key={g.key} onClick={()=>setSelTx(g.tx)}
+                            style={{display:"flex",alignItems:"center",gap:8,width:"100%",background:"none",border:"none",
+                              padding:"4px 0",cursor:"pointer",fontFamily:"inherit",textAlign:"left"}}>
+                            <span style={{fontSize:11,fontWeight:500,color:"var(--text)",flex:1,minWidth:0,
+                              whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{g.key}</span>
+                            <span style={{fontSize:10,color:"var(--muted)",flexShrink:0}}>{g.count} txn{g.count!==1?"s":""}</span>
+                            <span style={{fontSize:11,fontFamily:"'DM Mono',monospace",color:"var(--text)",flexShrink:0}}>{fmt(g.out)}</span>
+                            <span style={{fontSize:11,color:"var(--muted)",flexShrink:0}}>›</span>
+                          </button>
+                        ))}
+                        <div style={{fontSize:10,color:"var(--muted)",marginTop:4,lineHeight:1.5}}>
+                          Tap one, pick its category, and it'll offer to remember the merchant.
+                        </div>
+                      </div>
+                    );
+                  })()}
                 </div>
                 );
               })}
@@ -2929,8 +3120,20 @@ export default function Dashboard({ refreshTick = 0 }) {
                 Send
               </button>
             </div>
+            {chatMsgs.length>0&&(
+              <div style={{display:"flex",justifyContent:"center",gap:8,marginTop:10}}>
+                <button onClick={()=>downloadCsv(`spending_chat_${new Date().toISOString().slice(0,10)}.md`,chatTranscript(chatMsgs),"text/markdown")}
+                  style={{fontSize:11,fontFamily:"inherit",color:"var(--text)",background:"var(--bg)",border:"1px solid var(--border)",borderRadius:8,padding:"5px 10px",cursor:"pointer"}}>
+                  Save chat
+                </button>
+                <button onClick={clearChat} disabled={chatBusy}
+                  style={{fontSize:11,fontFamily:"inherit",color:"var(--muted)",background:"var(--bg)",border:"1px solid var(--border)",borderRadius:8,padding:"5px 10px",cursor:chatBusy?"default":"pointer",opacity:chatBusy?.5:1}}>
+                  New chat
+                </button>
+              </div>
+            )}
             <div style={{marginTop:8,fontSize:10,color:"var(--muted)",textAlign:"center"}}>
-              Read-only: the assistant sees your data but can't change anything. Conversations aren't saved.
+              Read-only: the assistant sees your data but can't change anything. Chats stay on this device until the tab or app closes — Save chat exports a copy.
             </div>
           </div>
         )}

@@ -151,7 +151,7 @@ function getMonthTransactions(year, month) {
 export async function getOverview() {
   const { data: accounts, error } = await supabase
     .from('accounts')
-    .select('name, mask, type, current_balance')
+    .select('id, name, mask, type, current_balance')
     .eq('hidden', false);
   if (error) throw error;
 
@@ -165,6 +165,8 @@ export async function getOverview() {
 
   return {
     accounts: ordered.map(a => ({
+      // Additive: the Overview card tile keys its remembered selection on it.
+      id: a.id,
       balance: { current: a.current_balance ?? 0 },
       name: a.name,
       mask: a.mask,
