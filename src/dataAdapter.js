@@ -6,7 +6,7 @@ import { markInternalTransfers, cashIncome, cashSpending } from './cashFlow.js';
 import { walkEnvelopes, monthKey, planMove } from './envelopes.js';
 import { isSpend, sumSpending, spendingGroups, biggestMovers, toTxShape, aggregateEnvelopeSpending } from './spending.js';
 import { createRangeMemo } from './monthMemo.js';
-import { parseIgnoreList } from './recurring.js';
+import { parseIgnoreList, toggleIgnoreKey, CANDIDATE_WINDOW_MONTHS } from './recurring.js';
 import { aggregateCoverage } from './coverage.js';
 
 // Re-export the pure cash-flow model (src/cashFlow.js) so existing importers
@@ -721,6 +721,20 @@ export async function setRecIgnore(keys) {
   if (error) throw error;
 }
 
+// Toggle ONE key with a read-merge-write: re-read the stored row at toggle
+// time and change only the toggled key (pure toggleIgnoreKey). Rebuilding the
+// whole array from component state let a failed mount-time read (recIgnore=[]
+// after a network blip) wipe every previously ignored charge for BOTH phones
+// on the first ✕ tap — and made the ordinary two-phone race last-array-wins.
+// A failed READ aborts before any write. Returns the merged list so the
+// caller can adopt keys the other phone added since mount.
+export async function updateRecIgnore(key, ignored) {
+  const current = await getRecIgnore();
+  const next = toggleIgnoreKey(current, key, ignored);
+  await setRecIgnore(next);
+  return next;
+}
+
 // Per-(category, month) spend sums for the walk's range, memoised. The walk's
 // range grows by a month every month and is re-read after every envelope edit,
 // but an envelope edit CANNOT change a transaction — so assigning, moving money
@@ -922,12 +936,17 @@ export async function fundTargets(items, { year, month }) {
 // partial one) for client-side recurring detection (src/recurring.js).
 // Goes through getTransactionsBetween so hidden-account filtering and
 // account rules ("Return") apply. Detection itself stays out of the adapter.
-// The window reaches ~2 years (was 6 months) so the ANNUAL cadence has the
-// >= 3 charges detection requires — two full year-gaps. Detection never reads
-// `_internal`, so the O(V·E) transfer matching is skipped over this long
-// range — the envelope-walk precedent (transfers are excluded by CATEGORY in
-// detectRecurring, not by the pairing marks).
-export async function getRecurringCandidates({ months = 25 } = {}) {
+// The window is CANDIDATE_WINDOW_MONTHS (~40 — was 6, then 25 on the faulty
+// "two full year-gaps" arithmetic, which kept an annual item detectable only
+// in its renewal month: the ≥3-charge floor needs the LAST three renewals in
+// range, and the newest of those can be nearly a year old — the constant's
+// comment in src/recurring.js carries the numbers, and the year-round sweep
+// in test/recurring.test.js pins them). detectRecurring's recency-sliced
+// gates + staleness cutoff are what keep a window this wide honest.
+// Detection never reads `_internal`, so the O(V·E) transfer matching is
+// skipped over this long range — the envelope-walk precedent (transfers are
+// excluded by CATEGORY in detectRecurring, not by the pairing marks).
+export async function getRecurringCandidates({ months = CANDIDATE_WINDOW_MONTHS } = {}) {
   const now = new Date();
   const curY = now.getFullYear();
   const curM = now.getMonth() + 1;
@@ -1637,7 +1656,13 @@ export async function getDataCoverage() {
 // direct supabaseClient import would escape the mocks and break harness
 // rendering. App.jsx's onAuthStateChange sees the session end and renders the
 // Login screen, so callers don't navigate — they just await this.
+// scope:'local' is LOAD-BEARING: supabase-js v2 defaults to scope 'global',
+// which revokes EVERY refresh token for the user server-side — and this app
+// runs ONE shared Auth user for the whole household, so the default would
+// silently drop the other person's phone to the Login screen within the
+// access-token hour. 'local' ends only this device's session, which is what
+// the confirm dialog promises.
 export async function signOut() {
-  const { error } = await supabase.auth.signOut();
+  const { error } = await supabase.auth.signOut({ scope: 'local' });
   if (error) throw error;
 }

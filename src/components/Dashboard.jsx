@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from "react";
-import { getOverview, getSpending, getBiggestMovers, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES, setCategoryRule, applyCategoryRuleToHistory, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, invalidateEnvelopeSpending, isEnvelopeSchemaMissing, targetNeed, readyToAssign, envelopePace, getEnvPace, setEnvPace as persistEnvPace, getRecIgnore, setRecIgnore as persistRecIgnore, monthKey, getEntities, createEntity, updateEntity, getTaxYearTransactions, getMileage, addMileage, deleteMileage, getReceiptTxIds, getDebts, getBalanceSnapshots, addManualTransaction, createManualAccount, getDataCoverage, signOut } from "../dataAdapter.js";
+import { getOverview, getSpending, getBiggestMovers, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES, setCategoryRule, applyCategoryRuleToHistory, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, invalidateEnvelopeSpending, isEnvelopeSchemaMissing, targetNeed, readyToAssign, envelopePace, getEnvPace, setEnvPace as persistEnvPace, getRecIgnore, updateRecIgnore, monthKey, getEntities, createEntity, updateEntity, getTaxYearTransactions, getMileage, addMileage, deleteMileage, getReceiptTxIds, getDebts, getBalanceSnapshots, addManualTransaction, createManualAccount, getDataCoverage, signOut } from "../dataAdapter.js";
 import { payoffWhatIf, debtFreeMonth, isMortgage } from "../debtPayoff.js";
 import { SCHEDULE_E_LINES, RENTS_KEY, DEFAULT_SCHEDULE_E_MAP, scheduleEReport, entityMonthly, entityLedger, personalDeductionReport, DEDUCTION_BUCKETS, DEFAULT_DEDUCTION_MAP, mileageDeduction, scheduleECsv } from "../taxReport.js";
 import { merchantKey } from "../txClassify.js";
@@ -926,7 +926,10 @@ export default function Dashboard({ refreshTick = 0 }) {
   // Biggest movers (Trends): viewed month vs the month before, PURCHASE-BASED
   // (isSpend lineage) — never mixed into the cash-flow figures. Plain reload
   // state like `spending`: refetched by every reloadData, so it self-heals
-  // after edits (no lazy cache, no sentinel).
+  // after edits (no lazy cache, no sentinel). Shape {y,m,list} — MONTH-TAGGED,
+  // because the card header derives its "X vs Y" labels from live year/month:
+  // an untagged list surviving a movers-only transient failure after a month
+  // switch would silently render the OLD pair's deltas under the new labels.
   const [movers,setMovers]=useState(null);
   const [accounts,setAccounts]=useState([]);
   const [budgets,setBudgets]=useState({});
@@ -1294,7 +1297,11 @@ export default function Dashboard({ refreshTick = 0 }) {
       // pattern): folding it into [] would blank the entity chips and every
       // property worksheet until the next successful reload.
       if(ents!==undefined)setEntities(ents.entities||[]);
-      if(mv!==undefined)setMovers(mv.movers||[]);
+      // Month-tagged (see the state comment). On a transient failure keep the
+      // list only if it already describes THIS month pair; a stale pair drops
+      // to null so the card shows its skeleton instead of mislabeled deltas.
+      if(mv!==undefined)setMovers({y,m,list:mv.movers||[]});
+      else setMovers(cur=>cur&&cur.y===y&&cur.m===m?cur:null);
       invalidateTax(); // recompute lazily on next Tax-tab visit
       // A completed envelope write may have painted fresher rows while this
       // reload was in flight — don't overwrite them (or the freshly saved
@@ -1346,7 +1353,8 @@ export default function Dashboard({ refreshTick = 0 }) {
   },[year,month,ready,refreshTick,fetchData]);
 
   // Recurring detection is lazy: fetched + computed the first time the tab
-  // opens (6-month query), cached until the next data reload.
+  // opens (a ~40-month query — CANDIDATE_WINDOW_MONTHS, sized for annual),
+  // cached until the next data reload.
   useEffect(()=>{
     if(tab!=="recurring"||recurring||recLoading)return;
     setRecLoading(true);
@@ -1973,13 +1981,19 @@ export default function Dashboard({ refreshTick = 0 }) {
     setEnvPace(next);
     persistEnvPace(next).catch(err=>console.error("saving pace opt-in failed",err));
   }
-  // Ignore/unignore a recurring charge. Same optimistic display-pref shape as
-  // togglePace: write settings directly, no refetch — detection stays
-  // unfiltered and the Recurring tab filters at render.
+  // Ignore/unignore a recurring charge. Optimistic at render like togglePace,
+  // but the WRITE is a single-key read-merge-write (updateRecIgnore): this is
+  // HOUSEHOLD data the other phone depends on, and persisting the whole array
+  // rebuilt from local state let a failed mount-time read (recIgnore=[] after
+  // a network blip) wipe every stored ignore on the first ✕ tap. On success,
+  // adopt the merged server list — it may carry keys the other phone added
+  // since mount; detection stays unfiltered, so no refetch either way.
   function toggleRecIgnore(key){
-    const next=recIgnore.includes(key)?recIgnore.filter(k=>k!==key):[...recIgnore,key];
-    setRecIgnore(next);
-    persistRecIgnore(next).catch(err=>console.error("saving recurring ignore list failed",err));
+    const ignored=!recIgnore.includes(key);
+    setRecIgnore(ignored?[...recIgnore,key]:recIgnore.filter(k=>k!==key));
+    updateRecIgnore(key,ignored)
+      .then(merged=>setRecIgnore(merged))
+      .catch(err=>console.error("saving recurring ignore list failed",err));
   }
   const saveIncome=(val,scope)=>runEnvelopeWrite("the income",()=>setBudgetIncome({year,month},val,{scope}));
   const doMove=(from,to,amount)=>runEnvelopeWrite("the transfer",()=>moveMoney({from,to,amount},{year,month}));
@@ -3341,13 +3355,17 @@ export default function Dashboard({ refreshTick = 0 }) {
                 By category (purchases) — {new Date(year,month-1,1).toLocaleString("default",{month:"short",year:"numeric"})} vs {new Date(year,month-2,1).toLocaleString("default",{month:"short",year:"numeric"})}.
                 Counts what was bought, so it won&#39;t line up with the cash-flow bars above.
               </div>
-              {loading||!movers?<Sk h={100}/>:movers.length===0?(
+              {(()=>{
+                // Render only a list tagged with the viewed month — a stale
+                // pair under the header's freshly-derived labels would lie.
+                const mlist=movers&&movers.y===year&&movers.m===month?movers.list:null;
+                return loading||!mlist?<Sk h={100}/>:mlist.length===0?(
                 <div style={{textAlign:"center",padding:"20px 0",color:"var(--muted)",fontSize:13}}>
                   Not much moved — category spending looks like last month.
                 </div>
               ):(()=>{
-                const maxAbs=Math.max(...movers.map(m=>Math.abs(m.delta)),1);
-                return movers.map(m=>{
+                const maxAbs=Math.max(...mlist.map(m=>Math.abs(m.delta)),1);
+                return mlist.map(m=>{
                   const up=m.delta>0; // more money spent than last month
                   const w=(Math.abs(m.delta)/maxAbs)*100;
                   return (
@@ -3367,7 +3385,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                     </div>
                   );
                 });
-              })()}
+              })();})()}
             </div>
           </div>
         )}
@@ -3395,7 +3413,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                     {fmt(shown.reduce((s,r)=>s+(r.monthlyEquivalent??r.monthlyAmount),0))}<span style={{fontSize:13,color:"var(--muted)",fontWeight:500}}>/mo</span>
                   </div>
                   <div style={{fontSize:11,color:"var(--muted)",marginTop:3}}>
-                    {shown.length} recurring charge{shown.length!==1?"s":""} · weekly and annual normalized to monthly · last two years
+                    {shown.length} recurring charge{shown.length!==1?"s":""} · weekly and annual normalized to monthly · last ~3 years
                   </div>
                 </>
               )}
@@ -3474,7 +3492,7 @@ export default function Dashboard({ refreshTick = 0 }) {
               </div>
             )}
             <div style={{fontSize:11,color:"var(--muted)",background:"var(--bg)",borderRadius:8,padding:"8px 12px"}}>
-              Detected heuristically: same merchant at a steady weekly, monthly, or annual cadence with similar amounts (±20%). Card payments and transfers never count. ✕ ignores a charge for the whole household.
+              Detected heuristically: same merchant at a steady weekly, monthly, or annual cadence with similar amounts (±20%). Charges that stop arriving drop off once they&#39;re a couple of cycles overdue. Card payments and transfers never count. ✕ ignores a charge for the whole household.
             </div>
           </div>
           );

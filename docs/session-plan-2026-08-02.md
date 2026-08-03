@@ -1,15 +1,16 @@
 # Future-sessions plan — my-money remaining work
 
-Source of truth: `docs/improvement-backlog-2026-08-01.md` Section 3 remainder (Mason's decisions inline) + CLAUDE.md Roadmap. Verified against code at c06b2fa: `Dashboard.jsx` is 3,787 lines (all sessions below touch it — sequence them, never parallel, per the one-session-per-line-of-work gotcha); `api/sync.js` already snapshots **all** usable accounts into `balance_snapshots` (not just debts — line 392, balance-moved gate), which changes the net-worth sizing; no sign-out exists anywhere in `src/`.
+Source of truth: `docs/improvement-backlog-2026-08-01.md` Section 3 remainder (Mason's decisions inline) + CLAUDE.md Roadmap. Verified against code at c06b2fa: `Dashboard.jsx` is 3,787 lines (all sessions below touch it — sequence them, never parallel, per the one-session-per-line-of-work gotcha); `api/sync.js` already snapshots **all** usable accounts into `balance_snapshots` (not just debts — line 392, balance-moved gate), which changes the net-worth sizing. (The "no sign-out exists anywhere in `src/`" observation is spent — the header sign-out button shipped 2026-08-03.)
 
 **Status 2026-08-03:** the Section 3 batch SHIPPED (card-cycling tile, Ask
 persistence + Save chat, Uncategorized teach-queue, startup skeleton + month
 jump picker) — that covers most of Session 1 (minus search refinement +
 sign-out), the teach-queue half of Session 2, and Session 4's v1. Session 3
 (recurring v2: weekly/annual cadences + household ignore list) SHIPPED
-2026-08-03. Remaining: search refinement (needs a Mason spec), sign-out
-button, Trends biggest movers, Session 5 (debt follow-ups), Session 6
-(envelopes, Mason-gated), and the in-app saved-chats sizing question.
+2026-08-03, as did Trends biggest movers (Session 2's second half) and the
+sign-out button. Remaining: search refinement (needs a Mason spec), Session 5
+(debt follow-ups), Session 6 (envelopes, Mason-gated), and the in-app
+saved-chats sizing question.
 
 All sessions follow the standard flow (fetch/absorb main → green `npm test` + placeholder-env build → screenshots at 390px for UI → branch → PR → merge, auto mode).
 
@@ -23,16 +24,16 @@ The pure-UI cluster; runs first so the heaviest Dashboard.jsx churn lands before
 - **Startup skeleton** (extend the existing `Sk` component to first paint).
 - **Month jump picker** (replaces repeated month-arrow taps).
 - **Client-side search refinement**.
-- **Sign-out button** (Roadmap "Later" list; ~10 lines, `supabase.auth.signOut()` + header placement — folded in because it's header UI in the same file).
+- ~~**Sign-out button**~~ **SHIPPED 2026-08-03** — header placement via a dataAdapter `signOut()` passthrough, and `{ scope: 'local' }` is load-bearing (supabase-js v2's default `'global'` revokes the SHARED household user's every session — it would sign the other phone out too).
 
 **Migration:** none. **Mason mid-session:** none — the tile spec is decided. **Post-merge:** Mason verifies the swipe gesture on the real iPhone (the receiptImage precedent: touch behavior isn't testable in the harness).
 
-## Session 2 — "Spending insight: Uncategorized teach-queue + Trends biggest movers" — **M**
+## Session 2 — "Spending insight: Uncategorized teach-queue + Trends biggest movers" — **M** — **SHIPPED** (teach-queue 2026-08-02, biggest movers 2026-08-03)
 Both are "understand my categories" features sharing the `src/spending.js` / `isSpend()` lineage and its test fixtures.
 
 **Items:**
-- **Uncategorized teach-queue** — top-5 Uncategorized groups by `merchantKey` feeding the existing `learnMerchant` flow. Constraints from the backlog: inherits the over-specific-key limit (pinned REGRESSION — fine, groups are just narrow), and whatever list the queue renders must be covered by `learnMerchant`'s refetch (the `saveTx` Gotcha — likely means the queue re-derives from `transactions` after a rule applies, or gets its own refetch hook).
-- **Trends biggest movers** — per-category month-over-month deltas, built strictly inside `spendingGroups` lineage as a pure helper in `src/spending.js` + tests against the ledger fixture; renders as a purchase-based section on the Trends tab, clearly separate from the cash-flow numbers (never mix the two models in one figure).
+- ~~**Uncategorized teach-queue**~~ **SHIPPED 2026-08-02** (Section 3 batch) — top-5 Uncategorized groups by `merchantKey` feeding the existing `learnMerchant` flow, derived in render from the month's rows (no cache).
+- ~~**Trends biggest movers**~~ **SHIPPED 2026-08-03** — pure `biggestMovers` in `src/spending.js` (spendingGroups lineage) + tests against the ledger fixture; its own purchase-based card on the Trends tab, month-tagged state, never mixed with the cash-flow numbers.
 
 **Migration:** none. **Mason mid-session:** none. **Order:** after Session 1 (both edit the Categories/Trends regions of Dashboard.jsx).
 

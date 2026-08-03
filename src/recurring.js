@@ -26,11 +26,39 @@ const PRICE_CREEP_PCT = 0.05;
 // ±4 near-tolerance, 7-day due window) — pinned by tests; never loosen it.
 // perMonth normalizes the per-charge amount to a monthly figure so mixed
 // cadences can sum and sort on one field (monthlyEquivalent).
+//
+// evalDays — how far back from the group's NEWEST charge the amount/gap gates
+// look. The candidate window is wide (~40 months, sized for annual — see
+// CANDIDATE_WINDOW_MONTHS), so without a recency bound a monthly sub's amount
+// median spans YEARS: a price change mid-window then fails the ±20%/80% gate
+// (a live sub vanishes until the new price dominates) and priceCreep re-flags
+// a hike that settled a year ago. Weekly/monthly judge the sub's RECENT shape
+// (monthly's 190 days ≈ the 6-month adapter window the original detector
+// shipped against); annual is null = the whole group (three yearly charges
+// have no meaningful "recent slice"). Anchored at the newest CHARGE, not the
+// clock, so the function stays pure without `today`.
+//
+// staleDays — with a clock, an item whose nextDate is more than this far past
+// is treated as cancelled and dropped: roughly two more missed cycles (14/60),
+// capped at 60 days for annual. Without it the wide window resurrects every
+// sub cancelled in the last ~3 years as a red "overdue" row whose
+// monthlyEquivalent inflates the Recurring headline /mo total.
 const CADENCES = [
-  { cadence: 'weekly', minGap: 5, maxGap: 9, gapTol: 2, dueSoonDays: 2, perMonth: 52 / 12 },
-  { cadence: 'monthly', minGap: 24, maxGap: 32, gapTol: 4, dueSoonDays: 7, perMonth: 1 },
-  { cadence: 'annual', minGap: 350, maxGap: 380, gapTol: 15, dueSoonDays: 30, perMonth: 1 / 12 },
+  { cadence: 'weekly', minGap: 5, maxGap: 9, gapTol: 2, dueSoonDays: 2, perMonth: 52 / 12, evalDays: 84, staleDays: 14 },
+  { cadence: 'monthly', minGap: 24, maxGap: 32, gapTol: 4, dueSoonDays: 7, perMonth: 1, evalDays: 190, staleDays: 60 },
+  { cadence: 'annual', minGap: 350, maxGap: 380, gapTol: 15, dueSoonDays: 30, perMonth: 1 / 12, evalDays: null, staleDays: 60 },
 ];
+
+// How many months of transactions the adapter feeds detection
+// (getRecurringCandidates' default). Sized by the ANNUAL worst case, which is
+// NOT "two year-gaps" (the 25 first shipped on that arithmetic left annual
+// items visible only in their renewal month): the three most recent renewals
+// span ~2×366 days ending at the LAST renewal, which itself can be up to
+// ~366 days + staleDays old before the staleness cutoff retires the item,
+// plus the window's month alignment (it starts at the 1st) and posting drift.
+// 732 + 366 + 60 + slack ⇒ 40 months (39 whole months ≥ ~1185 days). Pinned
+// by the year-round sweep in test/recurring.test.js.
+export const CANDIDATE_WINDOW_MONTHS = 40;
 
 // 'YYYY-MM-DD' → whole days since epoch. String split, not new Date(string),
 // so day arithmetic can't pick up UTC off-by-one surprises.
@@ -101,28 +129,48 @@ export function detectRecurring(transactions, today = null) {
   }
 
   const out = [];
-  for (const [key, all] of groups) {
-    if (all.length < 3) continue;
+  for (const [key, group] of groups) {
+    if (group.length < 3) continue;
+    const all = [...group].sort(
+      (a, b) => dayNumber(a.transaction_date) - dayNumber(b.transaction_date)
+    );
+    const newestDay = dayNumber(all[all.length - 1].transaction_date);
 
-    // Similar amounts: keep charges within ±20% of the median; a group where
-    // fewer than ~80% qualify is variable spend (groceries), not a subscription.
-    const amounts = all.map(t => t.amount).sort((a, b) => a - b);
-    const medAmount = median(amounts);
-    const kept = all.filter(t => Math.abs(t.amount - medAmount) <= 0.2 * medAmount);
-    if (kept.length < 3 || kept.length < 0.8 * all.length) continue;
+    // Try each cadence over its own recency slice (evalDays above). The bands
+    // don't overlap, so on any one slice at most one band can match — the
+    // first hit wins and the scan is deterministic. On histories shorter than
+    // every evalDays the slices all equal the whole group, which makes this
+    // byte-identical to the original single-pass detector.
+    let hit = null;
+    for (const c of CADENCES) {
+      const windowed =
+        c.evalDays == null
+          ? all
+          : all.filter(t => newestDay - dayNumber(t.transaction_date) <= c.evalDays);
+      if (windowed.length < 3) continue;
 
-    // Steady cadence: the median gap must land inside one band (the bands
-    // don't overlap, so the match is unambiguous), and most gaps must sit
-    // within that band's tolerance of the median.
-    const days = kept.map(t => dayNumber(t.transaction_date)).sort((a, b) => a - b);
-    const gaps = [];
-    for (let i = 1; i < days.length; i++) gaps.push(days[i] - days[i - 1]);
-    if (!gaps.length) continue;
-    const medGap = median([...gaps].sort((a, b) => a - b));
-    const spec = CADENCES.find(c => medGap >= c.minGap && medGap <= c.maxGap);
-    if (!spec) continue;
-    const near = gaps.filter(g => Math.abs(g - medGap) <= spec.gapTol).length;
-    if (near < Math.ceil((gaps.length * 2) / 3)) continue;
+      // Similar amounts: keep charges within ±20% of the median; a group where
+      // fewer than ~80% qualify is variable spend (groceries), not a subscription.
+      const amounts = windowed.map(t => t.amount).sort((a, b) => a - b);
+      const medAmount = median(amounts);
+      const kept = windowed.filter(t => Math.abs(t.amount - medAmount) <= 0.2 * medAmount);
+      if (kept.length < 3 || kept.length < 0.8 * windowed.length) continue;
+
+      // Steady cadence: the median gap must land inside this band, and most
+      // gaps must sit within the band's tolerance of the median.
+      const days = kept.map(t => dayNumber(t.transaction_date)).sort((a, b) => a - b);
+      const gaps = [];
+      for (let i = 1; i < days.length; i++) gaps.push(days[i] - days[i - 1]);
+      if (!gaps.length) continue;
+      const medGap = median([...gaps].sort((a, b) => a - b));
+      if (medGap < c.minGap || medGap > c.maxGap) continue;
+      const near = gaps.filter(g => Math.abs(g - medGap) <= c.gapTol).length;
+      if (near < Math.ceil((gaps.length * 2) / 3)) continue;
+      hit = { spec: c, kept, days, gaps, medGap, medAmount };
+      break;
+    }
+    if (!hit) continue;
+    const { spec, kept, days, gaps, medGap, medAmount } = hit;
 
     const keptAmounts = kept.map(t => t.amount).sort((a, b) => a - b);
     const lastDay = days[days.length - 1];
@@ -134,6 +182,10 @@ export function detectRecurring(transactions, today = null) {
     }).amount;
     const nextDay = lastDay + Math.round(medGap);
     const todayDay = today ? dayNumber(today) : null;
+    // Lapsed: more than staleDays past the expected charge means cancelled,
+    // not overdue — drop the item rather than flag it. Only with a clock; the
+    // pure no-clock call still returns every detected group.
+    if (todayDay != null && todayDay - nextDay > spec.staleDays) continue;
     out.push({
       key,
       name: mostFrequent(kept.map(t => t.merchant_name)) || titleCase(key),
@@ -197,5 +249,24 @@ export function parseIgnoreList(raw) {
     seen.add(k);
     out.push(k);
   }
+  return out;
+}
+
+// Pure merge step for the ignore-list WRITE path: apply one key's toggle to a
+// list that was just re-read from settings — never to whatever copy a device
+// has held since mount. Rebuilding the whole array from local state let a
+// failed mount-time read (recIgnore=[] after a network blip) wipe the
+// household's stored list on the first ✕ tap; merging a single-key delta into
+// a fresh read shrinks the two-phone race to that one key. Tolerant of
+// garbage input, the parseIgnoreList spirit.
+export function toggleIgnoreKey(list, key, ignored) {
+  const seen = new Set();
+  const out = [];
+  for (const k of Array.isArray(list) ? list : []) {
+    if (typeof k !== 'string' || !k || k === key || seen.has(k)) continue;
+    seen.add(k);
+    out.push(k);
+  }
+  if (ignored && typeof key === 'string' && key) out.push(key);
   return out;
 }

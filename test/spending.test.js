@@ -334,11 +334,14 @@ test('biggestMovers skips negligible deltas and honors the limit opt', () => {
   assert.equal(all.length, 9);
   assert.equal(biggestMovers(curr, juneRows(), { limit: 3 }).length, 3);
   // A sub-dollar wobble is noise: shrink June Groceries by 50¢ from July's total.
+  // limit:100 so the assertion exercises the $1 noise floor itself — at the
+  // default top-5, eight larger movers crowd the 50¢ delta out and the check
+  // passes even with minDelta loosened to a penny (verified by mutation).
   const A = makeAccounts();
   const wobble = [makeTx(A.checking, 'w1', '2026-06-05', 109.0, 'SAFEWAY 1467 EVERETT WA')];
   assert.ok(
-    !biggestMovers(curr, wobble).some(m => m.label === 'Groceries'),
-    'a 50¢ delta is skipped'
+    !biggestMovers(curr, wobble, { limit: 100 }).some(m => m.label === 'Groceries'),
+    'a 50¢ delta is skipped even with slots to spare'
   );
 });
 
