@@ -799,8 +799,8 @@ session** (diagnosis archived in `docs/double-count-diagnosis-2026-08-03.md`):
 
 - **ROTATE the Supabase `service_role` key** — it was pasted into a Claude
   chat session (2026-08-03) to run the read-only diagnosis. Dashboard →
-  Settings → API → rotate; then update `SUPABASE_SERVICE_ROLE_KEY` in Vercel
-  (Production AND Preview) and redeploy.
+  Settings → API Keys ("Publishable and secret" tab) → rotate the Secret key;
+  then update it in Vercel (Production AND Preview) and redeploy.
 - **Verify the $2,200 payroll duplicate** — "ACH Deposit PAYROLL From POME
   HOLISTIC PE" −$2,200 appears TWICE on 2026-07-24 on Cashback Debit (3481)
   with two distinct `sfin:` tx ids, so the upsert can't dedup it. Check the
@@ -1029,7 +1029,14 @@ surgically, never the foundation.
   hidden in a uniform payload is precisely what must not be overwritten.
 - Vercel `VITE_*` vars are baked at BUILD time — changing them needs a redeploy
   (check Production AND Preview). Missing client config renders the
-  ConfigErrorScreen (App.jsx), not white.
+  ConfigErrorScreen (App.jsx), not white. **Supabase key naming** (renamed
+  upstream 2025): client = the Publishable key (`sb_publishable_…`) in
+  `VITE_SUPABASE_PUBLISHABLE_KEY`; server = the Secret key (`sb_secret_…`) in
+  `SUPABASE_SECRET_KEY`. The legacy names (`VITE_SUPABASE_ANON_KEY`,
+  `SUPABASE_SERVICE_ROLE_KEY`, holding legacy anon/service_role JWTs or
+  new-style keys) still work as code-level fallbacks — never put a
+  `sb_secret_…` value in any `VITE_*` var; it would be baked into the public
+  bundle.
 - The empty-institution count-query error must NOT fall back to the "connect
   your first account" screen (see App.jsx count handling).
 - iOS PWA: apple-touch-icon must be PNG; service worker (`public/sw.js`) never
