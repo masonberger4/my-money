@@ -4,8 +4,9 @@ import { merchantKey, classifyDescription } from './txClassify.js';
 import { applyRuleToHistory, isRangeExhaustedError } from './ruleHistory.js';
 import { markInternalTransfers, cashIncome, cashSpending } from './cashFlow.js';
 import { walkEnvelopes, monthKey, planMove } from './envelopes.js';
-import { isSpend, sumSpending, spendingGroups, toTxShape, aggregateEnvelopeSpending } from './spending.js';
+import { isSpend, sumSpending, spendingGroups, biggestMovers, toTxShape, aggregateEnvelopeSpending } from './spending.js';
 import { createRangeMemo } from './monthMemo.js';
+import { parseIgnoreList, toggleIgnoreKey, CANDIDATE_WINDOW_MONTHS } from './recurring.js';
 import { aggregateCoverage } from './coverage.js';
 
 // Re-export the pure cash-flow model (src/cashFlow.js) so existing importers
@@ -24,6 +25,7 @@ export {
   isSpend,
   sumSpending,
   spendingGroups,
+  biggestMovers,
   toTxShape,
   patchTxShape,
   effectiveCategory,
@@ -186,6 +188,31 @@ export async function getOverview() {
 export async function getSpending({ year, month }) {
   const txs = await getMonthTransactions(year, month);
   return { groups: spendingGroups(txs) };
+}
+
+// The Trends "Biggest movers" read: the viewed month vs the month before it,
+// through the pure biggestMovers (src/spending.js — isSpend lineage, the ONE
+// linked-boundary model). Each month's rows arrive already marked:
+// getTransactionsBetween runs markInternalTransfers per fetch, because
+// isSpend() reads `_internal` — the pairing is part of the row shape, not an
+// optional step. Both months ride the same per-reload range memo the other
+// reads share, so inside a reload the current month is served from the fetch
+// getSpending already started (and the previous month by slicing the
+// cash-flow window when it overlaps). Honest limit: the pairing sees one
+// month's window at a time, so a transfer pair straddling the month boundary
+// is unpaired on both sides and each leg COUNTS — the same verdict the one
+// model gives any pair that crosses a boundary it can't see across (an
+// unlinked or hidden account), here triggered by the window edge instead of
+// the account set.
+export async function getBiggestMovers({ year, month }) {
+  const prev = shiftMonth(year, month, -1);
+  const cb = monthBounds(year, month);
+  const pb = monthBounds(prev.year, prev.month);
+  const [currRows, prevRows] = await Promise.all([
+    getTransactionsBetween(cb.start, cb.end),
+    getTransactionsBetween(pb.start, pb.end),
+  ]);
+  return { movers: biggestMovers(currRows, prevRows) };
 }
 
 // fields: { user_category } (null reverts to the automatic category),
@@ -671,6 +698,66 @@ export async function setEnvPace(map) {
   if (error) throw error;
 }
 
+// Recurring-charge ignore list — a HOUSEHOLD pref (settings table, NOT
+// localStorage: muting a subscription should mute it on both phones — Mason's
+// recorded ruling). ONE row keyed 'rec:ignore' holding a JSON array of the
+// recurring items' group keys (detectRecurring's `key`); parsing is the pure
+// parseIgnoreList in src/recurring.js. Display-only: detection stays
+// unfiltered and the Recurring tab filters at render, so toggling never
+// refetches (and never touches the lazy cache's null-means-refetch sentinel).
+const REC_IGNORE_KEY = 'rec:ignore';
+
+export async function getRecIgnore() {
+  const { data, error } = await supabase
+    .from('settings')
+    .select('value')
+    .eq('key', REC_IGNORE_KEY)
+    .maybeSingle();
+  if (error) throw error;
+  return parseIgnoreList(data?.value ?? null);
+}
+
+export async function setRecIgnore(keys) {
+  const seen = new Set();
+  const clean = [];
+  for (const k of keys || []) {
+    if (typeof k !== 'string' || !k || seen.has(k)) continue;
+    seen.add(k);
+    clean.push(k);
+  }
+  const { error } = await supabase
+    .from('settings')
+    .upsert({ key: REC_IGNORE_KEY, value: JSON.stringify(clean) }, { onConflict: 'household_id,key' });
+  if (error) throw error;
+}
+
+// Toggle ONE key with a read-merge-write: re-read the stored row at toggle
+// time and change only the toggled key (pure toggleIgnoreKey). Rebuilding the
+// whole array from component state let a failed mount-time read (recIgnore=[]
+// after a network blip) wipe every previously ignored charge for BOTH phones
+// on the first ✕ tap — and made the ordinary two-phone race last-array-wins.
+// A failed READ aborts before any write. Returns the merged list so the
+// caller can adopt keys the other phone added since mount.
+//
+// SAME-DEVICE toggles are serialized through a promise chain: two quick ✕
+// taps otherwise interleave (read A, read B, write [A], write [B]) and the
+// last write silently drops the first key — then the caller's
+// .then(setRecIgnore) reverts it on screen too. Chaining makes B's read see
+// A's committed write. The chain swallows rejections so one failed toggle
+// never dams the queue; callers still receive the real rejection. The
+// two-PHONE race stays the accepted single-key last-write-wins.
+let recIgnoreChain = Promise.resolve();
+export function updateRecIgnore(key, ignored) {
+  const run = recIgnoreChain.then(async () => {
+    const current = await getRecIgnore();
+    const next = toggleIgnoreKey(current, key, ignored);
+    await setRecIgnore(next);
+    return next;
+  });
+  recIgnoreChain = run.catch(() => {});
+  return run;
+}
+
 // Per-(category, month) spend sums for the walk's range, memoised. The walk's
 // range grows by a month every month and is re-read after every envelope edit,
 // but an envelope edit CANNOT change a transaction — so assigning, moving money
@@ -872,7 +959,18 @@ export async function fundTargets(items, { year, month }) {
 // partial one) for client-side recurring detection (src/recurring.js).
 // Goes through getTransactionsBetween so hidden-account filtering and
 // account rules ("Return") apply. Detection itself stays out of the adapter.
-export async function getRecurringCandidates({ months = 6 } = {}) {
+// The window is CANDIDATE_WINDOW_MONTHS (~40 — was 6, then 25 on the faulty
+// "two full year-gaps" arithmetic, which kept an annual item detectable only
+// in its renewal month: the ≥3-charge floor needs the LAST three renewals in
+// range, and the newest of those can be nearly a year old — the constant's
+// comment in src/recurring.js carries the numbers, and the year-round sweep
+// in test/recurring.test.js pins them). detectRecurring's recency-sliced
+// gates + staleness cutoff are what keep a window this wide honest.
+// Detection itself never reads `_internal` — transfers are excluded by
+// CATEGORY inside detectRecurring — but the rows arrive marked anyway: under
+// the unified model getTransactionsBetween ALWAYS runs the pairing (cheap —
+// per-equal-amount buckets), and toTxShape's `counted` reads the marks.
+export async function getRecurringCandidates({ months = CANDIDATE_WINDOW_MONTHS } = {}) {
   const now = new Date();
   const curY = now.getFullYear();
   const curM = now.getMonth() + 1;
@@ -1575,4 +1673,21 @@ export async function getDataCoverage() {
     if (data.length < page) break;
   }
   return aggregateCoverage(rows);
+}
+
+// Sign out the shared household session on this device. A passthrough so
+// Dashboard never imports supabaseClient.js directly — the gitignored mock
+// harness aliases dataAdapter/sync/db/apiClient by full-match regex, and a
+// direct supabaseClient import would escape the mocks and break harness
+// rendering. App.jsx's onAuthStateChange sees the session end and renders the
+// Login screen, so callers don't navigate — they just await this.
+// scope:'local' is LOAD-BEARING: supabase-js v2 defaults to scope 'global',
+// which revokes EVERY refresh token for the user server-side — and this app
+// runs ONE shared Auth user for the whole household, so the default would
+// silently drop the other person's phone to the Login screen within the
+// access-token hour. 'local' ends only this device's session, which is what
+// the confirm dialog promises.
+export async function signOut() {
+  const { error } = await supabase.auth.signOut({ scope: 'local' });
+  if (error) throw error;
 }

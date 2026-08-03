@@ -79,7 +79,7 @@ entry once shipped.
 | `src/components/Dashboard.jsx` | Almost the entire UI — single file, inline styles, tabs: overview/categories/**budget**/transactions/accounts/trends/recurring/**tax**/ask. Shared mini-components: `Pill`, `Swatch`, `EditName`, `Sk` (skeleton), `Donut`, `DrillNum` (the tap-a-number affordance) ; envelope editors `AssignEdit`/`BudgetEdit`/`IncomeEdit` + the `TargetSheet`/`MoveSheet`/`CategorySheet`/`PropertySheet` modals. |
 | `src/dataAdapter.js` | All Supabase reads + shapes consumed by Dashboard. Keep return shapes stable. Also holds the CSV/PDF-import writes (`findOrCreateManualInstitution`, `createManualAccount`, `getExistingTxIds`, `importCsvTransactions`, `isManualAccount`), the comparison-mode read `getAccountTransactionsInRange`, the backfill boundary `getFeedCoverageStart`, the learned-rule CRUD (`getCategoryRules`/`setCategoryRule`/`applyCategoryRuleToHistory`/`deleteCategoryRule`), the SimpleFIN predicates (`isSimpleFinAccount`, `ACCOUNT_TYPES`/`ACCOUNT_SUBTYPES`), the envelope I/O (`getEnvelopes`, `setAssigned`, `setCategoryRollover`, `setTargetKind`, `fundTargets`, `moveMoney`, `getBudgetIncome`/`setBudgetIncome`), the rental/tax I/O (`getEntities`/`createEntity`/`updateEntity`, `getTaxYearTransactions`, `getMileage`/`addMileage`/`deleteMileage`), the receipt I/O (`getReceipts`/`addReceipt`/`deleteReceipt`/`getReceiptUrl`/`getReceiptTxIds` — the app's only Supabase **Storage** use), and re-exports the pure helpers from `cashFlow.js`, `envelopes.js`, and `spending.js` so existing importers/harnesses keep working. The spending predicate/bucketing/`toTxShape` now live in `spending.js` — dataAdapter delegates (shapes unchanged). |
 | `src/cashFlow.js` | The linked-boundary PAIRING + income side (see Conventions), pure: `markInternalTransfers` (structural equal-amount pairing, `maxMatchTransfers` Kuhn's), `cashIncome` (unpaired depository inflows), `cashSpending` (delegates to `sumSpending` — one model). Plain-Node importable; covered by `test/cashFlow.test.js` incl. the brute-force mixed-account-type parity check. |
-| `src/spending.js` | THE unified spending model, pure (imports `categoryMap.js` + `txClassify.js`): `effectiveCategory`, `bankName`/`displayName`, `isLoanAccount`, **`isSpend`** (the ONE predicate, every surface incl. Trends), `sumSpending`, `spendingGroups` (the Categories bucketing), `toTxShape` (incl. `counted`), and `aggregateEnvelopeSpending` (the envelope fold). Rows must go through `markInternalTransfers` first — `isSpend` reads `_internal`. Hidden-account exclusion deliberately NOT here — it lives at the query level; the pure layer never sees hidden rows. Covered by `test/spending.test.js` against the ledger fixture. |
+| `src/spending.js` | THE unified spending model, pure (imports `categoryMap.js` + `txClassify.js`): `effectiveCategory`, `bankName`/`displayName`, `isLoanAccount`, **`isSpend`** (the ONE predicate, every surface incl. Trends), `sumSpending`, `spendingGroups` (the Categories bucketing), `biggestMovers` (the Trends month-over-month deltas, same `isSpend` lineage), `toTxShape` (incl. `counted`), and `aggregateEnvelopeSpending` (the envelope fold). Rows must go through `markInternalTransfers` first — `isSpend` reads `_internal`. Hidden-account exclusion deliberately NOT here — it lives at the query level; the pure layer never sees hidden rows. Covered by `test/spending.test.js` against the ledger fixture. |
 | `src/envelopes.js` | The envelope-budgeting model (see Conventions), pure: `walkEnvelopes` (`available = assigned + carry − spent`), `targetNeed`, `readyToAssign`, `planMove`, month-key helpers, and `envelopePace` (the display-only per-envelope pace warning; opt-in via the `env:pace` settings key, `getEnvPace`/`setEnvPace` in dataAdapter). Zero imports — dataAdapter does the I/O and hands it plain arrays. Covered by `test/envelopes.test.js`. |
 | `src/ruleHistory.js` | The learned-rule history-apply core, extracted from `applyCategoryRuleToHistory`: first-token ilike narrowing (`ilikeCandidatePattern`), ordered paging with the **PGRST103 end-of-range contract** (`isRangeExhaustedError`), re-matching via `matchLearnedRule`, skip-already-correct, dryRun, mapped_category-only writes. Takes injected `fetchPage`/`updateBatch` so it tests with fakes; dataAdapter binds the real client. Covered by `test/categoryRules.test.js`. |
 | `src/taxReport.js` | The Tax tab's pure core, zero imports: `SCHEDULE_E_LINES` + `scheduleEReport` (category→line mapping, refund netting, capital expenses pulled out of the lines, a VISIBLE unmapped bucket — the Uncategorized lesson applied to tax lines), `entityMonthly` (per-property cash P&L) + `entityLedger` (the property drill-in's Money in/out/not-counted sections — totals pinned by test to `entityMonthly`'s sums), `personalDeductionReport` (charitable/medical/taxes-paid buckets), `MILEAGE_RATES` (effective-dated IRS rates — data that goes stale; verify at irs.gov each January) + `mileageDeduction`, and `scheduleECsv` (exports keep the stored positive=out sign; the column name says so). Covered by `test/taxReport.test.js`. |
@@ -725,6 +725,73 @@ The app's ONLY use of Supabase **Storage** — everything else is Postgres.
   dataAdapter (whole-table paged read, fetched lazily on first expand). May be
   hidden or removed once the coverage questions settle. No migration.
 
+- **Recurring v2 (2026-08-03, plan Session 3)** — weekly + annual cadence
+  detection alongside monthly, no migration. `detectRecurring` matches the
+  median gap against non-overlapping bands (weekly 5–9, monthly 24–32
+  UNCHANGED, annual 350–380) with near-tolerance and the due-soon window
+  scaled per band (±2/±4/±15 days; due-soon 2/7/30) — all pinned as
+  documentation in `test/recurring.test.js`. Items gained `cadence` +
+  `monthlyEquivalent` (×52/12, ×1, ÷12); `monthlyAmount` keeps its historical
+  name but is the PER-CHARGE median — render it with a cadence suffix
+  (/wk, /mo, /yr; the tab headline and the sort use the equivalent, and
+  `spendingContext.js` suffixes too). `getRecurringCandidates` widened
+  6→`CANDIDATE_WINDOW_MONTHS` (40); detection excludes transfers by
+  CATEGORY, never `_internal` — but the rows still arrive MARKED, because
+  under the unified model `getTransactionsBetween` ALWAYS runs the pairing
+  (the pre-merge `markTransfers:false` option was DELETED by the unification
+  merge; never "restore" an unmarked fetch path — `isSpend()` reads
+  `_internal`, and unmarked rows would count both legs of every washed
+  pair). (The 25 first shipped came from "annual needs two year-gaps",
+  which forgot the LAST renewal is itself up to a year old — annual items
+  vanished ~11 months a year; the constant's comment in `src/recurring.js`
+  carries the corrected arithmetic and a year-round sweep test pins it.)
+  Review fixes hardened the wide window: the amount/gap gates and the
+  priceCreep baseline judge each cadence over a RECENT slice anchored at the
+  group's newest charge (`evalDays` 84/190/whole-group — else a price change
+  mid-window failed the ±20%/80% gate and dropped a LIVE sub, and a
+  long-settled hike re-flagged as creep), and with a clock an item overdue
+  past `staleDays` (two missed cycles — 14/60, annual capped 60) is dropped
+  as cancelled rather than lingering ~2 years as a red overdue row inflating
+  the headline /mo total. Band EDGES + both guards REGRESSION-pinned in
+  `test/recurring.test.js`. Plus the **household ignore
+  list**: ONE settings row `rec:ignore` (JSON array of group `key`s; tolerant
+  pure `parseIgnoreList` in recurring.js; `getRecIgnore`/`setRecIgnore` in
+  dataAdapter — settings table per Mason's ruling, NOT localStorage), applied
+  at RENDER only — detection stays unfiltered, so toggling never refetches
+  and never touches the lazy cache's null-means-refetch sentinel. ✕ on the
+  row ignores; a collapsed "Ignored (n)" card restores — and the WRITE is a
+  single-key read-merge-write (`updateRecIgnore` → pure `toggleIgnoreKey`),
+  never the whole array from component state, so a failed mount-time read
+  can't wipe the other phone's ignores on the first tap. Same-device toggles
+  are SERIALIZED through a promise chain inside `updateRecIgnore` (two quick
+  ✕ taps otherwise read the same base and the last write drops the first
+  key); the two-phone race stays the accepted single-key last-write-wins.
+
+- **Trends biggest movers (2026-08-03, plan Session 2)** — per-category
+  month-over-month deltas as its own card on the Trends tab, below the
+  cash-flow figures: pure `biggestMovers` in
+  `src/spending.js` (spendingGroups/`isSpend` lineage — the ONE unified
+  linked-boundary model, the same spending count the cash-flow bars sum;
+  top 5 by |delta|, $1 noise floor, alphabetical tie-break) +
+  `getBiggestMovers` in dataAdapter (rides the per-reload range memo; rows
+  arrive `markInternalTransfers`-marked, since no `markTransfers` opt-out
+  exists post-unification — the only honest divergence from the bars is
+  window-edge pairing, per-month fetches vs the bars' 6-month window).
+  Dashboard's movers state is **MONTH-TAGGED**
+  (`{y,m,list}`): the card header derives its "X vs Y" labels from live
+  year/month, so an untagged list surviving a movers-only transient failure
+  after a month switch would render the old pair's deltas under the new
+  labels. No migration.
+- **Sign-out button (2026-08-03)** — header button next to Refresh,
+  confirm-gated; `signOut()` passthrough in dataAdapter (Dashboard never
+  imports supabaseClient.js — the mock-harness alias rule) calling
+  `supabase.auth.signOut({ scope: 'local' })`. **`scope:'local'` is
+  load-bearing:** supabase-js v2 defaults to `'global'`, which revokes EVERY
+  refresh token for the ONE shared household Auth user — signing out the
+  laptop would silently drop the other phone to the Login screen within the
+  access-token hour, contradicting the "on this device" confirm text. No
+  migration.
+
 ## Pending branches
 
 None in code. **Outstanding ops/data tasks from the 2026-08-03 double-count
@@ -775,10 +842,13 @@ ship, or delete it when spent.
 
 **Improvement backlog (2026-08-01 six-dimension audit):**
 `docs/improvement-backlog-2026-08-01.md` — Batch 1 + Sections 1–2 and most of
-Section 3 SHIPPED (see Merged features). Genuinely unbuilt remainder: Trends
-biggest-movers (now single-model — build in the `isSpend()` lineage), recurring
-weekly/annual cadences + ignore list, search refinement (needs a Mason spec),
-sign-out button, in-app saved chats (needs a Mason sizing decision). Carry
+Section 3 SHIPPED (see Merged features — the Section 3 batch covered the
+card-balance tile, Ask-tab persistence + save-chat, the Uncategorized
+teach-queue, the startup skeleton and the month jump picker; recurring v2,
+Trends biggest movers and the sign-out button shipped 2026-08-03, movers
+reconciled to the unified single-model `isSpend()` lineage at merge). Genuinely
+unbuilt remainder: client-side search refinement (needs a Mason spec) and
+in-app saved chats (needs Mason's sizing call). Carry
 condition: the Dashboard.jsx decomposition is DEFERRED (keep the single file
 during active development). Delete entries as they ship.
 
@@ -786,7 +856,7 @@ Debt follow-ups (not built): manual debts (reuse the
 `is_manual` machinery), per-debt payoff schedules view, and net worth over
 time — `balance_snapshots` is its shared groundwork. Later (discussed,
 not committed): net worth over time, cash-flow forecast, savings goals, CSV/PDF
-export, sign-out button. **Envelope follow-ups** (the tab is shipped, these are
+export. **Envelope follow-ups** (the tab is shipped, these are
 not): Age of Money — wants real *measured* income, so it waits on the income
 wall; scheduled/expected transactions; reconciliation; per-month target
 overrides (a target is one setting per category today, not per month);

@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from "react";
-import { getOverview, getSpending, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES, setCategoryRule, applyCategoryRuleToHistory, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, invalidateEnvelopeSpending, isEnvelopeSchemaMissing, targetNeed, readyToAssign, envelopePace, getEnvPace, setEnvPace as persistEnvPace, monthKey, getEntities, createEntity, updateEntity, getTaxYearTransactions, getMileage, addMileage, deleteMileage, getReceiptTxIds, getDebts, getBalanceSnapshots, addManualTransaction, createManualAccount, getDataCoverage } from "../dataAdapter.js";
+import { getOverview, getSpending, getBiggestMovers, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES, setCategoryRule, applyCategoryRuleToHistory, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, invalidateEnvelopeSpending, isEnvelopeSchemaMissing, targetNeed, readyToAssign, envelopePace, getEnvPace, setEnvPace as persistEnvPace, getRecIgnore, updateRecIgnore, monthKey, getEntities, createEntity, updateEntity, getTaxYearTransactions, getMileage, addMileage, deleteMileage, getReceiptTxIds, getDebts, getBalanceSnapshots, addManualTransaction, createManualAccount, getDataCoverage, signOut } from "../dataAdapter.js";
 import { payoffWhatIf, debtFreeMonth, isMortgage } from "../debtPayoff.js";
 import { SCHEDULE_E_LINES, RENTS_KEY, DEFAULT_SCHEDULE_E_MAP, scheduleEReport, entityMonthly, entityLedger, personalDeductionReport, DEDUCTION_BUCKETS, DEFAULT_DEDUCTION_MAP, mileageDeduction, scheduleECsv } from "../taxReport.js";
 import { merchantKey } from "../txClassify.js";
@@ -923,6 +923,15 @@ export default function Dashboard({ refreshTick = 0 }) {
   const [spending,setSpending]=useState(null);
   const [transactions,setTransactions]=useState(null);
   const [cashFlow,setCashFlow]=useState(null);
+  // Biggest movers (Trends): viewed month vs the month before, through the ONE
+  // unified isSpend() model — the same count the cash-flow bars sum
+  // (cashSpending delegates to sumSpending). Plain reload
+  // state like `spending`: refetched by every reloadData, so it self-heals
+  // after edits (no lazy cache, no sentinel). Shape {y,m,list} — MONTH-TAGGED,
+  // because the card header derives its "X vs Y" labels from live year/month:
+  // an untagged list surviving a movers-only transient failure after a month
+  // switch would silently render the OLD pair's deltas under the new labels.
+  const [movers,setMovers]=useState(null);
   const [accounts,setAccounts]=useState([]);
   const [budgets,setBudgets]=useState({});
   // By-date sinking funds, kept OUT of `budgets`: their amount is a
@@ -960,6 +969,13 @@ export default function Dashboard({ refreshTick = 0 }) {
   const [acctLoading,setAcctLoading]=useState(false);
   const [recurring,setRecurring]=useState(null);
   const [recLoading,setRecLoading]=useState(false);
+  // Muted recurring charges — array of detectRecurring group keys. HOUSEHOLD
+  // pref ('rec:ignore' in the settings table, NOT localStorage — muting a
+  // charge should mute it on both phones). Applied at RENDER, never in the
+  // lazy detection cache, so toggling needs no refetch and never touches the
+  // null-means-refetch sentinel (the setState(null) gotcha stays untriggered).
+  const [recIgnore,setRecIgnore]=useState([]);
+  const [recIgnoredOpen,setRecIgnoredOpen]=useState(false);
   // --- Data coverage panel (TEMPORARY troubleshooting aid; Accounts tab) ---
   // Lazy: the query pages the whole transactions table, so nothing is fetched
   // until the card is first expanded.
@@ -1089,18 +1105,20 @@ export default function Dashboard({ refreshTick = 0 }) {
   useEffect(()=>{
     async function load(){
       try {
-        const [c,n,cc,am,ae,ep]=await Promise.all([
+        const [c,n,cc,am,ae,ep,ri]=await Promise.all([
           getSetting("dash:colors").catch(()=>null),
           getSetting("dash:names").catch(()=>null),
           getSetting("dash:cats").catch(()=>null),
           getSetting("asst:model").catch(()=>null),
           getSetting("asst:effort").catch(()=>null),
           getEnvPace().catch(()=>({})),
+          getRecIgnore().catch(()=>[]),
         ]);
         if(c)setCustomColors(JSON.parse(c));
         if(n)setCustomNames(JSON.parse(n));
         if(cc)setCustomCats(JSON.parse(cc));
         if(ep)setEnvPace(ep);
+        if(ri?.length)setRecIgnore(ri);
         if(am&&ASSISTANT_MODELS[am])setAsstModel(am);
         if(ae&&EFFORT_LEVELS.includes(ae))setAsstEffort(ae);
       } catch{}
@@ -1251,7 +1269,7 @@ export default function Dashboard({ refreshTick = 0 }) {
     invalidateEnvelopeSpending();
     const eseq=++envSeq.current;
     try{
-      const[ov,sp,tx,cf,ac,bu,en,inc,ents]=await Promise.all([
+      const[ov,sp,tx,cf,ac,bu,en,inc,ents,mv]=await Promise.all([
         cur?getOverview():Promise.resolve(null),
         getSpending({year:y,month:m}),
         getTransactions({year:y,month:m}),
@@ -1268,6 +1286,10 @@ export default function Dashboard({ refreshTick = 0 }) {
         // entity picker; degrades to [] until the rental-tax migration lands
         // (inside getEntities) — undefined = transient failure, keep state.
         getEntities().catch(()=>undefined),
+        // Movers share the month fetches above through the range memo, so a
+        // lone failure here is next to impossible — but a nice-to-have section
+        // must not take down the reload; undefined = keep what's on screen.
+        getBiggestMovers({year:y,month:m}).catch(()=>undefined),
       ]);
       if(seq!==loadSeq.current)return false;
       setOverview(ov);setSpending(sp);setTransactions(tx);setCashFlow(cf);
@@ -1276,6 +1298,11 @@ export default function Dashboard({ refreshTick = 0 }) {
       // pattern): folding it into [] would blank the entity chips and every
       // property worksheet until the next successful reload.
       if(ents!==undefined)setEntities(ents.entities||[]);
+      // Month-tagged (see the state comment). On a transient failure keep the
+      // list only if it already describes THIS month pair; a stale pair drops
+      // to null so the card shows its skeleton instead of mislabeled deltas.
+      if(mv!==undefined)setMovers({y,m,list:mv.movers||[]});
+      else setMovers(cur=>cur&&cur.y===y&&cur.m===m?cur:null);
       invalidateTax(); // recompute lazily on next Tax-tab visit
       // A completed envelope write may have painted fresher rows while this
       // reload was in flight — don't overwrite them (or the freshly saved
@@ -1327,7 +1354,8 @@ export default function Dashboard({ refreshTick = 0 }) {
   },[year,month,ready,refreshTick,fetchData]);
 
   // Recurring detection is lazy: fetched + computed the first time the tab
-  // opens (6-month query), cached until the next data reload.
+  // opens (a ~40-month query — CANDIDATE_WINDOW_MONTHS, sized for annual),
+  // cached until the next data reload.
   useEffect(()=>{
     if(tab!=="recurring"||recurring||recLoading)return;
     setRecLoading(true);
@@ -1954,6 +1982,20 @@ export default function Dashboard({ refreshTick = 0 }) {
     setEnvPace(next);
     persistEnvPace(next).catch(err=>console.error("saving pace opt-in failed",err));
   }
+  // Ignore/unignore a recurring charge. Optimistic at render like togglePace,
+  // but the WRITE is a single-key read-merge-write (updateRecIgnore): this is
+  // HOUSEHOLD data the other phone depends on, and persisting the whole array
+  // rebuilt from local state let a failed mount-time read (recIgnore=[] after
+  // a network blip) wipe every stored ignore on the first ✕ tap. On success,
+  // adopt the merged server list — it may carry keys the other phone added
+  // since mount; detection stays unfiltered, so no refetch either way.
+  function toggleRecIgnore(key){
+    const ignored=!recIgnore.includes(key);
+    setRecIgnore(ignored?[...recIgnore,key]:recIgnore.filter(k=>k!==key));
+    updateRecIgnore(key,ignored)
+      .then(merged=>setRecIgnore(merged))
+      .catch(err=>console.error("saving recurring ignore list failed",err));
+  }
   const saveIncome=(val,scope)=>runEnvelopeWrite("the income",()=>setBudgetIncome({year,month},val,{scope}));
   const doMove=(from,to,amount)=>runEnvelopeWrite("the transfer",()=>moveMoney({from,to,amount},{year,month}));
   const saveTarget=(category,{amount,kind,date})=>runEnvelopeWrite("the target",async()=>{
@@ -2001,6 +2043,16 @@ export default function Dashboard({ refreshTick = 0 }) {
             <button className="ibtn" onClick={()=>fetchData(year,month,{sync:true})} disabled={loading} style={{padding:"0 12px"}}>
               <span style={{display:"inline-block",animation:loading?"spin 1s linear infinite":"none"}}>↻</span>
               {lastUpd?lastUpd.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}):"Refresh"}
+            </button>
+            {/* Shared household login — confirm so a stray tap can't sign the
+                whole household out on this device. App.jsx's onAuthStateChange
+                renders the Login screen once the session ends. */}
+            <button className="ibtn" title="Sign out" aria-label="Sign out" style={{padding:"0 12px",flexShrink:0}}
+              onClick={async()=>{
+                if(!window.confirm("Sign out on this device? You'll need the household password to sign back in."))return;
+                try{await signOut();}catch(e){alert("Sign-out failed: "+(e?.message||e));}
+              }}>
+              Sign out
             </button>
           </div>
         </div>
@@ -3293,43 +3345,102 @@ export default function Dashboard({ refreshTick = 0 }) {
                 });
               })()}
             </div>
+            {/* Biggest movers — the ONE unified isSpend() model, the same
+                spending count the cash-flow bars above sum (cashSpending
+                delegates to sumSpending); the only honest divergence is
+                window-edge pairing (per-month fetches here vs the bars'
+                6-month window — see getBiggestMovers). Rise
+                in spending = OVER_MONEY, fall = OK_MONEY (the vs-last-month
+                tile's idiom); bars are marks on the --bg gutter, delta text
+                sits on the card — each contrast-corrected for its own surface. */}
+            <div className="card">
+              <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em",marginBottom:4}}>Biggest movers</div>
+              <div style={{fontSize:11,color:"var(--muted)",marginBottom:14}}>
+                By category — {new Date(year,month-1,1).toLocaleString("default",{month:"short",year:"numeric"})} vs {new Date(year,month-2,1).toLocaleString("default",{month:"short",year:"numeric"})}.
+                Same spending count as the bars above, split by category.
+              </div>
+              {(()=>{
+                // Render only a list tagged with the viewed month — a stale
+                // pair under the header's freshly-derived labels would lie.
+                const mlist=movers&&movers.y===year&&movers.m===month?movers.list:null;
+                return loading||!mlist?<Sk h={100}/>:mlist.length===0?(
+                <div style={{textAlign:"center",padding:"20px 0",color:"var(--muted)",fontSize:13}}>
+                  Not much moved — category spending looks like last month.
+                </div>
+              ):(()=>{
+                const maxAbs=Math.max(...mlist.map(m=>Math.abs(m.delta)),1);
+                return mlist.map(m=>{
+                  const up=m.delta>0; // more money spent than last month
+                  const w=(Math.abs(m.delta)/maxAbs)*100;
+                  return (
+                    <div key={m.label} style={{marginBottom:12}}>
+                      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,marginBottom:4}}>
+                        <Pill label={getName(m.label)} color={getColor(m.label)} surface={surf.card}/>
+                        <span style={{fontSize:11,fontFamily:"'DM Mono',monospace",fontWeight:600,color:inkOn(up?OVER_MONEY:OK_MONEY,surf.card),flexShrink:0}}>
+                          {up?"+":"−"}{fmt(Math.abs(m.delta))}
+                        </span>
+                      </div>
+                      <div style={{display:"flex",alignItems:"center",gap:8}}>
+                        <div style={{flex:1,height:6,background:"var(--bg)",borderRadius:3,overflow:"hidden"}}>
+                          <div style={{height:"100%",width:w+"%",borderRadius:3,background:markOn(up?OVER_MONEY:OK_MONEY,surf.bg)}}/>
+                        </div>
+                        <span style={{fontSize:10,fontFamily:"'DM Mono',monospace",color:"var(--muted)",flexShrink:0}}>{fmt(m.prev)} → {fmt(m.curr)}</span>
+                      </div>
+                    </div>
+                  );
+                });
+              })();})()}
+            </div>
           </div>
         )}
 
         {/* RECURRING */}
-        {tab==="recurring"&&(
+        {tab==="recurring"&&(()=>{
+          const busy=recLoading||!recurring;
+          // The ignore filter applies HERE, at render — detection stays
+          // unfiltered in the lazy cache, so toggling needs no refetch.
+          const ignoreSet=new Set(recIgnore);
+          const shown=busy?[]:recurring.filter(r=>!ignoreSet.has(r.key));
+          const ignored=busy?[]:recurring.filter(r=>ignoreSet.has(r.key));
+          // Per-row amounts keep the per-charge figure with a cadence suffix;
+          // the headline sums monthlyEquivalent so mixed cadences stay honest.
+          const perLabel={weekly:"/wk",monthly:"/mo",annual:"/yr"};
+          return (
           <div style={{display:"flex",flexDirection:"column",gap:12}}>
             <div className="card">
               <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em",marginBottom:8}}>Recurring charges</div>
-              {recLoading||!recurring?(
+              {busy?(
                 <><Sk w="40%" h={24}/><div style={{marginTop:8}}><Sk w="60%" h={11}/></div></>
               ):(
                 <>
                   <div style={{fontSize:22,fontWeight:600,letterSpacing:"-.02em"}}>
-                    {fmt(recurring.reduce((s,r)=>s+r.monthlyAmount,0))}<span style={{fontSize:13,color:"var(--muted)",fontWeight:500}}>/mo</span>
+                    {fmt(shown.reduce((s,r)=>s+(r.monthlyEquivalent??r.monthlyAmount),0))}<span style={{fontSize:13,color:"var(--muted)",fontWeight:500}}>/mo</span>
                   </div>
                   <div style={{fontSize:11,color:"var(--muted)",marginTop:3}}>
-                    {recurring.length} recurring charge{recurring.length!==1?"s":""} · detected from the last 6 months
+                    {shown.length} recurring charge{shown.length!==1?"s":""} · weekly and annual normalized to monthly · last ~3 years
                   </div>
                 </>
               )}
             </div>
             <div className="card">
-              {recLoading||!recurring?[1,2,3,4,5].map(i=>(
+              {busy?[1,2,3,4,5].map(i=>(
                 <div key={i} style={{display:"flex",gap:12,alignItems:"center",marginBottom:12}}>
                   <Sk w={34} h={34} r={10}/><div style={{flex:1}}><Sk w="60%" h={13}/></div><Sk w={60} h={13}/>
                 </div>
-              )):recurring.length===0?(
+              )):shown.length===0?(
                 <div style={{textAlign:"center",padding:"30px 0",color:"var(--muted)",fontSize:14}}>
-                  No recurring charges detected yet — they show up after a few months of history.
+                  {ignored.length>0
+                    ?"Every detected recurring charge is ignored — restore one below."
+                    :"No recurring charges detected yet — they show up after a few months of history."}
                 </div>
-              ):recurring.map((r,i)=>{
+              ):shown.map((r,i)=>{
                 const a=acctById(r.account_id);
                 // Quiet signal badges (not a nag banner): amber warn for a
-                // price hike or a charge due within a week, red danger for an
-                // overdue one. Colours are the app's warn/danger data hexes run
-                // through the contrast helpers against the card surface, same as
-                // the Categories over/under money pair.
+                // price hike or a charge inside its cadence-scaled due window,
+                // red danger for an overdue one. Colours are the app's
+                // warn/danger data hexes run through the contrast helpers
+                // against the card surface, same as the Categories over/under
+                // money pair.
                 const overdue=r.dueStatus==="overdue";
                 const dueSoon=r.dueStatus==="due-soon";
                 const dueHex=overdue?"#D85A30":"#C08A2E";
@@ -3359,17 +3470,37 @@ export default function Dashboard({ refreshTick = 0 }) {
                     </div>
                   </div>
                   <div style={{fontSize:13,fontFamily:"'DM Mono',monospace",fontWeight:500,flexShrink:0}}>
-                    {fmtX(r.monthlyAmount)}<span style={{fontSize:10,color:"var(--muted)"}}>/mo</span>
+                    {fmtX(r.monthlyAmount)}<span style={{fontSize:10,color:"var(--muted)"}}>{perLabel[r.cadence]||"/mo"}</span>
                   </div>
+                  <button title={`Ignore ${r.name} (hides it for the whole household)`} onClick={()=>toggleRecIgnore(r.key)}
+                    style={{background:"none",border:"none",color:"var(--muted)",cursor:"pointer",fontSize:13,padding:"4px 2px",lineHeight:1,flexShrink:0}}>✕</button>
                 </div>
                 );
               })}
             </div>
+            {ignored.length>0&&(
+              <div className="card">
+                <button onClick={()=>setRecIgnoredOpen(o=>!o)}
+                  style={{background:"none",border:"none",color:"var(--muted)",cursor:"pointer",fontSize:12,fontWeight:500,padding:0,display:"flex",alignItems:"center",gap:6,fontFamily:"inherit",width:"100%"}}>
+                  <span style={{fontSize:10}}>{recIgnoredOpen?"▾":"▸"}</span>Ignored ({ignored.length})
+                </button>
+                {recIgnoredOpen&&ignored.map(r=>(
+                  <div key={r.key} className="tx">
+                    <div style={{flex:1,minWidth:0}}>
+                      <div style={{fontSize:13,fontWeight:500,color:"var(--muted)",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{r.name}</div>
+                      <div style={{fontSize:11,color:"var(--muted)",marginTop:2}}>{fmtX(r.monthlyAmount)}{perLabel[r.cadence]||"/mo"} · ~every {r.avgGapDays} days</div>
+                    </div>
+                    <button className="ibtn" onClick={()=>toggleRecIgnore(r.key)}>Restore</button>
+                  </div>
+                ))}
+              </div>
+            )}
             <div style={{fontSize:11,color:"var(--muted)",background:"var(--bg)",borderRadius:8,padding:"8px 12px"}}>
-              Detected heuristically: same merchant at a ~monthly cadence (±4 days) with similar amounts (±20%). Card payments and transfers never count.
+              Detected heuristically: same merchant at a steady weekly, monthly, or annual cadence with similar amounts (±20%). Charges that stop arriving drop off once they&#39;re a couple of cycles overdue. Card payments and transfers never count. ✕ ignores a charge for the whole household.
             </div>
           </div>
-        )}
+          );
+        })()}
 
         {/* TAX — the rental Schedule E lens, personal deductions and the
             mileage log. Record-keeping for the preparer, NOT tax math: no AGI

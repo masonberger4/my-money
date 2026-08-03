@@ -119,6 +119,19 @@ test('recurring section renders the subscription, its creep flag, and the tx-der
   assert.ok(!text.includes('- SAFEWAY'));
 });
 
+test('recurring section suffixes by cadence: a weekly item reads /wk, not /mo', () => {
+  // 4 charges 7 days apart — detectRecurring's weekly band (recurring v2).
+  const weekly = ['2026-06-22', '2026-06-29', '2026-07-06', '2026-07-13'].map(d => ({
+    account_id: 'a-chk', date: d, amount: 12, merchant_name: 'WEEKLY BOX', description: 'WEEKLY BOX',
+    mapped_category: 'Groceries', user_category: null, user_description: null, excluded: false,
+  }));
+  const text = formatSpendingContext(clone(ACCOUNTS), clone(TXS).concat(weekly));
+  assert.ok(text.includes('- WEEKLY BOX: ~$12.00/wk'), text);
+  // The monthly fixture keeps its /mo suffix untouched.
+  const monthly = formatSpendingContext(clone(ACCOUNTS), clone(TXS).concat(clone(SUB_TXS)));
+  assert.ok(monthly.includes('~$19.99/mo'));
+});
+
 test('recurring section says "None detected." rather than disappearing', () => {
   const text = formatSpendingContext(clone(ACCOUNTS), clone(TXS));
   assert.ok(text.includes('## Recurring charges'));

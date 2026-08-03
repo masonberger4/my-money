@@ -14,6 +14,7 @@ import {
   isSpend,
   sumSpending,
   spendingGroups,
+  biggestMovers,
   toTxShape,
   patchTxShape,
   effectiveCategory,
@@ -361,6 +362,151 @@ test('patchTxShape never mutates its input row (rollback depends on the captured
   const frozen = JSON.stringify(shaped);
   patchTxShape(shaped, { user_category: 'Pets', user_description: 'X', excluded: true });
   assert.equal(JSON.stringify(shaped), frozen);
+});
+
+// --- Scenario 12: biggest movers (Trends month-over-month deltas) ------------
+// The "previous month" fixture is hand-built against EXPECTED.groups (July):
+//   Groceries 100 (July 109.5 -> +9.5), Travel 220 (July 220 -> 0, skipped),
+//   Utilities 55 (July 120 -> +65), Pets 90 (absent in July -> -90 fall);
+// every July-only category rises from 0 (Vehicle +85, Home maint +75, …).
+
+function juneRows() {
+  const A = makeAccounts();
+  return [
+    makeTx(A.checking, 'p1', '2026-06-05', 100.0, 'SAFEWAY 1467 EVERETT WA'), // Groceries
+    makeTx(A.card1, 'p2', '2026-06-07', 220.0, 'CAPITAL ONE TRAVEL PORTLAND'), // Travel — identical to July
+    makeTx(A.checking, 'p3', '2026-06-10', 55.0, 'PUGET SOUND ENERGY BILL PAY'), // Utilities
+    makeTx(A.checking, 'p4', '2026-06-14', 90.0, 'EVERGREEN VET CLINIC', { user_category: 'Pets' }), // only in June
+  ];
+}
+
+test('biggestMovers ranks rises AND falls by |delta|: a new category rises from 0, a disappeared one falls to 0', () => {
+  // Each month's rows are washed per-fetch, exactly as getBiggestMovers'
+  // reads deliver them: July's chk5↔sav1 pair goes _internal, so no
+  // fabricated transfer bucket outranks the real movers.
+  const movers = biggestMovers(washed(standardLedger().visibleRows()), washed(juneRows()));
+  assert.deepEqual(
+    movers.map(m => m.label),
+    ['Pets', 'Vehicle expenses', 'Home maintenance and improvement', 'Utilities', 'Dining out'],
+    'top 5 by |delta|, signs interleaved'
+  );
+  // The disappeared category: present only in June, falls to 0.
+  near(movers[0].delta, -90.0, 'Pets fall');
+  near(movers[0].prev, 90.0);
+  near(movers[0].curr, 0);
+  // The new category: present only in July, rises from 0.
+  near(movers[1].delta, 85.0, 'Vehicle rise');
+  near(movers[1].prev, 0);
+  near(movers[1].curr, 85.0);
+  // Ordering invariant, independent of the hand-computed list above.
+  for (let i = 1; i < movers.length; i++) {
+    assert.ok(Math.abs(movers[i - 1].delta) >= Math.abs(movers[i].delta), 'sorted by |delta|');
+  }
+});
+
+test('biggestMovers skips negligible deltas and honors the limit opt', () => {
+  const curr = washed(standardLedger().visibleRows());
+  const all = biggestMovers(curr, washed(juneRows()), { limit: 100 });
+  // Travel is $220 in BOTH months — a zero delta never earns a slot.
+  assert.ok(!all.some(m => m.label === 'Travel and vacation'), 'unchanged category skipped');
+  // Everything else moved by >= $1: 9 July categories + Pets − shared(3) = ...
+  // Groceries/Utilities changed, Travel didn't: 9 − 1 + 1 = 9 movers.
+  assert.equal(all.length, 9);
+  assert.equal(biggestMovers(curr, washed(juneRows()), { limit: 3 }).length, 3);
+  // A sub-dollar wobble is noise: shrink June Groceries by 50¢ from July's total.
+  // limit:100 so the assertion exercises the $1 noise floor itself — at the
+  // default top-5, eight larger movers crowd the 50¢ delta out and the check
+  // passes even with minDelta loosened to a penny (verified by mutation).
+  const A = makeAccounts();
+  const wobble = washed([makeTx(A.checking, 'w1', '2026-06-05', 109.0, 'SAFEWAY 1467 EVERETT WA')]);
+  assert.ok(
+    !biggestMovers(curr, wobble, { limit: 100 }).some(m => m.label === 'Groceries'),
+    'a 50¢ delta is skipped even with slots to spare'
+  );
+});
+
+test('biggestMovers excludes non-spend rows STRUCTURALLY: washed pairs, the card-payment veto, Return, loan rows, excluded rows, money in', () => {
+  const A = makeAccounts();
+  // Junk that must move NOTHING under the linked-boundary model. The transfer
+  // is a complete two-leg pair, so the per-fetch wash marks both _internal —
+  // exclusion by structure, not by the transfer CATEGORY (an unpaired leg
+  // COUNTS now; pinned below). The autopay leg has no card counter-leg in the
+  // junk, so it stays unpaired — the card-payment VETO is what excludes it.
+  const junk = month => [
+    makeTx(A.checking, `${month}j1`, `2026-${month}-12`, 300.0, 'ONLINE BANKING TRANSFER TO SAVINGS'),
+    makeTx(A.savings, `${month}j1b`, `2026-${month}-13`, -300.0, 'ONLINE BANKING TRANSFER FROM CHECKING'),
+    makeTx(A.checking, `${month}j2`, `2026-${month}-15`, 400.0, 'CAPITAL ONE AUTOPAY PYMT'),
+    makeTx(A.mortgage, `${month}j3`, `2026-${month}-15`, 800.0, 'ESCROW DISBURSEMENT COUNTY TAX'),
+    makeTx(A.card1, `${month}j4`, `2026-${month}-20`, -50.0, 'RIVER GEAR RETURNS'), // → Return
+    makeTx(A.checking, `${month}j5`, `2026-${month}-21`, 500.0, 'SAFEWAY 1467 EVERETT WA', { excluded: true }),
+    makeTx(A.checking, `${month}j6`, `2026-${month}-01`, -2500.0, 'PAYROLL DIRECT DEP'), // money in
+  ];
+  const base = biggestMovers(washed(standardLedger().visibleRows()), washed(juneRows()), { limit: 100 });
+  // Junk in EITHER month moves nothing (the excluded Safeway row alone would
+  // otherwise swing Groceries by $500, the loan escrow row its bucket by $800).
+  assert.deepEqual(
+    biggestMovers(washed(standardLedger().visibleRows()), washed([...juneRows(), ...junk('06')]), { limit: 100 }),
+    base
+  );
+  assert.deepEqual(
+    biggestMovers(washed([...standardLedger().visibleRows(), ...junk('07')]), washed(juneRows()), { limit: 100 }),
+    base
+  );
+  // …and the guarded buckets never surface as movers at all.
+  const labels = biggestMovers(
+    washed([...standardLedger().visibleRows(), ...junk('07')]),
+    washed([...juneRows(), ...junk('06')]),
+    { limit: 100 }
+  ).map(m => m.label);
+  assert.ok(!labels.includes(TRANSFER_CATEGORY), 'no transfer bucket');
+  assert.ok(!labels.includes(RETURN_CATEGORY), 'no Return bucket');
+
+  // The counterpoint the old category-based test could not express: drop the
+  // counter-leg and the SAME transfer-worded row crosses the linked boundary,
+  // stays unpaired, and IS a mover — visible under the transfer label, by
+  // design (this is what fails if isSpend regresses to category exclusion).
+  const unpaired = junk('07').filter(t => t.id !== '07j1b');
+  const tb = biggestMovers(
+    washed([...standardLedger().visibleRows(), ...unpaired]),
+    washed(juneRows()),
+    { limit: 100 }
+  ).find(m => m.label === TRANSFER_CATEGORY);
+  assert.ok(tb, 'an unpaired boundary-crossing transfer IS a mover');
+  near(tb.delta, 300.0, 'exactly the unpaired leg, a rise from 0');
+  near(tb.prev, 0);
+});
+
+test('biggestMovers over empty months', () => {
+  assert.deepEqual(biggestMovers([], []), []);
+  // One empty side degenerates to that month's groups (largest first, capped
+  // at 5): all rises when prev is empty, all falls when curr is. Rows washed
+  // per-fetch as the adapter delivers them — unwashed, the chk5 leg would
+  // fabricate a $300 transfer "fall" outranking Travel's real $220 one.
+  const visible = washed(standardLedger().visibleRows());
+  const rises = biggestMovers(visible, []);
+  assert.equal(rises.length, 5);
+  assert.deepEqual(
+    rises.map(m => m.label),
+    spendingGroups(visible).slice(0, 5).map(g => g.label),
+    'prev empty: top groups, as rises'
+  );
+  assert.ok(rises.every(m => m.delta > 0 && m.prev === 0));
+  const falls = biggestMovers([], visible);
+  assert.ok(falls.every(m => m.delta < 0 && m.curr === 0));
+  near(falls[0].delta, -EXPECTED.groups['Travel and vacation'].amount, 'largest fall');
+});
+
+test('biggestMovers is deterministic: equal |delta| ties break alphabetically', () => {
+  const A = makeAccounts();
+  const curr = [
+    makeTx(A.checking, 't1', '2026-07-05', 40.0, 'SAFEWAY 1467 EVERETT WA'), // Groceries +40
+    makeTx(A.checking, 't2', '2026-07-06', 40.0, 'ACME COFFEE 0042'), // Coffee and snacks +40
+    makeTx(A.checking, 't3', '2026-07-07', 40.0, 'PUGET SOUND ENERGY BILL PAY'), // Utilities +40
+  ];
+  assert.deepEqual(
+    biggestMovers(curr, []).map(m => m.label),
+    ['Coffee and snacks', 'Groceries', 'Utilities']
+  );
 });
 
 // --- Property tests (seeded PRNG over random ledgers) ------------------------

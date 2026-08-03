@@ -124,6 +124,36 @@ export function spendingGroups(txs) {
     .sort((a, b) => b.amount - a.amount);
 }
 
+// The Trends "Biggest movers" core: per-category month-over-month deltas.
+// Both row sets go through spendingGroups (and therefore the ONE unified
+// isSpend(), which reads `_internal` — rows must arrive already
+// markInternalTransfers-marked, like every isSpend consumer); the caller
+// supplies each month's rows already sliced (this layer doesn't inspect
+// dates, same contract as spendingGroups). A category present in only one month still shows: absent
+// means $0, so a brand-new category is a rise from 0 and a disappeared one is
+// a fall to 0. delta = curr − prev, so positive = MORE money spent.
+//
+// Cutoff (decided): the top `limit` (5) categories by |delta|, skipping any
+// delta under `minDelta` ($1) — sub-dollar drift is noise at monthly grain and
+// would let a $0.40 wobble occupy a slot. Ties in |delta| break alphabetically
+// so the same data always renders the same list.
+export function biggestMovers(currRows, prevRows, { limit = 5, minDelta = 1 } = {}) {
+  const curr = new Map(spendingGroups(currRows).map(g => [g.label, g.amount]));
+  const prev = new Map(spendingGroups(prevRows).map(g => [g.label, g.amount]));
+  const movers = [];
+  for (const label of new Set([...curr.keys(), ...prev.keys()])) {
+    const c = curr.get(label) || 0;
+    const p = prev.get(label) || 0;
+    const delta = c - p;
+    if (Math.abs(delta) < minDelta) continue;
+    movers.push({ label, curr: c, prev: p, delta });
+  }
+  movers.sort(
+    (a, b) => Math.abs(b.delta) - Math.abs(a.delta) || a.label.localeCompare(b.label)
+  );
+  return movers.slice(0, limit);
+}
+
 export function toTxShape(t) {
   return {
     id: t.id,

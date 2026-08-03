@@ -270,8 +270,12 @@ export function formatSpendingContext(accounts, txs, extras = {}) {
   } else {
     lines.push(`Due dates are relative to the newest transaction (${maxDate}).`);
     for (const r of recurring) {
+      // monthlyAmount is the PER-CHARGE median — suffix by cadence, or a
+      // weekly box would read as a monthly cost (still deterministic: the
+      // cadence is a pure function of the same rows).
+      const per = r.cadence === 'weekly' ? 'wk' : r.cadence === 'annual' ? 'yr' : 'mo';
       const bits = [
-        `- ${r.name}: ~$${r.monthlyAmount.toFixed(2)}/mo (${r.category}, every ~${r.avgGapDays} days, last ${r.lastDate}, next ~${r.nextDate})`,
+        `- ${r.name}: ~$${r.monthlyAmount.toFixed(2)}/${per} (${r.category}, every ~${r.avgGapDays} days, last ${r.lastDate}, next ~${r.nextDate})`,
       ];
       if (r.priceCreep) bits.push(`price increased: was $${r.medianAmount.toFixed(2)}, now $${r.lastAmount.toFixed(2)}`);
       if (r.dueStatus) bits.push(r.dueStatus === 'overdue' ? 'overdue' : 'due soon');
