@@ -125,10 +125,11 @@ export function spendingGroups(txs) {
 }
 
 // The Trends "Biggest movers" core: per-category month-over-month deltas.
-// PURCHASE-BASED ONLY — both row sets go through spendingGroups (and therefore
-// isSpend), never the cash-flow model; the caller supplies each month's rows
-// already sliced (this layer doesn't inspect dates, same contract as
-// spendingGroups). A category present in only one month still shows: absent
+// Both row sets go through spendingGroups (and therefore the ONE unified
+// isSpend(), which reads `_internal` — rows must arrive already
+// markInternalTransfers-marked, like every isSpend consumer); the caller
+// supplies each month's rows already sliced (this layer doesn't inspect
+// dates, same contract as spendingGroups). A category present in only one month still shows: absent
 // means $0, so a brand-new category is a rise from 0 and a disappeared one is
 // a fall to 0. delta = curr − prev, so positive = MORE money spent.
 //

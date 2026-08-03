@@ -735,9 +735,13 @@ The app's ONLY use of Supabase **Storage** — everything else is Postgres.
   name but is the PER-CHARGE median — render it with a cadence suffix
   (/wk, /mo, /yr; the tab headline and the sort use the equivalent, and
   `spendingContext.js` suffixes too). `getRecurringCandidates` widened
-  6→`CANDIDATE_WINDOW_MONTHS` (40) with `markTransfers:false` — detection
-  excludes transfers by CATEGORY, never `_internal`, the envelope-walk
-  precedent. (The 25 first shipped came from "annual needs two year-gaps",
+  6→`CANDIDATE_WINDOW_MONTHS` (40); detection excludes transfers by
+  CATEGORY, never `_internal` — but the rows still arrive MARKED, because
+  under the unified model `getTransactionsBetween` ALWAYS runs the pairing
+  (the pre-merge `markTransfers:false` option was DELETED by the unification
+  merge; never "restore" an unmarked fetch path — `isSpend()` reads
+  `_internal`, and unmarked rows would count both legs of every washed
+  pair). (The 25 first shipped came from "annual needs two year-gaps",
   which forgot the LAST renewal is itself up to a year old — annual items
   vanished ~11 months a year; the constant's comment in `src/recurring.js`
   carries the corrected arithmetic and a year-round sweep test pins it.)
@@ -758,15 +762,22 @@ The app's ONLY use of Supabase **Storage** — everything else is Postgres.
   row ignores; a collapsed "Ignored (n)" card restores — and the WRITE is a
   single-key read-merge-write (`updateRecIgnore` → pure `toggleIgnoreKey`),
   never the whole array from component state, so a failed mount-time read
-  can't wipe the other phone's ignores on the first tap.
+  can't wipe the other phone's ignores on the first tap. Same-device toggles
+  are SERIALIZED through a promise chain inside `updateRecIgnore` (two quick
+  ✕ taps otherwise read the same base and the last write drops the first
+  key); the two-phone race stays the accepted single-key last-write-wins.
 
 - **Trends biggest movers (2026-08-03, plan Session 2)** — per-category
-  month-over-month deltas as its own card on the Trends tab, clearly split
-  from the cash-flow figures above it: pure `biggestMovers` in
-  `src/spending.js` (spendingGroups/`isSpend` lineage — purchase model ONLY;
+  month-over-month deltas as its own card on the Trends tab, below the
+  cash-flow figures: pure `biggestMovers` in
+  `src/spending.js` (spendingGroups/`isSpend` lineage — the ONE unified
+  linked-boundary model, the same spending count the cash-flow bars sum;
   top 5 by |delta|, $1 noise floor, alphabetical tie-break) +
-  `getBiggestMovers` in dataAdapter (rides the per-reload range memo,
-  `markTransfers` off). Dashboard's movers state is **MONTH-TAGGED**
+  `getBiggestMovers` in dataAdapter (rides the per-reload range memo; rows
+  arrive `markInternalTransfers`-marked, since no `markTransfers` opt-out
+  exists post-unification — the only honest divergence from the bars is
+  window-edge pairing, per-month fetches vs the bars' 6-month window).
+  Dashboard's movers state is **MONTH-TAGGED**
   (`{y,m,list}`): the card header derives its "X vs Y" labels from live
   year/month, so an untagged list surviving a movers-only transient failure
   after a month switch would render the old pair's deltas under the new

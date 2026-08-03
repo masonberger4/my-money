@@ -738,11 +738,24 @@ export async function setRecIgnore(keys) {
 // on the first ✕ tap — and made the ordinary two-phone race last-array-wins.
 // A failed READ aborts before any write. Returns the merged list so the
 // caller can adopt keys the other phone added since mount.
-export async function updateRecIgnore(key, ignored) {
-  const current = await getRecIgnore();
-  const next = toggleIgnoreKey(current, key, ignored);
-  await setRecIgnore(next);
-  return next;
+//
+// SAME-DEVICE toggles are serialized through a promise chain: two quick ✕
+// taps otherwise interleave (read A, read B, write [A], write [B]) and the
+// last write silently drops the first key — then the caller's
+// .then(setRecIgnore) reverts it on screen too. Chaining makes B's read see
+// A's committed write. The chain swallows rejections so one failed toggle
+// never dams the queue; callers still receive the real rejection. The
+// two-PHONE race stays the accepted single-key last-write-wins.
+let recIgnoreChain = Promise.resolve();
+export function updateRecIgnore(key, ignored) {
+  const run = recIgnoreChain.then(async () => {
+    const current = await getRecIgnore();
+    const next = toggleIgnoreKey(current, key, ignored);
+    await setRecIgnore(next);
+    return next;
+  });
+  recIgnoreChain = run.catch(() => {});
+  return run;
 }
 
 // Per-(category, month) spend sums for the walk's range, memoised. The walk's

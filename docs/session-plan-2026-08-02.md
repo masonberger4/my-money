@@ -46,7 +46,7 @@ Both are "understand my categories" features sharing the `src/spending.js` / `is
 **Migration:** none. **Mason mid-session:** none. **Order:** after Session 1 (both edit the Categories/Trends regions of Dashboard.jsx).
 
 ## Session 3 — "Recurring v2: weekly/annual cadences + ignore list" — **M** — **SHIPPED 2026-08-03**
-Self-contained: `src/recurring.js` (pure) + the Recurring tab + one settings key (`rec:ignore`). See CLAUDE.md's "Recurring v2" Merged-features entry for the decided details (cadence bands, `monthlyEquivalent`, the 25-month candidate window, render-time ignore filter).
+Self-contained: `src/recurring.js` (pure) + the Recurring tab + one settings key (`rec:ignore`). See CLAUDE.md's "Recurring v2" Merged-features entry for the decided details (cadence bands, `monthlyEquivalent`, the 40-month candidate window, render-time ignore filter).
 
 **Items:**
 - Weekly and annual cadence detection alongside the existing monthly logic. Existing tests pin thresholds **as documentation — extend, don't loosen** (backlog line 30).

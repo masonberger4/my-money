@@ -923,8 +923,9 @@ export default function Dashboard({ refreshTick = 0 }) {
   const [spending,setSpending]=useState(null);
   const [transactions,setTransactions]=useState(null);
   const [cashFlow,setCashFlow]=useState(null);
-  // Biggest movers (Trends): viewed month vs the month before, PURCHASE-BASED
-  // (isSpend lineage) — never mixed into the cash-flow figures. Plain reload
+  // Biggest movers (Trends): viewed month vs the month before, through the ONE
+  // unified isSpend() model — the same count the cash-flow bars sum
+  // (cashSpending delegates to sumSpending). Plain reload
   // state like `spending`: refetched by every reloadData, so it self-heals
   // after edits (no lazy cache, no sentinel). Shape {y,m,list} — MONTH-TAGGED,
   // because the card header derives its "X vs Y" labels from live year/month:
@@ -3344,16 +3345,19 @@ export default function Dashboard({ refreshTick = 0 }) {
                 });
               })()}
             </div>
-            {/* Biggest movers — PURCHASE-BASED (isSpend lineage), its own card
-                so it never reads as part of the cash-flow figures above. Rise
+            {/* Biggest movers — the ONE unified isSpend() model, the same
+                spending count the cash-flow bars above sum (cashSpending
+                delegates to sumSpending); the only honest divergence is
+                window-edge pairing (per-month fetches here vs the bars'
+                6-month window — see getBiggestMovers). Rise
                 in spending = OVER_MONEY, fall = OK_MONEY (the vs-last-month
                 tile's idiom); bars are marks on the --bg gutter, delta text
                 sits on the card — each contrast-corrected for its own surface. */}
             <div className="card">
               <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em",marginBottom:4}}>Biggest movers</div>
               <div style={{fontSize:11,color:"var(--muted)",marginBottom:14}}>
-                By category (purchases) — {new Date(year,month-1,1).toLocaleString("default",{month:"short",year:"numeric"})} vs {new Date(year,month-2,1).toLocaleString("default",{month:"short",year:"numeric"})}.
-                Counts what was bought, so it won&#39;t line up with the cash-flow bars above.
+                By category — {new Date(year,month-1,1).toLocaleString("default",{month:"short",year:"numeric"})} vs {new Date(year,month-2,1).toLocaleString("default",{month:"short",year:"numeric"})}.
+                Same spending count as the bars above, split by category.
               </div>
               {(()=>{
                 // Render only a list tagged with the viewed month — a stale
