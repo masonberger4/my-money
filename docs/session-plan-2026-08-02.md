@@ -5,9 +5,10 @@ Source of truth: `docs/improvement-backlog-2026-08-01.md` Section 3 remainder (M
 **Status 2026-08-03:** the Section 3 batch SHIPPED (card-cycling tile, Ask
 persistence + Save chat, Uncategorized teach-queue, startup skeleton + month
 jump picker) — that covers most of Session 1 (minus search refinement +
-sign-out), the teach-queue half of Session 2, and Session 4's v1. Remaining:
-search refinement (needs a Mason spec), sign-out button, Trends biggest
-movers, Session 3 (recurring v2), Session 5 (debt follow-ups), Session 6
+sign-out), the teach-queue half of Session 2, and Session 4's v1. Session 3
+(recurring v2: weekly/annual cadences + household ignore list) SHIPPED
+2026-08-03. Remaining: search refinement (needs a Mason spec), sign-out
+button, Trends biggest movers, Session 5 (debt follow-ups), Session 6
 (envelopes, Mason-gated), and the in-app saved-chats sizing question.
 
 All sessions follow the standard flow (fetch/absorb main → green `npm test` + placeholder-env build → screenshots at 390px for UI → branch → PR → merge, auto mode).
@@ -35,8 +36,8 @@ Both are "understand my categories" features sharing the `src/spending.js` / `is
 
 **Migration:** none. **Mason mid-session:** none. **Order:** after Session 1 (both edit the Categories/Trends regions of Dashboard.jsx).
 
-## Session 3 — "Recurring v2: weekly/annual cadences + ignore list" — **M**
-Self-contained: `src/recurring.js` (148 lines, pure) + the Recurring tab + one settings key.
+## Session 3 — "Recurring v2: weekly/annual cadences + ignore list" — **M** — **SHIPPED 2026-08-03**
+Self-contained: `src/recurring.js` (pure) + the Recurring tab + one settings key (`rec:ignore`). See CLAUDE.md's "Recurring v2" Merged-features entry for the decided details (cadence bands, `monthlyEquivalent`, the 25-month candidate window, render-time ignore filter).
 
 **Items:**
 - Weekly and annual cadence detection alongside the existing monthly logic. Existing tests pin thresholds **as documentation — extend, don't loosen** (backlog line 30).

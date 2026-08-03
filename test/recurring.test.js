@@ -1,11 +1,16 @@
-// Tests for src/recurring.js — client-side subscription detection, previously
-// zero coverage. The thresholds asserted here (≥3 charges, ±20% amount band
-// with ≥80% kept, median gap 28±4 days, ≥2/3 of gaps within ±4 of the median,
-// price creep strictly >5% over the median, due-soon within 7 days) are the
-// ACTUAL shipped values, pinned as documentation.
+// Tests for src/recurring.js — client-side subscription detection. The
+// thresholds asserted here are the ACTUAL shipped values, pinned as
+// documentation: ≥3 charges, ±20% amount band with ≥80% kept, price creep
+// strictly >5% over the median, and per-cadence bands with ≥2/3 of gaps
+// within the band's tolerance of the median gap —
+//   weekly   gap 5–9    (7±2),   near ±2,  due-soon within 2 days
+//   monthly  gap 24–32  (28±4),  near ±4,  due-soon within 7 days  (the
+//            original detector, unchanged — never loosen it)
+//   annual   gap 350–380 (365±15), near ±15, due-soon within 30 days
+// Gaps outside every band (biweekly ~14, quarterly ~91) stay undetected.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { detectRecurring, normalizeMerchant } from '../src/recurring.js';
+import { detectRecurring, normalizeMerchant, parseIgnoreList } from '../src/recurring.js';
 import { TRANSFER_CATEGORY, RETURN_CATEGORY } from '../src/categoryMap.js';
 
 // Rows in the toTxShape fields detectRecurring reads.
@@ -93,18 +98,126 @@ test('one skipped month: detected with 4+ charges, not with only 3', () => {
   assert.equal(detectRecurring(threeCharges).length, 0);
 });
 
-test('non-monthly cadences are not flagged — the detector is monthly-only', () => {
-  // Weekly: median gap 7, below the 24-day floor.
-  const weekly = ['2026-01-05', '2026-01-12', '2026-01-19', '2026-01-26'].map(d =>
-    tx(d, 12.0, 'WEEKLY BOX')
+test('gaps outside every cadence band stay undetected: biweekly and quarterly', () => {
+  // Biweekly: median gap 14, between the weekly (5–9) and monthly (24–32)
+  // bands. A real cadence, deliberately out of scope — no band, no detection.
+  const biweekly = ['2026-01-05', '2026-01-19', '2026-02-02', '2026-02-16'].map(d =>
+    tx(d, 12.0, 'BIWEEKLY BOX')
   );
-  assert.equal(detectRecurring(weekly).length, 0);
+  assert.equal(detectRecurring(biweekly).length, 0);
 
-  // Quarterly: median gap ~91, above the 32-day ceiling.
+  // Quarterly: median gap ~91, between monthly (24–32) and annual (350–380).
   const quarterly = ['2026-01-05', '2026-04-06', '2026-07-06', '2026-10-05'].map(d =>
     tx(d, 30.0, 'QUARTERLY DUES')
   );
   assert.equal(detectRecurring(quarterly).length, 0);
+});
+
+test('weekly cadence: constant weekly charges detect as weekly', () => {
+  const rows = ['2026-01-05', '2026-01-12', '2026-01-19', '2026-01-26'].map(d =>
+    tx(d, 12.0, 'WEEKLY BOX')
+  );
+  const out = detectRecurring(rows);
+  assert.equal(out.length, 1);
+  const r = out[0];
+  assert.equal(r.cadence, 'weekly');
+  assert.equal(r.count, 4);
+  assert.equal(r.monthlyAmount, 12.0, 'the per-CHARGE median keeps its historical field name');
+  assert.equal(r.monthlyEquivalent, 12.0 * (52 / 12), 'normalized: ×52/12 for a per-month figure');
+  assert.equal(r.lastDate, '2026-01-26');
+  assert.equal(r.nextDate, '2026-02-02', 'last + the 7-day median gap');
+  assert.equal(r.priceCreep, false);
+});
+
+test('weekly jitter tolerance is ±2 days, tighter than monthly ±4', () => {
+  // Gaps 7 / 9 / 5 — median 7, all within ±2 → detected.
+  const jittery = ['2026-01-05', '2026-01-12', '2026-01-21', '2026-01-26'].map(d =>
+    tx(d, 12.0, 'JITTER BOX')
+  );
+  const out = detectRecurring(jittery);
+  assert.equal(out.length, 1);
+  assert.equal(out[0].cadence, 'weekly');
+
+  // Gaps 7 / 11 / 3 — median 7 (in band), but only 1 of 3 gaps within ±2,
+  // under the ≥2/3 bar. The same ±4 spread a monthly sub is allowed is too
+  // loose for a 7-day cycle.
+  const loose = ['2026-01-05', '2026-01-12', '2026-01-23', '2026-01-26'].map(d =>
+    tx(d, 12.0, 'LOOSE BOX')
+  );
+  assert.equal(detectRecurring(loose).length, 0);
+});
+
+test('annual cadence: three yearly renewals detect as annual', () => {
+  const rows = [
+    tx('2024-03-10', 95.0, 'DOMAIN RENEWAL'),
+    tx('2025-03-10', 95.0, 'DOMAIN RENEWAL'),
+    tx('2026-03-10', 95.0, 'DOMAIN RENEWAL'),
+  ];
+  const out = detectRecurring(rows);
+  assert.equal(out.length, 1);
+  const r = out[0];
+  assert.equal(r.cadence, 'annual');
+  assert.equal(r.count, 3);
+  assert.equal(r.monthlyAmount, 95.0);
+  assert.equal(r.monthlyEquivalent, 95.0 * (1 / 12), 'normalized: ÷12 for a per-month figure');
+  assert.equal(r.nextDate, '2027-03-10', 'last + the 365-day median gap');
+  // Two renewals are never enough — the ≥3-charge floor holds for every
+  // cadence (a lone year-apart pair is a coincidence, not a subscription).
+  assert.equal(detectRecurring(rows.slice(1)).length, 0);
+});
+
+test('due windows scale with cadence: 2 days weekly, 30 days annual', () => {
+  // WEEKLY BOX fixture: nextDate 2026-02-02.
+  const weekly = ['2026-01-05', '2026-01-12', '2026-01-19', '2026-01-26'].map(d =>
+    tx(d, 12.0, 'WEEKLY BOX')
+  );
+  const w3 = detectRecurring(weekly, '2026-01-30')[0]; // 3 days out
+  assert.equal(w3.dueSoon, false, '3 days out is NOT due-soon for a weekly charge');
+  assert.equal(w3.dueStatus, null);
+  const w2 = detectRecurring(weekly, '2026-01-31')[0]; // 2 days out
+  assert.equal(w2.dueSoon, true);
+  assert.equal(w2.dueStatus, 'due-soon');
+  const wLate = detectRecurring(weekly, '2026-02-03')[0]; // the day after
+  assert.equal(wLate.overdue, true);
+  assert.equal(wLate.dueStatus, 'overdue');
+
+  // DOMAIN RENEWAL fixture: nextDate 2027-03-10.
+  const annual = [
+    tx('2024-03-10', 95.0, 'DOMAIN RENEWAL'),
+    tx('2025-03-10', 95.0, 'DOMAIN RENEWAL'),
+    tx('2026-03-10', 95.0, 'DOMAIN RENEWAL'),
+  ];
+  const a31 = detectRecurring(annual, '2027-02-07')[0]; // 31 days out
+  assert.equal(a31.dueSoon, false, '31 days out is not yet due-soon even for annual');
+  assert.equal(a31.dueStatus, null);
+  const a30 = detectRecurring(annual, '2027-02-08')[0]; // 30 days out
+  assert.equal(a30.dueSoon, true);
+  assert.equal(a30.dueStatus, 'due-soon');
+});
+
+test('priceCreep works on a weekly item: >5% over the median flags', () => {
+  const dates = ['2026-01-05', '2026-01-12', '2026-01-19', '2026-01-26'];
+  // Median of [10, 10, 10, 10.6] is 10 — the 10.60 last charge is +6%.
+  const crept = dates.map((d, i) => tx(d, i === 3 ? 10.6 : 10.0, 'CREEPING BOX'));
+  const r = detectRecurring(crept)[0];
+  assert.equal(r.cadence, 'weekly');
+  assert.equal(r.medianAmount, 10.0);
+  assert.equal(r.lastAmount, 10.6);
+  assert.equal(r.priceCreep, true, '+6% is creep on a weekly cadence too');
+
+  // Exactly 5% is not creep — the strict-inequality boundary is cadence-free.
+  const boundary = dates.map((d, i) => tx(d, i === 3 ? 10.5 : 10.0, 'BOUNDARY BOX'));
+  assert.equal(detectRecurring(boundary)[0].priceCreep, false);
+});
+
+test('mixed cadences sort by monthly-equivalent cost', () => {
+  const rows = [
+    ...['2026-01-05', '2026-02-04', '2026-03-06'].map(d => tx(d, 20.0, 'MONTHLY SUB')),
+    ...['2026-01-05', '2026-01-12', '2026-01-19', '2026-01-26'].map(d => tx(d, 9.99, 'WEEKLY BOX')),
+  ];
+  const out = detectRecurring(rows);
+  assert.deepEqual(out.map(r => r.key), ['WEEKLY BOX', 'MONTHLY SUB'],
+    '$9.99/wk ≈ $43.29/mo outranks $20/mo despite the smaller per-charge amount');
 });
 
 test('one-off and twice-only purchases are never flagged', () => {
@@ -219,10 +332,12 @@ test('item shape is stable: existing fields unchanged, new fields additive', () 
   ];
   const r = detectRecurring(rows, '2026-04-26')[0];
   // The full key set — a rename or removal here breaks Dashboard's consumers.
+  // (cadence + monthlyEquivalent are the recurring-v2 additions.)
   assert.deepEqual(Object.keys(r).sort(), [
-    'account_id', 'avgGapDays', 'category', 'count', 'dueSoon', 'dueStatus',
-    'key', 'lastAmount', 'lastDate', 'medianAmount', 'monthlyAmount', 'name',
-    'nextDate', 'overdue', 'priceCreep',
+    'account_id', 'avgGapDays', 'cadence', 'category', 'count', 'dueSoon',
+    'dueStatus', 'key', 'lastAmount', 'lastDate', 'medianAmount',
+    'monthlyAmount', 'monthlyEquivalent', 'name', 'nextDate', 'overdue',
+    'priceCreep',
   ]);
   // Pre-existing fields keep their values from the detection heuristic.
   assert.equal(r.key, 'STREAMFLIX COM');
@@ -230,6 +345,25 @@ test('item shape is stable: existing fields unchanged, new fields additive', () 
   assert.equal(r.lastDate, '2026-04-04');
   assert.equal(r.nextDate, '2026-05-03');
   assert.equal(r.count, 4);
+  // A monthly item carries cadence 'monthly' and a monthlyEquivalent equal to
+  // its monthlyAmount — the pre-v2 fields mean exactly what they always did.
+  assert.equal(r.cadence, 'monthly');
+  assert.equal(r.monthlyEquivalent, r.monthlyAmount);
+});
+
+test('parseIgnoreList: tolerant parse of the rec:ignore settings row', () => {
+  // Absent/blank/garbage rows must never take the Recurring tab down.
+  assert.deepEqual(parseIgnoreList(null), []);
+  assert.deepEqual(parseIgnoreList(undefined), []);
+  assert.deepEqual(parseIgnoreList(''), []);
+  assert.deepEqual(parseIgnoreList('  '), []);
+  assert.deepEqual(parseIgnoreList('not json'), []);
+  assert.deepEqual(parseIgnoreList('{"a":true}'), [], 'a non-array parses to empty');
+  // Valid entries keep their order; dupes, empties, and non-strings drop.
+  assert.deepEqual(
+    parseIgnoreList('["WEEKLY BOX","STREAMFLIX COM","WEEKLY BOX","",42,null]'),
+    ['WEEKLY BOX', 'STREAMFLIX COM']
+  );
 });
 
 test('name and category come from the most frequent values in the group', () => {

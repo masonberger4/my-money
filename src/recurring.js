@@ -3,9 +3,12 @@
 // transaction_date 'YYYY-MM-DD', amount, category, account_id }), touches no
 // network, so it stays testable and reusable by server code later.
 //
-// Heuristic (roadmap spec): a merchant is "recurring" when it has >= 3
-// charges at a ~monthly cadence (median gap 28±4 days, most gaps within ±4
-// days of that median) with similar amounts (within ±20% of the median).
+// Heuristic (roadmap spec, extended to three cadences): a merchant is
+// "recurring" when it has >= 3 charges at a steady cadence — weekly (median
+// gap 7±2 days), monthly (28±4, the original detector, thresholds unchanged)
+// or annual (365±15) — with most gaps near the median (tolerance scaled to
+// the band) and similar amounts (within ±20% of the median). Gaps outside
+// every band (biweekly ~14, quarterly ~91) stay undetected.
 
 import { TRANSFER_CATEGORY, RETURN_CATEGORY } from './categoryMap.js';
 
@@ -13,9 +16,21 @@ import { TRANSFER_CATEGORY, RETURN_CATEGORY } from './categoryMap.js';
 // STRICTLY more than this fraction. A Netflix-style hike (~10–15%) hides
 // comfortably inside the ±20% similar-amount band that detection needs, so
 // without this signal a raised subscription still reads as "recurring, fine".
+// Cadence-independent: a weekly box that creeps is flagged the same way.
 const PRICE_CREEP_PCT = 0.05;
-// A nextDate within this many days of the caller's clock reads 'due-soon'.
-const DUE_SOON_DAYS = 7;
+
+// The cadence bands. gapTol is the "most gaps near the median" tolerance and
+// dueSoonDays the 'due-soon' window — both scale with the cycle length (a
+// weekly sub is due soon within 2 days, an annual one within a month). The
+// MONTHLY row is the ORIGINAL shipped detector verbatim (24–32 gap window,
+// ±4 near-tolerance, 7-day due window) — pinned by tests; never loosen it.
+// perMonth normalizes the per-charge amount to a monthly figure so mixed
+// cadences can sum and sort on one field (monthlyEquivalent).
+const CADENCES = [
+  { cadence: 'weekly', minGap: 5, maxGap: 9, gapTol: 2, dueSoonDays: 2, perMonth: 52 / 12 },
+  { cadence: 'monthly', minGap: 24, maxGap: 32, gapTol: 4, dueSoonDays: 7, perMonth: 1 },
+  { cadence: 'annual', minGap: 350, maxGap: 380, gapTol: 15, dueSoonDays: 30, perMonth: 1 / 12 },
+];
 
 // 'YYYY-MM-DD' → whole days since epoch. String split, not new Date(string),
 // so day arithmetic can't pick up UTC off-by-one surprises.
@@ -96,14 +111,17 @@ export function detectRecurring(transactions, today = null) {
     const kept = all.filter(t => Math.abs(t.amount - medAmount) <= 0.2 * medAmount);
     if (kept.length < 3 || kept.length < 0.8 * all.length) continue;
 
-    // ~Monthly cadence: median gap 28±4 days, and most gaps near the median.
+    // Steady cadence: the median gap must land inside one band (the bands
+    // don't overlap, so the match is unambiguous), and most gaps must sit
+    // within that band's tolerance of the median.
     const days = kept.map(t => dayNumber(t.transaction_date)).sort((a, b) => a - b);
     const gaps = [];
     for (let i = 1; i < days.length; i++) gaps.push(days[i] - days[i - 1]);
     if (!gaps.length) continue;
     const medGap = median([...gaps].sort((a, b) => a - b));
-    if (medGap < 24 || medGap > 32) continue;
-    const near = gaps.filter(g => Math.abs(g - medGap) <= 4).length;
+    const spec = CADENCES.find(c => medGap >= c.minGap && medGap <= c.maxGap);
+    if (!spec) continue;
+    const near = gaps.filter(g => Math.abs(g - medGap) <= spec.gapTol).length;
     if (near < Math.ceil((gaps.length * 2) / 3)) continue;
 
     const keptAmounts = kept.map(t => t.amount).sort((a, b) => a - b);
@@ -121,7 +139,13 @@ export function detectRecurring(transactions, today = null) {
       name: mostFrequent(kept.map(t => t.merchant_name)) || titleCase(key),
       category: mostFrequent(kept.map(t => t.category)) || 'Shopping and gear',
       account_id: mostFrequent(kept.map(t => t.account_id)) || null,
+      // Historical name: the median PER-CHARGE amount (for monthly the two are
+      // the same thing, which is where the name came from). For weekly/annual
+      // it is the per-cycle charge — use monthlyEquivalent for a per-month
+      // figure; consumers that render it should suffix by cadence.
       monthlyAmount: median(keptAmounts),
+      monthlyEquivalent: median(keptAmounts) * spec.perMonth,
+      cadence: spec.cadence,
       count: kept.length,
       lastDate: isoFromDayNumber(lastDay),
       nextDate: isoFromDayNumber(nextDay),
@@ -132,17 +156,46 @@ export function detectRecurring(transactions, today = null) {
       medianAmount: medAmount,
       // Strictly more than PRICE_CREEP_PCT over the median: exactly 5% is not creep.
       priceCreep: lastAmount > (1 + PRICE_CREEP_PCT) * medAmount,
-      dueSoon: todayDay == null ? null : nextDay >= todayDay && nextDay - todayDay <= DUE_SOON_DAYS,
+      dueSoon: todayDay == null ? null : nextDay >= todayDay && nextDay - todayDay <= spec.dueSoonDays,
       overdue: todayDay == null ? null : nextDay < todayDay,
-      // One-field summary of the two booleans above; a nextDate more than
-      // DUE_SOON_DAYS out is null even with a clock.
+      // One-field summary of the two booleans above; a nextDate more than the
+      // cadence's due-soon window out is null even with a clock.
       dueStatus:
         todayDay == null ? null
         : nextDay < todayDay ? 'overdue'
-        : nextDay - todayDay <= DUE_SOON_DAYS ? 'due-soon'
+        : nextDay - todayDay <= spec.dueSoonDays ? 'due-soon'
         : null,
     });
   }
 
-  return out.sort((a, b) => b.monthlyAmount - a.monthlyAmount);
+  // Monthly-equivalent cost so mixed cadences rank sensibly ($10/wk beats
+  // $20/mo). For an all-monthly input this is byte-identical to the original
+  // monthlyAmount sort.
+  return out.sort((a, b) => b.monthlyEquivalent - a.monthlyEquivalent);
+}
+
+// --- Ignore list -------------------------------------------------------------
+// The Recurring tab's mute list: a HOUSEHOLD pref (muting a charge should mute
+// it on both phones — Mason's ruling), stored as ONE settings row keyed
+// 'rec:ignore' whose value is a JSON array of the items' group keys (the
+// normalizeMerchant output detectRecurring emits as `key` — stable across
+// re-detection, unlike list order or amounts). Tolerant parse, the
+// parseRestoreSet spirit: garbage in the row must never take the tab down.
+export function parseIgnoreList(raw) {
+  if (raw == null || String(raw).trim() === '') return [];
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+  const seen = new Set();
+  const out = [];
+  for (const k of parsed) {
+    if (typeof k !== 'string' || !k || seen.has(k)) continue;
+    seen.add(k);
+    out.push(k);
+  }
+  return out;
 }

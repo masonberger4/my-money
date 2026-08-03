@@ -6,6 +6,7 @@ import { markInternalTransfers, cashIncome, cashSpending } from './cashFlow.js';
 import { walkEnvelopes, monthKey, planMove } from './envelopes.js';
 import { isSpend, sumSpending, spendingGroups, biggestMovers, toTxShape, aggregateEnvelopeSpending } from './spending.js';
 import { createRangeMemo } from './monthMemo.js';
+import { parseIgnoreList } from './recurring.js';
 import { aggregateCoverage } from './coverage.js';
 
 // Re-export the pure cash-flow model (src/cashFlow.js) so existing importers
@@ -687,6 +688,39 @@ export async function setEnvPace(map) {
   if (error) throw error;
 }
 
+// Recurring-charge ignore list — a HOUSEHOLD pref (settings table, NOT
+// localStorage: muting a subscription should mute it on both phones — Mason's
+// recorded ruling). ONE row keyed 'rec:ignore' holding a JSON array of the
+// recurring items' group keys (detectRecurring's `key`); parsing is the pure
+// parseIgnoreList in src/recurring.js. Display-only: detection stays
+// unfiltered and the Recurring tab filters at render, so toggling never
+// refetches (and never touches the lazy cache's null-means-refetch sentinel).
+const REC_IGNORE_KEY = 'rec:ignore';
+
+export async function getRecIgnore() {
+  const { data, error } = await supabase
+    .from('settings')
+    .select('value')
+    .eq('key', REC_IGNORE_KEY)
+    .maybeSingle();
+  if (error) throw error;
+  return parseIgnoreList(data?.value ?? null);
+}
+
+export async function setRecIgnore(keys) {
+  const seen = new Set();
+  const clean = [];
+  for (const k of keys || []) {
+    if (typeof k !== 'string' || !k || seen.has(k)) continue;
+    seen.add(k);
+    clean.push(k);
+  }
+  const { error } = await supabase
+    .from('settings')
+    .upsert({ key: REC_IGNORE_KEY, value: JSON.stringify(clean) }, { onConflict: 'household_id,key' });
+  if (error) throw error;
+}
+
 // Per-(category, month) spend sums for the walk's range, memoised. The walk's
 // range grows by a month every month and is re-read after every envelope edit,
 // but an envelope edit CANNOT change a transaction — so assigning, moving money
@@ -888,14 +922,19 @@ export async function fundTargets(items, { year, month }) {
 // partial one) for client-side recurring detection (src/recurring.js).
 // Goes through getTransactionsBetween so hidden-account filtering and
 // account rules ("Return") apply. Detection itself stays out of the adapter.
-export async function getRecurringCandidates({ months = 6 } = {}) {
+// The window reaches ~2 years (was 6 months) so the ANNUAL cadence has the
+// >= 3 charges detection requires — two full year-gaps. Detection never reads
+// `_internal`, so the O(V·E) transfer matching is skipped over this long
+// range — the envelope-walk precedent (transfers are excluded by CATEGORY in
+// detectRecurring, not by the pairing marks).
+export async function getRecurringCandidates({ months = 25 } = {}) {
   const now = new Date();
   const curY = now.getFullYear();
   const curM = now.getMonth() + 1;
   const oldest = shiftMonth(curY, curM, -(months - 1));
   const { start } = monthBounds(oldest.year, oldest.month);
   const { end } = monthBounds(curY, curM);
-  const rows = await getTransactionsBetween(start, end);
+  const rows = await getTransactionsBetween(start, end, { markTransfers: false });
   return { transactions: rows.map(toTxShape) };
 }
 

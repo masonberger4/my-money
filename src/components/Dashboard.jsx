@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from "react";
-import { getOverview, getSpending, getBiggestMovers, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES, setCategoryRule, applyCategoryRuleToHistory, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, invalidateEnvelopeSpending, isEnvelopeSchemaMissing, targetNeed, readyToAssign, envelopePace, getEnvPace, setEnvPace as persistEnvPace, monthKey, getEntities, createEntity, updateEntity, getTaxYearTransactions, getMileage, addMileage, deleteMileage, getReceiptTxIds, getDebts, getBalanceSnapshots, addManualTransaction, createManualAccount, getDataCoverage } from "../dataAdapter.js";
+import { getOverview, getSpending, getBiggestMovers, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES, setCategoryRule, applyCategoryRuleToHistory, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, invalidateEnvelopeSpending, isEnvelopeSchemaMissing, targetNeed, readyToAssign, envelopePace, getEnvPace, setEnvPace as persistEnvPace, getRecIgnore, setRecIgnore as persistRecIgnore, monthKey, getEntities, createEntity, updateEntity, getTaxYearTransactions, getMileage, addMileage, deleteMileage, getReceiptTxIds, getDebts, getBalanceSnapshots, addManualTransaction, createManualAccount, getDataCoverage } from "../dataAdapter.js";
 import { payoffWhatIf, debtFreeMonth, isMortgage } from "../debtPayoff.js";
 import { SCHEDULE_E_LINES, RENTS_KEY, DEFAULT_SCHEDULE_E_MAP, scheduleEReport, entityMonthly, entityLedger, personalDeductionReport, DEDUCTION_BUCKETS, DEFAULT_DEDUCTION_MAP, mileageDeduction, scheduleECsv } from "../taxReport.js";
 import { merchantKey } from "../txClassify.js";
@@ -965,6 +965,13 @@ export default function Dashboard({ refreshTick = 0 }) {
   const [acctLoading,setAcctLoading]=useState(false);
   const [recurring,setRecurring]=useState(null);
   const [recLoading,setRecLoading]=useState(false);
+  // Muted recurring charges — array of detectRecurring group keys. HOUSEHOLD
+  // pref ('rec:ignore' in the settings table, NOT localStorage — muting a
+  // charge should mute it on both phones). Applied at RENDER, never in the
+  // lazy detection cache, so toggling needs no refetch and never touches the
+  // null-means-refetch sentinel (the setState(null) gotcha stays untriggered).
+  const [recIgnore,setRecIgnore]=useState([]);
+  const [recIgnoredOpen,setRecIgnoredOpen]=useState(false);
   // --- Data coverage panel (TEMPORARY troubleshooting aid; Accounts tab) ---
   // Lazy: the query pages the whole transactions table, so nothing is fetched
   // until the card is first expanded.
@@ -1094,18 +1101,20 @@ export default function Dashboard({ refreshTick = 0 }) {
   useEffect(()=>{
     async function load(){
       try {
-        const [c,n,cc,am,ae,ep]=await Promise.all([
+        const [c,n,cc,am,ae,ep,ri]=await Promise.all([
           getSetting("dash:colors").catch(()=>null),
           getSetting("dash:names").catch(()=>null),
           getSetting("dash:cats").catch(()=>null),
           getSetting("asst:model").catch(()=>null),
           getSetting("asst:effort").catch(()=>null),
           getEnvPace().catch(()=>({})),
+          getRecIgnore().catch(()=>[]),
         ]);
         if(c)setCustomColors(JSON.parse(c));
         if(n)setCustomNames(JSON.parse(n));
         if(cc)setCustomCats(JSON.parse(cc));
         if(ep)setEnvPace(ep);
+        if(ri?.length)setRecIgnore(ri);
         if(am&&ASSISTANT_MODELS[am])setAsstModel(am);
         if(ae&&EFFORT_LEVELS.includes(ae))setAsstEffort(ae);
       } catch{}
@@ -1963,6 +1972,14 @@ export default function Dashboard({ refreshTick = 0 }) {
     if(next[category])delete next[category];else next[category]=true;
     setEnvPace(next);
     persistEnvPace(next).catch(err=>console.error("saving pace opt-in failed",err));
+  }
+  // Ignore/unignore a recurring charge. Same optimistic display-pref shape as
+  // togglePace: write settings directly, no refetch — detection stays
+  // unfiltered and the Recurring tab filters at render.
+  function toggleRecIgnore(key){
+    const next=recIgnore.includes(key)?recIgnore.filter(k=>k!==key):[...recIgnore,key];
+    setRecIgnore(next);
+    persistRecIgnore(next).catch(err=>console.error("saving recurring ignore list failed",err));
   }
   const saveIncome=(val,scope)=>runEnvelopeWrite("the income",()=>setBudgetIncome({year,month},val,{scope}));
   const doMove=(from,to,amount)=>runEnvelopeWrite("the transfer",()=>moveMoney({from,to,amount},{year,month}));
@@ -3346,39 +3363,52 @@ export default function Dashboard({ refreshTick = 0 }) {
         )}
 
         {/* RECURRING */}
-        {tab==="recurring"&&(
+        {tab==="recurring"&&(()=>{
+          const busy=recLoading||!recurring;
+          // The ignore filter applies HERE, at render — detection stays
+          // unfiltered in the lazy cache, so toggling needs no refetch.
+          const ignoreSet=new Set(recIgnore);
+          const shown=busy?[]:recurring.filter(r=>!ignoreSet.has(r.key));
+          const ignored=busy?[]:recurring.filter(r=>ignoreSet.has(r.key));
+          // Per-row amounts keep the per-charge figure with a cadence suffix;
+          // the headline sums monthlyEquivalent so mixed cadences stay honest.
+          const perLabel={weekly:"/wk",monthly:"/mo",annual:"/yr"};
+          return (
           <div style={{display:"flex",flexDirection:"column",gap:12}}>
             <div className="card">
               <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em",marginBottom:8}}>Recurring charges</div>
-              {recLoading||!recurring?(
+              {busy?(
                 <><Sk w="40%" h={24}/><div style={{marginTop:8}}><Sk w="60%" h={11}/></div></>
               ):(
                 <>
                   <div style={{fontSize:22,fontWeight:600,letterSpacing:"-.02em"}}>
-                    {fmt(recurring.reduce((s,r)=>s+r.monthlyAmount,0))}<span style={{fontSize:13,color:"var(--muted)",fontWeight:500}}>/mo</span>
+                    {fmt(shown.reduce((s,r)=>s+(r.monthlyEquivalent??r.monthlyAmount),0))}<span style={{fontSize:13,color:"var(--muted)",fontWeight:500}}>/mo</span>
                   </div>
                   <div style={{fontSize:11,color:"var(--muted)",marginTop:3}}>
-                    {recurring.length} recurring charge{recurring.length!==1?"s":""} · detected from the last 6 months
+                    {shown.length} recurring charge{shown.length!==1?"s":""} · weekly and annual normalized to monthly · last two years
                   </div>
                 </>
               )}
             </div>
             <div className="card">
-              {recLoading||!recurring?[1,2,3,4,5].map(i=>(
+              {busy?[1,2,3,4,5].map(i=>(
                 <div key={i} style={{display:"flex",gap:12,alignItems:"center",marginBottom:12}}>
                   <Sk w={34} h={34} r={10}/><div style={{flex:1}}><Sk w="60%" h={13}/></div><Sk w={60} h={13}/>
                 </div>
-              )):recurring.length===0?(
+              )):shown.length===0?(
                 <div style={{textAlign:"center",padding:"30px 0",color:"var(--muted)",fontSize:14}}>
-                  No recurring charges detected yet — they show up after a few months of history.
+                  {ignored.length>0
+                    ?"Every detected recurring charge is ignored — restore one below."
+                    :"No recurring charges detected yet — they show up after a few months of history."}
                 </div>
-              ):recurring.map((r,i)=>{
+              ):shown.map((r,i)=>{
                 const a=acctById(r.account_id);
                 // Quiet signal badges (not a nag banner): amber warn for a
-                // price hike or a charge due within a week, red danger for an
-                // overdue one. Colours are the app's warn/danger data hexes run
-                // through the contrast helpers against the card surface, same as
-                // the Categories over/under money pair.
+                // price hike or a charge inside its cadence-scaled due window,
+                // red danger for an overdue one. Colours are the app's
+                // warn/danger data hexes run through the contrast helpers
+                // against the card surface, same as the Categories over/under
+                // money pair.
                 const overdue=r.dueStatus==="overdue";
                 const dueSoon=r.dueStatus==="due-soon";
                 const dueHex=overdue?"#D85A30":"#C08A2E";
@@ -3408,17 +3438,37 @@ export default function Dashboard({ refreshTick = 0 }) {
                     </div>
                   </div>
                   <div style={{fontSize:13,fontFamily:"'DM Mono',monospace",fontWeight:500,flexShrink:0}}>
-                    {fmtX(r.monthlyAmount)}<span style={{fontSize:10,color:"var(--muted)"}}>/mo</span>
+                    {fmtX(r.monthlyAmount)}<span style={{fontSize:10,color:"var(--muted)"}}>{perLabel[r.cadence]||"/mo"}</span>
                   </div>
+                  <button title={`Ignore ${r.name} (hides it for the whole household)`} onClick={()=>toggleRecIgnore(r.key)}
+                    style={{background:"none",border:"none",color:"var(--muted)",cursor:"pointer",fontSize:13,padding:"4px 2px",lineHeight:1,flexShrink:0}}>✕</button>
                 </div>
                 );
               })}
             </div>
+            {ignored.length>0&&(
+              <div className="card">
+                <button onClick={()=>setRecIgnoredOpen(o=>!o)}
+                  style={{background:"none",border:"none",color:"var(--muted)",cursor:"pointer",fontSize:12,fontWeight:500,padding:0,display:"flex",alignItems:"center",gap:6,fontFamily:"inherit",width:"100%"}}>
+                  <span style={{fontSize:10}}>{recIgnoredOpen?"▾":"▸"}</span>Ignored ({ignored.length})
+                </button>
+                {recIgnoredOpen&&ignored.map(r=>(
+                  <div key={r.key} className="tx">
+                    <div style={{flex:1,minWidth:0}}>
+                      <div style={{fontSize:13,fontWeight:500,color:"var(--muted)",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{r.name}</div>
+                      <div style={{fontSize:11,color:"var(--muted)",marginTop:2}}>{fmtX(r.monthlyAmount)}{perLabel[r.cadence]||"/mo"} · ~every {r.avgGapDays} days</div>
+                    </div>
+                    <button className="ibtn" onClick={()=>toggleRecIgnore(r.key)}>Restore</button>
+                  </div>
+                ))}
+              </div>
+            )}
             <div style={{fontSize:11,color:"var(--muted)",background:"var(--bg)",borderRadius:8,padding:"8px 12px"}}>
-              Detected heuristically: same merchant at a ~monthly cadence (±4 days) with similar amounts (±20%). Card payments and transfers never count.
+              Detected heuristically: same merchant at a steady weekly, monthly, or annual cadence with similar amounts (±20%). Card payments and transfers never count. ✕ ignores a charge for the whole household.
             </div>
           </div>
-        )}
+          );
+        })()}
 
         {/* TAX — the rental Schedule E lens, personal deductions and the
             mileage log. Record-keeping for the preparer, NOT tax math: no AGI

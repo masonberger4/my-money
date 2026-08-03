@@ -712,6 +712,26 @@ The app's ONLY use of Supabase **Storage** — everything else is Postgres.
   dataAdapter (whole-table paged read, fetched lazily on first expand). May be
   hidden or removed once the coverage questions settle. No migration.
 
+- **Recurring v2 (2026-08-03, plan Session 3)** — weekly + annual cadence
+  detection alongside monthly, no migration. `detectRecurring` matches the
+  median gap against non-overlapping bands (weekly 5–9, monthly 24–32
+  UNCHANGED, annual 350–380) with near-tolerance and the due-soon window
+  scaled per band (±2/±4/±15 days; due-soon 2/7/30) — all pinned as
+  documentation in `test/recurring.test.js`. Items gained `cadence` +
+  `monthlyEquivalent` (×52/12, ×1, ÷12); `monthlyAmount` keeps its historical
+  name but is the PER-CHARGE median — render it with a cadence suffix
+  (/wk, /mo, /yr; the tab headline and the sort use the equivalent, and
+  `spendingContext.js` suffixes too). `getRecurringCandidates` widened
+  6→25 months (annual needs two full year-gaps for the ≥3-charge floor) with
+  `markTransfers:false` — detection excludes transfers by CATEGORY, never
+  `_internal`, the envelope-walk precedent. Plus the **household ignore
+  list**: ONE settings row `rec:ignore` (JSON array of group `key`s; tolerant
+  pure `parseIgnoreList` in recurring.js; `getRecIgnore`/`setRecIgnore` in
+  dataAdapter — settings table per Mason's ruling, NOT localStorage), applied
+  at RENDER only — detection stays unfiltered, so toggling never refetches
+  and never touches the lazy cache's null-means-refetch sentinel. ✕ on the
+  row ignores; a collapsed "Ignored (n)" card restores.
+
 ## Pending branches
 
 None in code. No outstanding ops tasks. Receipts storage policy SETTLED +
@@ -736,10 +756,13 @@ ship, or delete it when spent.
 
 **Improvement backlog (2026-08-01 six-dimension audit):**
 `docs/improvement-backlog-2026-08-01.md` — Batch 1 + Sections 1–2 and most of
-Section 3 SHIPPED (see Merged features). Genuinely unbuilt remainder: cycling
-card-balance tile, Ask-tab sessionStorage + save-chat, Trends biggest-movers,
-Uncategorized teach-queue, recurring weekly/annual cadences + ignore list, UX
-polish (startup skeleton, month jump picker, search refinement). Carry
+Section 3 SHIPPED (see Merged features — the Section 3 batch covered the
+card-balance tile, Ask-tab persistence + save-chat, the Uncategorized
+teach-queue, the startup skeleton and the month jump picker; recurring v2
+shipped 2026-08-03). Genuinely unbuilt remainder: Trends biggest-movers (in
+flight on the recurring-v2 branch), client-side search refinement (needs a
+Mason spec), sign-out button, in-app saved chats (needs Mason's sizing
+call). Carry
 condition: the Dashboard.jsx decomposition is DEFERRED (keep the single file
 during active development). Delete entries as they ship.
 
