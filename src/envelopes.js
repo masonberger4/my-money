@@ -234,9 +234,9 @@ export function walkEnvelopes({ assignments = [], spending = [], settings = [], 
 }
 
 // Rule 1, as far as this app can honestly go. `income` is hand-entered — the
-// household's real take-home is not measurable from the feed (only the two
-// joint BECU accounts sync; Trends' cashIncome is a proxy that includes
-// personal→joint transfers). Deliberately NOT carried over from prior months:
+// feed still can't be trusted for take-home pay (SimpleFIN only syncs what is
+// linked and unhidden, and a missed paycheck would silently read as less to
+// budget — the income wall). Deliberately NOT carried over from prior months:
 // with hand-entered income a carry-forward would compound whatever months the
 // user never filled in. One month in, one month out.
 // Returns null when no income is set, so the UI can hide the number instead of

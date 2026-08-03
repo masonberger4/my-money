@@ -38,10 +38,15 @@ export { TRANSFER_CATEGORY, FALLBACK_CATEGORY };
 // ---------------------------------------------------------------------------
 const PAYMENT_WORD_RE = /\b(PAYMENT|PAYMENTS|PYMT|PMT|AUTOPAY|AUTO PAY|E-?PAY|E-?PAYMENT|BILL ?PAY|ONLINE PMT|\bACH\b)\b/i;
 
-const CARD_ISSUER_RE = /\b(AMEX|AMERICAN EXPRESS|CHASE CARD|CHASE CREDIT|CAPITAL ONE|DISCOVER|CITI CARD|CITIBANK|SYNCHRONY|BARCLAY|COMENITY|CREDIT CRD)\b/i;
+// BANK OF AMERICA / WELLS FARGO added 2026-08-03: live BECU descriptors
+// ("External Withdrawal - BANK OF AMERICA - PAYMENT", "External Withdrawal -
+// WELLS FARGO CARD - CCPYMT") missed the guard and $1,109.57 of card payments
+// counted as purchases over one quarter (double-count findings F2).
+const CARD_ISSUER_RE = /\b(AMEX|AMERICAN EXPRESS|CHASE CARD|CHASE CREDIT|CAPITAL ONE|DISCOVER|CITI CARD|CITIBANK|SYNCHRONY|BARCLAY|COMENITY|CREDIT CRD|BANK OF AMERICA|WELLS FARGO)\b/i;
 
 // Descriptors that are unambiguously a card payment on their own.
-const STANDALONE_PAYMENT_RE = /\b(CARD PAYMENT|CARD PMT|CC PYMT|CREDIT CARD PAYMENT|CARDMEMBER SERV|CARDMEMBER PAYMENT|EPAYMENT)\b/i;
+// CCPYMT (unspaced — BECU's wording) added 2026-08-03, same finding as above.
+const STANDALONE_PAYMENT_RE = /\b(CARD PAYMENT|CARD PMT|CC ?PYMT|CREDIT CARD PAYMENT|CARDMEMBER SERV|CARDMEMBER PAYMENT|EPAYMENT)\b/i;
 
 // Explicit "moved my own money" wording.
 const TRANSFER_RE = /ONLINE BANKING TRANSFER|\bTRANSFER\s+(TO|FROM)\b/i;
@@ -61,6 +66,20 @@ function isCardPurchase(accountType, amount) {
 function looksLikeCardPayment(descriptor) {
   if (STANDALONE_PAYMENT_RE.test(descriptor)) return true;
   return CARD_ISSUER_RE.test(descriptor) && PAYMENT_WORD_RE.test(descriptor);
+}
+
+// The ONE category-shaped veto the linked-boundary spending model keeps
+// (Mason, 2026-08-03): a card payment never counts as spending, even when its
+// card is unlinked so structural pairing cannot wash it. Everything else that
+// used to hide behind "Transfers and card payments" — plain transfer wording —
+// now counts as spending when it crosses the linked boundary unpaired; only
+// this verdict removes an unpaired row from the totals. Covers the
+// issuer+payment co-occurrence, the standalone payment wordings, and BECU's
+// "Online Banking Transfer To VISA" shape (transfer wording naming a card).
+export function isCardPaymentDescriptor(descriptor) {
+  const d = String(descriptor ?? '');
+  if (looksLikeCardPayment(d)) return true;
+  return TRANSFER_RE.test(d) && CARD_PAYMENT_RE.test(d);
 }
 
 // ---------------------------------------------------------------------------

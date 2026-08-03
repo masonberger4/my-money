@@ -128,10 +128,12 @@ export const EXPECTED = {
     Uncategorized: { amount: 33.0, count: 1 },
     'Coffee and snacks': { amount: 6.5, count: 1 },
   },
-  // Joint-budget cash flow (after markInternalTransfers washes chk5↔sav1):
-  // income = chk3 2500 + sav2 1.25; spending = checking+manual outflows
-  // 120 + 85.50 + 400 + 60 + 55 + 33 + 75 + 24 (chk5 washed, chk6 excluded).
-  cash: { income: 2501.25, spending: 852.5 },
+  // Linked-boundary model (2026-08-03): after markInternalTransfers washes
+  // chk5↔sav1 (structural) and chk4↔c1b (depository→credit card payment),
+  // income = chk3 2500 + sav2 1.25 (unpaired depository inflows), and
+  // cash spending IS sumSpending — one model. chk4 is excluded twice over
+  // (washed AND card-payment veto); chk6 excluded; loan rows never count.
+  cash: { income: 2501.25, spending: 764.0 },
 };
 
 // Seeded LCG for the property tests (same pattern as test/cashFlow.test.js).

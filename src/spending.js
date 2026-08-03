@@ -15,7 +15,8 @@
 // `counted` needs accounts.type (see isLoanAccount); a row missing the join is
 // treated as non-loan — every caller of toTxShape selects accounts.type.
 
-import { isTransferCategory, UNCATEGORIZED } from './categoryMap.js';
+import { UNCATEGORIZED, TRANSFER_CATEGORY } from './categoryMap.js';
+import { isCardPaymentDescriptor } from './txClassify.js';
 
 // User override wins over the classifier's answer.
 export function effectiveCategory(t) {
@@ -40,25 +41,53 @@ export function displayName(t) {
   return t.user_description || bankName(t);
 }
 
-// A debit on a LOAN account is a loan payment, not a purchase — and the cash
-// that paid it already counts when it leaves checking, so counting it here
-// double-counts the mortgage. Plaid never surfaced this (its loan accounts
-// carry sparse/no transactions), but SimpleFIN ships the servicer's real
-// transaction list. Note this guards `loan` ONLY: credit-card *purchases* are
-// exactly what purchase-based spending is supposed to measure.
+// A debit on a LOAN account is loan accounting (a suspense posting, a
+// reversal), not a purchase — and by the linked-boundary model's own decision
+// the COUNTED leg of a mortgage/auto payment is the depository outflow that
+// paid it (loan accounts never participate in transfer pairing, so that leg
+// stays unpaired and counts). Counting the loan's own ledger too would
+// double-count every payment. SimpleFIN ships the servicer's real transaction
+// list, so this guard is load-bearing. It guards `loan` ONLY: credit-card
+// *purchases* are exactly what spending measures.
 export function isLoanAccount(t) {
   return t.accounts?.type === 'loan';
 }
 
-// The purchase-based spending test. getSpending(), sumSpending() and the
-// envelope walk all go through this one predicate so a category's "Spent"
-// can never disagree with the bar rendered next to it. Positive = money out;
-// user edits win; transfers/card payments, credit-card returns and loan
-// account postings never count.
+// The card-payment veto — the ONE category-shaped exclusion the linked-boundary
+// model keeps (Mason, 2026-08-03): a card payment never counts as spending,
+// even when its card is unlinked/hidden so structural pairing cannot wash it.
+// An explicit user pick of "Transfers and card payments" is honored as the
+// same verdict (user edits win); any OTHER explicit user category means the
+// row counts whatever its wording says. A positive amount on a credit account
+// is a purchase by definition (a payment arrives as money in), so the
+// descriptor test is skipped there — same guard as txClassify's write path.
+function isCardPaymentRow(t) {
+  if (t.user_category) return t.user_category === TRANSFER_CATEGORY;
+  if (t.accounts?.type === 'credit') return false;
+  return isCardPaymentDescriptor(t.description) || isCardPaymentDescriptor(t.merchant_name);
+}
+
+// THE spending test of the unified linked-boundary model (Mason, 2026-08-03).
+// Every surface goes through it — Categories tab, Overview headline, budgets,
+// envelopes, toTxShape's `counted`, AND Trends (cashSpending delegates to
+// sumSpending) — so no two screens can disagree on spending by construction.
+// Positive = money out. Counts: card purchases, depository outflows, transfers
+// that LEAVE the linked boundary (to an unlinked or hidden account — they
+// arrive here unpaired), and the depository leg of a loan payment. Never
+// counts: rows washed by markInternalTransfers (`_internal` — an equal-amount
+// counter-leg exists on another visible linked account; run the pairing before
+// aggregating, or boundary-internal transfers will count), card payments
+// (isCardPaymentRow, paired or not), loan accounts' own ledger rows, excluded
+// rows, and money in (which is where "Return" lands — credit negatives are
+// never spending or income). NOTE the narrowed meaning of "Transfers and card
+// payments": the CATEGORY no longer excludes a row — internal is decided by
+// structure, and only the card-payment verdict vetoes an unpaired row. An
+// unpaired transfer-worded row crossed the boundary and counts (it shows in
+// Categories under the transfer label — visible, like Uncategorized).
 export function isSpend(t) {
-  if (t.excluded || isLoanAccount(t)) return false;
+  if (t.excluded || t._internal || isLoanAccount(t)) return false;
   if (t.amount <= 0) return false;
-  return !isTransferCategory(effectiveCategory(t));
+  return !isCardPaymentRow(t);
 }
 
 export function sumSpending(txs) {
@@ -125,7 +154,11 @@ export function toTxShape(t) {
     // category drill-in's own total can never disagree with the number that was
     // tapped to open it — same reason getEnvelopeSpending aggregates on
     // isSpend() instead of its own copy of the rule. Every caller of toTxShape
-    // selects accounts.type, which isLoanAccount() needs.
+    // selects accounts.type, which isLoanAccount() needs. isSpend also reads
+    // `_internal`, so `counted` is only fully accurate on rows that went
+    // through markInternalTransfers (the month lists do; the single-account
+    // sheet and search results cannot pair and may over-report `counted` on a
+    // boundary-internal transfer leg — their lists don't render it).
     counted: isSpend(t),
   };
 }
