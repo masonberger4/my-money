@@ -927,6 +927,13 @@ export default function Dashboard({ refreshTick = 0 }) {
   // open, or null. Rows come from taxData, so the sheet shows the tax cache's
   // busy state while an edit's invalidation refetches.
   const [taxDrill,setTaxDrill]=useState(null);
+  // Cycling card-balance tile: id of the credit account the Overview tile
+  // shows. DEVICE pref (localStorage, the mm:theme precedent — a settings-table
+  // pref would flip the other phone). A stale/unresolvable id falls back to the
+  // credit-first default at render time; every storage access is try/caught
+  // (Safari private mode throws on ACCESS).
+  const [cardTileId,setCardTileId]=useState(()=>{try{return localStorage.getItem("mm:cardTile")||null;}catch{return null;}});
+  const cardSwipe=useRef(null);
   const [chatMsgs,setChatMsgs]=useState([]);
   const [chatInput,setChatInput]=useState("");
   const [chatBusy,setChatBusy]=useState(false);
@@ -1656,7 +1663,20 @@ export default function Dashboard({ refreshTick = 0 }) {
   const totalSpent=cats.reduce((s,c)=>s+c.amount,0);
   // Debts read negative (see src/accountBalance.js). getOverview orders credit
   // accounts first, so this headline is usually a card — and it carries `type`.
-  const balance=displayBalance(overview?.accounts?.[0]?.balance?.current,overview?.accounts?.[0]?.type);
+  // The tile cycles over unhidden CREDIT accounts only; the remembered pick is
+  // a device pref (mm:cardTile). 0 credit accounts -> today's behavior (first
+  // ordered account / em-dash); a stored id that no longer resolves falls back
+  // to the credit-first default, never a blank tile.
+  const creditAccts=(overview?.accounts||[]).filter(a=>a.type==="credit");
+  const tileAcct=creditAccts.find(a=>a.id===cardTileId)||creditAccts[0]||overview?.accounts?.[0];
+  const tileIdx=Math.max(0,creditAccts.indexOf(tileAcct));
+  const balance=displayBalance(tileAcct?.balance?.current,tileAcct?.type);
+  const cycleCard=(dir)=>{
+    if(creditAccts.length<2)return;
+    const next=creditAccts[(tileIdx+dir+creditAccts.length)%creditAccts.length];
+    setCardTileId(next.id);
+    try{localStorage.setItem("mm:cardTile",next.id);}catch{/* private mode: session-only */}
+  };
   const lastSpent=overview?.last_month?.spending?.amount;
   const delta=lastSpent!=null?totalSpent-lastSpent:null;
   // Donut slices are non-text marks on the card -> 3:1.
@@ -1918,13 +1938,34 @@ export default function Dashboard({ refreshTick = 0 }) {
             // Whole dollars like its neighbours: a negative card balance with
             // cents is too wide for a third of a 390px screen and wrapped the
             // minus sign onto its own line.
-            {label:"Card balance",val:loading?null:fmt(balance),sub:overview?.accounts?.[0]?.name||"Linked account"},
+            // Cycles through unhidden credit accounts: click/tap advances,
+            // horizontal swipe goes either way (with an intent threshold so it
+            // never claims a vertical page scroll). Selection is a device pref.
+            {label:"Card balance",val:loading?null:fmt(balance),sub:tileAcct?.name||"Linked account",cycle:!loading&&creditAccts.length>1},
             {label:"vs last month",val:loading||delta==null?null:`${delta>=0?"+":""}${fmt(delta)}`,sub:delta==null?"—":delta>=0?"↑ more spending":"↓ less spending",clr:delta==null?"var(--muted)":inkOn(delta>=0?"#D85A30":"#1D9E75",surf.card)},
           ].map((c,i)=>(
-            <div key={i} className="card" style={{animationDelay:i*.04+"s"}}>
+            <div key={i} className="card" style={{animationDelay:i*.04+"s",...(c.cycle?{cursor:"pointer",userSelect:"none"}:{})}}
+              onClick={c.cycle?()=>cycleCard(1):undefined}
+              onTouchStart={c.cycle?(e)=>{const t=e.touches[0];cardSwipe.current={x:t.clientX,y:t.clientY};}:undefined}
+              onTouchEnd={c.cycle?(e)=>{
+                const s=cardSwipe.current;cardSwipe.current=null;if(!s)return;
+                const t=e.changedTouches[0];const dx=t.clientX-s.x,dy=t.clientY-s.y;
+                // Horizontal intent only: |dx| must beat |dy| AND clear a
+                // minimum, so a vertical scroll is never claimed. A real swipe
+                // suppresses the synthetic click; a plain tap falls through to
+                // onClick above.
+                if(Math.abs(dx)>Math.abs(dy)&&Math.abs(dx)>30){e.preventDefault();cycleCard(dx<0?1:-1);}
+              }:undefined}>
               <div style={{fontSize:11,color:"var(--muted)",fontWeight:500,marginBottom:5}}>{c.label}</div>
               {loading?<Sk w="70%" h={22}/>:<div style={{fontSize:20,fontWeight:600,letterSpacing:"-.02em",marginBottom:3}}>{c.val??"—"}</div>}
-              <div style={{fontSize:11,color:c.clr||"var(--muted)"}}>{loading?<Sk w="80%" h={10}/>:c.sub}</div>
+              <div style={{fontSize:11,color:c.clr||"var(--muted)",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{loading?<Sk w="80%" h={10}/>:c.sub}</div>
+              {c.cycle&&(
+                <div style={{display:"flex",gap:4,marginTop:6,alignItems:"center"}}>
+                  {creditAccts.map((a,j)=>(
+                    <span key={a.id??j} style={{width:5,height:5,borderRadius:"50%",background:j===tileIdx?"var(--accent)":"var(--border)"}}/>
+                  ))}
+                </div>
+              )}
             </div>
           ))}
         </div>
