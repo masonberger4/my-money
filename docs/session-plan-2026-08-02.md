@@ -2,6 +2,14 @@
 
 Source of truth: `docs/improvement-backlog-2026-08-01.md` Section 3 remainder (Mason's decisions inline) + CLAUDE.md Roadmap. Verified against code at c06b2fa: `Dashboard.jsx` is 3,787 lines (all sessions below touch it — sequence them, never parallel, per the one-session-per-line-of-work gotcha); `api/sync.js` already snapshots **all** usable accounts into `balance_snapshots` (not just debts — line 392, balance-moved gate), which changes the net-worth sizing. (The "no sign-out exists anywhere in `src/`" observation is spent — the header sign-out button shipped 2026-08-03.)
 
+**Status 2026-08-03 (second update):** the household attached ALL accounts,
+which surfaced a $24k/quarter double count; the diagnosis session shipped the
+**unified linked-boundary spending model** (PR #32 — replaces the two-model
+design; loan payments count as spending, card payments never, hidden =
+unlinked) and the temporary **Data coverage panel** (PR #31). Outstanding
+data/ops tasks are in CLAUDE.md → Pending; the full diagnosis is archived in
+`docs/double-count-diagnosis-2026-08-03.md`.
+
 **Status 2026-08-03:** the Section 3 batch SHIPPED (card-cycling tile, Ask
 persistence + Save chat, Uncategorized teach-queue, startup skeleton + month
 jump picker) — that covers most of Session 1 (minus search refinement +
@@ -33,7 +41,7 @@ Both are "understand my categories" features sharing the `src/spending.js` / `is
 
 **Items:**
 - ~~**Uncategorized teach-queue**~~ **SHIPPED 2026-08-02** (Section 3 batch) — top-5 Uncategorized groups by `merchantKey` feeding the existing `learnMerchant` flow, derived in render from the month's rows (no cache).
-- ~~**Trends biggest movers**~~ **SHIPPED 2026-08-03** — pure `biggestMovers` in `src/spending.js` (spendingGroups lineage) + tests against the ledger fixture; its own purchase-based card on the Trends tab, month-tagged state, never mixed with the cash-flow numbers.
+- ~~**Trends biggest movers**~~ **SHIPPED 2026-08-03** — pure `biggestMovers` in `src/spending.js` + tests against the ledger fixture; its own card on the Trends tab, month-tagged state. (Same-day model unification: movers reconciled at merge to the one `isSpend()` predicate over `markInternalTransfers`-marked rows.)
 
 **Migration:** none. **Mason mid-session:** none. **Order:** after Session 1 (both edit the Categories/Trends regions of Dashboard.jsx).
 

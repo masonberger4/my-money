@@ -78,8 +78,8 @@ entry once shipped.
 | `src/paletteContrast.js` | Pure, zero imports: WCAG math + `readableInk`/`markColor`/`chipStyle`, which hold hue fixed and bisect lightness to guarantee 4.5:1 / 3:1 against a given surface. Never throws (runs during render). Covered by `test/paletteContrast.test.js`. |
 | `src/components/Dashboard.jsx` | Almost the entire UI — single file, inline styles, tabs: overview/categories/**budget**/transactions/accounts/trends/recurring/**tax**/ask. Shared mini-components: `Pill`, `Swatch`, `EditName`, `Sk` (skeleton), `Donut`, `DrillNum` (the tap-a-number affordance) ; envelope editors `AssignEdit`/`BudgetEdit`/`IncomeEdit` + the `TargetSheet`/`MoveSheet`/`CategorySheet`/`PropertySheet` modals. |
 | `src/dataAdapter.js` | All Supabase reads + shapes consumed by Dashboard. Keep return shapes stable. Also holds the CSV/PDF-import writes (`findOrCreateManualInstitution`, `createManualAccount`, `getExistingTxIds`, `importCsvTransactions`, `isManualAccount`), the comparison-mode read `getAccountTransactionsInRange`, the backfill boundary `getFeedCoverageStart`, the learned-rule CRUD (`getCategoryRules`/`setCategoryRule`/`applyCategoryRuleToHistory`/`deleteCategoryRule`), the SimpleFIN predicates (`isSimpleFinAccount`, `ACCOUNT_TYPES`/`ACCOUNT_SUBTYPES`), the envelope I/O (`getEnvelopes`, `setAssigned`, `setCategoryRollover`, `setTargetKind`, `fundTargets`, `moveMoney`, `getBudgetIncome`/`setBudgetIncome`), the rental/tax I/O (`getEntities`/`createEntity`/`updateEntity`, `getTaxYearTransactions`, `getMileage`/`addMileage`/`deleteMileage`), the receipt I/O (`getReceipts`/`addReceipt`/`deleteReceipt`/`getReceiptUrl`/`getReceiptTxIds` — the app's only Supabase **Storage** use), and re-exports the pure helpers from `cashFlow.js`, `envelopes.js`, and `spending.js` so existing importers/harnesses keep working. The spending predicate/bucketing/`toTxShape` now live in `spending.js` — dataAdapter delegates (shapes unchanged). |
-| `src/cashFlow.js` | The Trends cash-flow model (see Conventions), extracted pure: `markInternalTransfers` + `maxMatchTransfers` (Kuhn's), `cashIncome`/`cashSpending`, account-type predicates. Zero imports — plain-Node importable; covered by `test/cashFlow.test.js` incl. the brute-force matching parity check. |
-| `src/spending.js` | The purchase-based spending model, extracted pure (imports only `categoryMap.js`): `effectiveCategory`, `bankName`/`displayName`, `isLoanAccount`, **`isSpend`** (the one predicate), `sumSpending`, `spendingGroups` (the Categories bucketing), `biggestMovers` (the Trends month-over-month deltas), `toTxShape` (incl. `counted`), and `aggregateEnvelopeSpending` (the envelope fold). Hidden-account exclusion deliberately NOT here — it lives at the query level; the pure layer never sees hidden rows. Covered by `test/spending.test.js` against the ledger fixture. |
+| `src/cashFlow.js` | The linked-boundary PAIRING + income side (see Conventions), pure: `markInternalTransfers` (structural equal-amount pairing, `maxMatchTransfers` Kuhn's), `cashIncome` (unpaired depository inflows), `cashSpending` (delegates to `sumSpending` — one model). Plain-Node importable; covered by `test/cashFlow.test.js` incl. the brute-force mixed-account-type parity check. |
+| `src/spending.js` | THE unified spending model, pure (imports `categoryMap.js` + `txClassify.js`): `effectiveCategory`, `bankName`/`displayName`, `isLoanAccount`, **`isSpend`** (the ONE predicate, every surface incl. Trends), `sumSpending`, `spendingGroups` (the Categories bucketing), `biggestMovers` (the Trends month-over-month deltas, same `isSpend` lineage), `toTxShape` (incl. `counted`), and `aggregateEnvelopeSpending` (the envelope fold). Rows must go through `markInternalTransfers` first — `isSpend` reads `_internal`. Hidden-account exclusion deliberately NOT here — it lives at the query level; the pure layer never sees hidden rows. Covered by `test/spending.test.js` against the ledger fixture. |
 | `src/envelopes.js` | The envelope-budgeting model (see Conventions), pure: `walkEnvelopes` (`available = assigned + carry − spent`), `targetNeed`, `readyToAssign`, `planMove`, month-key helpers, and `envelopePace` (the display-only per-envelope pace warning; opt-in via the `env:pace` settings key, `getEnvPace`/`setEnvPace` in dataAdapter). Zero imports — dataAdapter does the I/O and hands it plain arrays. Covered by `test/envelopes.test.js`. |
 | `src/ruleHistory.js` | The learned-rule history-apply core, extracted from `applyCategoryRuleToHistory`: first-token ilike narrowing (`ilikeCandidatePattern`), ordered paging with the **PGRST103 end-of-range contract** (`isRangeExhaustedError`), re-matching via `matchLearnedRule`, skip-already-correct, dryRun, mapped_category-only writes. Takes injected `fetchPage`/`updateBatch` so it tests with fakes; dataAdapter binds the real client. Covered by `test/categoryRules.test.js`. |
 | `src/taxReport.js` | The Tax tab's pure core, zero imports: `SCHEDULE_E_LINES` + `scheduleEReport` (category→line mapping, refund netting, capital expenses pulled out of the lines, a VISIBLE unmapped bucket — the Uncategorized lesson applied to tax lines), `entityMonthly` (per-property cash P&L) + `entityLedger` (the property drill-in's Money in/out/not-counted sections — totals pinned by test to `entityMonthly`'s sums), `personalDeductionReport` (charitable/medical/taxes-paid buckets), `MILEAGE_RATES` (effective-dated IRS rates — data that goes stale; verify at irs.gov each January) + `mileageDeduction`, and `scheduleECsv` (exports keep the stored positive=out sign; the column name says so). Covered by `test/taxReport.test.js`. |
@@ -245,8 +245,11 @@ playwright-core screenshot (`executablePath:'/opt/pw-browsers/chromium'`,
   must split on it rather than re-deriving the rule, or the list's own sum
   drifts from the number that was tapped to open it. Same reasoning as
   `getEnvelopeSpending` aggregating through `isSpend()`.
-- "Transfers and card payments" and "Return" (credit-card negatives) are never
-  counted as spending; "Return" is never counted as income.
+- "Return" (credit-card negatives) is never spending (money in) and never
+  income (income counts depository inflows only). "Transfers and card
+  payments" is NO LONGER a blanket spending exclusion (2026-08-03): internal
+  is decided by STRUCTURE (the pairing), and the category's only remaining
+  totals role is the card-payment veto — see the linked-boundary model below.
 - **`Uncategorized` is the fallback, and it is a real taxonomy member.** It IS
   counted as spending (the money left) but is never budgetable and is never
   offered in the manual category picker — the way to undo a wrong pick is
@@ -295,51 +298,52 @@ playwright-core screenshot (`executablePath:'/opt/pw-browsers/chromium'`,
 - Account labels: `nickname || "name ··mask"`; badge color from `ACCOUNT_COLORS`
   by index when `color` is null.
 
-### Two spending/income models (deliberate — don't "unify" without asking)
-- **Purchase-based** (Categories tab, Overview headline, budgets, the Budget
-  tab's envelopes, "vs last month" delta): `sumSpending` / `getSpending` count
-  what was *bought* by category, excluding Transfers/Return **and every
-  `type === 'loan'` account** (a loan debit is a payment, not a purchase, and
-  the cash already counts on its way out of checking). All of them go through
-  the shared `isSpend()` predicate in `src/spending.js` (re-exported by
-  dataAdapter.js) — keep it that way so an envelope's Spent can never disagree
-  with the Categories bar.
-- **Joint-budget cash-flow** (Trends income-vs-spending, 6-mo bars, Cash flow
-  section): `getCashFlow`. The connected accounts are two **joint** BECU
-  accounts (checking + savings); real paychecks land in three **personal**
-  accounts that are NOT connected to the feed — so true household income is
-  unmeasurable until those are added. Model chosen by Mason ("joint-budget
-  view"):
-  - **Income** (`cashIncome`) = money *into* either joint account, checking OR
-    savings — `isHouseholdDepository` = `type === 'depository'`. Includes money
-    moved in from the personal accounts (no synced counter-leg to wash against),
-    so income runs high — it is NOT just paychecks.
-  - **Spending** (`cashSpending`) = money *out of* joint **checking** only
-    (`isCheckingAccount` = depository & `subtype !== 'savings'`). Savings
-    outflows are never spending. Incl. credit-card *payments*; card *purchases*
-    are not counted here.
-  - **Internal transfers** washed by `markInternalTransfers`: a depository
-    `TRANSFER_OUT` pairs with a depository `TRANSFER_IN` of equal amount on a
-    *different* account within 4 days → both `_internal`, skipped. Only the two
-    joint accounts are synced, so the only pairs that can match are joint
-    checking ↔ savings; transfers in from the un-synced personal accounts stay
-    counted as income (by design). Keep the depository↔depository restriction
-    tight — matching a depository→credit leg would wrongly wash out card
-    payments (which `cashSpending` must count) and unmatched real-income
-    deposits. Needs `raw_category` + `subtype` (both queried).
-    Pairing is a **maximum bipartite matching** (Kuhn's, in `maxMatchTransfers`,
-    per equal-amount bucket) — NOT greedy nearest-partner, which could give an
-    early leg the nearer partner and strand a later pair outside the window,
-    leaving a real transfer counted and inflating income AND spending equally
-    (net unaffected). Verified maximum against brute force — that check is now a
-    permanent seeded test in `test/cashFlow.test.js`. Inputs are sorted
-    before matching so the same data always washes the same pairs. The whole
-    model lives in `src/cashFlow.js` (pure, zero imports); dataAdapter
-    re-exports the helpers.
-  - **Cash flow section** = net per month (income − spending), diverging bars.
-  - Trends spending can legitimately differ from the Overview headline —
-    different questions. Abandoned attempts (same-day/same-amount wash; blanket
-    `raw_category` income filter) are in git log — don't retry them.
+### ONE spending/income model: linked-boundary (Mason, 2026-08-03 — replaces the two-model design)
+Mason explicitly relitigated the old "two models, don't unify" and "keep the
+depository↔depository wash restriction tight" doctrines after the 2026-08-01
+mass account attach invalidated their premise: the "personal" accounts got
+linked, and the wording-gated wash let $23k/quarter of cross-bank
+self-transfers count as spending AND income (the F1 double count — see PR #32).
+Every surface — Categories tab, Overview headline, budgets, envelopes,
+`toTxShape.counted`, AND Trends — now reads ONE model, so Trends and
+Categories agree on spending by construction.
+
+- **Internal is decided by STRUCTURE, not wording.** `markInternalTransfers`
+  (`src/cashFlow.js`) pairs a positive (money out) row with an equal-amount
+  negative (money in) row on a DIFFERENT visible linked account within 4 days —
+  across ALL account-type combinations EXCEPT loan accounts, which never
+  participate (so a mortgage/auto payment's depository leg stays unpaired and
+  counts as spending — Mason's decision: loan payments ARE spending even though
+  the loan is linked). No `raw_category`/`TRANSFER_RE` gate anymore. A matched
+  pair is `_internal`: excluded from income and spending. Pairing is still a
+  maximum bipartite matching (Kuhn's, per equal-amount bucket, sorted inputs,
+  brute-force parity pinned in `test/cashFlow.test.js` across mixed types).
+- **Spending** = `isSpend()` (`src/spending.js`, the ONE predicate): unpaired
+  positive rows on non-loan accounts — card purchases, depository outflows,
+  transfers that LEAVE the boundary (to an unlinked or **hidden** account;
+  hidden = unlinked for boundary purposes, their own rows stay query-excluded)
+  — MINUS card payments: `isCardPaymentRow` vetoes an unpaired
+  card-payment-worded row (`isCardPaymentDescriptor` in txClassify, or an
+  explicit `user_category` of the transfer bucket), because card payments never
+  count even when the card is unlinked (Mason). This NARROWS the transfer
+  category's meaning: an unpaired transfer-WORDED row counts (it crossed the
+  boundary); only the card-payment verdict excludes. Loan accounts' own ledger
+  rows never count (`isLoanAccount` — the counted leg is the depository
+  payment).
+- **Income** (`cashIncome`) = unpaired depository inflows (checking or
+  savings) — money in from outside the boundary. Credit negatives are "Return"
+  (`applyAccountRules`, unchanged): never income, never spending.
+- **`cashSpending` delegates to `sumSpending`** — kept under its old name for
+  importers. Trends' Cash flow section = income − spending per month.
+- **The pairing is part of the row pipeline**: `getTransactionsBetween` always
+  runs `markInternalTransfers` (the envelope walk included — it no longer skips
+  it; per-amount bucketing + binary-searched windows keep it near-linear).
+  `counted` is stamped where the month's rows are assembled; single-account
+  reads (account sheet, search) can't pair and may over-report `counted` on a
+  transfer leg — their lists don't render it.
+- Accepted trade, deliberate: an accidental equal-amount coincidence within 4
+  days across two accounts washes falsely. Judged rarer and cheaper than the
+  wording-dependence it replaces.
 - **Assistant model/effort** is user-selectable; `src/assistantModels.js` is the
   shared allowlist (Haiku 4.5 / Sonnet 5 / Opus 4.8) + `estimateCostRange`. The
   server validates the choice and only sends `thinking`/`effort` to models that
@@ -360,9 +364,9 @@ category's own first assignment; the pure core is `src/envelopes.js`.
   `moveMoney` can leave a 0 row behind, and a 0 row must stay equivalent to no
   row, or the category would start walking from there and turn its earlier
   ordinary spending into rolled-over debt.
-- **Envelopes use the purchase-based model only** (`isSpend()`, shared with
-  `getSpending`/`sumSpending`, including the loan-account guard). Never
-  `getCashFlow` — mixing the two models double-counts.
+- **Envelopes use the shared `isSpend()`** (the unified linked-boundary
+  predicate, including the loan-account guard) — the same fold the Categories
+  bars read, so Spent can never disagree with the bar beside it.
 - **`Uncategorized` (and the transfer bucket) can't be budgeted** —
   `isBudgetableCategory` gates assignments, targets, moves and the picker; its
   spending still renders read-only so the size of the unknown stays visible.
@@ -384,9 +388,10 @@ category's own first assignment; the pure core is `src/envelopes.js`.
 - **RTA income is hand-entered and never carried between months.** With a typed
   figure, a carry-forward would compound every month the user left blank. One
   month in, one month out.
-- The walk reads only the columns `isSpend()` needs and **skips
-  `markInternalTransfers`** — envelopes never read `_internal`, and that
-  matching is O(V·E) over a range that grows with the budgeting history.
+- The walk reads only the columns `isSpend()` needs (now incl. `account_id` +
+  descriptors) and, since 2026-08-03, RUNS `markInternalTransfers` — the
+  unified `isSpend()` reads `_internal`. Per-amount bucketing keeps the
+  matching near-linear over the budgeting history.
 - A by-date target **forces rollover on** — a sinking fund only reaches its
   number because leftovers carry; with rollover off it would ask for the full
   share forever and never converge.
@@ -705,6 +710,14 @@ The app's ONLY use of Supabase **Storage** — everything else is Postgres.
   Budget tab). Deliberately not built: in-app saved chats and search
   refinement (both need Mason — see the backlog).
 
+- **Unified linked-boundary spending model (2026-08-03, Mason's decision)** —
+  replaced the two spending/income models after the double-count diagnosis
+  (F1 $23k/quarter cross-bank self-transfers; F2 BofA/WF card payments as
+  purchases). Structural pairing, the card-payment veto, loan-payments-count:
+  all in the Conventions section. Classifier fixes: BANK OF AMERICA +
+  WELLS FARGO in `CARD_ISSUER_RE`, unspaced CCPYMT in
+  `STANDALONE_PAYMENT_RE`, `isCardPaymentDescriptor` exported. No migration —
+  read-time model only.
 - **Data coverage panel (TEMPORARY troubleshooting aid)** — collapsible card at
   the bottom of the Accounts tab: per-account first/last tx date, row count and
   source badges (simplefin/csv/pdf/manual), hidden accounts included on purpose.
@@ -770,7 +783,33 @@ The app's ONLY use of Supabase **Storage** — everything else is Postgres.
 
 ## Pending branches
 
-None in code. No outstanding ops tasks. Receipts storage policy SETTLED +
+None in code. **Outstanding ops/data tasks from the 2026-08-03 double-count
+session** (diagnosis archived in `docs/double-count-diagnosis-2026-08-03.md`):
+
+- **ROTATE the Supabase `service_role` key** — it was pasted into a Claude
+  chat session (2026-08-03) to run the read-only diagnosis. Dashboard →
+  Settings → API → rotate; then update `SUPABASE_SERVICE_ROLE_KEY` in Vercel
+  (Production AND Preview) and redeploy.
+- **Verify the $2,200 payroll duplicate** — "ACH Deposit PAYROLL From POME
+  HOLISTIC PE" −$2,200 appears TWICE on 2026-07-24 on Cashback Debit (3481)
+  with two distinct `sfin:` tx ids, so the upsert can't dedup it. Check the
+  Discover statement; if duplicated, set `excluded=true` on one copy. July
+  income reads ~$2,200 high until resolved. (Small same-day Venture X dupes
+  too, ~$34 total Jun+Jul.)
+- **Resolve the Discover it (7933) twins before unhiding** — one row is
+  mistyped `depository/checking` under the Capital One org, its sibling is
+  `credit` under the Discover org. Both hidden today (contributing $0); keep
+  the credit-typed one. Eyeball the type on EVERY account at unhide time.
+- **Recategorize NEWREZ** out of "Utilities" (~$3.8k/mo, counted once,
+  wrong bucket) — learned rule or `user_category`.
+- **Statement backfill** — pre-May-2026 history for BECU savings, Cashback
+  Debit and the cards via CSV/PDF import (the coverage panel on the Accounts
+  tab shows each account's gap). Note: Checking (2644) rows end 2026-04-03
+  exactly where Checking (5481) begins — likely the SAME real BECU checking
+  re-keyed by the feed (no overlap, no double count, but pre-May history
+  lives on the old row); confirm before treating 2644 as a separate account.
+
+Receipts storage policy SETTLED +
 verified end-to-end incl. cross-tenant denial (2026-07-31); the three orphan
 Plaid Items CLOSED (2026-08-01 — Mason deleted the Plaid account, retiring
 every Item; `PLAID_*` env vars already removed).
@@ -795,7 +834,8 @@ ship, or delete it when spent.
 Section 3 SHIPPED (see Merged features — the Section 3 batch covered the
 card-balance tile, Ask-tab persistence + save-chat, the Uncategorized
 teach-queue, the startup skeleton and the month jump picker; recurring v2,
-Trends biggest movers and the sign-out button shipped 2026-08-03). Genuinely
+Trends biggest movers and the sign-out button shipped 2026-08-03, movers
+reconciled to the unified single-model `isSpend()` lineage at merge). Genuinely
 unbuilt remainder: client-side search refinement (needs a Mason spec) and
 in-app saved chats (needs Mason's sizing call). Carry
 condition: the Dashboard.jsx decomposition is DEFERRED (keep the single file

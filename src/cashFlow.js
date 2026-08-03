@@ -1,15 +1,28 @@
-// Pure cash-flow model (no Supabase/React/env) — importable from plain Node,
-// e.g. by the CSV-import dry-run harness. dataAdapter.js re-exports the public
-// pieces, so existing importers are unchanged.
+// Pure linked-boundary pairing + income (no Supabase/React/env) — importable
+// from plain Node, e.g. by the CSV-import dry-run harness. dataAdapter.js
+// re-exports the public pieces, so existing importers are unchanged.
+//
+// THE LINKED-BOUNDARY MODEL (Mason, 2026-08-03 — supersedes the old two-model
+// design; see CLAUDE.md). Detection of "my own money moving between my own
+// accounts" is STRUCTURAL, not descriptor-based: a positive (money out) row on
+// one visible linked account pairs with a negative (money in) row of equal
+// amount on a DIFFERENT visible linked account within the window, across ALL
+// account-type combinations EXCEPT loan accounts, which never participate —
+// a mortgage/auto payment's depository leg must stay unpaired and count as
+// spending (the loan's own ledger rows are excluded by isLoanAccount instead).
+// Both legs of a matched pair are `_internal`: excluded from income AND
+// spending. The old gates — raw_category TRANSFER_IN/OUT wording on both legs,
+// depository↔depository only — are GONE: wording-dependence let $23k/quarter
+// of cross-bank ACH self-transfers count as spending and income (the F1
+// double count), and the depository→credit restriction is unnecessary now that
+// spending is unified (a washed card payment is exactly what "card payments
+// never count" wants; the checking leg is no longer the counted proxy for card
+// purchases — the purchases themselves count).
+// Hidden accounts are excluded at the QUERY level, so their legs never enter
+// pairing — a transfer to a hidden account is unpaired and counts as spending
+// (hidden = outside the linked boundary, by decision).
+import { sumSpending } from './spending.js';
 
-// Mark both legs of a transfer between the household's own deposit accounts
-// (BECU checking ↔ savings) as `_internal` so cash-flow totals skip them.
-// A Plaid TRANSFER_OUT on one depository account pairs with a TRANSFER_IN on a
-// *different* depository account of the same amount within a few days (legs
-// often post on different days). Restricting to TRANSFER_IN/OUT legs and to
-// depository↔depository leaves real income (an unmatched deposit that merely
-// arrives tagged TRANSFER_IN) and credit-card payments (checking → credit,
-// which IS cash leaving checking) counted.
 const INTERNAL_MATCH_WINDOW_DAYS = 4;
 
 function dayNumber(iso) {
@@ -18,21 +31,20 @@ function dayNumber(iso) {
 }
 
 // Exported so the CSV-import dry-run harness can verify washing against the
-// real logic (a personal↔joint transfer pair cancels across CSV + Plaid legs).
+// real logic (a transfer pair cancels across CSV + feed legs).
 export function markInternalTransfers(rows) {
-  // Eligibility is unchanged: a depository TRANSFER_OUT pairs with a depository
-  // TRANSFER_IN of equal amount, on a DIFFERENT account, within the window.
-  // Keep the depository↔depository restriction tight — matching a
-  // depository→credit leg would wrongly wash out card payments (which
-  // cashSpending must count) and unmatched real-income deposits.
+  // Structural eligibility (see the header): every non-excluded row on a
+  // non-loan account participates — positive rows as outs, negative as ins.
+  // No raw_category / wording gate. A row missing the accounts join is treated
+  // as non-loan, matching isLoanAccount's convention (and a single-account row
+  // set can never pair with itself anyway).
   const outsByAmount = new Map();
   const insByAmount = new Map();
   for (const t of rows) {
-    if (t.excluded || t.accounts?.type !== 'depository') continue;
-    const raw = (t.raw_category || '').toUpperCase();
-    if (t.amount > 0 && raw.startsWith('TRANSFER_OUT')) {
+    if (t.excluded || t.accounts?.type === 'loan') continue;
+    if (t.amount > 0) {
       pushTo(outsByAmount, t.amount.toFixed(2), t);
-    } else if (t.amount < 0 && raw.startsWith('TRANSFER_IN')) {
+    } else if (t.amount < 0) {
       pushTo(insByAmount, (-t.amount).toFixed(2), t);
     }
   }
@@ -145,55 +157,26 @@ function maxMatchTransfers(outs, ins) {
   return pairs;
 }
 
-// --- Trends cash flow (joint-budget view) ------------------------------------
-// The Trends "income vs spending" chart measures cash moving through the
-// household's *joint* accounts, treated as one budget:
-//   income   = money arriving in the joint checking OR savings accounts
-//   spending = money leaving the joint checking account (expenses are paid from
-//              checking; money leaving savings is never an expense)
-// Transfers between the joint checking and joint savings wash out
-// (markInternalTransfers), so moving money to savings isn't "spending" and
-// moving it back isn't "income". Money the household moves in from its own
-// *personal* accounts (not connected to Plaid) has no matching leg to wash
-// against, so it counts as income — deliberate: with only the joint accounts
-// synced, funding the joint budget from a personal account is the closest thing
-// to measurable income (real paychecks land in the un-connected personal
-// accounts). Credit-card *purchases* are not counted here — the card *payment*
-// that leaves checking is (that's the cash actually spent). This is deliberately
-// different from the Categories tab / Overview headline (sumSpending in
-// dataAdapter.js), which break spending down by what was purchased so
-// per-category budgets work.
-function isHouseholdDepository(t) {
-  // Any connected depository account (checking or savings) — the joint budget.
-  return t.accounts?.type === 'depository';
-}
-
-function isCheckingAccount(t) {
-  // Depository and not the savings pot. Lenient on subtype so a null/oddly
-  // typed primary account still counts; only "savings" is treated as separate.
-  return t.accounts?.type === 'depository' && t.accounts?.subtype !== 'savings';
-}
-
-// Expenses are paid from checking only; savings outflows are not spending.
-// Exported for the CSV-import dry-run harness (see markInternalTransfers).
+// --- The unified income/spending reads ---------------------------------------
+// ONE model everywhere (Mason, 2026-08-03): Trends spending IS the shared
+// isSpend() total — the same number as the Categories tab / Overview headline /
+// envelopes, by construction. cashSpending stays exported under its old name so
+// existing importers and harnesses keep working; it simply delegates.
 export function cashSpending(txs) {
-  let total = 0;
-  for (const t of txs) {
-    if (t.excluded || t._internal) continue;
-    if (isCheckingAccount(t) && t.amount > 0) total += t.amount;
-  }
-  return total;
+  return sumSpending(txs);
 }
 
-// Income is money into either joint account (checking or savings). Savings is
-// included so income that arrives via savings — money moved in from a personal
-// account — is not missed.
+// Income = money into a depository (checking or savings) account from OUTSIDE
+// the linked boundary: an unpaired depository inflow. Paired inflows are the
+// household's own money arriving from another linked account and were washed
+// by markInternalTransfers. Credit-account negatives are never income — they
+// are payments received or refunds ("Return" via applyAccountRules).
 // Exported for the CSV-import dry-run harness (see markInternalTransfers).
 export function cashIncome(txs) {
   let total = 0;
   for (const t of txs) {
     if (t.excluded || t._internal) continue;
-    if (isHouseholdDepository(t) && t.amount < 0) total += Math.abs(t.amount);
+    if (t.accounts?.type === 'depository' && t.amount < 0) total += Math.abs(t.amount);
   }
   return total;
 }

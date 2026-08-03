@@ -2,9 +2,11 @@
 // extracted from dataAdapter.js) against a synthetic multi-account household
 // (test/helpers/ledger.js) covering every transaction type the app handles.
 //
-// The two spending models — purchase-based here, joint-budget cash-flow in
-// src/cashFlow.js — legitimately disagree. Scenario 8 asserts each against its
-// OWN constants; nothing here asserts they match.
+// ONE unified linked-boundary model (Mason, 2026-08-03): structural transfer
+// pairing (markInternalTransfers) is part of establishing the row shape, so
+// totals tests wash the rows first — exactly what dataAdapter's
+// getTransactionsBetween does for every caller. Scenario 8 pins that Trends
+// spending and the Categories total are now THE SAME number by construction.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -27,10 +29,17 @@ const near = (a, b, msg) => assert.ok(Math.abs(a - b) < CENT, `${msg ?? ''} (${a
 
 const byLabel = groups => Object.fromEntries(groups.map(g => [g.label, g]));
 
+// The adapter pipeline's stand-in: every read the totals are built from runs
+// the structural pairing before aggregation (getTransactionsBetween).
+const washed = rows => {
+  markInternalTransfers(rows);
+  return rows;
+};
+
 // --- Scenario 1: groups, sum and hand-computed total agree -------------------
 
 test('group amounts sum exactly to sumSpending and to the hand-computed total', () => {
-  const visible = standardLedger().visibleRows();
+  const visible = washed(standardLedger().visibleRows());
   const groups = spendingGroups(visible);
   const groupSum = groups.reduce((s, g) => s + g.amount, 0);
   near(groupSum, sumSpending(visible), 'groups vs sumSpending');
@@ -60,7 +69,7 @@ test('a loan account contributes NOTHING to purchase-based spending', () => {
 // --- Scenario 3: the counted contract (CategorySheet) ------------------------
 
 test('the sum of counted:true rows in a category equals that category’s group amount', () => {
-  const visible = standardLedger().visibleRows();
+  const visible = washed(standardLedger().visibleRows());
   const groups = byLabel(spendingGroups(visible));
   const shaped = visible.map(toTxShape);
   for (const [label, g] of Object.entries(groups)) {
@@ -108,8 +117,12 @@ test('Return rows count in neither spending nor income', () => {
 
 // --- Scenario 6: transfer/card-payment guards through the aggregation --------
 
-test('transfers/card payments never count as spending — and issuer-named PURCHASES are not eaten by the guard', () => {
-  const visible = standardLedger().visibleRows();
+test('washed transfers/card payments never count as spending — and issuer-named PURCHASES are not eaten by the guard', () => {
+  // Model change 2026-08-03: the transfer CATEGORY no longer excludes a row —
+  // chk5 is out of the totals because its counter-leg sav1 pairs structurally,
+  // and chk4 because of the card-payment veto. With both washed there is
+  // still no transfer bucket over this fixture.
+  const visible = washed(standardLedger().visibleRows());
   const groups = byLabel(spendingGroups(visible));
   assert.equal(groups[TRANSFER_CATEGORY], undefined, 'no transfer bucket');
 
@@ -139,6 +152,7 @@ test('toggling excluded moves the total by exactly that row’s amount', () => {
 
 test('a user_category change moves money between buckets and conserves the grand total', () => {
   const led = standardLedger();
+  washed(led.visibleRows());
   const row = led.rows.find(t => t.id === 'chk2'); // Groceries 85.50
   row.user_category = 'Dining out';
   const groups = byLabel(spendingGroups(led.visibleRows()));
@@ -151,38 +165,101 @@ test('a user_category change moves money between buckets and conserves the grand
   );
 });
 
-// --- Scenario 8: the cash-flow model, against its OWN constants --------------
+// --- Scenario 8: ONE model — Trends and Categories agree by construction -----
+// (Model change 2026-08-03: the old two-model design is gone; these tests
+// asserted the models "legitimately disagree" — they now assert the opposite.)
 
-test('cash-flow constants: the checking↔savings pair washes; the card payment is cash spending but not purchase spending', () => {
-  const visible = standardLedger().visibleRows();
-  markInternalTransfers(visible);
+test('unified model: cashSpending IS sumSpending; income is unpaired depository inflows; both transfer pairs wash', () => {
+  const visible = washed(standardLedger().visibleRows());
   assert.equal(visible.find(t => t.id === 'chk5')._internal, true, 'transfer out leg washed');
   assert.equal(visible.find(t => t.id === 'sav1')._internal, true, 'transfer in leg washed');
+  // REGRESSION (model decision b): the depository→credit card-payment pair
+  // washes too — the old depository↔depository gate is gone.
+  assert.equal(visible.find(t => t.id === 'chk4')._internal, true, 'card-payment checking leg washed');
+  assert.equal(visible.find(t => t.id === 'c1b')._internal, true, 'card-payment credit leg washed');
   near(cashIncome(visible), EXPECTED.cash.income, 'cash income');
   near(cashSpending(visible), EXPECTED.cash.spending, 'cash spending');
-  // The card payment (chk4, $400) IS inside cash spending but NOT in purchase
-  // spending — the two models legitimately disagree; assert each against its
-  // own number, never against each other.
-  near(EXPECTED.cash.spending - sumSpending(visible), 852.5 - 764.0, 'models differ by design');
+  near(cashSpending(visible), sumSpending(visible), 'Trends spending EQUALS the Categories total');
 });
 
-test('a second, savings→checking pair reduces income only — savings outflows were never spending', () => {
+test('a savings→checking pair washes both legs — income and spending both unchanged', () => {
   const led = standardLedger();
   led.rows.push(
     makeTx(led.accounts.savings, 'sav3', '2026-07-24', 150.0, 'ONLINE BANKING TRANSFER TO CHECKING'),
     makeTx(led.accounts.checking, 'chk11', '2026-07-26', -150.0, 'ONLINE BANKING TRANSFER FROM SAVINGS')
   );
-  const visible = led.visibleRows();
-  // Unwashed, the extra pair would inflate income by its in-leg (and the
-  // still-unwashed chk5/sav1 pair shows up in both).
-  near(cashIncome(visible), EXPECTED.cash.income + 300 + 150, 'pre-wash income');
-  near(cashSpending(visible), EXPECTED.cash.spending + 300, 'pre-wash spending: the savings out-leg never appears');
-
-  markInternalTransfers(visible);
+  const visible = washed(led.visibleRows());
   assert.equal(visible.find(t => t.id === 'sav3')._internal, true);
   assert.equal(visible.find(t => t.id === 'chk11')._internal, true);
   near(cashIncome(visible), EXPECTED.cash.income, 'washing removed the in-leg from income');
-  near(cashSpending(visible), EXPECTED.cash.spending, 'spending never contained the savings out-leg');
+  near(cashSpending(visible), EXPECTED.cash.spending, 'washing removed the out-leg from spending');
+});
+
+// --- Named REGRESSIONs for the 2026-08-03 linked-boundary decisions ----------
+
+test('REGRESSION (c): a depository payment to a linked LOAN account counts as spending — loans never pair', () => {
+  // Mason's decision: mortgage/auto payments COUNT as spending even though the
+  // loan is linked. The loan's own credit leg is in the row set, but loan
+  // accounts never participate in pairing, so the checking leg stays unpaired.
+  const led = standardLedger();
+  led.rows.push(
+    makeTx(led.accounts.checking, 'chk12', '2026-07-27', 1800.0, 'ACH Withdrawal NEWREZ-SHELLPOINT'),
+    makeTx(led.accounts.mortgage, 'loan3', '2026-07-28', -1800.0, 'PAYMENT RECEIVED THANK YOU')
+  );
+  const visible = washed(led.visibleRows());
+  const leg = visible.find(t => t.id === 'chk12');
+  assert.ok(!leg._internal, 'the depository leg is NOT washed');
+  assert.equal(isSpend(leg), true, 'the loan payment counts as spending');
+  assert.equal(isSpend(visible.find(t => t.id === 'loan3')), false, 'the loan ledger row never counts');
+  near(sumSpending(visible), EXPECTED.spendTotal + 1800, 'total includes the payment once');
+});
+
+test('REGRESSION (d): a transfer to a HIDDEN account counts as spending — hidden is outside the boundary', () => {
+  // The hidden card's rows are excluded at the query level (visibleRows), so
+  // the out-leg has no counter-leg to pair with and crosses the boundary.
+  const led = standardLedger();
+  led.rows.push(
+    makeTx(led.accounts.checking, 'chk13', '2026-07-29', 250.0, 'ONLINE BANKING TRANSFER TO EXTERNAL'),
+    makeTx(led.accounts.hiddenCard, 'hid2', '2026-07-29', -250.0, 'TRANSFER FROM CHECKING')
+  );
+  const visible = washed(led.visibleRows());
+  const leg = visible.find(t => t.id === 'chk13');
+  assert.ok(!leg._internal, 'no visible counter-leg — unpaired');
+  assert.equal(isSpend(leg), true, 'the boundary-crossing transfer counts');
+  near(sumSpending(visible), EXPECTED.spendTotal + 250, 'total includes it once');
+});
+
+test('REGRESSION (e): an unpaired card-payment-worded row is still excluded (the live BofA/WF descriptors)', () => {
+  // Mason: card payments never count, even when the card is unlinked so
+  // pairing cannot wash them. Exact descriptors from the live F2 finding.
+  const led = standardLedger();
+  led.rows.push(
+    makeTx(led.accounts.checking, 'chk14', '2026-07-03', 510.19, 'External Withdrawal - BANK OF AMERICA - PAYMENT'),
+    makeTx(led.accounts.checking, 'chk15', '2026-07-04', 412.86, 'External Withdrawal - WELLS FARGO CARD - CCPYMT')
+  );
+  const visible = washed(led.visibleRows());
+  for (const id of ['chk14', 'chk15']) {
+    const t = visible.find(x => x.id === id);
+    assert.ok(!t._internal, `${id}: unpaired`);
+    assert.equal(isSpend(t), false, `${id}: card payment never counts`);
+  }
+  near(sumSpending(visible), EXPECTED.spendTotal, 'totals unchanged');
+});
+
+test('an unpaired transfer-WORDED row DOES count — the category no longer excludes it', () => {
+  // The narrowed exclusion: internal is decided by structure; only the
+  // card-payment verdict vetoes an unpaired row. This is what fixes the F1
+  // $23k double count's Trends side without hiding real boundary-crossing
+  // money from the totals.
+  const led = standardLedger();
+  led.rows.push(
+    makeTx(led.accounts.checking, 'chk16', '2026-07-30', 999.0, 'ONLINE BANKING TRANSFER TO SOMEWHERE ELSE')
+  );
+  const visible = washed(led.visibleRows());
+  const t = visible.find(x => x.id === 'chk16');
+  assert.equal(t.mapped_category, TRANSFER_CATEGORY, 'fixture sanity: classified as a transfer');
+  assert.ok(!t._internal, 'no counter-leg');
+  assert.equal(isSpend(t), true, 'it left the boundary — it counts');
 });
 
 // --- Scenario 9: Uncategorized is counted and visible ------------------------
@@ -304,7 +381,10 @@ function juneRows() {
 }
 
 test('biggestMovers ranks rises AND falls by |delta|: a new category rises from 0, a disappeared one falls to 0', () => {
-  const movers = biggestMovers(standardLedger().visibleRows(), juneRows());
+  // Each month's rows are washed per-fetch, exactly as getBiggestMovers'
+  // reads deliver them: July's chk5↔sav1 pair goes _internal, so no
+  // fabricated transfer bucket outranks the real movers.
+  const movers = biggestMovers(washed(standardLedger().visibleRows()), washed(juneRows()));
   assert.deepEqual(
     movers.map(m => m.label),
     ['Pets', 'Vehicle expenses', 'Home maintenance and improvement', 'Utilities', 'Dining out'],
@@ -325,53 +405,84 @@ test('biggestMovers ranks rises AND falls by |delta|: a new category rises from 
 });
 
 test('biggestMovers skips negligible deltas and honors the limit opt', () => {
-  const curr = standardLedger().visibleRows();
-  const all = biggestMovers(curr, juneRows(), { limit: 100 });
+  const curr = washed(standardLedger().visibleRows());
+  const all = biggestMovers(curr, washed(juneRows()), { limit: 100 });
   // Travel is $220 in BOTH months — a zero delta never earns a slot.
   assert.ok(!all.some(m => m.label === 'Travel and vacation'), 'unchanged category skipped');
   // Everything else moved by >= $1: 9 July categories + Pets − shared(3) = ...
   // Groceries/Utilities changed, Travel didn't: 9 − 1 + 1 = 9 movers.
   assert.equal(all.length, 9);
-  assert.equal(biggestMovers(curr, juneRows(), { limit: 3 }).length, 3);
+  assert.equal(biggestMovers(curr, washed(juneRows()), { limit: 3 }).length, 3);
   // A sub-dollar wobble is noise: shrink June Groceries by 50¢ from July's total.
   // limit:100 so the assertion exercises the $1 noise floor itself — at the
   // default top-5, eight larger movers crowd the 50¢ delta out and the check
   // passes even with minDelta loosened to a penny (verified by mutation).
   const A = makeAccounts();
-  const wobble = [makeTx(A.checking, 'w1', '2026-06-05', 109.0, 'SAFEWAY 1467 EVERETT WA')];
+  const wobble = washed([makeTx(A.checking, 'w1', '2026-06-05', 109.0, 'SAFEWAY 1467 EVERETT WA')]);
   assert.ok(
     !biggestMovers(curr, wobble, { limit: 100 }).some(m => m.label === 'Groceries'),
     'a 50¢ delta is skipped even with slots to spare'
   );
 });
 
-test('biggestMovers excludes transfers/card payments, Return, loan rows, excluded rows and money in — the isSpend lineage', () => {
+test('biggestMovers excludes non-spend rows STRUCTURALLY: washed pairs, the card-payment veto, Return, loan rows, excluded rows, money in', () => {
   const A = makeAccounts();
+  // Junk that must move NOTHING under the linked-boundary model. The transfer
+  // is a complete two-leg pair, so the per-fetch wash marks both _internal —
+  // exclusion by structure, not by the transfer CATEGORY (an unpaired leg
+  // COUNTS now; pinned below). The autopay leg has no card counter-leg in the
+  // junk, so it stays unpaired — the card-payment VETO is what excludes it.
   const junk = month => [
     makeTx(A.checking, `${month}j1`, `2026-${month}-12`, 300.0, 'ONLINE BANKING TRANSFER TO SAVINGS'),
+    makeTx(A.savings, `${month}j1b`, `2026-${month}-13`, -300.0, 'ONLINE BANKING TRANSFER FROM CHECKING'),
     makeTx(A.checking, `${month}j2`, `2026-${month}-15`, 400.0, 'CAPITAL ONE AUTOPAY PYMT'),
     makeTx(A.mortgage, `${month}j3`, `2026-${month}-15`, 800.0, 'ESCROW DISBURSEMENT COUNTY TAX'),
     makeTx(A.card1, `${month}j4`, `2026-${month}-20`, -50.0, 'RIVER GEAR RETURNS'), // → Return
     makeTx(A.checking, `${month}j5`, `2026-${month}-21`, 500.0, 'SAFEWAY 1467 EVERETT WA', { excluded: true }),
     makeTx(A.checking, `${month}j6`, `2026-${month}-01`, -2500.0, 'PAYROLL DIRECT DEP'), // money in
   ];
-  const curr = standardLedger().visibleRows();
-  const base = biggestMovers(curr, juneRows(), { limit: 100 });
+  const base = biggestMovers(washed(standardLedger().visibleRows()), washed(juneRows()), { limit: 100 });
   // Junk in EITHER month moves nothing (the excluded Safeway row alone would
-  // otherwise swing Groceries by $500).
-  assert.deepEqual(biggestMovers(curr, [...juneRows(), ...junk('06')], { limit: 100 }), base);
-  assert.deepEqual(biggestMovers([...curr, ...junk('07')], juneRows(), { limit: 100 }), base);
+  // otherwise swing Groceries by $500, the loan escrow row its bucket by $800).
+  assert.deepEqual(
+    biggestMovers(washed(standardLedger().visibleRows()), washed([...juneRows(), ...junk('06')]), { limit: 100 }),
+    base
+  );
+  assert.deepEqual(
+    biggestMovers(washed([...standardLedger().visibleRows(), ...junk('07')]), washed(juneRows()), { limit: 100 }),
+    base
+  );
   // …and the guarded buckets never surface as movers at all.
-  const labels = biggestMovers([...curr, ...junk('07')], [...juneRows(), ...junk('06')], { limit: 100 }).map(m => m.label);
+  const labels = biggestMovers(
+    washed([...standardLedger().visibleRows(), ...junk('07')]),
+    washed([...juneRows(), ...junk('06')]),
+    { limit: 100 }
+  ).map(m => m.label);
   assert.ok(!labels.includes(TRANSFER_CATEGORY), 'no transfer bucket');
   assert.ok(!labels.includes(RETURN_CATEGORY), 'no Return bucket');
+
+  // The counterpoint the old category-based test could not express: drop the
+  // counter-leg and the SAME transfer-worded row crosses the linked boundary,
+  // stays unpaired, and IS a mover — visible under the transfer label, by
+  // design (this is what fails if isSpend regresses to category exclusion).
+  const unpaired = junk('07').filter(t => t.id !== '07j1b');
+  const tb = biggestMovers(
+    washed([...standardLedger().visibleRows(), ...unpaired]),
+    washed(juneRows()),
+    { limit: 100 }
+  ).find(m => m.label === TRANSFER_CATEGORY);
+  assert.ok(tb, 'an unpaired boundary-crossing transfer IS a mover');
+  near(tb.delta, 300.0, 'exactly the unpaired leg, a rise from 0');
+  near(tb.prev, 0);
 });
 
 test('biggestMovers over empty months', () => {
   assert.deepEqual(biggestMovers([], []), []);
   // One empty side degenerates to that month's groups (largest first, capped
-  // at 5): all rises when prev is empty, all falls when curr is.
-  const visible = standardLedger().visibleRows();
+  // at 5): all rises when prev is empty, all falls when curr is. Rows washed
+  // per-fetch as the adapter delivers them — unwashed, the chk5 leg would
+  // fabricate a $300 transfer "fall" outranking Travel's real $220 one.
+  const visible = washed(standardLedger().visibleRows());
   const rises = biggestMovers(visible, []);
   assert.equal(rises.length, 5);
   assert.deepEqual(

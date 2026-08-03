@@ -39,9 +39,33 @@ test('equal-amount depository OUT/IN pair on different accounts within the windo
   assert.equal(i._internal, true);
 });
 
-test('a depository→credit pair is NOT washed (card payments must stay countable)', () => {
+test('REGRESSION (b, model decision 2026-08-03): a depository→credit pair IS washed — a card payment is internal', () => {
+  // Inverted from the old two-model design, where the checking leg had to stay
+  // countable as the cash-flow proxy for card purchases. Under the unified
+  // linked-boundary model the purchases themselves count and the payment is
+  // never spending, so the pair washes.
   const o = out(500, 0); // checking leg of a card payment
   const i = inn(500, 1, 'acc-cc', CC); // credit-card side
+  markInternalTransfers([o, i]);
+  assert.equal(o._internal, true);
+  assert.equal(i._internal, true);
+});
+
+test('REGRESSION (a, the F1 case): a cross-bank depository ACH pair with NO transfer wording washes', () => {
+  // The $23k/quarter double count: SimpleFIN stamps raw_category only on
+  // intra-bank transfers, so cross-bank legs arrived blank and the old
+  // raw_category gate never paired them. Detection is structural now.
+  const o = { plaid_tx_id: 'f1o', account_id: 'acc-discover', accounts: CHK, date: iso(0), amount: 6000, raw_category: '', description: 'ACH Withdrawal Boeing Employees Credit Union' };
+  const i = { plaid_tx_id: 'f1i', account_id: 'acc-becu', accounts: CHK, date: iso(2), amount: -6000, raw_category: '', description: 'External Deposit - Discover (CONA) DC FINOUT' };
+  markInternalTransfers([o, i]);
+  assert.equal(o._internal, true);
+  assert.equal(i._internal, true);
+  assert.equal(cashIncome([o, i]), 0, 'the in-leg is not income');
+});
+
+test('a LOAN account never participates in pairing — the depository leg of a loan payment stays unpaired', () => {
+  const o = out(1800, 0); // checking leg of a mortgage payment
+  const i = { plaid_tx_id: 'ln1', account_id: 'acc-loan', accounts: { type: 'loan', subtype: null }, date: iso(1), amount: -1800, raw_category: '' };
   markInternalTransfers([o, i]);
   assert.ok(!o._internal);
   assert.ok(!i._internal);
@@ -81,13 +105,17 @@ function lcg(seed) {
 }
 
 // Exhaustive maximum matching over the same eligibility rules the real code
-// applies: equal amount, different account, |date gap| ≤ window. Fine at n ≤ 8.
+// applies: equal amount, different account, |date gap| ≤ window, and neither
+// leg on a loan account (loans never pair — model decision 2026-08-03).
+// Fine at n ≤ 8.
 function bruteMax(outs, ins) {
+  const eligible = t => t.accounts?.type !== 'loan';
   const adj = outs.map(o =>
     ins
       .map((r, j) => j)
       .filter(j => {
         const r = ins[j];
+        if (!eligible(o) || !eligible(r)) return false;
         if (o.amount.toFixed(2) !== (-r.amount).toFixed(2)) return false;
         if (r.account_id === o.account_id) return false;
         return Math.abs(day(r.date) - day(o.date)) <= WINDOW;
@@ -108,11 +136,19 @@ function bruteMax(outs, ins) {
   return rec(0);
 }
 
-test('random instances: washed-pair count equals brute-force maximum matching', () => {
+test('REGRESSION (g): random MIXED-account-type instances — washed-pair count equals brute-force maximum matching', () => {
   const rand = lcg(20260726);
   const randInt = n => Math.floor(rand() * n);
   const amounts = [5, 5, 12.5, 80];
-  const accountIds = ['acc-a', 'acc-b', 'acc-c'];
+  // Mixed types on purpose: depository, credit and loan accounts all appear,
+  // pinning that pairing spans every type combination EXCEPT loan.
+  const LOAN = { type: 'loan', subtype: null };
+  const accountPool = [
+    ['acc-a', CHK],
+    ['acc-b', SAV],
+    ['acc-c', CC],
+    ['acc-d', LOAN],
+  ];
   for (let trial = 0; trial < 200; trial++) {
     seq = 0;
     const outs = [];
@@ -120,10 +156,12 @@ test('random instances: washed-pair count equals brute-force maximum matching', 
     const nOuts = randInt(9);
     const nIns = randInt(9);
     for (let i = 0; i < nOuts; i++) {
-      outs.push(out(amounts[randInt(amounts.length)], randInt(13), accountIds[randInt(3)]));
+      const [id, acct] = accountPool[randInt(accountPool.length)];
+      outs.push(out(amounts[randInt(amounts.length)], randInt(13), id, acct));
     }
     for (let j = 0; j < nIns; j++) {
-      ins.push(inn(amounts[randInt(amounts.length)], randInt(13), accountIds[randInt(3)]));
+      const [id, acct] = accountPool[randInt(accountPool.length)];
+      ins.push(inn(amounts[randInt(amounts.length)], randInt(13), id, acct));
     }
     const rows = [...outs, ...ins];
     for (let k = rows.length - 1; k > 0; k--) {
@@ -140,12 +178,17 @@ test('random instances: washed-pair count equals brute-force maximum matching', 
 
 // --- cashSpending / cashIncome ----------------------------------------------
 
-test('cashSpending counts checking outflows only; cashIncome counts depository inflows; _internal and excluded rows skip both', () => {
+test('unified model: cashSpending counts ALL unpaired non-loan outflows (incl. savings + card purchases); cashIncome counts unpaired depository inflows', () => {
+  // Model change 2026-08-03: cashSpending delegates to the shared sumSpending.
+  // Savings outflows and credit purchases now count (they used to be excluded
+  // by the checking-only rule); _internal and excluded rows still skip both,
+  // and loan rows never count.
   const rows = [
     { accounts: CHK, amount: 50 }, // checking outflow → spending
     { accounts: { type: 'depository', subtype: null }, amount: 10 }, // lenient subtype → spending
-    { accounts: SAV, amount: 200 }, // savings outflow → NOT spending
-    { accounts: CC, amount: 30 }, // credit purchase → NOT spending
+    { accounts: SAV, amount: 200 }, // savings outflow → spending now (unpaired = crossed the boundary)
+    { accounts: CC, amount: 30 }, // credit PURCHASE → spending now (one model)
+    { accounts: { type: 'loan', subtype: null }, amount: 500 }, // loan ledger row → never spending
     { accounts: CHK, amount: -1000 }, // checking inflow → income
     { accounts: SAV, amount: -250 }, // savings inflow → income
     { accounts: CC, amount: -25 }, // credit refund → NOT income
@@ -154,6 +197,6 @@ test('cashSpending counts checking outflows only; cashIncome counts depository i
     { accounts: CHK, amount: 40, excluded: true }, // user-excluded skips both
     { accounts: CHK, amount: -40, excluded: true },
   ];
-  assert.equal(cashSpending(rows), 60);
+  assert.equal(cashSpending(rows), 290);
   assert.equal(cashIncome(rows), 1250);
 });
