@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from "react";
-import { getOverview, getSpending, getBiggestMovers, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES, setCategoryRule, applyCategoryRuleToHistory, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, invalidateEnvelopeSpending, isEnvelopeSchemaMissing, targetNeed, readyToAssign, envelopePace, getEnvPace, setEnvPace as persistEnvPace, getRecIgnore, updateRecIgnore, monthKey, getEntities, createEntity, updateEntity, getTaxYearTransactions, getMileage, addMileage, deleteMileage, getReceiptTxIds, getDebts, getBalanceSnapshots, addManualTransaction, createManualAccount, updateManualBalance, getDataCoverage, signOut } from "../dataAdapter.js";
+import { getOverview, getSpending, getBiggestMovers, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES, setCategoryRule, applyCategoryRuleToHistory, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, invalidateEnvelopeSpending, isEnvelopeSchemaMissing, targetNeed, readyToAssign, envelopePace, getEnvPace, setEnvPace as persistEnvPace, getRecIgnore, updateRecIgnore, monthKey, getEntities, createEntity, updateEntity, getTaxYearTransactions, getMileage, addMileage, deleteMileage, getReceiptTxIds, getDebts, getBalanceSnapshots, getNetWorthSeries, addManualTransaction, createManualAccount, updateManualBalance, getDataCoverage, signOut } from "../dataAdapter.js";
 import { payoffWhatIf, debtFreeMonth, isMortgage, amortizationSchedule, addMonths, MAX_MONTHS } from "../debtPayoff.js";
 import { SCHEDULE_E_LINES, RENTS_KEY, DEFAULT_SCHEDULE_E_MAP, scheduleEReport, entityMonthly, entityLedger, personalDeductionReport, DEDUCTION_BUCKETS, DEFAULT_DEDUCTION_MAP, mileageDeduction, scheduleECsv } from "../taxReport.js";
 import { merchantKey } from "../txClassify.js";
@@ -1142,6 +1142,7 @@ export default function Dashboard({ refreshTick = 0 }) {
   const [debtData,setDebtData]=useState(null);   // {debts,totalDebt,totalMinimums,hasDebtColumns}
   const [debtLoading,setDebtLoading]=useState(false);
   const [debtSnaps,setDebtSnaps]=useState([]);   // balance_snapshots rows, oldest first (STORED sign: debts positive)
+  const [nwSeries,setNwSeries]=useState([]);     // [{date,total}] oldest first, total already SIGNED (never re-displayBalance)
   const [debtStrategy,setDebtStrategy]=useState("snowball");
   const [debtExtra,setDebtExtra]=useState("");   // extra $/mo, text while typing
   // Per-account include-in-payoff override; the DEFAULT (no entry) is: credit
@@ -1534,6 +1535,10 @@ export default function Dashboard({ refreshTick = 0 }) {
           const since=new Date(Date.now()-365*86400000).toISOString().slice(0,10);
           setDebtSnaps(await getBalanceSnapshots(d.debts.map(a=>a.id),since));
         }catch(err){console.error("balance snapshots load failed",err);setDebtSnaps([]);}
+        try{
+          const since=new Date(Date.now()-365*86400000).toISOString().slice(0,10);
+          setNwSeries(await getNetWorthSeries(since));
+        }catch(err){console.error("net worth load failed",err);setNwSeries([]);}
         setDebtData(d);
       })
       .catch(err=>{console.error("debt load failed",err);setDebtData({debts:[],totalDebt:0,totalMinimums:0,hasDebtColumns:false});})
@@ -3369,6 +3374,44 @@ export default function Dashboard({ refreshTick = 0 }) {
                 );
               })()}
               <div style={{marginTop:8,fontSize:10,color:"var(--muted)"}}>Snapshots are taken by the daily sync whenever a balance changes — the line fills in over time.</div>
+            </div>
+            )}
+
+            {/* NET WORTH — assets minus debts off balance_snapshots, hidden
+                accounts excluded (Mason 2026-08-03). Totals arrive SIGNED from
+                the adapter (each account already through displayBalance inside
+                the pure fold) — rendered directly, never re-flipped. */}
+            {nwSeries.length>0&&(
+            <div className="card">
+              <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em",marginBottom:5}}>Net worth</div>
+              <div style={{fontSize:24,fontWeight:600,letterSpacing:"-.02em",fontFamily:"'DM Mono',monospace"}}>
+                {fmtX(nwSeries[nwSeries.length-1].total)}
+              </div>
+              <div style={{fontSize:11,color:"var(--muted)",marginTop:3}}>
+                assets − debts across unhidden accounts · history since {shortDate(nwSeries[0].date)}
+              </div>
+              {nwSeries.length>=2&&(()=>{
+                const max=Math.max(...nwSeries.map(p=>p.total));
+                const min=Math.min(...nwSeries.map(p=>p.total));
+                const span=Math.max(max-min,Math.abs(max)*.02,1);
+                const W=300,H=60;
+                const pts=nwSeries.map((p,i)=>`${(i/(nwSeries.length-1))*W},${H-4-((p.total-min)/span)*(H-8)}`).join(" ");
+                const line=markOn("#7F77DD",surf.card);
+                return (
+                  <>
+                    <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{width:"100%",height:H,display:"block",marginTop:10}}>
+                      <polyline points={pts} fill="none" stroke={line} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round"/>
+                    </svg>
+                    <div style={{display:"flex",justifyContent:"space-between",marginTop:6,fontSize:10,color:"var(--muted)",fontFamily:"'DM Mono',monospace"}}>
+                      <span>{shortDate(nwSeries[0].date)} · {fmt(nwSeries[0].total)}</span>
+                      <span>{shortDate(nwSeries[nwSeries.length-1].date)} · {fmt(nwSeries[nwSeries.length-1].total)}</span>
+                    </div>
+                  </>
+                );
+              })()}
+              <div style={{marginTop:8,fontSize:10,color:"var(--muted)"}}>
+                Snapshots only started accruing on 2026-08-01, so the line is honest but shallow — it deepens daily.
+              </div>
             </div>
             )}
           </div>

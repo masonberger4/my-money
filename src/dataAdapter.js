@@ -8,6 +8,7 @@ import { isSpend, sumSpending, spendingGroups, biggestMovers, toTxShape, aggrega
 import { createRangeMemo } from './monthMemo.js';
 import { parseIgnoreList, toggleIgnoreKey, CANDIDATE_WINDOW_MONTHS } from './recurring.js';
 import { aggregateCoverage } from './coverage.js';
+import { netWorthSeries } from './netWorth.js';
 
 // Re-export the pure cash-flow model (src/cashFlow.js) so existing importers
 // and the CSV-import dry-run harness keep working.
@@ -378,6 +379,23 @@ export async function getBalanceSnapshots(accountIds, sinceDate) {
     throw error;
   }
   return data || [];
+}
+
+// Net worth over time: assets minus debts off balance_snapshots, one point
+// per snapshot date, oldest first — [{ date, total }], total already SIGNED
+// (each account through displayBalance inside the fold; render it directly,
+// never through displayBalance again). Hidden accounts are EXCLUDED (Mason
+// 2026-08-03, the query-level rule) — filtered here so the pure fold never
+// sees them or their snapshots. Degrades like getBalanceSnapshots: [] when
+// the snapshots table isn't installed yet (previews share the prod DB), and
+// [] on no accounts. `hidden` is an original accounts column, so there is no
+// missing-column arm to check here.
+export async function getNetWorthSeries(sinceDate) {
+  const { data, error } = await supabase.from('accounts').select('id, type, hidden');
+  if (error) throw error;
+  const accounts = (data || []).filter(a => !a.hidden);
+  const snaps = await getBalanceSnapshots(accounts.map(a => a.id), sinceDate);
+  return netWorthSeries(snaps, accounts);
 }
 
 // All transactions for one account, newest first, capped so a huge history
