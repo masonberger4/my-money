@@ -8,9 +8,15 @@ let serviceClient = null;
 export function getServiceClient() {
   if (serviceClient) return serviceClient;
   const url = process.env.SUPABASE_URL;
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  // Supabase renamed its server key "service_role" → "Secret" (sb_secret_…).
+  // New name preferred; the legacy var name keeps working during migration.
+  const key =
+    process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
   if (!url || !key) {
-    throw new Error('Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY');
+    throw new Error(
+      'Set SUPABASE_URL and SUPABASE_SECRET_KEY (the sb_secret_… key; ' +
+        'legacy name SUPABASE_SERVICE_ROLE_KEY also accepted)'
+    );
   }
   serviceClient = createClient(url, key, {
     auth: { persistSession: false, autoRefreshToken: false },
