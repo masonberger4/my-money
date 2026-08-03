@@ -251,6 +251,50 @@ function Sk({w="100%",h=16,r=6}) {
   return <div style={{width:w,height:h,borderRadius:r,background:"var(--border)",animation:"pulse 1.5s ease-in-out infinite"}} />;
 }
 
+// Month jump picker — opened by tapping the header month label. A tap-a-month
+// grid + year stepper, deliberately NOT <input type="month"> (the free-typed
+// date-input mid-typing-garbage Gotcha). Future months are only pickable when
+// maxAhead allows them — the caller passes the same 12-on-budget / 0-elsewhere
+// rule that gates canNext, so the picker can never reach a month ‹/› can't.
+function MonthJumpSheet({year,month,now,maxAhead,onPick,onClose}) {
+  const [py,setPy]=useState(year);
+  const nowY=now.getFullYear(),nowM=now.getMonth()+1;
+  const maxIdx=nowY*12+(nowM-1)+maxAhead; // absolute month index cap
+  const maxYear=Math.floor(maxIdx/12);
+  const names=Array.from({length:12},(_,i)=>new Date(2000,i,1).toLocaleString("default",{month:"short"}));
+  return (
+    <div className="overlay" onClick={onClose}>
+      <div className="modal" onClick={e=>e.stopPropagation()} style={{width:"min(340px,92vw)"}}>
+        <div style={{fontSize:12,color:"var(--muted)",marginBottom:10,textAlign:"center"}}>Jump to a month</div>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:10,marginBottom:14}}>
+          <button className="nbtn" onClick={()=>setPy(y=>y-1)} aria-label="Previous year">‹</button>
+          <div style={{fontSize:16,fontWeight:600,minWidth:70,textAlign:"center",color:"var(--text)"}}>{py}</div>
+          <button className="nbtn" onClick={()=>setPy(y=>y+1)} disabled={py>=maxYear} aria-label="Next year">›</button>
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8}}>
+          {names.map((n,i)=>{
+            const m=i+1;
+            const disabled=py*12+i>maxIdx;
+            const active=py===year&&m===month;
+            const isNow=py===nowY&&m===nowM;
+            return (
+              <button key={m} className="ibtn" disabled={disabled} onClick={()=>onPick(py,m)}
+                style={{justifyContent:"center",padding:"10px 0",
+                  fontWeight:active||isNow?600:400,
+                  opacity:disabled?.35:1,
+                  ...(active?{background:"var(--accent)",color:"var(--accent-text)",borderColor:"var(--accent)"}:{}),
+                  ...(!active&&isNow?{borderColor:"var(--accent)"}:{})}}>
+                {n}
+              </button>
+            );
+          })}
+        </div>
+        <button onClick={onClose} className="ibtn" style={{width:"100%",justifyContent:"center",marginTop:14}}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
 function Donut({data,size=130}) {
   const total = data.reduce((s,d)=>s+d.value,0);
   if (!total) return <div style={{width:size,height:size,borderRadius:"50%",background:"var(--border)"}} />;
@@ -1417,6 +1461,7 @@ export default function Dashboard({ refreshTick = 0 }) {
   const [selTx,setSelTx]=useState(null);
   const [importing,setImporting]=useState(false);
   const [connectingSfin,setConnectingSfin]=useState(false);
+  const [monthPicker,setMonthPicker]=useState(false);
   const [quickAdd,setQuickAdd]=useState(false); // manual transaction quick-add sheet
   const [quickAddBusy,setQuickAddBusy]=useState(false);
 
@@ -1915,7 +1960,10 @@ export default function Dashboard({ refreshTick = 0 }) {
             <div style={{fontSize:11,fontWeight:600,letterSpacing:".08em",color:"var(--muted)",textTransform:"uppercase",marginBottom:4}}>Spending Dashboard</div>
             <div style={{display:"flex",alignItems:"center",gap:10}}>
               <button className="nbtn" onClick={prevMonth}>‹</button>
-              <h1 style={{fontSize:20,fontWeight:600,letterSpacing:"-.02em",minWidth:190,textAlign:"center",color:"var(--text)"}}>
+              <h1 role="button" tabIndex={0} title="Jump to a month" aria-label="Jump to a month"
+                onClick={()=>setMonthPicker(true)}
+                onKeyDown={e=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();setMonthPicker(true);}}}
+                style={{fontSize:20,fontWeight:600,letterSpacing:"-.02em",minWidth:190,textAlign:"center",color:"var(--text)",cursor:"pointer"}}>
                 {loading&&!lastUpd?<span style={{opacity:.4}}>Loading…</span>:monthLabel(year,month)}
               </h1>
               <button className="nbtn" onClick={nextMonth} disabled={!canNext}>›</button>
@@ -1937,6 +1985,13 @@ export default function Dashboard({ refreshTick = 0 }) {
             </button>
           </div>
         </div>
+
+        {monthPicker&&(
+          <MonthJumpSheet year={year} month={month} now={now}
+            maxAhead={tab==="budget"?12:0}
+            onPick={(y,m)=>{setYear(y);setMonth(m);setMonthPicker(false);}}
+            onClose={()=>setMonthPicker(false)}/>
+        )}
 
         {error&&<div style={{background:"var(--danger-bg)",border:"1px solid var(--danger-border)",borderRadius:10,padding:"12px 16px",fontSize:13,color:"var(--danger)",marginBottom:14}}>{error}</div>}
 
