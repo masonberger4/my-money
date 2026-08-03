@@ -6,6 +6,7 @@ import { markInternalTransfers, cashIncome, cashSpending } from './cashFlow.js';
 import { walkEnvelopes, monthKey, planMove } from './envelopes.js';
 import { isSpend, sumSpending, spendingGroups, toTxShape, aggregateEnvelopeSpending } from './spending.js';
 import { createRangeMemo } from './monthMemo.js';
+import { aggregateCoverage } from './coverage.js';
 
 // Re-export the pure cash-flow model (src/cashFlow.js) so existing importers
 // and the CSV-import dry-run harness keep working.
@@ -1540,4 +1541,33 @@ export async function getReceiptUrl(storagePath) {
     .createSignedUrl(storagePath, 3600);
   if (error) throw error;
   return data.signedUrl;
+}
+
+// TEMPORARY TROUBLESHOOTING AID (see src/coverage.js) — per-account transaction
+// coverage for the Accounts tab's "Data coverage" panel. Pages the WHOLE
+// transactions table (account_id/date/source only), so callers should fetch
+// lazily — Dashboard loads it only when the panel is first expanded.
+// Return shape (stable): { [account_id]: { first: 'YYYY-MM-DD'|null,
+//   last: 'YYYY-MM-DD'|null, count: n, sources: { simplefin|csv|pdf|manual|unknown: n } } }
+export async function getDataCoverage() {
+  const rows = [];
+  const page = 1000;
+  for (let from = 0; ; from += page) {
+    const { data, error } = await supabase
+      .from('transactions')
+      .select('account_id, date, source')
+      .order('id', { ascending: true })
+      .range(from, from + page - 1);
+    // A row count that is an exact multiple of `page` makes the next request
+    // start past the end, which PostgREST answers with a 416/PGRST103 rather
+    // than an empty page — treat that as end-of-data, not a failure (same fix
+    // as the ruleHistory candidate scan and the spendingContext paginators).
+    if (error) {
+      if (isRangeExhaustedError(error)) break;
+      throw error;
+    }
+    rows.push(...data);
+    if (data.length < page) break;
+  }
+  return aggregateCoverage(rows);
 }
