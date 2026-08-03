@@ -3,7 +3,9 @@ import { applyAccountRules } from './categoryMap.js';
 import { merchantKey, classifyDescription } from './txClassify.js';
 import { applyRuleToHistory, isRangeExhaustedError } from './ruleHistory.js';
 import { markInternalTransfers, cashIncome, cashSpending } from './cashFlow.js';
-import { walkEnvelopes, monthKey, planMove } from './envelopes.js';
+import { walkEnvelopes, monthKey, planMove, planAutoFill } from './envelopes.js';
+import { matchExpected, rollForwardDate, isDuplicateExpected } from './expectedTx.js';
+import { isBudgetableCategory } from './categoryMap.js';
 import { isSpend, sumSpending, spendingGroups, biggestMovers, toTxShape, aggregateEnvelopeSpending } from './spending.js';
 import { createRangeMemo } from './monthMemo.js';
 import { parseIgnoreList, toggleIgnoreKey, CANDIDATE_WINDOW_MONTHS } from './recurring.js';
@@ -16,7 +18,17 @@ export { markInternalTransfers, cashIncome, cashSpending } from './cashFlow.js';
 
 // Same deal for the pure envelope model (src/envelopes.js) — Dashboard and any
 // harness import the helpers from one place.
-export { targetNeed, readyToAssign, envelopePace, monthKey, shiftMonthKey } from './envelopes.js';
+export { targetNeed, readyToAssign, envelopePace, monthKey, shiftMonthKey, effectiveTarget } from './envelopes.js';
+
+// Same for the pure expected-transaction model (src/expectedTx.js) — the I/O
+// lives below; Dashboard imports the display helpers from one place.
+export {
+  expectedByCategory,
+  projectFutureCycles,
+  expectedStatus,
+  isMissedExpected,
+  seedFromRecurring,
+} from './expectedTx.js';
 
 // The purchase-based spending model lives pure in src/spending.js (isSpend,
 // sumSpending, the Categories bucketing, toTxShape, the envelope fold) — same
@@ -629,17 +641,39 @@ export function isEnvelopeSchemaMissing(error) {
 // than date-clamped: dropping old rows would drop real dollars out of a
 // rollover balance. Ordered by (month, category), which is unique per
 // household, so page boundaries are stable.
-async function getAssignmentsThrough(monthStart) {
+// budget_months.target_override lands with migration 20260804000001. Previews
+// share the prod database, so the read must work before Mason pastes it — but
+// the fallback needs a check STRICTER than isMissingColumnError: the Budget
+// tab's gate (isEnvelopeSchemaMissing) treats ANY 42703 as "envelopes not
+// installed", so a bare 42703 caused by this one new column escaping from
+// here would shut the whole tab off. Only an error that NAMES target_override
+// triggers the retry; everything else still escapes to the gate untouched.
+let budgetMonthsHaveOverride = true;
+
+function isMissingOverrideColumnError(error) {
+  if (!error) return false;
+  if (error.code !== '42703' && error.code !== 'PGRST204') return false;
+  const blob = `${error.message || ''} ${error.details || ''} ${error.hint || ''}`.toLowerCase();
+  return blob.includes('target_override');
+}
+
+async function getAssignmentsThrough(monthStart, { client = supabase } = {}) {
   const rows = [];
   const page = 1000;
   for (let from = 0; ; from += page) {
-    const { data, error } = await supabase
-      .from('budget_months')
-      .select('category, month, assigned')
-      .lte('month', monthStart)
-      .order('month', { ascending: true })
-      .order('category', { ascending: true })
-      .range(from, from + page - 1);
+    const attempt = withOverride =>
+      client
+        .from('budget_months')
+        .select(withOverride ? 'category, month, assigned, target_override' : 'category, month, assigned')
+        .lte('month', monthStart)
+        .order('month', { ascending: true })
+        .order('category', { ascending: true })
+        .range(from, from + page - 1);
+    let { data, error } = await attempt(budgetMonthsHaveOverride);
+    if (error && budgetMonthsHaveOverride && isMissingOverrideColumnError(error)) {
+      budgetMonthsHaveOverride = false;
+      ({ data, error } = await attempt(false));
+    }
     // A row count that is an exact multiple of `page` makes the next request
     // start past the end, which PostgREST answers with a 416/PGRST103 rather
     // than an empty page — treat that as end-of-data, not a failure (same fix
@@ -648,11 +682,22 @@ async function getAssignmentsThrough(monthStart) {
       if (isRangeExhaustedError(error)) break;
       throw error;
     }
-    rows.push(...data);
+    // walkEnvelopes reads `targetOverride` off the assignment rows (viewed
+    // month only; past overrides never reach the output — the walk enforces
+    // that, not this read).
+    for (const r of data) {
+      rows.push({
+        category: r.category,
+        month: r.month,
+        assigned: r.assigned,
+        targetOverride: r.target_override ?? null,
+      });
+    }
     if (data.length < page) break;
   }
   return rows;
 }
+export { getAssignmentsThrough }; // exported for test/envelopeIO.test.js only
 
 // Household income for a month, for Ready to Assign. Hand-entered: the feed
 // still cannot be trusted for take-home pay (SimpleFIN only syncs what is
@@ -877,9 +922,14 @@ export async function getEnvelopes({ year, month }) {
 }
 
 // Assigns dollars to a category for one month. Blank or zero removes the
-// assignment entirely (which is what keeps "no row = assigned 0" true).
-// Negative is allowed — that's moving money back out of an envelope.
-export async function setAssigned(category, { year, month }, amount) {
+// assignment entirely (which is what keeps "no row = assigned 0" true) —
+// UNLESS the row carries a per-month target_override: the zero-row-equivalence
+// rule applies to ASSIGNED only, so a row with a non-null override is a REAL
+// row and is set to assigned 0 instead of deleted (deleting it would silently
+// discard the override). Negative is allowed — that's moving money back out
+// of an envelope. `client` is injectable for tests (the addManualTransaction
+// pattern).
+export async function setAssigned(category, { year, month }, amount, { client = supabase } = {}) {
   const raw = amount == null ? '' : String(amount).trim();
   const n = raw === '' ? 0 : Number(raw);
   // A typo ("1-2") must not silently wipe an assignment — only an empty value
@@ -887,21 +937,130 @@ export async function setAssigned(category, { year, month }, amount) {
   if (!Number.isFinite(n)) return;
   const monthStart = `${year}-${pad2(month)}-01`;
   if (n === 0) {
-    const { error } = await supabase
+    const del = () => client.from('budget_months').delete().eq('category', category).eq('month', monthStart);
+    if (!budgetMonthsHaveOverride) {
+      // Pre-migration: the old unconditional delete (no override can exist).
+      const { error } = await del();
+      if (error) throw error;
+      return;
+    }
+    const { error } = await del().is('target_override', null);
+    if (error) {
+      // 42703 NAMING target_override = the column isn't there yet — fall back
+      // to the old behaviour rather than break clearing an assignment on a
+      // preview. Anything else (incl. a bare 42703) escapes untouched.
+      if (isMissingOverrideColumnError(error)) {
+        budgetMonthsHaveOverride = false;
+        const { error: delErr } = await del();
+        if (delErr) throw delErr;
+        return;
+      }
+      throw error;
+    }
+    // A row the delete skipped (non-null override) still needs its assignment
+    // cleared. No row matches ⇒ no-op.
+    const { error: updErr } = await client
       .from('budget_months')
-      .delete()
+      .update({ assigned: 0, updated_at: new Date().toISOString() })
       .eq('category', category)
       .eq('month', monthStart);
-    if (error) throw error;
+    if (updErr) throw updErr;
     return;
   }
-  const { error } = await supabase
+  const { error } = await client
     .from('budget_months')
     .upsert(
       { category, month: monthStart, assigned: n, updated_at: new Date().toISOString() },
       { onConflict: 'household_id,category,month' }
     );
   if (error) throw error;
+}
+
+// Per-month funding-target override (budget_months.target_override). Non-null
+// upserts the override — sent-columns-only, so an existing row's `assigned`
+// survives, and a fresh row gets the column default assigned 0, which does
+// NOT open an envelope (the walk's catStart rule). An override of 0 is a real
+// value ("ask nothing this month"), distinct from clearing. Clearing (null or
+// blank) null-UPDATEs the row, then deletes it only when it carries nothing
+// else (assigned = 0 AND target_override IS NULL) — the setBudget shape.
+export async function setTargetOverride(category, { year, month }, amount, { client = supabase } = {}) {
+  const monthStart = `${year}-${pad2(month)}-01`;
+  const raw = amount == null ? '' : String(amount).trim();
+  if (raw === '') {
+    const { error } = await client
+      .from('budget_months')
+      .update({ target_override: null, updated_at: new Date().toISOString() })
+      .eq('category', category)
+      .eq('month', monthStart);
+    if (error) {
+      // Pre-migration there is no override to clear — a no-op, not a failure.
+      if (isMissingOverrideColumnError(error)) {
+        budgetMonthsHaveOverride = false;
+        return;
+      }
+      throw error;
+    }
+    const { error: delErr } = await client
+      .from('budget_months')
+      .delete()
+      .eq('category', category)
+      .eq('month', monthStart)
+      .eq('assigned', 0)
+      .is('target_override', null);
+    if (delErr) throw delErr;
+    return;
+  }
+  const n = Number(raw);
+  // Targets are plain positive dollars (0 allowed — "ask nothing").
+  if (!Number.isFinite(n) || n < 0) return;
+  const { error } = await client
+    .from('budget_months')
+    .upsert(
+      { category, month: monthStart, target_override: n, updated_at: new Date().toISOString() },
+      { onConflict: 'household_id,category,month' }
+    );
+  if (error) throw error;
+}
+
+// Auto-fill: copy the previous month's assignments into the viewed month
+// ("Fill from July"). The plan itself is pure (planAutoFill in envelopes.js):
+// merge semantics — existing non-zero assignments in the viewed month are
+// skipped, zero sums are never written, an existing 0 row counts as absent.
+// The write is ONE bulk upsert of the plan's rows, sent-columns-only
+// (category, month, assigned, updated_at — NEVER target_override), so filling
+// onto a 0 row that carries an override leaves the override intact. Reads
+// never select target_override here for the same pre-migration reason as
+// getAssignmentsThrough. Returns the plan so the UI can confirm/summarize.
+export async function autoFillMonth({ year, month }, { client = supabase } = {}) {
+  const monthStart = `${year}-${pad2(month)}-01`;
+  const prev = shiftMonth(year, month, -1);
+  const prevStart = `${prev.year}-${pad2(prev.month)}-01`;
+  const [srcRes, existRes] = await Promise.all([
+    client.from('budget_months').select('category, assigned').eq('month', prevStart),
+    client.from('budget_months').select('category, assigned').eq('month', monthStart),
+  ]);
+  if (srcRes.error) throw srcRes.error;
+  if (existRes.error) throw existRes.error;
+
+  const plan = planAutoFill({
+    source: srcRes.data || [],
+    existing: existRes.data || [],
+    isBudgetable: isBudgetableCategory,
+  });
+  if (!plan.rows.length) return plan;
+
+  const updatedAt = new Date().toISOString();
+  const { error } = await client.from('budget_months').upsert(
+    plan.rows.map(r => ({
+      category: r.category,
+      month: monthStart,
+      assigned: r.assigned,
+      updated_at: updatedAt,
+    })),
+    { onConflict: 'household_id,category,month' }
+  );
+  if (error) throw error;
+  return plan;
 }
 
 // Rule 3: whether this category's leftover (or overspend) carries forward.
@@ -1817,4 +1976,258 @@ export async function getDataCoverage() {
 export async function signOut() {
   const { error } = await supabase.auth.signOut({ scope: 'local' });
   if (error) throw error;
+}
+
+// --- Expected/scheduled transactions (migration 20260804000002) --------------
+// DISPLAY-ONLY by contract (the envelopePace rule): nothing here ever writes
+// budgets/budget_months or touches the walk, `available`, or any spending
+// total — a matched expectation just points at the real transaction row. The
+// decisions live pure in src/expectedTx.js; this is the I/O. All reads return
+// null pre-migration (the getReceiptTxIds pattern: null ≠ "no expectations",
+// it means "the feature isn't installed — hide every surface"), and the
+// missing-TABLE check is deliberately separate from any missing-column check
+// (the api/sync.js gotcha). No adapter-side cache: the Dashboard holds the
+// lazy list behind an EPOCH counter (never a null sentinel) and re-reads after
+// each write commits; these writes touch no transaction/budget rows, so the
+// range memo and envelope-spending cache stay valid.
+
+let hasExpectedTx = true;
+
+const EXPECTED_COLUMNS =
+  'id, recurring_key, description, category, account_id, amount, due_date, cadence, status, matched_tx_id, created_at';
+
+// How far back the auto-match read reaches for real transactions. Covers the
+// worst pending case: staleDays 60 overdue + the annual 30-day match window.
+const EXPECTED_MATCH_LOOKBACK_DAYS = 95;
+
+function addDaysISO(iso, days) {
+  const [y, m, d] = String(iso).split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d + days));
+  return `${dt.getUTCFullYear()}-${pad2(dt.getUTCMonth() + 1)}-${pad2(dt.getUTCDate())}`;
+}
+
+function localTodayISO() {
+  const now = new Date();
+  return `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}`;
+}
+
+// Insert the NEXT cycle's pending row after a match/dismiss. Dup-gated on
+// recurring_key (isDuplicateExpected) so two devices matching the same cycle
+// can't double the Upcoming card; 'once' rows never roll (rollForwardDate
+// returns null). Returns the inserted row or null.
+async function rollForwardExpected(client, row) {
+  const due_date = rollForwardDate(row.due_date, row.cadence);
+  if (!due_date) return null;
+  const fields = {
+    recurring_key: row.recurring_key ?? null,
+    description: row.description,
+    category: row.category,
+    account_id: row.account_id ?? null,
+    amount: row.amount,
+    due_date,
+    cadence: row.cadence,
+  };
+  if (fields.recurring_key != null) {
+    const { data, error } = await client
+      .from('expected_transactions')
+      .select(EXPECTED_COLUMNS)
+      .eq('status', 'pending')
+      .eq('recurring_key', fields.recurring_key);
+    if (error) throw error;
+    if (isDuplicateExpected(fields, data || [])) return null;
+  }
+  const { data, error } = await client
+    .from('expected_transactions')
+    .insert(fields)
+    .select(EXPECTED_COLUMNS)
+    .single();
+  if (error) throw error;
+  return data;
+}
+
+// The main read: every pending row plus this month's matched ones, with the
+// auto-match pass run and PERSISTED first (status='matched' + matched_tx_id,
+// then the roll-forward pending row for the next cycle). Matching is the pure
+// matchExpected (greedy nearest-date, deterministic); the transaction window
+// rides getTransactionsBetween, so it shares the reload's range memo and the
+// full pipeline (hidden accounts excluded, marks applied — irrelevant here,
+// but one read path is one read path). `today` is injectable for tests.
+export async function getExpectedTransactions(
+  { today } = {},
+  { client = supabase, fetchTxs = getTransactionsBetween } = {}
+) {
+  if (!hasExpectedTx) return null;
+  const day = today || localTodayISO();
+  const { start: monthStart, end: monthEnd } = monthBounds(
+    Number(day.slice(0, 4)),
+    Number(day.slice(5, 7))
+  );
+
+  const pendRes = await client
+    .from('expected_transactions')
+    .select(EXPECTED_COLUMNS)
+    .eq('status', 'pending')
+    .order('due_date', { ascending: true });
+  if (pendRes.error) {
+    if (isMissingTableError(pendRes.error)) {
+      hasExpectedTx = false;
+      return null;
+    }
+    throw pendRes.error;
+  }
+  const matchedRes = await client
+    .from('expected_transactions')
+    .select(EXPECTED_COLUMNS)
+    .eq('status', 'matched')
+    .gte('due_date', monthStart)
+    .lte('due_date', monthEnd)
+    .order('due_date', { ascending: true });
+  if (matchedRes.error) throw matchedRes.error;
+
+  let pending = pendRes.data || [];
+  const matched = matchedRes.data || [];
+
+  if (pending.length) {
+    // Fetch real rows around the pending due dates (never past today — a
+    // match needs a posted transaction).
+    let earliest = pending[0].due_date;
+    for (const r of pending) if (r.due_date < earliest) earliest = r.due_date;
+    // Cover every pending due date's window (earliest−31 covers the widest,
+    // annual's 30), clamped to the lookback floor. ISO strings compare as
+    // dates, so the LATER of the two is the clamp.
+    const floor = addDaysISO(day, -EXPECTED_MATCH_LOOKBACK_DAYS);
+    const wanted = addDaysISO(earliest, -31);
+    const fetchStart = wanted > floor ? wanted : floor;
+    if (fetchStart <= day) {
+      const txs = await fetchTxs(fetchStart, day);
+      // Ids already claimed by a matched expectation can't match again.
+      const claimed = new Set(matched.map(r => r.matched_tx_id).filter(Boolean));
+      const txRows = (txs || [])
+        .filter(t => !claimed.has(t.id))
+        .map(t => ({
+          id: t.id,
+          transaction_date: t.date,
+          amount: Number(t.amount),
+          account_id: t.account_id,
+          merchant_name: t.merchant_name,
+          description: t.user_description || t.description,
+        }));
+      const matches = matchExpected(pending, txRows);
+      if (matches.length) {
+        const byId = new Map(pending.map(r => [r.id, r]));
+        const updatedAt = new Date().toISOString();
+        for (const m of matches) {
+          const row = byId.get(m.expectationId);
+          if (!row) continue;
+          const { error } = await client
+            .from('expected_transactions')
+            .update({ status: 'matched', matched_tx_id: m.txId, updated_at: updatedAt })
+            .eq('id', m.expectationId);
+          if (error) throw error;
+          row.status = 'matched';
+          row.matched_tx_id = m.txId;
+        }
+        // Roll each freshly matched row forward, then re-split the lists.
+        const stillPending = pending.filter(r => r.status === 'pending');
+        for (const m of matches) {
+          const row = byId.get(m.expectationId);
+          if (!row) continue;
+          const next = await rollForwardExpected(client, row);
+          if (next) stillPending.push(next);
+          if (row.due_date >= monthStart && row.due_date <= monthEnd) matched.push(row);
+        }
+        pending = stillPending;
+      }
+    }
+  }
+
+  const bySort = (a, b) => (a.due_date < b.due_date ? -1 : a.due_date > b.due_date ? 1 : 0);
+  pending.sort(bySort);
+  matched.sort(bySort);
+  return { pending, matched };
+}
+
+// Adds an expectation (seeded from a recurring item via seedFromRecurring, or
+// hand-typed). Dup-gated: the same recurring_key with an existing PENDING row
+// due within ± the cadence's tolerance is the same cycle — return it instead
+// of inserting a twin (hand-typed rows, recurring_key null, never gate).
+// Returns { row, duplicate } — or null pre-migration.
+export async function addExpected(fields, { client = supabase } = {}) {
+  if (!hasExpectedTx) return null;
+  if (fields?.recurring_key != null) {
+    const { data, error } = await client
+      .from('expected_transactions')
+      .select(EXPECTED_COLUMNS)
+      .eq('status', 'pending')
+      .eq('recurring_key', fields.recurring_key);
+    if (error) {
+      if (isMissingTableError(error)) {
+        hasExpectedTx = false;
+        return null;
+      }
+      throw error;
+    }
+    if (isDuplicateExpected(fields, data || [])) return { row: null, duplicate: true };
+  }
+  const insert = {
+    recurring_key: fields.recurring_key ?? null,
+    description: fields.description,
+    category: fields.category,
+    account_id: fields.account_id ?? null,
+    amount: fields.amount,
+    due_date: fields.due_date,
+    cadence: fields.cadence || 'once',
+  };
+  const { data, error } = await client
+    .from('expected_transactions')
+    .insert(insert)
+    .select(EXPECTED_COLUMNS)
+    .single();
+  if (error) {
+    if (isMissingTableError(error)) {
+      hasExpectedTx = false;
+      return null;
+    }
+    throw error;
+  }
+  return { row: data, duplicate: false };
+}
+
+// Dismiss one cycle ("not this time"). Rolls the next cycle forward unless
+// { stop: true } — stopping is the user saying the bill itself is gone.
+// NEVER called automatically: a stale unmatched expectation renders "missed?"
+// and waits for a human (the unmatched bill is the alarm).
+export async function dismissExpected(id, { stop = false } = {}, { client = supabase } = {}) {
+  const { data: row, error: readErr } = await client
+    .from('expected_transactions')
+    .select(EXPECTED_COLUMNS)
+    .eq('id', id)
+    .single();
+  if (readErr) throw readErr;
+  const { error } = await client
+    .from('expected_transactions')
+    .update({ status: 'dismissed', updated_at: new Date().toISOString() })
+    .eq('id', id);
+  if (error) throw error;
+  if (stop) return { next: null };
+  const next = await rollForwardExpected(client, row);
+  return { next };
+}
+
+// The "Mark paid" picker: the user points an expectation at a real
+// transaction the auto-match missed. Rolls forward like an auto-match.
+export async function matchExpectedManually(id, txId, { client = supabase } = {}) {
+  const { data: row, error: readErr } = await client
+    .from('expected_transactions')
+    .select(EXPECTED_COLUMNS)
+    .eq('id', id)
+    .single();
+  if (readErr) throw readErr;
+  const { error } = await client
+    .from('expected_transactions')
+    .update({ status: 'matched', matched_tx_id: txId, updated_at: new Date().toISOString() })
+    .eq('id', id);
+  if (error) throw error;
+  const next = await rollForwardExpected(client, row);
+  return { next };
 }
