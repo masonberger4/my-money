@@ -8,7 +8,7 @@ import { isSpend, sumSpending, spendingGroups, biggestMovers, toTxShape, aggrega
 import { createRangeMemo } from './monthMemo.js';
 import { parseIgnoreList, toggleIgnoreKey, CANDIDATE_WINDOW_MONTHS } from './recurring.js';
 import { aggregateCoverage } from './coverage.js';
-import { netWorthSeries } from './netWorth.js';
+import { netWorthSeries, clampSeries } from './netWorth.js';
 
 // Re-export the pure cash-flow model (src/cashFlow.js) so existing importers
 // and the CSV-import dry-run harness keep working.
@@ -362,23 +362,37 @@ export async function getDebts() {
 let hasBalanceSnapshots = true;
 export async function getBalanceSnapshots(accountIds, sinceDate) {
   if (!hasBalanceSnapshots || !accountIds || accountIds.length === 0) return [];
-  let q = supabase
-    .from('balance_snapshots')
-    .select('account_id, captured_on, balance')
-    .in('account_id', accountIds)
-    .order('captured_on', { ascending: true });
-  if (sinceDate) q = q.gte('captured_on', sinceDate);
-  const { data, error } = await q;
-  if (error) {
-    // Missing table: PGRST205 (PostgREST schema cache) or 42P01 (Postgres) —
-    // same pair as isEnvelopeSchemaMissing.
-    if (error.code === 'PGRST205' || error.code === '42P01') {
-      hasBalanceSnapshots = false;
-      return [];
+  // Paged: PostgREST caps unranged reads at 1000 rows and truncation here
+  // would drop the NEWEST snapshots (ascending order) — the exact rows the
+  // headline/sparkline endpoints read. Ordinal tiebreak on account_id keeps
+  // pages deterministic; PGRST103 on an exact page multiple = cleanly done
+  // (the same end-of-range contract as ruleHistory).
+  const page = 1000;
+  const rows = [];
+  for (let from = 0; ; from += page) {
+    let q = supabase
+      .from('balance_snapshots')
+      .select('account_id, captured_on, balance')
+      .in('account_id', accountIds)
+      .order('captured_on', { ascending: true })
+      .order('account_id', { ascending: true })
+      .range(from, from + page - 1);
+    if (sinceDate) q = q.gte('captured_on', sinceDate);
+    const { data, error } = await q;
+    if (error) {
+      if (isRangeExhaustedError(error)) break;
+      // Missing table: PGRST205 (PostgREST schema cache) or 42P01 (Postgres) —
+      // same pair as isEnvelopeSchemaMissing.
+      if (error.code === 'PGRST205' || error.code === '42P01') {
+        hasBalanceSnapshots = false;
+        return [];
+      }
+      throw error;
     }
-    throw error;
+    rows.push(...(data || []));
+    if (!data || data.length < page) break;
   }
-  return data || [];
+  return rows;
 }
 
 // Net worth over time: assets minus debts off balance_snapshots, one point
@@ -390,12 +404,20 @@ export async function getBalanceSnapshots(accountIds, sinceDate) {
 // the snapshots table isn't installed yet (previews share the prod DB), and
 // [] on no accounts. `hidden` is an original accounts column, so there is no
 // missing-column arm to check here.
+//
+// sinceDate is a DISPLAY window, never a fetch window: snapshots are written
+// on balance CHANGE only, so an account that hasn't moved inside the window
+// has zero rows there and a windowed fetch would silently drop its entire
+// balance from every point — headline included (a manual loan typed once ages
+// out of a 365-day window after a year, with no error and no visual tell).
+// So the fold always runs over FULL history and clampSeries trims the points
+// afterwards, keeping the boundary-crossing carry.
 export async function getNetWorthSeries(sinceDate) {
   const { data, error } = await supabase.from('accounts').select('id, type, hidden');
   if (error) throw error;
   const accounts = (data || []).filter(a => !a.hidden);
-  const snaps = await getBalanceSnapshots(accounts.map(a => a.id), sinceDate);
-  return netWorthSeries(snaps, accounts);
+  const snaps = await getBalanceSnapshots(accounts.map(a => a.id), null);
+  return clampSeries(netWorthSeries(snaps, accounts), sinceDate);
 }
 
 // All transactions for one account, newest first, capped so a huge history

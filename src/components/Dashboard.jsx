@@ -1568,23 +1568,37 @@ export default function Dashboard({ refreshTick = 0 }) {
 
   // Hand-typed balance edit on a MANUAL debt (fed balances are never
   // hand-edited — updateManualBalance enforces it). Optimistic patch of the
-  // debt cache incl. totalDebt, then the write, which also appends today's
-  // balance_snapshots row so the sparkline/net-worth history stays truthful.
+  // debt cache incl. totalDebt AND the accounts list (Accounts tab/Overview
+  // read the same balance through displayBalance — patching only debtData is
+  // the saveTx "only refresh some lists ever get" gotcha recurring), then the
+  // write, which also appends today's balance_snapshots row; on success the
+  // same-tab net-worth card + sparkline are refetched so they don't sit two
+  // cards below visibly totalling the pre-edit balance.
   function saveManualBalance(a,v){
     if(v==null)return; // a balance can be corrected, not cleared
     const prevBal=a.current_balance;
-    setDebtData(prev=>{
-      if(!prev)return prev;
-      const debts=prev.debts.map(d=>d.id===a.id?{...d,current_balance:v}:d);
-      return {...prev,debts,totalDebt:debts.reduce((s,d)=>s+(Number(d.current_balance)||0),0)};
-    });
-    updateManualBalance(a,v).catch(err=>{
-      console.error("manual balance save failed",err);
+    const patchBal=bal=>{
       setDebtData(prev=>{
         if(!prev)return prev;
-        const debts=prev.debts.map(d=>d.id===a.id?{...d,current_balance:prevBal}:d);
+        const debts=prev.debts.map(d=>d.id===a.id?{...d,current_balance:bal}:d);
         return {...prev,debts,totalDebt:debts.reduce((s,d)=>s+(Number(d.current_balance)||0),0)};
       });
+      setAccounts(prev=>prev.map(x=>x.id===a.id?{...x,current_balance:bal}:x));
+      setOverview(prev=>prev?{...prev,accounts:prev.accounts.map(x=>x.id===a.id?{...x,balance:{current:bal}}:x)}:prev);
+    };
+    patchBal(v);
+    updateManualBalance(a,v).then(async()=>{
+      // History refresh, best-effort: the write appended a snapshot row.
+      const since=new Date(Date.now()-365*86400000).toISOString().slice(0,10);
+      try{setNwSeries(await getNetWorthSeries(since));}
+      catch(err){console.error("net worth refresh failed",err);}
+      try{
+        const ids=(debtData?.debts||[]).map(d=>d.id);
+        if(ids.length)setDebtSnaps(await getBalanceSnapshots(ids,since));
+      }catch(err){console.error("balance snapshots refresh failed",err);}
+    }).catch(err=>{
+      console.error("manual balance save failed",err);
+      patchBal(prevBal);
       window.alert(`Couldn't save that balance: ${err.message||err}`);
     });
   }

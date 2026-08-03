@@ -39,3 +39,23 @@ export function netWorthSeries(snapshots, accounts) {
   }
   return points;
 }
+
+// Clamp a folded series to a display window WITHOUT losing the carry that
+// crossed its boundary. The fold above is only honest over FULL history
+// (snapshots are written on balance CHANGE only, so an account that hasn't
+// moved inside the window has zero rows there — feeding the fold a windowed
+// fetch silently drops its whole balance from every point, headline
+// included). So the adapter folds everything and clamps HERE: keep points on
+// or after sinceDate, plus the one immediately before them — that point's
+// total already carries every static account, and its real date keeps the
+// "history since" label truthful. A series that is entirely pre-window (no
+// balance moved all year) keeps just its latest point: the current net worth
+// is still real even when nothing changed recently.
+export function clampSeries(points, sinceDate) {
+  const pts = points || [];
+  if (!sinceDate || pts.length === 0) return pts;
+  const i = pts.findIndex(p => p.date >= sinceDate);
+  if (i === -1) return [pts[pts.length - 1]];
+  if (i === 0) return pts;
+  return pts.slice(i - 1);
+}
