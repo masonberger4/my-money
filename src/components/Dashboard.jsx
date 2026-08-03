@@ -2142,6 +2142,52 @@ export default function Dashboard({ refreshTick = 0 }) {
                       and set its category, and it'll remember that merchant next time.
                     </div>
                   )}
+                  {/* Teach-queue: the month's top Uncategorized merchants, derived
+                      in render from txsByCategory (no cached state — the
+                      setState(null) gotcha never applies, and the list self-heals
+                      through learnMerchant's reloadData). Grouped by the SAME key
+                      the classifier uses (merchantKey over txDescriptor, not raw
+                      description) so a taught rule fires on the next pull. Tapping
+                      a row opens the detail sheet for the group's most recent
+                      transaction — the existing pick-a-category → offerToLearn →
+                      learnMerchant flow, dry-run preview and all; Uncategorized
+                      is never offerable there. */}
+                  {c.label===UNCATEGORIZED&&(()=>{
+                    const rows=txsByCategory.get(UNCATEGORIZED)||[];
+                    const groups=new Map();
+                    for(const t of rows){
+                      const k=merchantKey(txDescriptor(t));
+                      if(!k)continue;
+                      const g=groups.get(k);
+                      if(g){g.count++;if(t.amount>0)g.out+=t.amount;if(t.transaction_date>g.tx.transaction_date)g.tx=t;}
+                      else groups.set(k,{key:k,count:1,out:t.amount>0?t.amount:0,tx:t});
+                    }
+                    // Top 5 by count (ties broken by summed outflow): repetition,
+                    // not size, is what makes a merchant worth teaching.
+                    const top=[...groups.values()].sort((a,b)=>b.count-a.count||b.out-a.out).slice(0,5);
+                    if(top.length===0)return null;
+                    return (
+                      <div style={{marginTop:8,background:"var(--bg)",borderRadius:8,padding:"8px 10px"}}>
+                        <div style={{fontSize:10,fontWeight:600,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em",marginBottom:6}}>
+                          Teach it — this month's top unknowns
+                        </div>
+                        {top.map(g=>(
+                          <button key={g.key} onClick={()=>setSelTx(g.tx)}
+                            style={{display:"flex",alignItems:"center",gap:8,width:"100%",background:"none",border:"none",
+                              padding:"4px 0",cursor:"pointer",fontFamily:"inherit",textAlign:"left"}}>
+                            <span style={{fontSize:11,fontWeight:500,color:"var(--text)",flex:1,minWidth:0,
+                              whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{g.key}</span>
+                            <span style={{fontSize:10,color:"var(--muted)",flexShrink:0}}>{g.count} txn{g.count!==1?"s":""}</span>
+                            <span style={{fontSize:11,fontFamily:"'DM Mono',monospace",color:"var(--text)",flexShrink:0}}>{fmt(g.out)}</span>
+                            <span style={{fontSize:11,color:"var(--muted)",flexShrink:0}}>›</span>
+                          </button>
+                        ))}
+                        <div style={{fontSize:10,color:"var(--muted)",marginTop:4,lineHeight:1.5}}>
+                          Tap one, pick its category, and it'll offer to remember the merchant.
+                        </div>
+                      </div>
+                    );
+                  })()}
                 </div>
                 );
               })}
