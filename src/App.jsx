@@ -42,6 +42,60 @@ function ConfigErrorScreen() {
   );
 }
 
+// Cold-start skeleton — shown while auth / the institution count resolve, so a
+// cold start is never a blank page. Token-styled only (ui.css is global, so the
+// tokens and the `pulse` keyframe are available pre-Dashboard); deliberately
+// local to App.jsx — importing Dashboard's Sk across the lazy boundary would
+// drag chunks into the main bundle.
+function SkBlock({ w = '100%', h = 16 }) {
+  return (
+    <div
+      style={{
+        width: w,
+        height: h,
+        borderRadius: 6,
+        background: 'var(--border)',
+        animation: 'pulse 1.5s ease-in-out infinite',
+      }}
+    />
+  );
+}
+
+function StartupSkeleton() {
+  return (
+    <div
+      style={{
+        minHeight: '100vh',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: 24,
+        background: 'var(--bg)',
+        color: 'var(--text)',
+        fontFamily: "'DM Sans','Helvetica Neue',sans-serif",
+      }}
+    >
+      <div
+        style={{
+          width: 'min(360px, 92vw)',
+          background: 'var(--card)',
+          border: '1px solid var(--border)',
+          borderRadius: 14,
+          padding: 24,
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 14,
+        }}
+      >
+        <SkBlock w="55%" h={12} />
+        <SkBlock w="80%" h={22} />
+        <SkBlock h={12} />
+        <SkBlock w="70%" h={12} />
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const [session, setSession] = useState(undefined); // undefined = loading
   const [count, setCount] = useState(null);
@@ -104,14 +158,14 @@ export default function App() {
   }, []);
 
   if (configError) return <ConfigErrorScreen />;
-  if (session === undefined) return null;
+  if (session === undefined) return <StartupSkeleton />;
   if (!session) return <Login />;
-  if (count === null) return null;
+  if (count === null) return <StartupSkeleton />;
 
   if (count === 0) {
     return (
       <ErrorBoundary label="empty state render failed">
-        <Suspense fallback={null}>
+        <Suspense fallback={<StartupSkeleton />}>
           <EmptyState onLinked={handleLinked} />
         </Suspense>
       </ErrorBoundary>
