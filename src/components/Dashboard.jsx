@@ -145,9 +145,9 @@ function signed(n) { return `${n>0?"+":""}${fmtAuto(n)}`; }
 // downloads are unreliable — the share sheet (→ Save to Files / AirDrop / a
 // mail draft to the CPA) is the path that actually works there, so try it
 // first and fall back to the anchor click for desktop browsers.
-async function downloadCsv(filename,text){
+async function downloadCsv(filename,text,mime="text/csv"){
   try{
-    const file=new File([text],filename,{type:"text/csv"});
+    const file=new File([text],filename,{type:mime});
     if(navigator.canShare&&navigator.canShare({files:[file]})){
       await navigator.share({files:[file],title:filename});
       return;
@@ -157,7 +157,7 @@ async function downloadCsv(filename,text){
     console.error("share failed, falling back to download",err);
   }
   try{
-    const url=URL.createObjectURL(new Blob([text],{type:"text/csv"}));
+    const url=URL.createObjectURL(new Blob([text],{type:mime}));
     const a=document.createElement("a");
     a.href=url;a.download=filename;
     document.body.appendChild(a);a.click();a.remove();
@@ -165,6 +165,42 @@ async function downloadCsv(filename,text){
   }catch(err){
     console.error("csv download failed",err);
   }
+}
+// Ask-tab scrollback: sessionStorage (device-local ephemera, per-tab scoping is
+// the point — NOT localStorage, NOT the shared settings table). Every access is
+// try/caught (Safari private mode throws on ACCESS). Only {role,content} pairs
+// are ever persisted — chatBusy/chatError are transient and never stored.
+// Trimmed to sit comfortably under api/assistant.js's caps (MAX_TURNS 30,
+// MAX_MSG_CHARS 8000, MAX_TOTAL_CHARS 60000) so a restored history can always
+// ride the next send without a 400.
+const CHAT_SS_KEY="mm:askChat";
+const CHAT_MAX_TURNS=30,CHAT_MSG_CHARS=8000,CHAT_TOTAL_CHARS=48000;
+function trimChatForStorage(msgs){
+  let out=(Array.isArray(msgs)?msgs:[])
+    .filter(m=>m&&(m.role==="user"||m.role==="assistant")&&typeof m.content==="string")
+    .map(m=>({role:m.role,content:m.content.slice(0,CHAT_MSG_CHARS)}))
+    .slice(-CHAT_MAX_TURNS);
+  let total=out.reduce((s,m)=>s+m.content.length,0);
+  while(out.length>1&&total>CHAT_TOTAL_CHARS){total-=out[0].content.length;out.shift();}
+  return out;
+}
+function readStoredChat(){
+  try{
+    const raw=sessionStorage.getItem(CHAT_SS_KEY);
+    if(!raw)return [];
+    return trimChatForStorage(JSON.parse(raw));
+  }catch{return [];}
+}
+function writeStoredChat(msgs){
+  try{
+    if(!msgs.length)sessionStorage.removeItem(CHAT_SS_KEY);
+    else sessionStorage.setItem(CHAT_SS_KEY,JSON.stringify(trimChatForStorage(msgs)));
+  }catch{/* Safari private mode / quota — scrollback just stays in-memory */}
+}
+// Plain-markdown transcript for the "Save chat" export.
+function chatTranscript(msgs){
+  const head=`# Spending assistant chat — ${new Date().toLocaleString()}\n`;
+  return head+msgs.map(m=>`\n**${m.role==="user"?"You":"Assistant"}:**\n${m.content}\n`).join("");
 }
 // "Jun 2027" from a 'YYYY-MM-DD' target date.
 function monthYear(dateStr) {
@@ -934,7 +970,9 @@ export default function Dashboard({ refreshTick = 0 }) {
   // (Safari private mode throws on ACCESS).
   const [cardTileId,setCardTileId]=useState(()=>{try{return localStorage.getItem("mm:cardTile")||null;}catch{return null;}});
   const cardSwipe=useRef(null);
-  const [chatMsgs,setChatMsgs]=useState([]);
+  // Hydrated from sessionStorage on mount, written back on change (see
+  // CHAT_SS_KEY above) — scrollback survives a same-tab reload, not tab close.
+  const [chatMsgs,setChatMsgs]=useState(readStoredChat);
   const [chatInput,setChatInput]=useState("");
   const [chatBusy,setChatBusy]=useState(false);
   const [chatError,setChatError]=useState(null);
@@ -960,6 +998,11 @@ export default function Dashboard({ refreshTick = 0 }) {
   const themeTitle=`Theme: ${themeUi.label}${themePref==="system"?` — following your device, ${themeResolved} right now`:""}. Tap for ${themeNext.label}.`;
 
   useEffect(()=>{chatEndRef.current?.scrollIntoView({behavior:"smooth"});},[chatMsgs,chatBusy]);
+  useEffect(()=>{writeStoredChat(chatMsgs);},[chatMsgs]);
+  function clearChat(){
+    setChatMsgs([]);setChatError(null);setChatInput("");
+    try{sessionStorage.removeItem(CHAT_SS_KEY);}catch{/* private mode */}
+  }
 
   async function sendChat(text){
     const q=(text??chatInput).trim();
@@ -2970,8 +3013,20 @@ export default function Dashboard({ refreshTick = 0 }) {
                 Send
               </button>
             </div>
+            {chatMsgs.length>0&&(
+              <div style={{display:"flex",justifyContent:"center",gap:8,marginTop:10}}>
+                <button onClick={()=>downloadCsv(`spending_chat_${new Date().toISOString().slice(0,10)}.md`,chatTranscript(chatMsgs),"text/markdown")}
+                  style={{fontSize:11,fontFamily:"inherit",color:"var(--text)",background:"var(--bg)",border:"1px solid var(--border)",borderRadius:8,padding:"5px 10px",cursor:"pointer"}}>
+                  Save chat
+                </button>
+                <button onClick={clearChat} disabled={chatBusy}
+                  style={{fontSize:11,fontFamily:"inherit",color:"var(--muted)",background:"var(--bg)",border:"1px solid var(--border)",borderRadius:8,padding:"5px 10px",cursor:chatBusy?"default":"pointer",opacity:chatBusy?.5:1}}>
+                  New chat
+                </button>
+              </div>
+            )}
             <div style={{marginTop:8,fontSize:10,color:"var(--muted)",textAlign:"center"}}>
-              Read-only: the assistant sees your data but can't change anything. Conversations aren't saved.
+              Read-only: the assistant sees your data but can't change anything. Chats stay on this device until the tab or app closes — Save chat exports a copy.
             </div>
           </div>
         )}
