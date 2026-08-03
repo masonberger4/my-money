@@ -9,6 +9,7 @@ import { isBudgetableCategory } from './categoryMap.js';
 import { isSpend, sumSpending, spendingGroups, biggestMovers, toTxShape, aggregateEnvelopeSpending } from './spending.js';
 import { createRangeMemo } from './monthMemo.js';
 import { parseIgnoreList, toggleIgnoreKey, CANDIDATE_WINDOW_MONTHS } from './recurring.js';
+import { parseSavedChats, addSavedChat, removeSavedChat } from './savedChats.js';
 import { aggregateCoverage } from './coverage.js';
 import { netWorthSeries, clampSeries } from './netWorth.js';
 
@@ -845,6 +846,57 @@ export function updateRecIgnore(key, ignored) {
   });
   recIgnoreChain = run.catch(() => {});
   return run;
+}
+
+// Saved Ask-tab chats — HOUSEHOLD data (settings table, NOT device storage:
+// a chat saved on the laptop should be openable on the phone). ONE row keyed
+// 'asst:chats' holding a JSON array of {id,title,savedAt,msgs}; all parsing/
+// trimming/eviction decisions are pure in src/savedChats.js. The WRITE is a
+// read-merge-write serialized through a promise chain — the exact
+// updateRecIgnore discipline: two quick saves must not interleave (read A,
+// read B, write [A], write [B]) and drop one, and a failed mount-time read
+// must never let a rebuilt-from-state array wipe the other phone's saves.
+// A failed READ aborts before any write; the chain swallows rejections so one
+// failed save never dams the queue, while callers still get the rejection.
+const ASST_CHATS_KEY = 'asst:chats';
+
+export async function getSavedChats() {
+  const { data, error } = await supabase
+    .from('settings')
+    .select('value')
+    .eq('key', ASST_CHATS_KEY)
+    .maybeSingle();
+  if (error) throw error;
+  return parseSavedChats(data?.value ?? null);
+}
+
+async function setSavedChats(list) {
+  const { error } = await supabase
+    .from('settings')
+    .upsert({ key: ASST_CHATS_KEY, value: JSON.stringify(list) }, { onConflict: 'household_id,key' });
+  if (error) throw error;
+}
+
+let savedChatsChain = Promise.resolve();
+function updateSavedChats(merge) {
+  const run = savedChatsChain.then(async () => {
+    const current = await getSavedChats();
+    const next = merge(current);
+    await setSavedChats(next);
+    return next;
+  });
+  savedChatsChain = run.catch(() => {});
+  return run;
+}
+
+// Both return the merged stored list so the caller can adopt entries the
+// other phone added since its last read.
+export function saveChatToApp(chat) {
+  return updateSavedChats(current => addSavedChat(current, chat));
+}
+
+export function deleteSavedChat(id) {
+  return updateSavedChats(current => removeSavedChat(current, id));
 }
 
 // Per-(category, month) spend sums for the walk's range, memoised. The walk's

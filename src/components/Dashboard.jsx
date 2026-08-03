@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from "react";
-import { getOverview, getSpending, getBiggestMovers, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES, setCategoryRule, applyCategoryRuleToHistory, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, invalidateEnvelopeSpending, isEnvelopeSchemaMissing, targetNeed, readyToAssign, envelopePace, getEnvPace, setEnvPace as persistEnvPace, getRecIgnore, updateRecIgnore, monthKey, getEntities, createEntity, updateEntity, getTaxYearTransactions, getMileage, addMileage, deleteMileage, getReceiptTxIds, getDebts, getBalanceSnapshots, getNetWorthSeries, addManualTransaction, createManualAccount, updateManualBalance, getDataCoverage, signOut, autoFillMonth, setTargetOverride, effectiveTarget, getExpectedTransactions, addExpected, dismissExpected, matchExpectedManually } from "../dataAdapter.js";
+import { getOverview, getSpending, getBiggestMovers, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES, setCategoryRule, applyCategoryRuleToHistory, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, invalidateEnvelopeSpending, isEnvelopeSchemaMissing, targetNeed, readyToAssign, envelopePace, getEnvPace, setEnvPace as persistEnvPace, getRecIgnore, updateRecIgnore, monthKey, getEntities, createEntity, updateEntity, getTaxYearTransactions, getMileage, addMileage, deleteMileage, getReceiptTxIds, getDebts, getBalanceSnapshots, getNetWorthSeries, addManualTransaction, createManualAccount, updateManualBalance, getDataCoverage, signOut, autoFillMonth, setTargetOverride, effectiveTarget, getExpectedTransactions, addExpected, dismissExpected, matchExpectedManually, getSavedChats, saveChatToApp, deleteSavedChat } from "../dataAdapter.js";
 // Pure cores imported directly (never Supabase — the mock-harness alias rule
 // only covers dataAdapter/sync/db/apiClient; pure modules are safe).
 import { planAutoFill } from "../envelopes.js";
@@ -7,6 +7,7 @@ import { expectedByCategory, expectedStatus, isMissedExpected, seedFromRecurring
 import { payoffWhatIf, debtFreeMonth, isMortgage, amortizationSchedule, addMonths, MAX_MONTHS } from "../debtPayoff.js";
 import { SCHEDULE_E_LINES, RENTS_KEY, DEFAULT_SCHEDULE_E_MAP, scheduleEReport, entityMonthly, entityLedger, personalDeductionReport, DEDUCTION_BUCKETS, DEFAULT_DEDUCTION_MAP, mileageDeduction, scheduleECsv } from "../taxReport.js";
 import { merchantKey } from "../txClassify.js";
+import { trimChatMsgs, buildSavedChat } from "../savedChats.js";
 import { patchTxShape } from "../spending.js";
 import { detectRecurring } from "../recurring.js";
 import { unlinkInstitution, askAssistant, getSimpleFinStatus } from "../apiClient.js";
@@ -174,26 +175,12 @@ async function downloadCsv(filename,text,mime="text/csv"){
 // the point — NOT localStorage, NOT the shared settings table). Every access is
 // try/caught (Safari private mode throws on ACCESS). Only {role,content} pairs
 // are ever persisted — chatBusy/chatError are transient and never stored.
-// Trimmed to sit comfortably under api/assistant.js's caps (MAX_TURNS 30,
-// MAX_MSG_CHARS 8000, MAX_TOTAL_CHARS 60000) so a restored history can always
-// ride the next send without a 400. Two invariants keep that true: at most
-// CHAT_MAX_TURNS-1 messages are stored (so [...restored, new user] is ≤
-// MAX_TURNS and the server's slice(-MAX_TURNS) drops nothing), and the stored
-// array always starts with a USER turn (Anthropic rejects an assistant-first
-// history with a 400).
+// The trim discipline (caps + user-first invariant) lives in
+// src/savedChats.js (trimChatMsgs) — ONE rule shared by this scrollback and
+// the household saved-chat store, so a saved chat survives the round trip
+// and can still ride the next send without a 400.
 const CHAT_SS_KEY="mm:askChat";
-const CHAT_MAX_TURNS=30,CHAT_MSG_CHARS=8000,CHAT_TOTAL_CHARS=48000;
-function trimChatForStorage(msgs){
-  let out=(Array.isArray(msgs)?msgs:[])
-    .filter(m=>m&&(m.role==="user"||m.role==="assistant")&&typeof m.content==="string")
-    .map(m=>({role:m.role,content:m.content.slice(0,CHAT_MSG_CHARS)}))
-    .slice(-(CHAT_MAX_TURNS-1));
-  let total=out.reduce((s,m)=>s+m.content.length,0);
-  while(out.length>1&&total>CHAT_TOTAL_CHARS){total-=out[0].content.length;out.shift();}
-  // Never store an assistant-first history — drop leading assistant turns.
-  while(out.length&&out[0].role!=="user")out.shift();
-  return out;
-}
+const trimChatForStorage=trimChatMsgs;
 function readStoredChat(){
   try{
     const raw=sessionStorage.getItem(CHAT_SS_KEY);
@@ -1272,6 +1259,17 @@ export default function Dashboard({ refreshTick = 0 }) {
   const [asstModel,setAsstModel]=useState(DEFAULT_MODEL);
   const [asstEffort,setAsstEffort]=useState(DEFAULT_EFFORT);
   const chatEndRef=useRef(null);
+  // Saved chats — HOUSEHOLD data (settings table via dataAdapter, one
+  // 'asst:chats' row; both phones see the list). Loaded LAZILY in the expand
+  // click handler — an explicit `savedLoaded` flag, never a null-means-refetch
+  // sentinel. `chatSavedSnap` is the JSON of the scrollback at its last
+  // save/open, so "unsaved changes" is a plain string compare (opening a
+  // saved chat over an unsaved one confirms first).
+  const [savedChats,setSavedChats]=useState([]);
+  const [savedLoaded,setSavedLoaded]=useState(false);
+  const [savedOpen,setSavedOpen]=useState(false);
+  const [savedBusy,setSavedBusy]=useState(false);
+  const chatSavedSnap=useRef(null);
   const didInitialSync=useRef(false);
   // {last_pulled_at,last_error} when the SimpleFIN feed looks unhealthy —
   // checked ONCE per mount, after the initial sync (never a status fetch on
@@ -1294,7 +1292,59 @@ export default function Dashboard({ refreshTick = 0 }) {
   useEffect(()=>{writeStoredChat(chatMsgs);},[chatMsgs]);
   function clearChat(){
     setChatMsgs([]);setChatError(null);setChatInput("");
+    chatSavedSnap.current=null;
     try{sessionStorage.removeItem(CHAT_SS_KEY);}catch{/* private mode */}
+  }
+
+  async function toggleSavedChats(){
+    const opening=!savedOpen;
+    setSavedOpen(opening);
+    if(opening&&!savedLoaded){
+      try{
+        setSavedChats(await getSavedChats());
+        setSavedLoaded(true);
+      }catch(err){
+        console.error("saved chats load failed",err);
+        setSavedOpen(false);
+        alert("Couldn't load saved chats — check your connection and try again.");
+      }
+    }
+  }
+  async function saveChatInApp(){
+    if(savedBusy||chatBusy)return;
+    const chat=buildSavedChat(chatMsgs);
+    if(!chat)return;
+    setSavedBusy(true);
+    try{
+      // Serialized read-merge-write in dataAdapter (the updateRecIgnore
+      // discipline); the returned list also adopts the other phone's saves.
+      const list=await saveChatToApp(chat);
+      setSavedChats(list);setSavedLoaded(true);
+      chatSavedSnap.current=JSON.stringify(trimChatMsgs(chatMsgs));
+    }catch(err){
+      console.error("save chat failed",err);
+      alert("Couldn't save the chat — check your connection and try again.");
+    }finally{setSavedBusy(false);}
+  }
+  function openSavedChat(c){
+    if(chatBusy)return;
+    const cur=JSON.stringify(trimChatMsgs(chatMsgs));
+    if(chatMsgs.length>0&&cur!==chatSavedSnap.current
+      &&!confirm("Replace the current chat? It hasn't been saved to the app."))return;
+    // A COPY — the saved entry is a keepsake. Continuing the conversation only
+    // changes the scrollback; "Save to app" afterwards saves a NEW chat.
+    const msgs=c.msgs.map(m=>({...m}));
+    setChatMsgs(msgs);setChatError(null);setChatInput("");
+    chatSavedSnap.current=JSON.stringify(msgs);
+  }
+  async function removeSavedChat(id){
+    if(!confirm("Delete this saved chat? It's shared — it disappears for the whole household."))return;
+    try{
+      setSavedChats(await deleteSavedChat(id));
+    }catch(err){
+      console.error("delete saved chat failed",err);
+      alert("Couldn't delete the chat — try again.");
+    }
   }
 
   async function sendChat(text){
@@ -3849,9 +3899,13 @@ export default function Dashboard({ refreshTick = 0 }) {
             </div>
             {chatMsgs.length>0&&(
               <div style={{display:"flex",justifyContent:"center",gap:8,marginTop:10}}>
+                <button onClick={saveChatInApp} disabled={savedBusy||chatBusy}
+                  style={{fontSize:11,fontFamily:"inherit",color:"var(--text)",background:"var(--bg)",border:"1px solid var(--border)",borderRadius:8,padding:"5px 10px",cursor:savedBusy||chatBusy?"default":"pointer",opacity:savedBusy||chatBusy?.5:1}}>
+                  {savedBusy?"Saving…":"Save to app"}
+                </button>
                 <button onClick={()=>downloadCsv(`spending_chat_${new Date().toISOString().slice(0,10)}.md`,chatTranscript(chatMsgs),"text/markdown")}
                   style={{fontSize:11,fontFamily:"inherit",color:"var(--text)",background:"var(--bg)",border:"1px solid var(--border)",borderRadius:8,padding:"5px 10px",cursor:"pointer"}}>
-                  Save chat
+                  Export
                 </button>
                 <button onClick={clearChat} disabled={chatBusy}
                   style={{fontSize:11,fontFamily:"inherit",color:"var(--muted)",background:"var(--bg)",border:"1px solid var(--border)",borderRadius:8,padding:"5px 10px",cursor:chatBusy?"default":"pointer",opacity:chatBusy?.5:1}}>
@@ -3859,8 +3913,40 @@ export default function Dashboard({ refreshTick = 0 }) {
                 </button>
               </div>
             )}
+            {/* Saved chats — household list ('asst:chats'), lazily fetched on
+                first expand. Opening loads a COPY into the scrollback (the
+                stored entry is never mutated); re-saving saves a NEW chat. */}
+            <div style={{marginTop:10}}>
+              <button onClick={toggleSavedChats}
+                style={{width:"100%",fontSize:11,fontFamily:"inherit",color:"var(--muted)",background:"transparent",border:"none",padding:"4px 0",cursor:"pointer",textAlign:"center"}}>
+                Saved chats{savedLoaded?` (${savedChats.length})`:""} {savedOpen?"▴":"▾"}
+              </button>
+              {savedOpen&&(
+                savedChats.length===0?(
+                  <div style={{fontSize:11,color:"var(--muted)",textAlign:"center",padding:"6px 0"}}>
+                    No saved chats yet — Save to app keeps a chat here for both of you.
+                  </div>
+                ):(
+                  <div style={{border:"1px solid var(--border)",borderRadius:10,overflow:"hidden"}}>
+                    {savedChats.map((c,i)=>(
+                      <div key={c.id} style={{display:"flex",alignItems:"center",gap:6,padding:"7px 10px",borderTop:i?"1px solid var(--border)":"none",background:"var(--bg)"}}>
+                        <button onClick={()=>openSavedChat(c)} disabled={chatBusy}
+                          style={{flex:1,minWidth:0,textAlign:"left",fontSize:12,fontFamily:"inherit",color:"var(--text)",background:"transparent",border:"none",padding:0,cursor:chatBusy?"default":"pointer"}}>
+                          <div style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{c.title}</div>
+                          <div style={{fontSize:10,color:"var(--muted)"}}>{c.msgs.length} messages{c.savedAt?` · ${c.savedAt.slice(0,10)}`:""}</div>
+                        </button>
+                        <button onClick={()=>removeSavedChat(c.id)} title="Delete saved chat"
+                          style={{fontSize:12,fontFamily:"inherit",color:"var(--muted)",background:"transparent",border:"none",padding:"2px 4px",cursor:"pointer"}}>
+                          ✕
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )
+              )}
+            </div>
             <div style={{marginTop:8,fontSize:10,color:"var(--muted)",textAlign:"center"}}>
-              Read-only: the assistant sees your data but can't change anything. Chats stay on this device until the tab or app closes — Save chat exports a copy.
+              Read-only: the assistant sees your data but can't change anything. Chats stay on this device until the tab or app closes — Save to app keeps one here for the household; Export downloads a copy.
             </div>
           </div>
         )}
