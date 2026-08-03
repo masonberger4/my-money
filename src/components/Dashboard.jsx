@@ -172,16 +172,22 @@ async function downloadCsv(filename,text,mime="text/csv"){
 // are ever persisted — chatBusy/chatError are transient and never stored.
 // Trimmed to sit comfortably under api/assistant.js's caps (MAX_TURNS 30,
 // MAX_MSG_CHARS 8000, MAX_TOTAL_CHARS 60000) so a restored history can always
-// ride the next send without a 400.
+// ride the next send without a 400. Two invariants keep that true: at most
+// CHAT_MAX_TURNS-1 messages are stored (so [...restored, new user] is ≤
+// MAX_TURNS and the server's slice(-MAX_TURNS) drops nothing), and the stored
+// array always starts with a USER turn (Anthropic rejects an assistant-first
+// history with a 400).
 const CHAT_SS_KEY="mm:askChat";
 const CHAT_MAX_TURNS=30,CHAT_MSG_CHARS=8000,CHAT_TOTAL_CHARS=48000;
 function trimChatForStorage(msgs){
   let out=(Array.isArray(msgs)?msgs:[])
     .filter(m=>m&&(m.role==="user"||m.role==="assistant")&&typeof m.content==="string")
     .map(m=>({role:m.role,content:m.content.slice(0,CHAT_MSG_CHARS)}))
-    .slice(-CHAT_MAX_TURNS);
+    .slice(-(CHAT_MAX_TURNS-1));
   let total=out.reduce((s,m)=>s+m.content.length,0);
   while(out.length>1&&total>CHAT_TOTAL_CHARS){total-=out[0].content.length;out.shift();}
+  // Never store an assistant-first history — drop leading assistant turns.
+  while(out.length&&out[0].role!=="user")out.shift();
   return out;
 }
 function readStoredChat(){
