@@ -3,7 +3,7 @@ import { getOverview, getSpending, getBiggestMovers, getTransactions, getCashFlo
 // Pure cores imported directly (never Supabase — the mock-harness alias rule
 // only covers dataAdapter/sync/db/apiClient; pure modules are safe).
 import { planAutoFill } from "../envelopes.js";
-import { buildSearchFilters } from "../searchFilters.js";
+import { buildSearchFilters, searchIsActive } from "../searchFilters.js";
 import { expectedByCategory, expectedStatus, isMissedExpected, seedFromRecurring, projectFutureCycles } from "../expectedTx.js";
 import { payoffWhatIf, debtFreeMonth, isMortgage, amortizationSchedule, addMonths, MAX_MONTHS } from "../debtPayoff.js";
 import { SCHEDULE_E_LINES, RENTS_KEY, DEFAULT_SCHEDULE_E_MAP, scheduleEReport, entityMonthly, entityLedger, personalDeductionReport, DEDUCTION_BUCKETS, DEFAULT_DEDUCTION_MAP, mileageDeduction, scheduleECsv } from "../taxReport.js";
@@ -1915,10 +1915,13 @@ export default function Dashboard({ refreshTick = 0 }) {
   useEffect(()=>{
     const q=searchQ.trim();
     const id=++searchSeq.current;
-    if(q.length<2){setSearchRes(null);setSearching(false);return;}
+    // Filter-only search: active filters run the search with no text query
+    // (searchIsActive is the shared gate — the adapter skips the ilike).
+    const filters=buildSearchFilters(searchFilters);
+    if(!searchIsActive(q,filters)){setSearchRes(null);setSearching(false);return;}
     setSearching(true);
     const h=setTimeout(()=>{
-      searchTransactions(q,{filters:buildSearchFilters(searchFilters)})
+      searchTransactions(q,{filters})
         .then(res=>{if(searchSeq.current===id){setSearchRes(res);setSearching(false);}})
         .catch(err=>{console.error("search failed",err);if(searchSeq.current===id){setSearchRes({transactions:[],hasMore:false});setSearching(false);}});
     },300);
@@ -2027,6 +2030,40 @@ export default function Dashboard({ refreshTick = 0 }) {
     return ()=>window.removeEventListener("keydown",h);
   },[selTx,pickingCat,addingCat]);
 
+  // Back gesture closes the open sheet, not the app (backlog Session B item 4).
+  // ONE history entry is pushed when the first overlay opens (stacked sheets
+  // share it — the tx sheet over a drill-in is one back-swipe, matching the
+  // overlay tap-out); popstate closes every overlay, and closing by tap/Escape
+  // consumes the entry with history.back() so the NEXT swipe leaves the app as
+  // usual. sheetHistRef distinguishes our pop from an organic one, and the
+  // programmatic back()'s own popstate arrives with the ref already cleared —
+  // a no-op. All history calls try/caught (iOS standalone PWAs have been
+  // quirky about history; a failure just means the old do-nothing swipe).
+  const anySheetOpen=!!(selTx||catDrill||taxDrill||schedDebtId||monthPicker||importing||connectingSfin||quickAdd||targetEdit||moveFrom||pickingCat||addingCat);
+  const sheetHistRef=useRef(false);
+  const closeAllSheets=useCallback(()=>{
+    setSelTx(null);setCatDrill(null);setTaxDrill(null);setSchedDebtId(null);setMonthPicker(false);
+    setImporting(false);setConnectingSfin(false);setQuickAdd(false);
+    setTargetEdit(null);setMoveFrom(null);setPickingCat(false);setAddingCat(false);
+  },[]);
+  useEffect(()=>{
+    const onPop=()=>{
+      if(!sheetHistRef.current)return;
+      sheetHistRef.current=false;
+      closeAllSheets();
+    };
+    window.addEventListener("popstate",onPop);
+    return ()=>window.removeEventListener("popstate",onPop);
+  },[closeAllSheets]);
+  useEffect(()=>{
+    if(anySheetOpen&&!sheetHistRef.current){
+      try{window.history.pushState({mmSheet:true},"");sheetHistRef.current=true;}catch{/* history unavailable: swipe just won't dismiss */}
+    }else if(!anySheetOpen&&sheetHistRef.current){
+      sheetHistRef.current=false;
+      try{window.history.back();}catch{/* ignore */}
+    }
+  },[anySheetOpen]);
+
   // Learned merchant rules: after a manual recategorization, offer to remember
   // the merchant so the correction survives the next sync/import.
   const [learnPrompt,setLearnPrompt]=useState(null); // {descriptor,key,category,count}
@@ -2062,12 +2099,13 @@ export default function Dashboard({ refreshTick = 0 }) {
   // "it didn't apply to the others" symptom.
   const refetchOpenLists=useCallback(async()=>{
     const q=searchQ.trim();
+    const filters=buildSearchFilters(searchFilters);
     await Promise.all([
-      q.length>=2
+      searchIsActive(q,filters)
         // First page of the current filtered query — an appended load-more
         // tail is dropped here, but hasMore comes back true so it's one tap
         // away, and the refetched page is at least consistent.
-        ? searchTransactions(q,{filters:buildSearchFilters(searchFilters)}).then(setSearchRes).catch(err=>console.error("search refresh failed",err))
+        ? searchTransactions(q,{filters}).then(setSearchRes).catch(err=>console.error("search refresh failed",err))
         : Promise.resolve(),
       selAcct
         ? getAccountTransactions(selAcct.id)
@@ -2308,7 +2346,7 @@ export default function Dashboard({ refreshTick = 0 }) {
   // While a search is active the Transactions tab renders results across all
   // months instead of the selected month; the account and category chips still
   // filter them.
-  const searchActive=searchQ.trim().length>=2;
+  const searchActive=searchIsActive(searchQ,buildSearchFilters(searchFilters));
   const searchTxs=searchRes?.transactions||[];
   // Account first, category second, so the category chips can be derived from
   // the account-filtered rows WITHOUT being narrowed by the category filter —
@@ -3120,7 +3158,8 @@ export default function Dashboard({ refreshTick = 0 }) {
                                 if(r.cadence==="once"){doDismissExpected(r.id);return;}
                                 setExpMatchId(null);setExpDismissId(dismissOpen?null:r.id);
                               }}
-                              style={{background:"none",border:"none",color:"var(--muted)",cursor:"pointer",fontSize:12,padding:"2px",lineHeight:1,flexShrink:0}}>✕</button>
+                              style={{background:"none",border:"none",color:"var(--muted)",cursor:"pointer",fontSize:12,lineHeight:1,flexShrink:0,
+                                padding:0,minWidth:32,minHeight:32,margin:"-10px -6px",display:"inline-flex",alignItems:"center",justifyContent:"center"}}>✕</button>
                           </>)}
                         </div>
                         {dismissOpen&&(
@@ -3303,9 +3342,10 @@ export default function Dashboard({ refreshTick = 0 }) {
                 style={{width:"100%",padding:"9px 34px 9px 12px",borderRadius:8,border:"1px solid var(--border)",
                   background:"var(--bg)",color:"var(--text)",fontSize:16,fontFamily:"inherit",outline:"none"}}/>
               {searchQ&&(
-                <button onClick={()=>setSearchQ("")} title="Clear search"
-                  style={{position:"absolute",right:6,top:"50%",transform:"translateY(-50%)",background:"none",border:"none",
-                    cursor:"pointer",color:"var(--muted)",fontSize:18,lineHeight:1,padding:"2px 6px"}}>×</button>
+                <button onClick={()=>setSearchQ("")} title="Clear search" aria-label="Clear search"
+                  style={{position:"absolute",right:0,top:"50%",transform:"translateY(-50%)",background:"none",border:"none",
+                    cursor:"pointer",color:"var(--muted)",fontSize:18,lineHeight:1,padding:0,minWidth:40,minHeight:40,
+                    display:"inline-flex",alignItems:"center",justifyContent:"center"}}>×</button>
               )}
             </div>
             {/* Refinement row — only while a search is active. Amounts match by
@@ -3313,8 +3353,11 @@ export default function Dashboard({ refreshTick = 0 }) {
                 placeholder says ±). Amount inputs commit on change and ride the
                 search debounce; DATE inputs commit on BLUR with a year sanity
                 floor (sanitizeDateInput) — <input type="date"> emits complete
-                garbage years mid-typing (the CLAUDE.md gotcha). */}
-            {searchActive&&(()=>{
+                garbage years mid-typing (the CLAUDE.md gotcha).
+                Always rendered (not gated on searchActive) so a FILTER-ONLY
+                search is reachable: setting a bound with no text query
+                activates the search by itself. */}
+            {(()=>{
               const fSt={padding:"6px 8px",borderRadius:8,border:"1px solid var(--border)",background:"var(--bg)",
                 color:"var(--text)",fontSize:12,fontFamily:"inherit",outline:"none"};
               const setBoth=(k,v)=>{setFilterDraft(f=>({...f,[k]:v}));setSearchFilters(f=>({...f,[k]:v}));};
@@ -3429,9 +3472,11 @@ export default function Dashboard({ refreshTick = 0 }) {
                 {(()=>{
                   const cn=txCatFilter?getName(txCatFilter):null;
                   const q=searchQ.trim();
-                  if(searchActive&&cn&&searchRes?.hasMore)return `No ${cn} transactions in the first ${searchTxs.length} matches for "${q}" — try Load more.`;
-                  if(searchActive&&cn)return `No ${cn} transactions match "${q}".`;
-                  if(searchActive)return `No transactions match "${q}".`;
+                  // Filter-only search has no text query to quote.
+                  const what=q.length>=2?`"${q}"`:"the filters";
+                  if(searchActive&&cn&&searchRes?.hasMore)return `No ${cn} transactions in the first ${searchTxs.length} matches for ${what} — try Load more.`;
+                  if(searchActive&&cn)return `No ${cn} transactions match ${what}.`;
+                  if(searchActive)return `No transactions match ${what}.`;
                   if(cn&&txAcctFilter)return `No ${cn} transactions for this account this month.`;
                   if(cn)return `No ${cn} transactions this month.`;
                   if(txAcctFilter)return "No transactions for this account this month.";
@@ -4402,7 +4447,8 @@ export default function Dashboard({ refreshTick = 0 }) {
                       style={{fontSize:9,padding:"2px 7px",flexShrink:0}}>Expect</button>
                   ))}
                   <button title={`Ignore ${r.name} (hides it for the whole household)`} onClick={()=>toggleRecIgnore(r.key)}
-                    style={{background:"none",border:"none",color:"var(--muted)",cursor:"pointer",fontSize:13,padding:"4px 2px",lineHeight:1,flexShrink:0}}>✕</button>
+                    style={{background:"none",border:"none",color:"var(--muted)",cursor:"pointer",fontSize:13,lineHeight:1,flexShrink:0,
+                      padding:0,minWidth:36,minHeight:36,margin:"-10px -8px",display:"inline-flex",alignItems:"center",justifyContent:"center"}}>✕</button>
                 </div>
                 );
               })}

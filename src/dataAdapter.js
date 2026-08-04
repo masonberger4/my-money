@@ -9,7 +9,7 @@ import { isBudgetableCategory } from './categoryMap.js';
 import { isSpend, sumSpending, spendingGroups, biggestMovers, toTxShape, aggregateEnvelopeSpending } from './spending.js';
 import { createRangeMemo } from './monthMemo.js';
 import { setSyncCompletionHook } from './sync.js';
-import { amountOrClause } from './searchFilters.js';
+import { amountOrClause, searchIsActive } from './searchFilters.js';
 import { parseIgnoreList, toggleIgnoreKey, CANDIDATE_WINDOW_MONTHS } from './recurring.js';
 import { parseSavedChats, addSavedChat, removeSavedChat } from './savedChats.js';
 import { aggregateCoverage } from './coverage.js';
@@ -1286,14 +1286,20 @@ function ilikePattern(q) {
 // per the ruleHistory convention.
 export async function searchTransactions(query, { limit = 200, offset = 0, filters = null } = {}) {
   const q = (query || '').trim();
-  if (q.length < 2) return { transactions: [], hasMore: false };
-  const pat = ilikePattern(q);
-
-  const ors = [
-    `description.ilike.${pat}`,
-    `merchant_name.ilike.${pat}`,
-    `user_description.ilike.${pat}`,
-  ];
+  // Filter-only search: non-null filters activate a search with no (or a
+  // too-short) text query — the ilike .or() is simply skipped and the
+  // amount/date conjuncts stand alone. searchIsActive is the shared gate.
+  if (!searchIsActive(q, filters)) return { transactions: [], hasMore: false };
+  const textOr = q.length >= 2
+    ? (() => {
+        const pat = ilikePattern(q);
+        return [
+          `description.ilike.${pat}`,
+          `merchant_name.ilike.${pat}`,
+          `user_description.ilike.${pat}`,
+        ].join(',');
+      })()
+    : null;
   // Chained .or() calls AND together in PostgREST — the text match and the
   // absolute-amount match are independent conjuncts.
   const amtOr = filters ? amountOrClause(filters.amountMin, filters.amountMax) : null;
@@ -1301,8 +1307,8 @@ export async function searchTransactions(query, { limit = 200, offset = 0, filte
     let b = supabase
       .from('transactions')
       .select(`${withEntity ? TX_COLUMNS + TX_TAX_COLUMNS : TX_COLUMNS}, accounts!inner(hidden, type, subtype)`)
-      .eq('accounts.hidden', false)
-      .or(ors.join(','));
+      .eq('accounts.hidden', false);
+    if (textOr) b = b.or(textOr);
     if (amtOr) b = b.or(amtOr);
     if (filters?.dateFrom) b = b.gte('date', filters.dateFrom);
     if (filters?.dateTo) b = b.lte('date', filters.dateTo);
