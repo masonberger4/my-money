@@ -10,7 +10,7 @@
 //
 // Bump CACHE_VERSION on any change to this file or the precache list.
 
-const CACHE_VERSION = 'v5';
+const CACHE_VERSION = 'v6';
 const SHELL_CACHE = `shell-${CACHE_VERSION}`;
 const ASSET_CACHE = `assets-${CACHE_VERSION}`;
 
@@ -74,7 +74,13 @@ const MAX_ASSET_ENTRIES = 40;
 async function pruneAssetCache() {
   try {
     const cache = await caches.open(ASSET_CACHE);
-    const keys = await cache.keys(); // insertion order: oldest first
+    // Only fingerprinted /assets/* entries are prunable. ASSET_CACHE also
+    // holds the stable-URL precache paths (fonts/icons/manifest) served by
+    // cacheFirst — cache hits never refresh insertion order, so they'd be
+    // the OLDEST entries after a few deploys and a whole-cache prune would
+    // evict exactly the fonts the offline shell depends on.
+    const keys = (await cache.keys()) // insertion order: oldest first
+      .filter((key) => new URL(key.url).pathname.startsWith('/assets/'));
     for (const key of keys.slice(0, Math.max(0, keys.length - MAX_ASSET_ENTRIES))) {
       await cache.delete(key);
     }

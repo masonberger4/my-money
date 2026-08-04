@@ -65,39 +65,33 @@ All six items landed:
   `{mmSheet:true}` entry is consumed at mount so the first back gesture isn't
   a dead press.
 
-### Session C — performance (network + cache)
+### Session C — performance (network + cache) — **SHIPPED 2026-08-04 (this branch)**
 
-1. **[S, medium] Vendor chunk split.** One 622 kB main chunk (174 kB gz);
-   sw.js caches /assets/* by fingerprint, so every deploy (several/day)
-   re-downloads all of it. `manualChunks` putting react/react-dom/supabase-js
-   in a vendor chunk keeps ~60–70 kB gz cached across deploys. Config-only —
-   CONFIRMS and complements next-iteration plan item 4 (tab-level React.lazy is
-   the bigger lever but carries the harness-alias caveat); this can ship first.
-2. **[S, medium] Prune sw.js ASSET_CACHE.** `public/sw.js` caches every
-   /assets/* forever within a CACHE_VERSION (activate only deletes
-   differently-NAMED caches, :36–47) — ~0.7–2.5 MB/deploy accumulating until
-   iOS evicts the PWA's storage and the whole offline shell at once. Prune in
-   `networkFirstShell` after caching a fresh '/' (cap entries, or clear on
-   index.html hash change). Bump CACHE_VERSION per the existing rule.
-3. **[S, medium] Narrow columns for the Recurring 40-month fetch.**
-   `getRecurringCandidates` (dataAdapter.js:1229–1238) pulls the full wide
-   TX_COLUMNS + tax columns + join for ~40 months — the app's largest query —
-   while detection needs roughly SPEND_TX_COLUMNS + user_description/auto
-   fields. Pass a `columns` option (envelope-walk precedent, :934). Bypassing
-   the memo is fine — recurring is lazy-cached in Dashboard state.
-4. **[M, medium] Make Trends lazy like recurring/debt/tax.** `reloadData`
-   (Dashboard.jsx:1538–1550) always fetches `getCashFlow({num_periods:6})` +
-   `getBiggestMovers` though both render only on Trends (:4028). Lazy +
-   epoch-invalidated (the :1631/1679/1217 pattern) shrinks the per-reload burst
-   ~6 months → ~2 of wide rows. Honest trade: current-month callers lose their
-   free ride on the 6-month memo entry and fetch 1–2 months directly — still
-   strictly fewer rows. Pairs with the Needs-Mason invalidation-scoping item.
-5. **[S, low] Preload the three woff2 fonts in index.html.** No
-   `<link rel="preload" as="font">`; first visit per device (and post-eviction)
-   FOUTs on the login screen. Add three preload links — **with `crossorigin`**
-   even same-origin, or the preload double-fetches. (Refutation caveat: fonts
-   wait on the built CSS link, not strictly on JS execution — gain real but
-   smaller than first claimed.)
+All five items landed, no migrations:
+- Items 1, 2, 5 in `6a5b7c0` — vendor chunk split (`manualChunks` in
+  vite.config.js: react/react-dom/scheduler → `vendor-react`, @supabase →
+  `vendor-supabase`), sw.js ASSET_CACHE prune (`pruneAssetCache`, cap 40
+  entries, run after a fresh shell cache; CACHE_VERSION bumped), and the
+  three woff2 `<link rel="preload" as="font" crossorigin>` lines in
+  index.html.
+  **Measured before/after:** one 622 kB main chunk (174 kB gz) → index
+  269 kB (75.3 kB gz) + vendor-react 142 kB (45.4 kB gz) + vendor-supabase
+  215 kB (55.5 kB gz) — ~101 kB gz of vendor code now survives every deploy
+  in the sw cache instead of re-downloading.
+- Items 3, 4 in `84c60ad` — `getRecurringCandidates` fetches narrow
+  recurring-only columns via the `columns` option (envelope-walk precedent),
+  and Trends went lazy like recurring/debt/tax (epoch-invalidated
+  `invalidateTrends`; movers stay month-tagged; per-reload burst no longer
+  fetches the 6-month window off-tab).
+- Review fixes (this commit) — `invalidateTrends` now bumps
+  `trendsSeq.current` itself: with another tab active, the effect re-run
+  early-returns on the tab guard, so an in-flight Trends load would
+  otherwise pass the seq check and cache a pre-invalidation snapshot.
+  And `pruneAssetCache` prunes only `/assets/*` keys — the stable-URL
+  precache entries (fonts/icons/manifest) also live in ASSET_CACHE and
+  cache hits never refresh insertion order, so a whole-cache prune evicted
+  the fonts after ~4 deploys and broke the offline shell's font guarantee
+  (CACHE_VERSION v5 → v6).
 
 ### Session D — code health (dedup + consistency, all S except the split)
 

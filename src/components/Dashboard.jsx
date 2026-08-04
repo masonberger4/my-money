@@ -1159,10 +1159,13 @@ export default function Dashboard({ refreshTick = 0 }) {
   const [trendsEpoch,setTrendsEpoch]=useState(0);
   const [trendsLoading,setTrendsLoading]=useState(false);
   const trendsSeq=useRef(0);
-  // The ONLY way to drop the Trends cache: clears both halves AND mints a new
-  // sequence via the epoch (an in-flight load's response is dropped, and the
-  // effect re-runs even when the values were already null).
-  const invalidateTrends=useCallback(()=>{setCashFlow(null);setMovers(null);setTrendsEpoch(e=>e+1);},[]);
+  // The ONLY way to drop the Trends cache: clears both halves, bumps the seq
+  // HERE (not just via the effect — when another tab is active the effect
+  // re-run early-returns on the tab guard, so an in-flight Trends load would
+  // otherwise still pass the seq check and cache a pre-invalidation
+  // snapshot), and bumps the epoch so the effect re-runs even when the
+  // values were already null.
+  const invalidateTrends=useCallback(()=>{trendsSeq.current++;setCashFlow(null);setMovers(null);setTrendsEpoch(e=>e+1);},[]);
   const [accounts,setAccounts]=useState([]);
   const [budgets,setBudgets]=useState({});
   // By-date sinking funds, kept OUT of `budgets`: their amount is a
