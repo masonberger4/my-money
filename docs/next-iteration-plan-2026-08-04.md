@@ -12,21 +12,42 @@ below relitigates a decided item.
    right now, because every model above them (income, Trends, RTA) reads the
    same rows. All five live in CLAUDE.md's Pending section with full detail;
    in priority order:
-   - **Rotate the Supabase service_role key** (pasted into a chat 2026-08-03).
-     Dashboard → Settings → API Keys → rotate Secret key; update Vercel
-     Production AND Preview; redeploy. Pure ops, five minutes, do it first.
+   - ~~Rotate the Supabase service_role key~~ **DONE 2026-08-04**, verified by
+     a successful assistant round trip (an answer proves `requireUser` passed
+     on the service client). The Anthropic spend cap is DONE too ($25/mo,
+     alert at $10).
    - **$2,200 payroll duplicate** — two distinct `sfin:` ids for the same
      2026-07-24 deposit on Cashback Debit (3481), so the
      `(account_id, plaid_tx_id)` upsert can't dedup. Verify against the
      Discover statement; `excluded=true` on one copy. July income reads
      ~$2,200 high until then (+ ~$34 of Venture X same-day dupes Jun+Jul).
-   - **Discover it (7933) twins** — one mistyped `depository/checking` under
-     the Capital One org, sibling `credit` under Discover. Both hidden ($0
-     impact today); keep the credit one, and eyeball type on EVERY unhide
-     (the mistype→household-spending failure the hidden-by-default rule
-     exists for).
-   - **NEWREZ recategorization** (~$3.8k/mo in "Utilities") — learned rule or
-     `user_category`; counted once, just the wrong bucket.
+   - **Discover it (7933) twins — UPDATED 2026-08-04 by Mason's inspection.**
+     The `credit`-typed row (Discover org) turned out to hold **no
+     transactions**, so Mason hid it and kept the sibling — which is the row
+     typed **`depository/checking`** under the Capital One org. That inverts
+     the earlier "keep the credit one" advice: the question is no longer
+     which row to keep but **the TYPE on the row that holds the data**. A
+     "Discover it" is a credit card, so that row must be retyped **Credit
+     card** in the account-type editor before it is ever unhidden — while it
+     is typed checking, every purchase on it counts as household CASH
+     spending (the F2 failure the hidden-by-default rule exists for).
+     **Mason's hypothesis, plausible and worth confirming: Capital One
+     acquired Discover, so SimpleFIN pulling both the Capital One and
+     Discover logins can surface the SAME card under two orgs.** Each row
+     carries its own `sfin:` id, so the `(account_id, plaid_tx_id)` upsert
+     cannot dedup them — with both visible, everything on that card
+     double-counts. Confirm via the Accounts-tab Data coverage panel (it
+     deliberately includes hidden accounts): overlapping date ranges + similar
+     row counts ⇒ same card twice. Search cannot see them —
+     `searchTransactions` inner-joins `accounts.hidden = false`.
+   - **NEWREZ recategorization** (~$3.8k/mo in "Utilities") — counted once,
+     just the wrong bucket. **Root cause is the keyword table**
+     (`src/txClassify.js`: `/NEWREZ|SHELLPOINT|MORTGAGE|…/ → 'Utilities'`,
+     because the taxonomy has no housing member). **Largely SUPERSEDED by the
+     user-owned category system** (Harder §0): that work deletes both the
+     keyword table and the taxonomy, so NEWREZ stops being mis-guessed by
+     construction and gets whatever category Mason creates for it. Fix it by
+     hand now only if the wrong bucket bothers him before that ships.
    - **Pre-May statement backfill** — BECU savings, Cashback Debit, the cards,
      via CSV/PDF import; the Data coverage panel (Accounts tab) shows each
      gap. First confirm the Checking 2644→5481 re-key theory (rows abut at
@@ -196,6 +217,52 @@ prior backlog. Both are S/M with no blockers and no migration.*
      is unfinished — settle the strip's exact placement and copy at build.
 
 ## Harder, high value
+
+0. **USER-OWNED CATEGORY SYSTEM — Mason's decision 2026-08-04. This REVERSES
+   recorded decisions; it is the next major line of work.** The app ships no
+   categories at all: the user creates every category, teaches which
+   transactions belong to it (manual at first), and the learned-rule machinery
+   makes it automatic thereafter. `category_rules` + `merchantKey` +
+   `applyCategoryRuleToHistory` ALREADY implement "manual then automatic" —
+   what changes is deleting the seed taxonomy and the guessing.
+
+   **Mason's three decisions (2026-08-04), verbatim in effect:**
+   - **Existing history: WIPE to Uncategorized and retrain.** Chosen with the
+     downsides stated (orphaned budgets/envelopes, empty past-month category
+     views, a lot of teaching). Claude's safety amendment, applied unless
+     Mason objects: the wipe **preserves the old values in a legacy column**
+     rather than overwriting in place — same end state, but the destructive
+     step stops being a one-way door on four years of live financial data.
+     `user_category` is wiped too (its labels come from the taxonomy being
+     removed) and is preserved the same way; orphaned `budgets` /
+     `budget_months` rows are cleaned up, not left dangling.
+   - **The keyword classifier is DELETED entirely** (`src/txClassify.js`'s
+     descriptor→category table). Nothing is guessed; a transaction is
+     Uncategorized until a learned rule matches. This kills the
+     NEWREZ→Utilities class of confidently-wrong guesses at the root.
+   - **Sequencing: the learned-rules screen ships FIRST** (spec in
+     Low-hanging fruit), because training becomes the ONLY path to a category
+     and a bad rule must be reviewable//fixable/deletable before it is the
+     sole mechanism.
+
+   **The structural catch — three built-ins are MECHANISM, not taste, and must
+   survive as internals hidden from the picker:** `Transfers and card
+   payments` (the card-payment veto in `isCardPaymentRow` reads it — dropping
+   it lets card payments count as spending), `Return` (synthesised by
+   `applyAccountRules` for credit-card negatives; never spending, never
+   income), and `Uncategorized` (the "not taught yet" state — this design
+   needs it MORE, not less). Only the ~18 taste categories go.
+
+   **Surface to change:** `ERA_CATEGORIES` in `src/categoryMap.js` (5
+   importers: Dashboard.jsx, txClassify.js, categoryMap.js + 2 tests); the
+   `dash:cats` registry becomes THE category system (it already carries
+   colours via `dash:colors` and rename aliases via `dash:names`);
+   `DEFAULT_SCHEDULE_E_MAP` in `src/taxReport.js` (only 2 entries) must go —
+   category→line mapping becomes fully user-driven through the existing
+   `tax:maps` key; `isBudgetableCategory` keeps gating the mechanism three.
+   The Uncategorized teach-queue (Categories tab) becomes the primary
+   onboarding surface rather than a cleanup aid — worth re-sizing as part of
+   this. **Migration: yes, additive + a data step; paste before merge.**
 
 1. **Dashboard.jsx decomposition** — deferred by Mason 2026-08-01 and STILL
    deferred; the file is now **4,983 lines** (`wc -l`, 2026-08-04). The
