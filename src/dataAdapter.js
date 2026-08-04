@@ -184,6 +184,15 @@ async function getTransactionsBetween(start, end, { columns } = {}) {
 const SPEND_TX_COLUMNS =
   'id, account_id, date, amount, description, merchant_name, mapped_category, user_category, excluded';
 
+// The recurring candidate fetch (~40 months — the app's largest query) needs
+// only what detectRecurring reads off the toTxShape rows: the spending
+// predicate's inputs plus user_description, which displayName() folds into
+// merchant_name (a renamed subscription must keep grouping under its display
+// name). Everything else toTxShape emits (plaid_tx_id, tax columns, pending)
+// defaults harmlessly and detection never reads it. Exported for the test
+// that pins this list against recurring.js's actual reads.
+export const RECURRING_TX_COLUMNS = SPEND_TX_COLUMNS + ', user_description';
+
 function getMonthTransactions(year, month) {
   const { start, end } = monthBounds(year, month);
   return getTransactionsBetween(start, end);
@@ -1262,7 +1271,12 @@ export async function getRecurringCandidates({ months = CANDIDATE_WINDOW_MONTHS 
   const oldest = shiftMonth(curY, curM, -(months - 1));
   const { start } = monthBounds(oldest.year, oldest.month);
   const { end } = monthBounds(curY, curM);
-  const rows = await getTransactionsBetween(start, end);
+  // Narrow columns (RECURRING_TX_COLUMNS — the envelope-walk precedent):
+  // ~40 months of the wide TX_COLUMNS + tax columns was the app's heaviest
+  // read for a consumer that only groups by name/amount/date. Passing
+  // `columns` bypasses the range memo, which is fine — recurring is
+  // lazy-cached in Dashboard state, so this runs once per invalidation.
+  const rows = await getTransactionsBetween(start, end, { columns: RECURRING_TX_COLUMNS });
   return { transactions: rows.map(toTxShape) };
 }
 
