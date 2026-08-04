@@ -21,3 +21,24 @@ export async function setSetting(key, value) {
     .upsert({ key, value }, { onConflict: 'household_id,key' });
   if (error) throw error;
 }
+
+// Multi-key read in one round trip (getBudgetIncome reads a default + a
+// per-month override together). Returns { key: value } for the rows that
+// exist; absent keys are simply absent.
+export async function getSettings(keys) {
+  const { data, error } = await supabase
+    .from('settings')
+    .select('key, value')
+    .in('key', keys);
+  if (error) throw error;
+  const byKey = {};
+  for (const row of data || []) byKey[row.key] = row.value;
+  return byKey;
+}
+
+// Delete path (setBudgetIncome clears overrides by removing the row — an
+// upserted empty string would read differently from "no row").
+export async function deleteSetting(key) {
+  const { error } = await supabase.from('settings').delete().eq('key', key);
+  if (error) throw error;
+}

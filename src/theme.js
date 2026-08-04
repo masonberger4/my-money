@@ -15,7 +15,11 @@
 
 import { useCallback, useEffect, useState } from 'react';
 
-export const THEME_STORAGE_KEY = 'mm:theme';
+// Everything below except the five public exports (THEME_PREFS, readToken,
+// subscribeTheme, initTheme, useTheme) is deliberately MODULE-PRIVATE:
+// exporting setThemePref/applyTheme invited a future caller to change the
+// theme while bypassing useTheme's subscription, leaving its state stale.
+const THEME_STORAGE_KEY = 'mm:theme';
 
 /** Preference values, in toggle-cycle order. Default is 'system'. */
 export const THEME_PREFS = ['system', 'light', 'dark'];
@@ -35,7 +39,7 @@ function darkMql() {
 }
 
 /** Stored preference: 'system' | 'light' | 'dark' (never throws). */
-export function getThemePref() {
+function getThemePref() {
   try {
     const v = localStorage.getItem(THEME_STORAGE_KEY);
     return THEME_PREFS.includes(v) ? v : 'system';
@@ -45,7 +49,7 @@ export function getThemePref() {
 }
 
 /** Persist + apply a preference. Returns the resolved theme. */
-export function setThemePref(pref) {
+function setThemePref(pref) {
   const next = THEME_PREFS.includes(pref) ? pref : 'system';
   try {
     if (next === 'system') localStorage.removeItem(THEME_STORAGE_KEY);
@@ -58,14 +62,14 @@ export function setThemePref(pref) {
 }
 
 /** 'system' | 'light' | 'dark' -> 'light' | 'dark'. */
-export function resolveTheme(pref = getThemePref()) {
+function resolveTheme(pref = getThemePref()) {
   if (pref === 'light' || pref === 'dark') return pref;
   const m = darkMql();
   return m && m.matches ? 'dark' : 'light';
 }
 
 /** The theme currently on <html>, falling back to resolving the preference. */
-export function getResolvedTheme() {
+function getResolvedTheme() {
   if (typeof document !== 'undefined') {
     const t = document.documentElement.getAttribute('data-theme');
     if (t === 'light' || t === 'dark') return t;
@@ -126,7 +130,7 @@ function syncBrowserChrome(pref, resolved) {
  * Apply a preference: sets <html data-theme="light|dark"> to the RESOLVED
  * theme and keeps the browser chrome in sync. Returns the resolved theme.
  */
-export function applyTheme(pref = getThemePref()) {
+function applyTheme(pref = getThemePref()) {
   const resolved = resolveTheme(pref);
   if (typeof document === 'undefined') return resolved;
   document.documentElement.setAttribute('data-theme', resolved);
@@ -156,7 +160,7 @@ export function subscribeTheme(handler) {
  * Low-level: fire handler('light'|'dark') on OS theme changes.
  * Returns an unsubscribe function.
  */
-export function subscribeSystemTheme(handler) {
+function subscribeSystemTheme(handler) {
   const m = darkMql();
   if (!m) return () => {};
   const onChange = (e) => handler(e.matches ? 'dark' : 'light');

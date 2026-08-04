@@ -14,6 +14,8 @@ import { parseIgnoreList, toggleIgnoreKey, CANDIDATE_WINDOW_MONTHS } from './rec
 import { parseSavedChats, addSavedChat, removeSavedChat } from './savedChats.js';
 import { aggregateCoverage } from './coverage.js';
 import { netWorthSeries, clampSeries } from './netWorth.js';
+import { getSetting, setSetting, getSettings, deleteSetting } from './db.js';
+import { makeSerializedUpdater } from './serializedUpdater.js';
 
 // Re-export the pure cash-flow model (src/cashFlow.js) so existing importers
 // and the CSV-import dry-run harness keep working.
@@ -425,9 +427,7 @@ export async function getBalanceSnapshots(accountIds, sinceDate) {
     const { data, error } = await q;
     if (error) {
       if (isRangeExhaustedError(error)) break;
-      // Missing table: PGRST205 (PostgREST schema cache) or 42P01 (Postgres) —
-      // same pair as isEnvelopeSchemaMissing.
-      if (error.code === 'PGRST205' || error.code === '42P01') {
+      if (isMissingTableError(error)) {
         hasBalanceSnapshots = false;
         return [];
       }
@@ -502,7 +502,7 @@ export async function getCategoryRules() {
   if (!hasCategoryRules) return {};
   const { data, error } = await supabase.from('category_rules').select('merchant_key, category');
   if (error) {
-    if (error.code === 'PGRST205' || error.code === '42P01') {
+    if (isMissingTableError(error)) {
       hasCategoryRules = false;
       return {};
     }
@@ -644,10 +644,11 @@ export async function setBudget(category, limit) {
 // failure: only the former should show the not-set-up notice. Same pattern as
 // getCategoryRules above.
 export function isEnvelopeSchemaMissing(error) {
-  return (
-    !!error &&
-    (error.code === 'PGRST205' || error.code === '42P01' || error.code === '42703')
-  );
+  // Missing table (shared predicate) OR the budgets columns the migration
+  // adds (42703, undefined_column) — this is the one place a column error is
+  // deliberately part of a schema-missing verdict; everywhere else the
+  // table/column tests stay separate (the api/sync.js rule).
+  return !!error && (isMissingTableError(error) || error.code === '42703');
 }
 
 // --- Envelope budgeting (YNAB rules 1–3) -------------------------------------
@@ -741,13 +742,7 @@ const INCOME_KEY = 'budget:income';
 
 export async function getBudgetIncome({ year, month }) {
   const monthKeyStr = `${INCOME_KEY}:${monthKey(year, month)}`;
-  const { data, error } = await supabase
-    .from('settings')
-    .select('key, value')
-    .in('key', [INCOME_KEY, monthKeyStr]);
-  if (error) throw error;
-  const byKey = {};
-  for (const row of data || []) byKey[row.key] = row.value;
+  const byKey = await getSettings([INCOME_KEY, monthKeyStr]);
   // settings.value is a TEXT column (see migration 2) — everything stored there
   // is a string, so read it back as one. An empty string is not a zero.
   const read = v => {
@@ -772,19 +767,9 @@ export async function setBudgetIncome({ year, month }, amount, { scope = 'month'
   if (raw !== '' && !Number.isFinite(n)) return;
   const monthKeyStr = `${INCOME_KEY}:${monthKey(year, month)}`;
   const key = scope === 'default' ? INCOME_KEY : monthKeyStr;
-  if (n == null) {
-    const { error } = await supabase.from('settings').delete().eq('key', key);
-    if (error) throw error;
-  } else {
-    const { error } = await supabase
-      .from('settings')
-      .upsert({ key, value: String(n) }, { onConflict: 'household_id,key' });
-    if (error) throw error;
-  }
-  if (scope === 'default') {
-    const { error } = await supabase.from('settings').delete().eq('key', monthKeyStr);
-    if (error) throw error;
-  }
+  if (n == null) await deleteSetting(key);
+  else await setSetting(key, String(n));
+  if (scope === 'default') await deleteSetting(monthKeyStr);
 }
 
 // Per-envelope pace-warning opt-in. Stored as ONE settings row keyed
@@ -796,15 +781,10 @@ export async function setBudgetIncome({ year, month }, amount, { scope = 'month'
 const ENV_PACE_KEY = 'env:pace';
 
 export async function getEnvPace() {
-  const { data, error } = await supabase
-    .from('settings')
-    .select('value')
-    .eq('key', ENV_PACE_KEY)
-    .maybeSingle();
-  if (error) throw error;
-  if (!data || data.value == null || String(data.value).trim() === '') return {};
+  const value = await getSetting(ENV_PACE_KEY);
+  if (value == null || String(value).trim() === '') return {};
   try {
-    const parsed = JSON.parse(data.value);
+    const parsed = JSON.parse(value);
     return parsed && typeof parsed === 'object' ? parsed : {};
   } catch {
     return {};
@@ -814,10 +794,7 @@ export async function getEnvPace() {
 export async function setEnvPace(map) {
   const clean = {};
   for (const [k, v] of Object.entries(map || {})) if (v) clean[k] = true;
-  const { error } = await supabase
-    .from('settings')
-    .upsert({ key: ENV_PACE_KEY, value: JSON.stringify(clean) }, { onConflict: 'household_id,key' });
-  if (error) throw error;
+  await setSetting(ENV_PACE_KEY, JSON.stringify(clean));
 }
 
 // Recurring-charge ignore list — a HOUSEHOLD pref (settings table, NOT
@@ -830,13 +807,7 @@ export async function setEnvPace(map) {
 const REC_IGNORE_KEY = 'rec:ignore';
 
 export async function getRecIgnore() {
-  const { data, error } = await supabase
-    .from('settings')
-    .select('value')
-    .eq('key', REC_IGNORE_KEY)
-    .maybeSingle();
-  if (error) throw error;
-  return parseIgnoreList(data?.value ?? null);
+  return parseIgnoreList(await getSetting(REC_IGNORE_KEY));
 }
 
 export async function setRecIgnore(keys) {
@@ -847,10 +818,7 @@ export async function setRecIgnore(keys) {
     seen.add(k);
     clean.push(k);
   }
-  const { error } = await supabase
-    .from('settings')
-    .upsert({ key: REC_IGNORE_KEY, value: JSON.stringify(clean) }, { onConflict: 'household_id,key' });
-  if (error) throw error;
+  await setSetting(REC_IGNORE_KEY, JSON.stringify(clean));
 }
 
 // Toggle ONE key with a read-merge-write: re-read the stored row at toggle
@@ -868,16 +836,13 @@ export async function setRecIgnore(keys) {
 // A's committed write. The chain swallows rejections so one failed toggle
 // never dams the queue; callers still receive the real rejection. The
 // two-PHONE race stays the accepted single-key last-write-wins.
-let recIgnoreChain = Promise.resolve();
+//
+// The chain mechanics (serialization, failed-read-aborts, swallowed
+// rejections that never dam the queue) live in the shared
+// makeSerializedUpdater (src/serializedUpdater.js, tested) — this binds it.
+const runRecIgnoreUpdate = makeSerializedUpdater(getRecIgnore, setRecIgnore);
 export function updateRecIgnore(key, ignored) {
-  const run = recIgnoreChain.then(async () => {
-    const current = await getRecIgnore();
-    const next = toggleIgnoreKey(current, key, ignored);
-    await setRecIgnore(next);
-    return next;
-  });
-  recIgnoreChain = run.catch(() => {});
-  return run;
+  return runRecIgnoreUpdate(current => toggleIgnoreKey(current, key, ignored));
 }
 
 // Saved Ask-tab chats — HOUSEHOLD data (settings table, NOT device storage:
@@ -893,33 +858,14 @@ export function updateRecIgnore(key, ignored) {
 const ASST_CHATS_KEY = 'asst:chats';
 
 export async function getSavedChats() {
-  const { data, error } = await supabase
-    .from('settings')
-    .select('value')
-    .eq('key', ASST_CHATS_KEY)
-    .maybeSingle();
-  if (error) throw error;
-  return parseSavedChats(data?.value ?? null);
+  return parseSavedChats(await getSetting(ASST_CHATS_KEY));
 }
 
 async function setSavedChats(list) {
-  const { error } = await supabase
-    .from('settings')
-    .upsert({ key: ASST_CHATS_KEY, value: JSON.stringify(list) }, { onConflict: 'household_id,key' });
-  if (error) throw error;
+  await setSetting(ASST_CHATS_KEY, JSON.stringify(list));
 }
 
-let savedChatsChain = Promise.resolve();
-function updateSavedChats(merge) {
-  const run = savedChatsChain.then(async () => {
-    const current = await getSavedChats();
-    const next = merge(current);
-    await setSavedChats(next);
-    return next;
-  });
-  savedChatsChain = run.catch(() => {});
-  return run;
-}
+const updateSavedChats = makeSerializedUpdater(getSavedChats, setSavedChats);
 
 // Both return the merged stored list so the caller can adopt entries the
 // other phone added since its last read.
@@ -1582,7 +1528,7 @@ async function appendClientSnapshot(accountId, balance) {
     { onConflict: 'account_id,captured_on' },
   );
   if (error) {
-    if (error.code === 'PGRST205' || error.code === '42P01') hasBalanceSnapshots = false;
+    if (isMissingTableError(error)) hasBalanceSnapshots = false;
     else console.warn('balance snapshot append failed', error.message || error);
   }
 }
