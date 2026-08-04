@@ -115,7 +115,7 @@ entry once shipped.
 | `api/_lib/supabase.js` | Service-role client + `requireUser` (JWT → householdId). |
 | `supabase/migrations/` | Ordered SQL migrations (additive-only on live data). |
 | `supabase/setup_all.sql` | One-paste fresh install — **DESTRUCTIVE, wipes all tables. Never run on live data. Never re-generate to include new migrations without that warning.** Convenience snapshot only — `migrations/` is the source of truth; ends with a column-level self-check that raises if it drifts behind migrations. |
-| `vercel.json` | Build/rewrite config **plus the security headers** (CSP, HSTS, nosniff, Referrer-Policy, Permissions-Policy, frame-ancestors/X-Frame-Options DENY) applied at a catch-all `/(.*)`. Each CSP directive is derived from real code usage; the derivation is the ignored `_csp_derivation` key. **Nothing local exercises these headers — a too-strict edit breaks prod silently; `test/securityHeaders.test.js` is the guard** (see Gotchas). |
+| `vercel.json` | Build/rewrite config **plus the security headers** (CSP, HSTS, nosniff, Referrer-Policy, Permissions-Policy, frame-ancestors/X-Frame-Options DENY) applied at a catch-all `/(.*)`. Each CSP directive is derived from real code usage; the derivation lives in `docs/csp-derivation.md` (**never as a key in `vercel.json` — Vercel REJECTS unknown top-level keys and the deploy fails schema validation before it builds**). **Nothing local exercises these headers — a too-strict edit breaks prod silently; `test/securityHeaders.test.js` is the guard** (see Gotchas). |
 | `test/` | `npm test` — Node's built-in `node --test`, zero deps; plain-module helpers live in `test/helpers/` (the `*.test.js` glob skips them). Covers the pure cores: cashFlow (incl. brute-force max-matching parity), csvImport parsing/dedup-id idempotency + overlap guard, **pdfImport** (the whole template pipeline: shape tests, year inference incl. the Dec→Jan wrap, geometry, applyTemplate anchor/continuation REGRESSIONs, debit/credit netting, the buildRows round-trip), **reconcile** (the comparison audit, with its own brute-force parity), **spending** (the extracted purchase-based model against the synthetic ledger: 11 scenarios + seeded property tests), **categoryRules** (the ruleHistory core against a fake PostgREST incl. the exact-page-multiple REGRESSION; write-time precedence; the teach→apply→re-import sequence), txClassify (learned-rule matching + the over-specific-key limit), envelopes (both walk regressions + by-date targets + `effectiveTarget`/`planAutoFill`), **expectedTx** (matching, lifecycle, dup gates incl. the null-key roll-forward REGRESSION, the display-only walk-byte-identity REGRESSION), **envelopeIO** (Session 6 adapter I/O against a recording fake — the 42703 target_override retry, the conditional setAssigned(0) delete, roll-forward gating; its degrade tests run LAST, order matters), taxReport (conservation, capital exclusion, the 2026 mileage-rate boundary), **recurring** (thresholds pinned as documentation), **accountBalance** (incl. the −0 REGRESSION), **categoryMap**, simplefin classifier/clamp + **simplefinNormalize** (type-inference ordering REGRESSION, wire parsing) + **simplefinToken** (SSRF/claim flow against a stubbed fetch), **assistantModels** (+ a server source scan), **spendingContext** byte-determinism, **syncDecisions** (watermark advance/hold/reset + missing-table vs missing-column), **lockstep** (index.html↔ui.css `--bg`, sw.js guards, fonts precache, pdf.js legacy build), **sync** (pullWasClean + runSync single-flight via injected transport), **syncOrchestration** (`pullOneAccessUrl` against the fake Supabase client in `test/helpers/fakeSupabase.js`), **manualTx** (quick-add row building + gating), **unlink** (remove-bank soft-hide decisions), **monthMemo** (range memo + per-model copies), **debtPayoff**, **serializedUpdater** (the read-merge-write chain's four invariants) + **settingsChains** (the two real call sites against a fake settings table), **securityHeaders** (the vercel.json CSP lockstep — script-hash recompute + per-directive pins), noPlaid, paletteContrast, apiLoads. Run before pushing. |
 
 ## Development workflow
@@ -1091,9 +1091,17 @@ surgically, never the foundation.
   test.js` is the guard**: it recomputes the sha256 of index.html's inline
   theme script and pins every load-bearing directive, so editing either side
   turns into a red test. Change the theme script and the test hands you the
-  new hash. The per-directive derivation lives in vercel.json's ignored
-  `_csp_derivation` key (JSON has no comments) — read it before adding or
-  removing an origin, and never widen a directive to make a symptom go away.
+  new hash. The per-directive derivation lives in `docs/csp-derivation.md` —
+  read it before adding or removing an origin, and never widen a directive to
+  make a symptom go away.
+- **`vercel.json` REJECTS unknown top-level keys** — schema validation fails
+  the deployment *before it builds*, so the site keeps serving the previous
+  deploy while every new push dies with "should NOT have additional property".
+  JSON has no comments, so the temptation is to park documentation in a
+  `_`-prefixed key: Vercel does NOT ignore it (learned when a `_csp_derivation`
+  key shipped in PR #45 and broke the deploy). Documentation about the config
+  goes in `docs/`, never inside it. Note the failure shape — `npm run build`
+  and `npm test` both pass, because nothing local validates that schema.
 - iOS PWA: apple-touch-icon must be PNG; service worker (`public/sw.js`) never
   caches `/api/*`; bump its CACHE_VERSION when changing it.
 - **pdf.js must be the LEGACY build** (`pdfjs-dist/legacy/build/…`). The modern
