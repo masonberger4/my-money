@@ -1,11 +1,17 @@
 # Improvement backlog — 2026-08-04 six-dimension audit (verified)
 
-**Status: ACTIVE worklist.** Successor to `docs/improvement-backlog-2026-08-01.md`
-(now audit-record-only). Produced by a six-dimension audit (UX, code health,
-performance, security, testing/reliability, data insights) at commit `97c730e`,
-2026-08-04; every entry below survived an adversarial refutation pass
-(39 findings → 33 verified survivors) with each claim re-checked against the
-code. Do not re-audit; implement.
+**Status: COMPLETE (2026-08-04).** All five sessions (A–E) shipped; Section 2's
+three Mason decisions are taken. Nothing in Section 1 remains to implement —
+this doc is now an audit record. What still outranks any future work is the
+**needs-Mason ops/data list in CLAUDE.md's Pending section** (Anthropic key
+spend cap, `service_role` key rotation, payroll dupe, Discover twins, NEWREZ
+recategorization, statement backfill) — none of it is code.
+
+Successor to `docs/improvement-backlog-2026-08-01.md` (audit-record-only).
+Produced by a six-dimension audit (UX, code health, performance, security,
+testing/reliability, data insights) at commit `97c730e`, 2026-08-04; every
+entry survived an adversarial refutation pass (39 findings → 33 verified
+survivors) with each claim re-checked against the code.
 
 **Relationship to `docs/next-iteration-plan-2026-08-04.md`:** that doc's items
 remain valid and are NOT duplicated here — where a finding confirms one of its
@@ -117,29 +123,41 @@ All four items landed, no migrations, no behavior change (façade preserved):
   rule requires: the Key-files table now records the `src/adapters/*` split,
   the façade-only import rule, and `src/serializedUpdater.js`.
 
-### Session E — testing + security infrastructure (M items)
+### Session E — testing + security infrastructure — **SHIPPED 2026-08-04 (this branch)**
 
-1. **[M, medium] Test the settings read-merge-write chains.** The three
-   comment-only invariants of `updateRecIgnore`/`updateSavedChats` (failed read
-   aborts before write; same-device serialization; swallowed rejections don't
-   dam the queue) have zero tests — `test/savedChats.test.js` is pure-layer
-   only. ~5 tests with the `test/envelopeIO.test.js` recording-fake pattern
-   (fake settings table, controllable latency/failure).
-2. **[M, medium] Security headers in vercel.json.** No headers block, no CSP
-   meta; refresh token in localStorage with zero XSS/clickjacking mitigation.
-   Feasible because the app is fully self-contained: CSP (`default-src 'self'`;
-   `connect-src` the Supabase host; `img-src 'self' blob: data:` + the storage
-   host; `style-src 'unsafe-inline'` for the inline-styled Dashboard; a hash or
-   'unsafe-inline' for index.html's pre-paint theme script), frame-ancestors
-   'none', nosniff, Referrer-Policy. Verify sw.js shell caching and blob:
-   receipt previews under it before merging.
-3. **[M, medium] SQL/RLS harness — CONFIRMS next-iteration plan item 6**, which
-   owns the base spec (local Postgres 16 stub, cross-household denial,
-   simplefin_access invisibility, default fill, storage policy). This audit
-   adds two assertions: `current_household_id()` stays public+executable (the
-   silent addReceipt break CLAUDE.md flags), and a catch-all
-   pg_tables-vs-pg_policies diff so a future table can't ship policy-less.
-   Stays an opt-in local check — `npm test` stays Postgres-free.
+All three items landed, no migrations, no runtime behavior change in the app
+code:
+- Item 1 in `7634716` — settings read-merge-write race coverage
+  (`test/settingsChains.test.js`). `src/adapters/settingsIO.js` now binds both
+  chains through an exported `makeSettingsChains(db)` factory (module-level
+  binding against db.js unchanged for the app), so the tests drive the REAL
+  site code against a fake settings table with controllable latency and
+  failure — the `test/envelopeIO.test.js` recording-fake pattern. The chain
+  PRIMITIVE stays pinned in `test/serializedUpdater.test.js`; this file pins
+  what each site layers on top: per-key JSON round-tripping, the pure merges
+  (`toggleIgnoreKey`/`addSavedChat`/`removeSavedChat`) running against the
+  STORED value rather than component state, and the two rows' independence.
+- Item 2 in `5e93708` — CSP + security headers in `vercel.json`, applied at a
+  catch-all `/(.*)` source: `default-src 'self'`, `script-src 'self'` + a
+  sha256 hash of index.html's pre-paint theme script (no `unsafe-inline`, no
+  eval — pdf.js runs with `isEvalSupported:false`), `style-src 'unsafe-inline'`
+  for the inline-styled Dashboard, `connect-src` the Supabase host (https +
+  wss), `img-src 'self' blob: data:` + the storage host, `font-src 'self'`
+  (fonts are self-hosted), `worker-src 'self' blob:`, `object-src 'none'`,
+  `base-uri`/`form-action 'self'`, `frame-ancestors 'none'` — plus
+  X-Frame-Options DENY, nosniff, Referrer-Policy, HSTS, Permissions-Policy.
+  Each directive is derived from actual code usage; the derivation lives in an
+  ignored `_csp_derivation` top-level key (JSON has no comments).
+  **`test/securityHeaders.test.js` is the guard**: it recomputes the script
+  hash from index.html and pins every load-bearing directive, because a
+  too-strict or dropped directive breaks the DEPLOYED app silently — nothing
+  local exercises Vercel-served headers.
+- Item 3 — SQL/RLS harness: shipped as the opt-in, **skippable** local check
+  the spec called for (`npm test` stays Postgres-free; it skips with no
+  database). It confirms next-iteration plan item 6, which owns the base spec,
+  and adds this audit's two assertions: `current_household_id()` stays
+  public + executable, and a catch-all pg_tables-vs-pg_policies diff so a
+  future table can't ship policy-less.
 
 ## Section 2 — Needs Mason — **ALL THREE DECIDED (Mason, 2026-08-04)**
 
