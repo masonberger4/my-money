@@ -15,6 +15,7 @@ import { unlinkInstitution, askAssistant, getSimpleFinStatus } from "../apiClien
 import { ERA_CATEGORIES, UNCATEGORIZED, isBudgetableCategory } from "../categoryMap.js";
 import { displayBalance, isDebtAccount as isDebtType } from "../accountBalance.js";
 import { unhideConfirmMessage } from "../unhideConfirm.js";
+import { createSheetHistory } from "../sheetHistory.js";
 import { runSync } from "../sync.js";
 // Lazy: both are modals rendered only on user action, and CsvImport reaches the
 // whole statement-import stack — no reason for either in the initial bundle.
@@ -306,10 +307,15 @@ function AddDebtForm({busy,surf,onSave,onClose}) {
 // a two-user app: Escape + dialog semantics (role="dialog"/aria-modal on the
 // .modal div), no full focus trap. Each handler claims the event
 // (`stopImmediatePropagation`) so one Escape press closes ONE layer, never a
-// whole stack. The stacked case that actually occurs (category picker /
-// add-category over the tx sheet) is handled by the single Dashboard-level
-// effect below, which picks the topmost open flag explicitly — the component
-// sheets using this hook are never stacked on each other.
+// whole stack. Component sheets using this hook are never stacked on EACH
+// OTHER, but the tx detail sheet DOES stack over CategorySheet/PropertySheet
+// (their onPick opens it without closing the drill-in) — and listener order
+// between this hook and the Dashboard-level handler is render-order-dependent
+// (the inline onClose identity re-registers this one every commit). That's why
+// the Dashboard-level effect below listens in the CAPTURE phase: whenever the
+// tx sheet (or a picker over it) is open, it deterministically wins and closes
+// the topmost layer; this hook's bubble-phase listener only ever fires when
+// its sheet is the top.
 function useEscClose(onClose){
   useEffect(()=>{
     const h=e=>{
@@ -2014,8 +2020,12 @@ export default function Dashboard({ refreshTick = 0 }) {
   // directly in Dashboard's JSX rather than as components — they can't call
   // useEscClose themselves). Priority is explicit because these DO stack: the
   // category picker and the add-category manager sit over the tx sheet, so one
-  // press peels one layer. Component sheets handle their own Escape via
-  // useEscClose; stopImmediatePropagation on both sides keeps a single press
+  // press peels one layer. Registered in the CAPTURE phase so it beats every
+  // useEscClose bubble-phase listener whenever it's active — the tx sheet also
+  // stacks over CategorySheet/PropertySheet (their onPick), and without
+  // capture, which layer got the press depended on listener registration
+  // order, i.e. on render order (the drill-in's inline onClose re-registers
+  // its listener each commit). stopImmediatePropagation keeps a single press
   // from closing two layers.
   useEffect(()=>{
     if(!(selTx||pickingCat||addingCat))return;
@@ -2026,8 +2036,8 @@ export default function Dashboard({ refreshTick = 0 }) {
       else if(pickingCat)setPickingCat(false);
       else setSelTx(null);
     };
-    window.addEventListener("keydown",h);
-    return ()=>window.removeEventListener("keydown",h);
+    window.addEventListener("keydown",h,true);
+    return ()=>window.removeEventListener("keydown",h,true);
   },[selTx,pickingCat,addingCat]);
 
   // Back gesture closes the open sheet, not the app (backlog Session B item 4).
@@ -2035,33 +2045,39 @@ export default function Dashboard({ refreshTick = 0 }) {
   // share it — the tx sheet over a drill-in is one back-swipe, matching the
   // overlay tap-out); popstate closes every overlay, and closing by tap/Escape
   // consumes the entry with history.back() so the NEXT swipe leaves the app as
-  // usual. sheetHistRef distinguishes our pop from an organic one, and the
-  // programmatic back()'s own popstate arrives with the ref already cleared —
-  // a no-op. All history calls try/caught (iOS standalone PWAs have been
-  // quirky about history; a failure just means the old do-nothing swipe).
+  // usual. The state machine lives in src/sheetHistory.js (pure, tested): it
+  // owns the pendingBack flag that (a) defers a push while the programmatic
+  // back()'s asynchronous popstate is in flight — a sheet opened in that
+  // window used to push a racing entry and then be flash-closed by the landing
+  // pop — and (b) lets onMount consume an {mmSheet:true} entry stranded by a
+  // reload-with-sheet-open, so the first back gesture isn't a dead press.
   const anySheetOpen=!!(selTx||catDrill||taxDrill||schedDebtId||monthPicker||importing||connectingSfin||quickAdd||targetEdit||moveFrom||pickingCat||addingCat);
-  const sheetHistRef=useRef(false);
+  const anySheetOpenRef=useRef(false);
+  anySheetOpenRef.current=anySheetOpen;
+  const sheetHistRef=useRef(null);
+  if(!sheetHistRef.current){
+    sheetHistRef.current=createSheetHistory({
+      push:()=>window.history.pushState({mmSheet:true},""),
+      back:()=>window.history.back(),
+    });
+  }
   const closeAllSheets=useCallback(()=>{
     setSelTx(null);setCatDrill(null);setTaxDrill(null);setSchedDebtId(null);setMonthPicker(false);
     setImporting(false);setConnectingSfin(false);setQuickAdd(false);
     setTargetEdit(null);setMoveFrom(null);setPickingCat(false);setAddingCat(false);
   },[]);
   useEffect(()=>{
+    let st=null;
+    try{st=window.history.state;}catch{/* history unavailable */}
+    sheetHistRef.current.onMount(st);
     const onPop=()=>{
-      if(!sheetHistRef.current)return;
-      sheetHistRef.current=false;
-      closeAllSheets();
+      if(sheetHistRef.current.onPop(anySheetOpenRef.current))closeAllSheets();
     };
     window.addEventListener("popstate",onPop);
     return ()=>window.removeEventListener("popstate",onPop);
   },[closeAllSheets]);
   useEffect(()=>{
-    if(anySheetOpen&&!sheetHistRef.current){
-      try{window.history.pushState({mmSheet:true},"");sheetHistRef.current=true;}catch{/* history unavailable: swipe just won't dismiss */}
-    }else if(!anySheetOpen&&sheetHistRef.current){
-      sheetHistRef.current=false;
-      try{window.history.back();}catch{/* ignore */}
-    }
+    sheetHistRef.current.onSheetsChange(anySheetOpen);
   },[anySheetOpen]);
 
   // Learned merchant rules: after a manual recategorization, offer to remember
