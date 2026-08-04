@@ -26,45 +26,19 @@ Merged-features lines), same rule as the 2026-08-01 backlog.
 Grouped into coherent sessions; suggested order A → E (A and B are the highest
 value-per-line; C/D/E are independent of each other).
 
-### Session A — silent-failure guards (all S; the no-alarm failure class)
+### Session A — silent-failure guards — **SHIPPED 2026-08-04 (this branch)**
 
-1. **[S, high] Add `isRangeExhaustedError` to the three unguarded paged loops.**
-   `src/dataAdapter.js`: `fetchRawBetween` (~100–117 — the memoized fetch every
-   tab rides), `getExistingTxIds` (~1558–1582), `getAccountTransactionsInRange`
-   (~1622–1640) end in bare `if (error) throw error`, unlike the seven guarded
-   loops (397/684/1291/1949/2027 + ruleHistory.js). An exact N×1000-row window
-   makes the whole dashboard error (memo evicts on rejection, so it recurs) and
-   blocks CSV/PDF import; backfill is pushing row counts up. Mechanical fix:
-   extract one `pagedSelect(buildQuery)` helper or add the three guards.
-2. **[S, high] Make client `isMissingColumnError` name-check its column.**
-   `src/dataAdapter.js:1380–1385` returns true for ANY PGRST204/42703 without
-   reading `col` — gates the entity/debt/is_manual degrade flags, so any future
-   42703 in a shared select silently reads a feature as "not installed" for the
-   session (the exact conflation the CLAUDE.md gotcha forbids). Match the
-   name-checking twin in `api/sync.js:47–53` (test-pinned) and the stricter
-   `isMissingOverrideColumnError` precedent (dataAdapter ~655); add a small test
-   (export it, or drive via query fakes as `test/envelopeIO.test.js` does).
-3. **[S, high] Rollback + alert on the optimistic account/property/tax writes.**
-   Dashboard.jsx: `saveAccount` (~1890), debt field save (~1719), `saveTaxMaps`
-   (~1457, state set BEFORE the write), `renameEntity`/`archiveEntity`
-   (~1490/1495), `deleteMileage` (~1513) all `catch → console.error` only.
-   Apply the `updateManualBalance` pattern (capture prev, rollback + alert —
-   three lines away at ~1748) at minimum to `saveAccount` (it carries the TYPE
-   editor: a dropped type correction is never restated by sync, so a mistyped
-   card silently counts purchases as household spending) and the debt save.
-4. **[S, low] Server-side confirm gate on the simplefin-status DELETE.**
-   `api/simplefin-status.js:98–105` wipes `simplefin_access` on a bare
-   authenticated DELETE — the only destructive api/ action without the
-   `unlink.js`-style literal gate. Require `{confirm:'disconnect'}` in the body
-   (three lines; the UI already confirms). Availability, not data loss — but
-   the failure is the silent-stale-dashboard shape the Gotchas warn about.
-5. **[S, low] Stop echoing raw error bodies from 500 handlers.**
-   `api/unlink-institution.js:157–160` returns `err?.response?.data ||
-   err.message` (can be a whole PostgREST body); `api/simplefin-status.js:166`,
-   `api/simplefin-claim.js:106`, `api/assistant.js:168` return raw
-   `err.message` (schema details). Log full server-side; return a generic
-   string + stable code — the `sanitizeFeedMessage` discipline applied to the
-   generic catch.
+All five items landed, with tests for every guard:
+- Items 1, 2, 5 in `5aa69e2` — `isRangeExhaustedError` on the three unguarded
+  paged loops (shared `pagedSelect`-style guards in `src/dataAdapter.js`),
+  client `isMissingColumnError` now name-checks its column (matching the
+  `api/sync.js` twin), and the four api/ 500 handlers return a generic
+  string + stable code instead of raw error bodies
+  (`test/pagedGuards.test.js`, `test/apiErrorSanitize.test.js`).
+- Items 3, 4 in `1b9f195` — rollback + alert on the optimistic
+  account/debt/tax/entity/mileage writes (the `updateManualBalance` pattern),
+  and the `{confirm:'disconnect'}` server-side gate on the simplefin-status
+  DELETE (`api/_lib/unlink.js` decisions; `test/unlink.test.js` additions).
 
 ### Session B — phone-first UX (mostly S)
 
@@ -192,34 +166,23 @@ value-per-line; C/D/E are independent of each other).
    pg_tables-vs-pg_policies diff so a future table can't ship policy-less.
    Stays an opt-in local check — `npm test` stays Postgres-free.
 
-## Section 2 — Needs Mason
+## Section 2 — Needs Mason — **ALL THREE DECIDED (Mason, 2026-08-04)**
 
-1. **Scope the month-navigation cache invalidation?** (performance, M,
-   high value) `reloadData` (Dashboard.jsx:1531) unconditionally calls
-   `invalidateEnvelopeSpending()`, nulling spendCache and clearing the
-   rangeMemo — so every month TAP refetches the whole-history envelope walk +
-   the 6-month window over LTE. Write/import/rule paths already clear the memo
-   themselves (dataAdapter 252/313/543/1668/1766). **Question:** may plain
-   month navigation reuse the caches within a session, invalidating only on
-   write/sync/import + the explicit Refresh button? Staleness window = another
-   device's write, already bounded by the hourly sync + Refresh.
-   **Recommendation: yes** — biggest single perceived-speed win on the phone;
-   must also hook runSync completion.
-2. **Durable assistant throttle?** (security, S, low value) The 10/min
-   throttle (`api/assistant.js:32–51`) is per-serverless-instance and
-   honestly commented as such; a leaked shared JWT can fan Opus calls across
-   instances until the Anthropic bill notices. Cheap durable option: an
-   `asst:throttle` settings row (read-merge-write) or Vercel KV, paired with a
-   spend cap on the Anthropic key. This relitigates an in-code accepted trade
-   (the 2026-08-01 "pragmatic > enterprise" rejection of a table-backed
-   limiter), so it is Mason's call. **Recommendation: skip the code, set the
-   Anthropic spend cap** — the dollar bound with zero new machinery.
-3. **When does the dataAdapter.js split (Session D item 4) run?** It is not
-   covered by the Dashboard.jsx deferral, but it shares that deferral's shape:
-   an L-sized refactor of a hot file during active multi-session development.
-   **Recommendation: schedule it as its own quiet session** (no feature work
-   alongside) rather than deferring indefinitely — the file grows ~300
-   lines/session and is the top merge-conflict surface after Dashboard.jsx.
+1. **Month-navigation cache invalidation — DECIDED YES and SHIPPED this
+   session** (`837f003`): plain month navigation reuses the cached rows;
+   invalidation happens only on write/sync/import + the explicit Refresh
+   button, and `runSync` completion is hooked to invalidate too.
+   `test/invalidationMatrix.test.js` pins the matrix; `test/sync.test.js`
+   covers the runSync completion hook. Accepted staleness window: another
+   device's write, bounded by the hourly sync + Refresh.
+2. **Durable assistant throttle — DECIDED: NO.** The per-instance 10/min
+   throttle stays as-is; no settings-row/KV limiter (the 2026-08-01
+   "pragmatic > enterprise" trade stands). The dollar bound is an **ops
+   task, not code: Mason sets a spend cap on the Anthropic key** — recorded
+   in CLAUDE.md's Pending section.
+3. **dataAdapter.js split (Session D item 4) — DECIDED: gets its own future
+   session**, quiet (no feature work alongside), not deferred indefinitely.
+   Session D item 4 below is the spec; treat it as SCHEDULED.
 
 ## Section 3 — Refuted / downgraded this round (don't re-propose)
 

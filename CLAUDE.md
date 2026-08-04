@@ -733,11 +733,33 @@ files / Gotchas, plus the few rules noted inline here that live nowhere else.
   confirm, the null-key roll-forward dup gate, the auto-fill preview month
   guard.
 
+- **Session A silent-failure guards (2026-08-04, from the 2026-08-04 backlog)**
+  — all five items, no migrations, a test per guard:
+  `isRangeExhaustedError` on the three previously-unguarded paged loops in
+  `src/dataAdapter.js` (`test/pagedGuards.test.js`); client
+  `isMissingColumnError` now name-checks its column, matching the
+  `api/sync.js` twin (the missing-table/missing-column conflation gotcha);
+  rollback + alert on the optimistic account/debt/tax/entity/mileage writes
+  (the `updateManualBalance` pattern); a `{confirm:'disconnect'}` server-side
+  gate on the simplefin-status DELETE (decisions in `api/_lib/unlink.js`);
+  and api/ 500 handlers return a generic string + stable code instead of raw
+  error bodies (`test/apiErrorSanitize.test.js`).
+- **Month-navigation cache reuse (2026-08-04, Mason's decision)** — plain
+  month navigation reuses cached rows (`reloadData` no longer unconditionally
+  clears spendCache/rangeMemo); invalidation only on write/sync/import + the
+  explicit Refresh button, with `runSync` completion hooked to invalidate.
+  Accepted staleness window: another device's write, bounded by the hourly
+  sync + Refresh. `test/invalidationMatrix.test.js` + `test/sync.test.js`.
+  No migration.
+
 ## Pending branches
 
 None in code. **Outstanding ops/data tasks from the 2026-08-03 double-count
 session** (diagnosis archived in `docs/double-count-diagnosis-2026-08-03.md`):
 
+- **Set a spend cap on the Anthropic API key** (Mason's decision 2026-08-04:
+  the assistant throttle stays per-instance — no durable limiter in code; the
+  dollar bound is this ops task, in the Anthropic console).
 - **ROTATE the Supabase `service_role` key** — it was pasted into a Claude
   chat session (2026-08-03) to run the read-only diagnosis. Dashboard →
   Settings → API Keys ("Publishable and secret" tab) → rotate the Secret key;
@@ -794,6 +816,14 @@ Sections 1–3; the last two — in-app saved chats and search refinement —
 Dashboard.jsx decomposition stays DEFERRED (keep the single file during
 active development). The file remains only as the audit record + that
 deferral's notes.
+
+**Active worklist:** `docs/improvement-backlog-2026-08-04.md` (six-dimension
+audit, verified). Session A + the month-navigation caching decision shipped
+2026-08-04 (see Merged features); Sessions B–E remain. Mason's 2026-08-04
+decisions recorded there: month-nav caching yes (shipped), no durable
+assistant throttle (the Anthropic spend cap is the Pending ops task), and the
+**dataAdapter.js internal split (backlog Session D item 4) is SCHEDULED as
+its own quiet session** — no feature work alongside.
 
 Debt follow-ups: ALL THREE SHIPPED 2026-08-03 (manual debts, per-debt payoff
 schedule drill-in, net worth over time — Mason's call recorded: net worth
