@@ -154,6 +154,91 @@ test('missing envelope schema (budget: null / absent) omits the section cleanly'
   assert.equal(withNull, absent, 'null budget and no extras render identically');
 });
 
+// --- The unified spending model (REGRESSION) --------------------------------
+// The context used to compute spending with its own fold ("every positive row
+// on a non-loan account"), which never ran markInternalTransfers and never
+// applied isSpend's card-payment veto. Washed cross-bank self-transfers and
+// card payments therefore counted as spending in the assistant's answers while
+// every screen excluded them — exactly what CLAUDE.md forbids for this file
+// ("must match or the Ask tab contradicts the screen"). Post-category-wipe this
+// section is the assistant's ONLY spending figure, so the divergence was the
+// whole story.
+
+const BOUNDARY_ACCOUNTS = ACCOUNTS.concat([
+  { id: 'a-sav', name: 'Savings', nickname: null, mask: '4410', type: 'depository', subtype: 'savings', current_balance: 9000, hidden: false, institutions: { name: 'Synth CU' } },
+]);
+
+const row = (o) => ({
+  merchant_name: '', description: '', mapped_category: 'Uncategorized',
+  user_category: null, user_description: null, excluded: false, ...o,
+});
+
+// One real purchase, plus the two shapes the private fold got wrong:
+// a matched cross-bank self-transfer (both legs) and a card payment paid out of
+// checking to a card that is not linked here (so nothing can wash it).
+const BOUNDARY_TXS = [
+  row({ account_id: 'a-chk', date: '2026-07-08', amount: 85.5, description: 'SAFEWAY 1467' }),
+  row({ account_id: 'a-chk', date: '2026-07-02', amount: 500, description: 'ONLINE BANKING TRANSFER TO SAVINGS' }),
+  row({ account_id: 'a-sav', date: '2026-07-03', amount: -500, description: 'ONLINE BANKING TRANSFER FROM CHECKING' }),
+  row({ account_id: 'a-chk', date: '2026-07-11', amount: 250, description: 'CAPITAL ONE - PAYMENT' }),
+];
+
+test('REGRESSION: a washed transfer pair and a card payment stay out of the spending total', () => {
+  const text = formatSpendingContext(clone(BOUNDARY_ACCOUNTS), clone(BOUNDARY_TXS));
+  const spendLines = text
+    .split('\n')
+    .filter(l => /^- 2026-07 /.test(l));
+  // Only the purchase survives the shared isSpend(): 500 (paired both ways) and
+  // 250 (card payment) are gone, and the total is the purchase alone.
+  assert.deepEqual(spendLines, ['- 2026-07 Uncategorized: $85.50'], text);
+  assert.ok(!text.includes(': $835.50'), 'the old private fold summed all three');
+  assert.ok(!text.includes(': $585.50') && !text.includes(': $335.50'), text);
+});
+
+test('REGRESSION: the excluded rows still LIST, marked, so re-adding the list matches the total', () => {
+  const text = formatSpendingContext(clone(BOUNDARY_ACCOUNTS), clone(BOUNDARY_TXS));
+  const listed = text.split('\n').filter(l => /^2026-07-\d\d \| /.test(l));
+  assert.equal(listed.length, 4, 'every row is still visible to the assistant');
+  const marked = listed.filter(l => l.endsWith('| not counted as spending'));
+  assert.equal(marked.length, 2, listed.join('\n'));
+  assert.ok(marked.every(l => /TRANSFER TO SAVINGS|CAPITAL ONE - PAYMENT/.test(l)), marked.join('\n'));
+  // The purchase is unmarked, and so is the money-IN leg (a negative amount is
+  // already money in — marking it would just cost context).
+  assert.ok(!listed.find(l => l.includes('SAFEWAY')).endsWith('| not counted as spending'));
+  assert.ok(!listed.find(l => l.includes('TRANSFER FROM CHECKING')).endsWith('| not counted as spending'));
+});
+
+test('an UNPAIRED transfer out still counts — structure decides, not wording', () => {
+  // Same transfer, but the receiving account is not in the row set (money left
+  // the linked boundary). The linked-boundary model counts it; the old
+  // category-name rule would have dropped it.
+  const oneLeg = clone(BOUNDARY_TXS).filter(t => t.amount !== -500 && t.amount !== 250);
+  const text = formatSpendingContext(clone(BOUNDARY_ACCOUNTS), oneLeg);
+  assert.ok(text.includes('- 2026-07 Uncategorized: $585.50'), text);
+  const listed = text.split('\n').filter(l => /^2026-07-\d\d \| /.test(l));
+  assert.ok(listed.length && listed.every(l => !l.endsWith('| not counted as spending')), text);
+});
+
+test('the stale "never count the transfer category" instruction is gone from the context', () => {
+  const text = formatSpendingContext(clone(ACCOUNTS), clone(TXS));
+  assert.ok(
+    !/"Transfers and card payments" and "Return" are not real spending/.test(text),
+    'that stopped being true when the linked-boundary model shipped (2026-08-03)'
+  );
+  assert.ok(text.includes('positive is money out'), 'the sign convention is still stated');
+});
+
+test('byte-determinism holds through the pairing pass, which must not mutate the inputs', () => {
+  const accounts = clone(BOUNDARY_ACCOUNTS);
+  const txs = clone(BOUNDARY_TXS);
+  const first = formatSpendingContext(accounts, txs);
+  assert.equal(first, formatSpendingContext(clone(BOUNDARY_ACCOUNTS), clone(BOUNDARY_TXS)));
+  assert.deepEqual(txs, BOUNDARY_TXS, 'markInternalTransfers stamped copies, not the caller rows');
+  // A second run over the SAME arrays would double-mark if the rows carried
+  // `_internal` out of the first call.
+  assert.equal(formatSpendingContext(accounts, txs), first);
+});
+
 test('monthly sums are emitted in sorted-key order (order-independent above the transaction list)', () => {
   // The transaction list itself follows input order (the query orders it);
   // everything above it — accounts and the monthly category sums — must not
