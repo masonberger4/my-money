@@ -821,13 +821,25 @@ files / Gotchas, plus the few rules noted inline here that live nowhere else.
 None in code. **Outstanding ops/data tasks from the 2026-08-03 double-count
 session** (diagnosis archived in `docs/double-count-diagnosis-2026-08-03.md`):
 
-- **Set a spend cap on the Anthropic API key** (Mason's decision 2026-08-04:
-  the assistant throttle stays per-instance — no durable limiter in code; the
-  dollar bound is this ops task, in the Anthropic console).
-- **ROTATE the Supabase `service_role` key** — it was pasted into a Claude
-  chat session (2026-08-03) to run the read-only diagnosis. Dashboard →
-  Settings → API Keys ("Publishable and secret" tab) → rotate the Secret key;
-  then update it in Vercel (Production AND Preview) and redeploy.
+- ~~Set a spend cap on the Anthropic API key~~ **DONE 2026-08-04** — $25/mo
+  cap, email alert at $10, in the Anthropic console. This IS the assistant's
+  burn-rate control: Mason's same-day decision was that the in-code throttle
+  stays best-effort per-instance, so the dollar bound replaces a durable
+  limiter. The ALERT is the load-bearing half — a silent cap just reads as
+  "the Ask tab stopped working".
+- ~~ROTATE the Supabase `service_role` key~~ **DONE 2026-08-04** (it had been
+  pasted into a Claude chat on 2026-08-03 for the read-only diagnosis).
+  **How to verify a rotation, because the failure is disguised:**
+  `requireUser` (`api/_lib/supabase.js`) calls `auth.getUser(token)` on the
+  SERVICE client, so a wrong/stale secret key makes every authenticated `api/`
+  call return **401 "Invalid or expired session"** — indistinguishable from a
+  routine expired login. A post-rotation "please sign in again" is therefore a
+  suspect, not a shrug. Cheapest positive proof: ask the assistant anything (an
+  answer means `requireUser` passed). Strongest: Refresh, then Accounts →
+  "+ Add bank" → the modal's "Last pull" — that watermark only advances on a
+  pull with no real error, and it works even when no new transactions exist.
+  Note what is NOT proof: the amber feed banner's absence (it needs a recorded
+  error or a >3-day-stale watermark, so a fresh failure is silent for days).
 - **Verify the $2,200 payroll duplicate** — "ACH Deposit PAYROLL From POME
   HOLISTIC PE" −$2,200 appears TWICE on 2026-07-24 on Cashback Debit (3481)
   with two distinct `sfin:` tx ids, so the upsert can't dedup it. Check the
@@ -873,9 +885,9 @@ The forward-looking doc is **`docs/next-iteration-plan-2026-08-04.md`**.
 `docs/improvement-backlog-2026-08-04.md` (the verified six-dimension audit) is
 **worked through — all five sessions A–E shipped 2026-08-04** and its three
 Section-2 questions are decided; it survives as an audit record. What remains
-is the **needs-Mason ops/data work in Pending** (Anthropic spend cap, key
-rotation, payroll dupe, Discover twins, NEWREZ, statement backfill) plus the
-genuinely-open items noted below.
+is the **needs-Mason data work in Pending** (payroll dupe, Discover twins,
+NEWREZ, statement backfill — the spend cap and key rotation are DONE
+2026-08-04) plus the genuinely-open items noted below.
 
 **Improvement backlog (2026-08-01 six-dimension audit):**
 `docs/improvement-backlog-2026-08-01.md` — everything SHIPPED (Batch 1,
