@@ -8,7 +8,9 @@ import { matchExpected, rollForwardDate, isDuplicateExpected, isDuplicateRollFor
 import { isBudgetableCategory } from './categoryMap.js';
 import { isSpend, sumSpending, spendingGroups, biggestMovers, toTxShape, aggregateEnvelopeSpending } from './spending.js';
 import { createRangeMemo } from './monthMemo.js';
+import { amountOrClause } from './searchFilters.js';
 import { parseIgnoreList, toggleIgnoreKey, CANDIDATE_WINDOW_MONTHS } from './recurring.js';
+import { parseSavedChats, addSavedChat, removeSavedChat } from './savedChats.js';
 import { aggregateCoverage } from './coverage.js';
 import { netWorthSeries, clampSeries } from './netWorth.js';
 
@@ -847,6 +849,57 @@ export function updateRecIgnore(key, ignored) {
   return run;
 }
 
+// Saved Ask-tab chats — HOUSEHOLD data (settings table, NOT device storage:
+// a chat saved on the laptop should be openable on the phone). ONE row keyed
+// 'asst:chats' holding a JSON array of {id,title,savedAt,msgs}; all parsing/
+// trimming/eviction decisions are pure in src/savedChats.js. The WRITE is a
+// read-merge-write serialized through a promise chain — the exact
+// updateRecIgnore discipline: two quick saves must not interleave (read A,
+// read B, write [A], write [B]) and drop one, and a failed mount-time read
+// must never let a rebuilt-from-state array wipe the other phone's saves.
+// A failed READ aborts before any write; the chain swallows rejections so one
+// failed save never dams the queue, while callers still get the rejection.
+const ASST_CHATS_KEY = 'asst:chats';
+
+export async function getSavedChats() {
+  const { data, error } = await supabase
+    .from('settings')
+    .select('value')
+    .eq('key', ASST_CHATS_KEY)
+    .maybeSingle();
+  if (error) throw error;
+  return parseSavedChats(data?.value ?? null);
+}
+
+async function setSavedChats(list) {
+  const { error } = await supabase
+    .from('settings')
+    .upsert({ key: ASST_CHATS_KEY, value: JSON.stringify(list) }, { onConflict: 'household_id,key' });
+  if (error) throw error;
+}
+
+let savedChatsChain = Promise.resolve();
+function updateSavedChats(merge) {
+  const run = savedChatsChain.then(async () => {
+    const current = await getSavedChats();
+    const next = merge(current);
+    await setSavedChats(next);
+    return next;
+  });
+  savedChatsChain = run.catch(() => {});
+  return run;
+}
+
+// Both return the merged stored list so the caller can adopt entries the
+// other phone added since its last read.
+export function saveChatToApp(chat) {
+  return updateSavedChats(current => addSavedChat(current, chat));
+}
+
+export function deleteSavedChat(id) {
+  return updateSavedChats(current => removeSavedChat(current, id));
+}
+
 // Per-(category, month) spend sums for the walk's range, memoised. The walk's
 // range grows by a month every month and is re-read after every envelope edit,
 // but an envelope edit CANNOT change a transaction — so assigning, moving money
@@ -1195,7 +1248,14 @@ function ilikePattern(q) {
   return `%${escaped}%`;
 }
 
-export async function searchTransactions(query, { limit = 200 } = {}) {
+// filters is the normalized object from buildSearchFilters (src/searchFilters.js)
+// or null. Amount/date go SERVER-side so limit/offset paginate the FILTERED
+// set — a client-side filter over an unfiltered 200 would silently hide
+// matches past the cap. offset > 0 is the "Load more" page: ordered paging
+// (date desc, id desc as the total-order tiebreak) via .range, with the
+// exact-page-multiple 416 answered as "no more rows" (isRangeExhaustedError),
+// per the ruleHistory convention.
+export async function searchTransactions(query, { limit = 200, offset = 0, filters = null } = {}) {
   const q = (query || '').trim();
   if (q.length < 2) return { transactions: [], hasMore: false };
   const pat = ilikePattern(q);
@@ -1205,20 +1265,32 @@ export async function searchTransactions(query, { limit = 200 } = {}) {
     `merchant_name.ilike.${pat}`,
     `user_description.ilike.${pat}`,
   ];
-  const attempt = withEntity =>
-    supabase
+  // Chained .or() calls AND together in PostgREST — the text match and the
+  // absolute-amount match are independent conjuncts.
+  const amtOr = filters ? amountOrClause(filters.amountMin, filters.amountMax) : null;
+  const attempt = withEntity => {
+    let b = supabase
       .from('transactions')
       .select(`${withEntity ? TX_COLUMNS + TX_TAX_COLUMNS : TX_COLUMNS}, accounts!inner(hidden, type, subtype)`)
       .eq('accounts.hidden', false)
-      .or(ors.join(','))
+      .or(ors.join(','));
+    if (amtOr) b = b.or(amtOr);
+    if (filters?.dateFrom) b = b.gte('date', filters.dateFrom);
+    if (filters?.dateTo) b = b.lte('date', filters.dateTo);
+    return b
       .order('date', { ascending: false })
-      .limit(limit + 1);
+      .order('id', { ascending: false })
+      .range(offset, offset + limit);
+  };
   let { data, error } = await attempt(transactionsHaveEntity);
   if (error && transactionsHaveEntity && isMissingColumnError(error, 'entity_id')) {
     transactionsHaveEntity = false;
     ({ data, error } = await attempt(false));
   }
-  if (error) throw error;
+  if (error) {
+    if (isRangeExhaustedError(error)) return { transactions: [], hasMore: false };
+    throw error;
+  }
 
   for (const t of data) {
     t.mapped_category = applyAccountRules(t.mapped_category, t.amount, t.accounts?.type);

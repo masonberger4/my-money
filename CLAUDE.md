@@ -736,8 +736,9 @@ The app's ONLY use of Supabase **Storage** — everything else is Postgres.
   the month's rows — no cache — feeding `learnMerchant`); **startup skeleton**
   (App.jsx, token-styled, decision order untouched) + **month jump picker**
   (tap the month label; tap-a-month grid, future months clamped outside the
-  Budget tab). Deliberately not built: in-app saved chats and search
-  refinement (both need Mason — see the backlog).
+  Budget tab). Deliberately not built then: in-app saved chats and search
+  refinement (later decided by Mason and shipped 2026-08-04 — see their own
+  entries).
 
 - **Unified linked-boundary spending model (2026-08-03, Mason's decision)** —
   replaced the two spending/income models after the double-count diagnosis
@@ -861,6 +862,34 @@ The app's ONLY use of Supabase **Storage** — everything else is Postgres.
   laptop would silently drop the other phone to the Login screen within the
   access-token hour, contradicting the "on this device" confirm text. No
   migration.
+- **In-app saved chats (2026-08-04)** — Ask tab "Save to app" beside the
+  share-sheet export; HOUSEHOLD data: ONE settings row `asst:chats` (JSON
+  array of `{id,title,savedAt,msgs}`), so a chat saved on the laptop opens on
+  the phone. Pure `src/savedChats.js` owns parse/trim/title/evict:
+  `trimChatMsgs` is now the ONE trim discipline shared with the sessionStorage
+  scrollback (caps sit under `api/assistant.js`'s server caps and never leave
+  an assistant-first history — the 400 gotcha), and `addSavedChat` evicts
+  OLDEST past 10 chats / 300k serialized chars (evict, don't refuse). Saved
+  chats are KEEPSAKES: opening loads a COPY into the scrollback; re-saving a
+  continuation makes a NEW entry. The write is a read-merge-write serialized
+  through a promise chain in dataAdapter (`updateSavedChats` — the
+  `updateRecIgnore` discipline: a failed read aborts before any write, so a
+  rebuilt-from-state array can't wipe the other phone's saves).
+  `test/savedChats.test.js`. No migration.
+- **Search refinement (2026-08-04, Mason's decided spec)** — Transactions-tab
+  search gains amount-range + date-range filters and "Load more" past the 200
+  cap. Pure `src/searchFilters.js` (zero imports): `parseAmount` (filters
+  match |amount| — a typed 80 means the transaction in either direction),
+  `sanitizeDateInput` (complete-date + year floor — the `<input type="date">`
+  gotcha; garbage reads as "no filter yet", never a bound that empties the
+  results), `buildSearchFilters` (inverted ranges swap, all-empty → null),
+  `amountOrClause` (the PostgREST `.or()` branches, injection-safe by
+  construction). Filters push SERVER-side so limit/offset paginate the
+  FILTERED set, not a client slice of an unfiltered 200; load-more is ordered
+  paging (date desc, id desc tiebreak) via `.range`, with the
+  exact-page-multiple 416 read as "no more rows" (`isRangeExhaustedError`).
+  `searchTransactions` now returns `{transactions, hasMore}`.
+  `test/searchFilters.test.js`. No migration.
 - **Envelope follow-ups (Session 6, 2026-08-03)** — all three decided items:
   per-month target overrides (`budget_months.target_override`, migration
   `20260804000001`), auto-fill from last month (`planAutoFill`/`autoFillMonth`),
@@ -919,27 +948,17 @@ migration that DROPS should verify rather than trust.
 
 ## Roadmap
 
-**Session plan:** `docs/session-plan-2026-08-02.md` sequences the remaining
-work (status header shows what's shipped; envelopes last, gated on Mason's
-scoping; explicit not-planned list). The 2026-08-02 next-session prompt was
-spent by the Section 3 batch and deleted. Keep the plan current as sessions
-ship, or delete it when spent.
+**Session plan:** the 2026-08-02 plan (`docs/session-plan-2026-08-02.md`) is
+SPENT — saved chats + search refinement shipped 2026-08-04 were its last two
+items — and deleted per its own rule.
 
 **Improvement backlog (2026-08-01 six-dimension audit):**
-`docs/improvement-backlog-2026-08-01.md` — Batch 1 + Sections 1–2 and most of
-Section 3 SHIPPED (see Merged features — the Section 3 batch covered the
-card-balance tile, Ask-tab persistence + save-chat, the Uncategorized
-teach-queue, the startup skeleton and the month jump picker; recurring v2,
-Trends biggest movers and the sign-out button shipped 2026-08-03, movers
-reconciled to the unified single-model `isSpend()` lineage at merge; the
-Session 5 debt trio — manual debts, payoff schedule drill-in, net worth —
-shipped 2026-08-03). Genuinely unbuilt remainder, both now DECIDED by Mason
-(2026-08-03), each needing its own session: **in-app saved chats — BUILD**
-(settings-table storage, per his earlier sizing question resolved yes) and
-**search refinement — spec decided**: amount-range filter + date-range filter
-+ load-more past the 200 cap. Carry
-condition: the Dashboard.jsx decomposition is DEFERRED (keep the single file
-during active development). Delete entries as they ship.
+`docs/improvement-backlog-2026-08-01.md` — everything SHIPPED (Batch 1,
+Sections 1–3; the last two — in-app saved chats and search refinement —
+2026-08-04; see Merged features) EXCEPT the one deliberate deferral: the
+Dashboard.jsx decomposition stays DEFERRED (keep the single file during
+active development). The file remains only as the audit record + that
+deferral's notes.
 
 Debt follow-ups: ALL THREE SHIPPED 2026-08-03 (manual debts, per-debt payoff
 schedule drill-in, net worth over time — Mason's call recorded: net worth
