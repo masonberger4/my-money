@@ -86,7 +86,7 @@ entry once shipped.
 | `src/taxReport.js` | The Tax tab's pure core, zero imports: `SCHEDULE_E_LINES` + `scheduleEReport` (category→line mapping, refund netting, capital expenses pulled out of the lines, a VISIBLE unmapped bucket — the Uncategorized lesson applied to tax lines), `entityMonthly` (per-property cash P&L) + `entityLedger` (the property drill-in's Money in/out/not-counted sections — totals pinned by test to `entityMonthly`'s sums), `personalDeductionReport` (charitable/medical/taxes-paid buckets), `MILEAGE_RATES` (effective-dated IRS rates — data that goes stale; verify at irs.gov each January) + `mileageDeduction`, and `scheduleECsv` (exports keep the stored positive=out sign; the column name says so). Covered by `test/taxReport.test.js`. |
 | `src/categoryList.js` | **THE ONE category list**, pure (imports only `categoryMap.js`): `userCategoryList` (the `dash:cats` registry ∪ names still carried by real data — a row, a budget, a by-date target, an envelope — minus the three MECHANISM internals, sorted by DISPLAY name), `missingCategories` (the zero-rows both the Categories and Budget lists top up with, so the two are the same set by construction) and `isDuplicateCategoryName` (case-insensitive, and blocks the mechanism names — a hand-made "Return" would collide with the synthesised one). Dashboard computes it ONCE as `userCats`; every tab, picker and sheet reads that. The only deliberate divergences are documented at the `userCats` memo: the mechanism three never enter a picker (but Uncategorized still renders its spending + teach-queue), and the Transactions chips still show only what is in view plus the pinned active filter — otherwise a set filter could not be cleared. `test/categoryList.test.js`. |
 | `src/categoryMap.js` | **The MECHANISM set — no taxonomy lives here any more (2026-08-05).** The app ships NO built-in categories: the user creates every one (`dash:cats`) and teaches it. `ERA_CATEGORIES` survives as the three INTERNAL categories the models depend on — `TRANSFER_CATEGORY` ('Transfers and card payments', read by the card-payment veto), `RETURN_CATEGORY` ('Return', synthesised by `applyAccountRules` for credit-card negatives) and `UNCATEGORIZED` — which must stay hidden from every picker and can't be created, renamed or retired. Plus `FALLBACK_CATEGORY` (= `UNCATEGORIZED`) and `isBudgetableCategory` (exactly the complement of the mechanism three). Pure JS, imported by server code too. |
-| `src/csvImport.js` | Pure CSV-import core (no React/Supabase): `parseCsv`, `detectHeader`, `parseMoney`/`parseDate`, transfer flagging, dedup `plaid_tx_id` hashing, `buildRows`/`analyzeCsv` (both take `rules` + `overlapFrom`). Re-exports `guessCategory`/`transferRawCategory`/`invalidRuleCategories` from `txClassify.js`, which now owns the rule table. Plus `importPlan` (which sections the modal shows, derived from the file's dates vs the feed boundary) and the audit core: `reconcileCsv` (max-matching), `descSimilarity`, `csvDateRange`. Testable in isolation. |
+| `src/csvImport.js` | Pure CSV-import core (no React/Supabase): `parseCsv`, `detectHeader`, `parseMoney`/`parseDate`, transfer flagging, dedup `plaid_tx_id` hashing, `buildRows`/`analyzeCsv` (both take `rules` + `overlapFrom`). Re-exports `guessCategory`/`transferRawCategory` from `txClassify.js`, which owns classification (transfer guards + learned rules — there is no keyword table). Plus `importPlan` (which sections the modal shows, derived from the file's dates vs the feed boundary) and the audit core: `reconcileCsv` (max-matching), `descSimilarity`, `csvDateRange`. Testable in isolation. |
 | `src/txClassify.js` | Learned-rule matching (`merchantKey`, `matchLearnedRule`) + internal-transfer/card-payment tagging (`guessCategory`, `transferRawCategory`, `classifyDescription`, `TRANSFER_RE`, `CARD_ISSUER_RE`/`STANDALONE_PAYMENT_RE`, `isCardPaymentDescriptor`, `isCardPurchase`). **The descriptor→category keyword table is GONE (2026-08-05)** — nothing is guessed. `guessCategory` is: transfer guards → learned rule → `Uncategorized`. The guards STAY and are REGRESSION-pinned: they protect the spending model, not taste. Lifted out of `csvImport.js` when SimpleFIN became a second caller — both feeds derive `mapped_category` at WRITE time here. Pure JS — imported by server code too. |
 | `src/debtPayoff.js` | The Debt tab's pure core, zero imports: monthly amortization, snowball/avalanche ordering, extra-payment what-if, stall detection (payment ≤ interest) + `MAX_MONTHS` runaway guard. Covered by `test/debtPayoff.test.js` (hand-computed constants). |
 | `src/recurring.js` | Pure recurring-detection core: `detectRecurring` matches the median gap against non-overlapping bands (weekly 5–9 / monthly 24–32 / annual 350–380), near-tolerance ±2/±4/±15 days, due-soon 2/7/30; `CANDIDATE_WINDOW_MONTHS` 40 (the first-shipped 25 forgot the LAST renewal is itself up to a year old — annual items vanished ~11 months a year; corrected arithmetic in the constant's comment, year-round sweep test pins it). Amount/gap gates + the `priceCreep` baseline judge each cadence over a RECENT slice anchored at the group's newest charge (`evalDays` 84/190/whole-group — else a mid-window price change drops a LIVE sub, and a settled hike re-flags as creep); with a clock, items overdue past `staleDays` (two missed cycles — 14/60, annual capped 60) drop as cancelled. `monthlyAmount` is the PER-CHARGE median (historical name) — render with a cadence suffix /wk /mo /yr (`spendingContext.js` suffixes too); the headline and sort use `monthlyEquivalent` (×52/12, ×1, ÷12). Detection excludes transfers by CATEGORY, never `_internal`. Household ignore list: ONE settings row `rec:ignore` (settings table per Mason's ruling, NOT localStorage; tolerant `parseIgnoreList`), applied at RENDER only — detection stays unfiltered, so toggling never refetches or touches the lazy cache's null sentinel; the WRITE is a single-key read-merge-write (`updateRecIgnore` → pure `toggleIgnoreKey`), never the whole array from component state (a failed mount-time read must not wipe the other phone's ignores), same-device toggles SERIALIZED through a promise chain; the two-phone race stays accepted single-key last-write-wins. Band EDGES + both guards REGRESSION-pinned in `test/recurring.test.js` (thresholds pinned as documentation). |
@@ -110,14 +110,14 @@ entry once shipped.
 | `src/apiClient.js` | Client → api/ fetch wrappers (JWT attached). Was `plaidClient.js`; renamed when nothing in it was Plaid-specific any more. |
 | `src/components/AddAccount.jsx` | The "add a bank" button + the SimpleFinConnect modal it owns (lazy-loaded). Rendered only by the EmptyState CTA since the FAB's removal (2026-08-01); the Dashboard's Accounts tab opens the same modal via its own "+ Add bank" header button (`connectingSfin`). Talks to the server only when pressed. |
 | `src/sync.js` | Single-flight wrapper triggering server sync. |
-| `src/db.js` | getSetting/setSetting (+ `getSettings` batch read, `deleteSetting`) on the Supabase `settings` table (dashboard prefs: colors, names, custom categories, `asst:model`/`asst:effort`). Since Session D, ALL **client-side** settings-table I/O routes through here — no direct `.from('settings')` anywhere in `src/`. The exception is `api/` (simplefin-status, unlink-institution), which reads the table under service_role and can't import a client module. |
+| `src/db.js` | getSetting/setSetting (+ `getSettings` batch read, `deleteSetting`) on the Supabase `settings` table (dashboard prefs: `dash:colors`, `dash:names`, the `dash:cats` category registry, `asst:model`/`asst:effort`). Since Session D, ALL **client-side** settings-table I/O routes through here — no direct `.from('settings')` anywhere in `src/`. The exception is `api/` (simplefin-status, unlink-institution), which reads the table under service_role and can't import a client module. |
 | `src/serializedUpdater.js` | `makeSerializedUpdater` — the ONE read-merge-write promise-chain discipline (extracted from the `updateRecIgnore`/`updateSavedChats` twins). Invariants: failed read aborts before write; same-device updates serialized; a swallowed rejection never dams the queue; resolves with the merged value written. Pure, zero imports; dataAdapter binds the real read/write. Never hand-roll a third copy — `test/serializedUpdater.test.js`. |
 | `src/assistantModels.js` | Shared client+server allowlist of assistant models + cost estimator. |
 | `api/_lib/supabase.js` | Service-role client + `requireUser` (JWT → householdId). |
 | `supabase/migrations/` | Ordered SQL migrations (additive-only on live data). |
 | `supabase/setup_all.sql` | One-paste fresh install — **DESTRUCTIVE, wipes all tables. Never run on live data. Never re-generate to include new migrations without that warning.** Convenience snapshot only — `migrations/` is the source of truth; ends with a column-level self-check that raises if it drifts behind migrations. |
 | `vercel.json` | Build/rewrite config **plus the security headers** (CSP, HSTS, nosniff, Referrer-Policy, Permissions-Policy, frame-ancestors/X-Frame-Options DENY) applied at a catch-all `/(.*)`. Each CSP directive is derived from real code usage; the derivation lives in `docs/csp-derivation.md` (**never as a key in `vercel.json` — Vercel REJECTS unknown top-level keys and the deploy fails schema validation before it builds**). **Nothing local exercises these headers — a too-strict edit breaks prod silently; `test/securityHeaders.test.js` is the guard** (see Gotchas). |
-| `test/` | `npm test` — Node's built-in `node --test`, zero deps; plain-module helpers live in `test/helpers/` (the `*.test.js` glob skips them). Covers the pure cores: cashFlow (incl. brute-force max-matching parity), csvImport parsing/dedup-id idempotency + overlap guard, **pdfImport** (the whole template pipeline: shape tests, year inference incl. the Dec→Jan wrap, geometry, applyTemplate anchor/continuation REGRESSIONs, debit/credit netting, the buildRows round-trip), **reconcile** (the comparison audit, with its own brute-force parity), **spending** (the extracted purchase-based model against the synthetic ledger: 11 scenarios + seeded property tests), **categoryRules** (the ruleHistory core against a fake PostgREST incl. the exact-page-multiple REGRESSION; write-time precedence; the teach→apply→re-import sequence), txClassify (learned-rule matching + the over-specific-key limit), envelopes (both walk regressions + by-date targets + `effectiveTarget`/`planAutoFill`), **expectedTx** (matching, lifecycle, dup gates incl. the null-key roll-forward REGRESSION, the display-only walk-byte-identity REGRESSION), **envelopeIO** (Session 6 adapter I/O against a recording fake — the 42703 target_override retry, the conditional setAssigned(0) delete, roll-forward gating; its degrade tests run LAST, order matters), taxReport (conservation, capital exclusion, the 2026 mileage-rate boundary), **recurring** (thresholds pinned as documentation), **accountBalance** (incl. the −0 REGRESSION), **categoryMap**, simplefin classifier/clamp + **simplefinNormalize** (type-inference ordering REGRESSION, wire parsing) + **simplefinToken** (SSRF/claim flow against a stubbed fetch), **assistantModels** (+ a server source scan), **spendingContext** byte-determinism, **syncDecisions** (watermark advance/hold/reset + missing-table vs missing-column), **lockstep** (index.html↔ui.css `--bg`, sw.js guards, fonts precache, pdf.js legacy build), **sync** (pullWasClean + runSync single-flight via injected transport), **syncOrchestration** (`pullOneAccessUrl` against the fake Supabase client in `test/helpers/fakeSupabase.js`), **manualTx** (quick-add row building + gating), **unlink** (remove-bank soft-hide decisions), **monthMemo** (range memo + per-model copies), **debtPayoff**, **serializedUpdater** (the read-merge-write chain's four invariants) + **settingsChains** (the two real call sites against a fake settings table), **securityHeaders** (the vercel.json CSP lockstep — script-hash recompute + per-directive pins), noPlaid, paletteContrast, apiLoads, plus `recurringColumns` and the opt-in `rls` harness (skips cleanly with no local Postgres). Run before pushing. |
+| `test/` | `npm test` — Node's built-in `node --test`, zero deps; plain-module helpers live in `test/helpers/` (the `*.test.js` glob skips them). Covers the pure cores: cashFlow (incl. brute-force max-matching parity), csvImport parsing/dedup-id idempotency + overlap guard, **pdfImport** (the whole template pipeline: shape tests, year inference incl. the Dec→Jan wrap, geometry, applyTemplate anchor/continuation REGRESSIONs, debit/credit netting, the buildRows round-trip), **reconcile** (the comparison audit, with its own brute-force parity), **spending** (the extracted purchase-based model against the synthetic ledger: 11 scenarios + seeded property tests), **categoryRules** (the ruleHistory core against a fake PostgREST incl. the exact-page-multiple REGRESSION; write-time precedence; the teach→apply→re-import sequence), txClassify (learned-rule matching + the over-specific-key limit), envelopes (both walk regressions + by-date targets + `effectiveTarget`/`planAutoFill`), **expectedTx** (matching, lifecycle, dup gates incl. the null-key roll-forward REGRESSION, the display-only walk-byte-identity REGRESSION), **envelopeIO** (Session 6 adapter I/O against a recording fake — the 42703 target_override retry, the conditional setAssigned(0) delete, roll-forward gating; its degrade tests run LAST, order matters), taxReport (conservation, capital exclusion, the 2026 mileage-rate boundary), **recurring** (thresholds pinned as documentation), **accountBalance** (incl. the −0 REGRESSION), **categoryMap** + **categoryList** + **userOwnedCategories** (the mechanism three, the ONE user-owned list, and the no-taxonomy/no-keyword-table pins), simplefin classifier/clamp + **simplefinNormalize** (type-inference ordering REGRESSION, wire parsing) + **simplefinToken** (SSRF/claim flow against a stubbed fetch), **assistantModels** (+ a server source scan), **spendingContext** byte-determinism, **syncDecisions** (watermark advance/hold/reset + missing-table vs missing-column), **lockstep** (index.html↔ui.css `--bg`, sw.js guards, fonts precache, pdf.js legacy build), **sync** (pullWasClean + runSync single-flight via injected transport), **syncOrchestration** (`pullOneAccessUrl` against the fake Supabase client in `test/helpers/fakeSupabase.js`), **manualTx** (quick-add row building + gating), **unlink** (remove-bank soft-hide decisions), **monthMemo** (range memo + per-model copies), **debtPayoff**, **serializedUpdater** (the read-merge-write chain's four invariants) + **settingsChains** (the two real call sites against a fake settings table), **securityHeaders** (the vercel.json CSP lockstep — script-hash recompute + per-directive pins), noPlaid, paletteContrast, apiLoads, plus `recurringColumns` and the opt-in `rls` harness (skips cleanly with no local Postgres). Run before pushing. |
 
 ## Development workflow
 
@@ -237,20 +237,25 @@ playwright-core screenshot (`executablePath:'/opt/pw-browsers/chromium'`,
   merged — count with grep, don't trust a number here.) `fmtX` renders
   negatives as −$1,234.56.
 - Effective category = `user_category || mapped_category` (user override wins).
-- **A custom category is a category, not a kind of category.** `dash:cats` is a
-  NAME REGISTRY (so a category with no spending yet can still be offered in the
-  pickers); its `color` is only the seed chosen at creation. **`dash:colors` is
-  the one mutable colour store for every category, built-in or custom** — which
-  is what lets `getColor` answer for both and keeps a custom category the same
-  colour on the Categories tab, the Budget tab, the donut and every pill.
-  (Before this, `getColor` knew nothing about `dash:cats`, so custom categories
-  rendered #888780 grey everywhere except the separate block they were penned
-  into.) Renaming one is a DISPLAY ALIAS in `dash:names`, exactly like renaming
-  a built-in — never a rewrite of the registry name, which is the raw label
-  `user_category`/`budgets`/`budget_months` are all keyed by, and rewriting it
-  orphans every one of them. Adding and retiring live in the "+ Add category"
-  sheet rather than on the rows, because a delete button on some rows and not
-  others is the separation the unified list exists to remove.
+- **THE APP SHIPS NO CATEGORIES (Mason, 2026-08-04; shipped 2026-08-05).** The
+  user creates every category and teaches which merchants belong to it;
+  `category_rules` + `merchantKey` make that automatic for every later import
+  and sync. There is no seed taxonomy and no keyword guessing. This REVERSES
+  the old "ERA_CATEGORIES is the taxonomy source of truth" rule: a household
+  never chose those ~18 names, and forcing every merchant into one produced
+  confidently-wrong answers that read exactly like correct ones (NEWREZ, a
+  mortgage, in "Utilities" at ~$3.8k/mo).
+- **`dash:cats` IS that system** — a NAME REGISTRY, so a category with no
+  spending yet is still offered in the pickers; its `color` is only the seed
+  chosen at creation, while **`dash:colors` is the one mutable colour store**,
+  which is what keeps a category the same colour on the Categories tab, the
+  Budget tab, the donut and every pill. Renaming is a DISPLAY ALIAS in
+  `dash:names`, never a rewrite of the registry name: that raw label is what
+  `user_category` / `budgets` / `budget_months` are all keyed by, and rewriting
+  it orphans every one of them. Adding and retiring live in the "+ Add
+  category" sheet rather than on the rows, and `src/categoryList.js` derives
+  the ONE list every tab reads. There is no "custom category" any more — no
+  built-in kind survives to contrast one with.
 - **`toTxShape` stamps `counted`** = the shared `isSpend()` verdict for that
   row. Anything that lists transactions behind a total (the category drill-in)
   must split on it rather than re-deriving the rule, or the list's own sum
@@ -261,23 +266,15 @@ playwright-core screenshot (`executablePath:'/opt/pw-browsers/chromium'`,
   payments" is NO LONGER a blanket spending exclusion (2026-08-03): internal
   is decided by STRUCTURE (the pairing), and the category's only remaining
   totals role is the card-payment veto — see the linked-boundary model below.
-- **THE APP SHIPS NO CATEGORIES (Mason, 2026-08-04; shipped 2026-08-05).** The
-  user creates every category — `dash:cats` is THE category system (colours in
-  `dash:colors`, rename aliases in `dash:names`) — and teaches which merchants
-  belong to it; `category_rules` + `merchantKey` make that automatic for every
-  later import and sync. There is no seed taxonomy and no keyword guessing.
-  This REVERSES the old "ERA_CATEGORIES is the taxonomy source of truth" rule:
-  a household never chose those ~18 names, and forcing every merchant into one
-  produced confidently-wrong answers that read exactly like correct ones
-  (NEWREZ, a mortgage, in "Utilities" at ~$3.8k/mo).
-- **`Uncategorized` is where every transaction STARTS, and this design needs it
-  more, not less.** It IS counted as spending (the money left) but is never
-  budgetable and is never offered in the picker — the way to undo a wrong pick
-  is "Reset to automatic". It exists because the old fallback was "Shopping and
-  gear", a category actually in use, so "we don't know" was indistinguishable
-  from a confident answer: 46% of a realistic merchant corpus landed there.
-  Now the unknown is visible and sized. Never reintroduce a real category as
-  the fallback, and never reintroduce a guess to avoid showing it.
+- **`Uncategorized` is where every transaction STARTS**, and this design needs
+  it more, not less: nothing guesses, so an untaught merchant stays there until
+  a rule is learned and the size of that bucket IS the retraining backlog. It
+  IS counted as spending (the money left) but is never budgetable and is never
+  offered in the picker — the way to undo a wrong pick is "Reset to automatic".
+  The lesson it encodes: an earlier build made "Shopping and gear" — a category
+  actually in use — the fallback, so "we don't know" was indistinguishable from
+  a confident answer. Never make a real category the fallback, and never
+  reintroduce a guess to avoid showing this one.
 - **Three "categories" are MECHANISM, not taste** — `Transfers and card
   payments` (the card-payment veto reads it; drop it and card payments count as
   spending), `Return` (synthesised for credit-card negatives), `Uncategorized`.
@@ -292,10 +289,10 @@ playwright-core screenshot (`executablePath:'/opt/pw-browsers/chromium'`,
   itself belongs to the feed. This is what makes "rebuild history from CSV" safe.
 - **Categorization precedence at WRITE time:** transfer/card-payment guards
   (`src/txClassify.js`) → learned rule (`category_rules`) → `Uncategorized`.
-  There is no keyword table any more — an untaught merchant stays
-  Uncategorized. At READ time
-  `user_category` still wins over all of it. Learned rules do NOT override the
-  transfer/card-payment guards — those protect spending totals, and a rule that
+  **A learned rule is the ONLY categorizer** — nothing is guessed, so an
+  untaught merchant stays Uncategorized however obvious its name looks. At READ
+  time `user_category` still wins over all of it. Learned rules do NOT override
+  the transfer/card-payment guards — those protect spending totals, and a rule that
   made card payments count as spending would be a footgun. Both write paths
   (SimpleFIN sync and CSV import) must pass `rules`, or a corrected merchant
   reverts on the next pull. `merchantKey` drops numeric tokens only, so
@@ -483,7 +480,9 @@ option; that is a decision for Mason, not an automatic upgrade.
   instead of silently dropping rows (Quicken's tax export drops unmapped rows;
   that is the bug not to copy). Unmapped money IN on an entity counts as rents
   received by default. Category→line mappings live per entity under the ONE
-  `tax:maps` settings key (`{emap:{entityId:{cat:line|'rents'}},dmap:{...}}`).
+  `tax:maps` settings key (`{emap:{entityId:{cat:line|'rents'}},dmap:{...}}`)
+  and are **entirely user-made** — `DEFAULT_SCHEDULE_E_MAP` went with the
+  taxonomy (2026-08-05); no category is pre-mapped to a line.
 - The whole tab is **record-keeping for the preparer, not tax math**: no AGI
   floors, no depreciation schedules, no estimated-tax computation. The UI says
   "not tax advice" and it should stay true. `MILEAGE_RATES` in
@@ -586,8 +585,9 @@ files / Gotchas, plus the few rules noted inline here that live nowhere else.
   POSTED date; adds a manual credit-card type + `source='csv'|'pdf'`. No
   migration.
 - **SimpleFIN feed (phases 1–2)** (migration `20260724000001`), **account-type
-  editor**, **classifier rebuild** (fallback rate 46% → 7%), **learned merchant
-  rules** (migration `20260728000001`) — all rules in Architecture/Conventions.
+  editor**, **classifier rebuild** (fallback rate 46% → 7% — the keyword table
+  it rebuilt was itself deleted 2026-08-05), **learned merchant rules**
+  (migration `20260728000001`) — all rules in Architecture/Conventions.
 - **Plaid removed (SimpleFIN phase 4)** — migration `20260728000002` DROPS,
   pasted AFTER the deploy (workflow rule 5's inverted order);
   `plaidClient.js` → `apiClient.js`.
@@ -595,9 +595,9 @@ files / Gotchas, plus the few rules noted inline here that live nowhere else.
   account** — see the `CsvImport.jsx` key row.
 - **Envelope budgeting (YNAB rules 1–3)** — migration `20260729000001`,
   applied to PROD 2026-07-29; rules in Conventions.
-- **Category drill-in + custom categories unified** — `CategorySheet` splits
+- **Category drill-in + one unified category list** — `CategorySheet` splits
   that month's rows on the adapter's `counted` flag so the list's sum is the
-  number tapped; custom categories are ordinary rows (Conventions); "+ Add
+  number tapped; every category is an ordinary row (Conventions); "+ Add
   category" is the add-and-retire manager. No migration.
 - **SimpleFIN advisory deadlock fixed** — mechanism + the four rules in the
   first Gotcha; REGRESSIONs in `test/simplefin.test.js`.
@@ -775,24 +775,29 @@ files / Gotchas, plus the few rules noted inline here that live nowhere else.
   `test/invalidationMatrix.test.js` + `test/sync.test.js`. No migration.
 
 - **User-owned categories (2026-08-05, Mason's decision — REVERSES the seed
-  taxonomy)** — migration `20260805000001_user_owned_categories.sql`. The app
-  ships no categories: `ERA_CATEGORIES` is now the mechanism three,
-  `src/txClassify.js`'s descriptor→category keyword table is deleted (the
-  transfer/card-payment guards stay — they protect the spending model), and
+  taxonomy)** — migration `20260805000001_user_owned_categories.sql`, **applied
+  to PROD and verified 2026-08-05**. The app ships no categories:
+  `ERA_CATEGORIES` is now the mechanism three, `src/txClassify.js`'s
+  descriptor→category keyword table is deleted (the transfer/card-payment
+  guards stay — they protect the spending model, not taste), and
   `DEFAULT_SCHEDULE_E_MAP` is gone so tax mapping is fully user-driven through
   `tax:maps`. `src/categoryList.js` is the ONE list every tab reads (see its
-  key row); the Budget tab's old "budget another category" picker was removed
-  with it — the list is topped up to `userCats`, so that picker's set was
-  empty by construction and its button never rendered. The migration
-  PRESERVES before it wipes (legacy columns + `legacy_budgets` /
-  `legacy_budget_months` / `legacy_category_rules` archives, gated on a
-  `legacy_categories_saved` marker so a re-run can't launder post-wipe labels
-  into the archive) and **must be pasted AFTER the deploy is live** — the old
-  build derives `mapped_category` at write time, so a sync in the paste-to-
-  deploy window writes fresh taste labels the wipe already passed over.
-  `category_rules` is wiped with the rest: with the keyword table gone, rules
-  are the only categorizer, so a surviving rule re-mints a deleted category
-  onto the next synced row. `test/userOwnedCategories.test.js`.
+  key row); the Budget tab's old "budget another category" picker went with it
+  — the list is topped up to `userCats`, so that picker's set was empty by
+  construction. The migration PRESERVED before it wiped (legacy columns +
+  `legacy_budgets` / `legacy_budget_months` / `legacy_category_rules` archives,
+  gated on a `legacy_categories_saved` marker so a re-run can't launder
+  post-wipe labels into the archive), so the wipe stays reversible; it was
+  pasted **AFTER** the deploy — the inverse of the usual order — because the
+  old build derived `mapped_category` at write time and a sync in the
+  paste-to-deploy window would have written fresh taste labels straight past
+  the wipe. `category_rules` was wiped with the rest: with the keyword table
+  gone, rules are the only categorizer, so a surviving rule re-mints a deleted
+  category onto the next synced row. **Live state since the paste:** every
+  `mapped_category` reads `Uncategorized` except the mechanism labels,
+  `user_category` is null except those, and `budgets`/`budget_months`/
+  `category_rules` are empty — the app is in retraining.
+  `test/userOwnedCategories.test.js`.
 
 - **Taught-rules screen (2026-08-04)** — `RulesSheet` (Dashboard.jsx), two
   low-emphasis entry points (a `Taught rules (N) ›` footer under the
@@ -876,15 +881,11 @@ files / Gotchas, plus the few rules noted inline here that live nowhere else.
 
 ## Pending branches
 
-**MIGRATION AWAITING MASON: `20260805000001_user_owned_categories.sql`** (the
-user-owned category wipe). Unlike every other migration here it is pasted
-**AFTER** the deploy is confirmed serving the new build — the file's DEPLOY
-ORDER block says why, and its verification SELECT must be run as a separate
-statement with every boolean column reading true. It archives before it
-deletes (`legacy_*` tables + columns), so it is reversible.
+None in code, and **no migration is outstanding** — `20260805000001` was pasted
+and verified 2026-08-05 (see the applied-to-PROD note below).
 
-Otherwise none in code. **Outstanding ops/data tasks from the 2026-08-03
-double-count session** (diagnosis archived in `docs/double-count-diagnosis-2026-08-03.md`):
+**Outstanding ops/data tasks from the 2026-08-03 double-count session**
+(diagnosis archived in `docs/double-count-diagnosis-2026-08-03.md`):
 
 - ~~Set a spend cap on the Anthropic API key~~ **DONE 2026-08-04** — $25/mo
   cap, email alert at $10, in the Anthropic console. This IS the assistant's
@@ -915,10 +916,11 @@ double-count session** (diagnosis archived in `docs/double-count-diagnosis-2026-
   mistyped `depository/checking` under the Capital One org, its sibling is
   `credit` under the Discover org. Both hidden today (contributing $0); keep
   the credit-typed one. Eyeball the type on EVERY account at unhide time.
-- **Recategorize NEWREZ** — RESOLVED IN KIND by the 2026-08-05 category wipe:
-  "Utilities" no longer exists and the rows read Uncategorized, so this is now
-  part of retraining (teach it whatever category Mason creates for it) rather
-  than a wrong-bucket fix.
+- ~~Recategorize NEWREZ~~ **RESOLVED BY CONSTRUCTION 2026-08-05** — nothing to
+  fix: the keyword rule that guessed it into "Utilities" is deleted, and the
+  applied wipe left those rows reading `Uncategorized` like every other row.
+  It is now just one merchant to teach during retraining, whatever category
+  Mason creates for it.
 - **Statement backfill** — pre-May-2026 history for BECU savings, Cashback
   Debit and the cards via CSV/PDF import (the coverage panel on the Accounts
   tab shows each account's gap). Note: Checking (2644) rows end 2026-04-03
@@ -931,11 +933,17 @@ verified end-to-end incl. cross-tenant denial (2026-07-31); the three orphan
 Plaid Items CLOSED (2026-08-01 — Mason deleted the Plaid account, retiring
 every Item; `PLAID_*` env vars already removed).
 
-**Every migration in `supabase/migrations/` is applied to PROD**, through the
-two Session 6 additions (`20260804000001_budget_month_target_override.sql`,
-`20260804000002_expected_transactions.sql`) — pasted and verified 2026-08-04
-by the SELECT the migration note prescribes (`to_regclass` +
-`information_schema.columns`), not by trusting "Success. No rows returned".
+**Every migration in `supabase/migrations/` is applied to PROD**, through
+`20260805000001_user_owned_categories.sql` — pasted **after** the deploy was
+confirmed serving the new build (its DEPLOY ORDER block says why) and verified
+2026-08-05 by the migration's own verification SELECT, run as a separate
+statement, with **every boolean column true** (`preserved_all_mapped`,
+`mapped_wiped`, `user_category_wiped`, `transfers_preserved`, the three
+`*_cleared` and the three `*_archived_ok`). The Session 6 pair
+(`20260804000001_budget_month_target_override.sql`,
+`20260804000002_expected_transactions.sql`) was verified the same way
+2026-08-04 (`to_regclass` + `information_schema.columns`). Verify with a SELECT
+you can read — never by trusting "Success. No rows returned".
 
 Lesson from the remove-plaid pre-flight (recurs): "I removed everything I
 could see" ≠ "the database is empty" — three invisible `plaid_tokens` rows
@@ -950,14 +958,17 @@ The forward-looking doc is **`docs/next-iteration-plan-2026-08-04.md`**.
 
 **Worklist status: one specced item left in that doc** (`coverage_shortfall`
 surfacing — 2026-08-04 sweep). The learned-rules screen SHIPPED 2026-08-04 and
-**Harder §0, the user-owned category system, SHIPPED 2026-08-05** (see Merged
-features; its migration is the one Pending item). No other code backlog.
+**Harder §0, the user-owned category system, SHIPPED 2026-08-05 with its
+migration applied and verified** (see Merged features). No other code backlog.
 `docs/improvement-backlog-2026-08-04.md` (the verified six-dimension audit) is
 **worked through — all five sessions A–E shipped 2026-08-04** and its three
 Section-2 questions are decided; it survives as an audit record. What remains
 is the **needs-Mason data work in Pending** (payroll dupe, Discover twins,
-NEWREZ, statement backfill — the spend cap and key rotation are DONE
-2026-08-04) plus the genuinely-open items noted below.
+statement backfill — the spend cap and key rotation are DONE 2026-08-04, and
+NEWREZ is resolved by construction) plus the genuinely-open items noted below.
+**Retraining is the live task now**: post-wipe, every category is created and
+taught by hand, so the Uncategorized teach-queue (Categories tab) and the
+Taught-rules screen are the working surfaces.
 
 **Improvement backlog (2026-08-01 six-dimension audit):**
 `docs/improvement-backlog-2026-08-01.md` — everything SHIPPED (Batch 1,
@@ -997,8 +1008,8 @@ Decision (settled, executed): **SimpleFIN Bridge** replaced Plaid — ~$15/yr
 flat, read-only, daily refresh, serverless-friendly (no daemon); coverage
 verified for every household institution incl. NewRez / Launch / Jenius. End
 state: **SimpleFIN + CSV/PDF import**, which is where the app now is. Caveats
-traded: weaker categorization (leans entirely on `src/txClassify.js` + learned
-rules); daily freshness, not real-time.
+traded: no categorization from the feed at all (since 2026-08-05 learned rules
+are the only categorizer — nothing guesses); daily freshness, not real-time.
 
 **Settled during the build** (verified against simplefin.org/protocol.md plus
 independent Go/Rust/Python clients — don't relitigate):
