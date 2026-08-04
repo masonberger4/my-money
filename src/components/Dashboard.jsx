@@ -14,6 +14,7 @@ import { detectRecurring } from "../recurring.js";
 import { unlinkInstitution, askAssistant, getSimpleFinStatus } from "../apiClient.js";
 import { UNCATEGORIZED, isBudgetableCategory } from "../categoryMap.js";
 import { userCategoryList, missingCategories, isDuplicateCategoryName } from "../categoryList.js";
+import { teachQueueGroups, nonSpendLabel } from "../teachQueue.js";
 import { displayBalance, isDebtAccount as isDebtType } from "../accountBalance.js";
 import { unhideConfirmMessage } from "../unhideConfirm.js";
 import { createSheetHistory } from "../sheetHistory.js";
@@ -873,6 +874,16 @@ function DrillNum({onClick,title,style,children}) {
 // "show all" toggle (390px phone is the target); a stalled schedule gets the
 // honest --danger banner instead of a fake date, and a MAX_MONTHS cap renders
 // the computed rows under a "still owing after 50 years" banner.
+// Teach-queue row chrome + how many merchants each of its two lists shows. TEN,
+// not the original five: the queue used to be a cleanup aid for a classifier
+// that got most rows right and is now the main onboarding surface, so it has to
+// be worth working down rather than a sample of it.
+const TEACH_LIMIT=10;
+const TEACH_ROW={display:"flex",alignItems:"center",gap:8,width:"100%",background:"none",border:"none",
+  padding:"4px 0",cursor:"pointer",fontFamily:"inherit",textAlign:"left"};
+const TEACH_KEY={fontSize:11,fontWeight:500,color:"var(--text)",flex:1,minWidth:0,
+  whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"};
+
 const SCHED_PREVIEW=24;
 function ScheduleSheet({debt,startMonth,acctLabel,onClose}){
   useEscClose(onClose);
@@ -1443,6 +1454,11 @@ export default function Dashboard({ refreshTick = 0 }) {
   // The category whose transactions are being drilled into (raw label), opened
   // from a Categories row or a Budget envelope.
   const [catDrill,setCatDrill]=useState(null);
+  // Teach-queue: whether the "no counted spending" merchants (paychecks,
+  // transfer legs, card payments) are expanded. Collapsed by default so the
+  // queue leads with what it is for, but never dropped — the count is always on
+  // screen, so the size of that group stays visible even while it is folded.
+  const [teachOther,setTeachOther]=useState(false);
   // Property drill-in on the Tax tab: the entity id whose compiled ledger is
   // open, or null. Rows come from taxData, so the sheet shows the tax cache's
   // busy state while an edit's invalidation refetches.
@@ -2711,6 +2727,17 @@ export default function Dashboard({ refreshTick = 0 }) {
   // Only offer the drill-in when there is something behind the number.
   const openDrill=useCallback(cat=>(txsByCategory.get(cat)||[]).length?()=>setCatDrill(cat):null,[txsByCategory]);
 
+  // The teach-queue's population — see src/teachQueue.js for the decision and
+  // its reasoning. Derived in render (no cached state, so the setState(null)
+  // gotcha never applies and the list self-heals through learnMerchant's
+  // reloadData), grouped on the SAME key the classifier learns on so a rule
+  // taught here fires on the next pull. Split on the adapter's `counted` flag,
+  // never re-derived: the queue's merchant count and the Uncategorized bar's
+  // "N txns" are then computed over one population by construction.
+  const teachQueue=useMemo(
+    ()=>teachQueueGroups(txsByCategory.get(UNCATEGORIZED)||[],t=>merchantKey(txDescriptor(t))),
+    [txsByCategory,txDescriptor]);
+
   // Budgets read the getSpending() groups (not raw transactions), so when the
   // adapter's effective-category logic changes (transaction-editing branch),
   // budget progress follows automatically. Keys are raw category labels.
@@ -3203,73 +3230,93 @@ export default function Dashboard({ refreshTick = 0 }) {
                       merchant once and every future transaction from it files itself.
                     </div>
                   )}
-                  {/* Teach-queue: the month's top Uncategorized merchants, derived
-                      in render from txsByCategory (no cached state — the
-                      setState(null) gotcha never applies, and the list self-heals
-                      through learnMerchant's reloadData). Grouped by the SAME key
-                      the classifier uses (merchantKey over txDescriptor, not raw
-                      description) so a taught rule fires on the next pull. Tapping
-                      a row opens the detail sheet for the group's most recent
-                      transaction — the existing pick-a-category → offerToLearn →
-                      learnMerchant flow, dry-run preview and all; Uncategorized
-                      is never offerable there. */}
-                  {c.label===UNCATEGORIZED&&(()=>{
-                    const rows=txsByCategory.get(UNCATEGORIZED)||[];
-                    const groups=new Map();
-                    for(const t of rows){
-                      const k=merchantKey(txDescriptor(t));
-                      if(!k)continue;
-                      const g=groups.get(k);
-                      if(g){g.count++;if(t.amount>0)g.out+=t.amount;if(t.transaction_date>g.tx.transaction_date)g.tx=t;}
-                      else groups.set(k,{key:k,count:1,out:t.amount>0?t.amount:0,tx:t});
-                    }
-                    // By count (ties broken by summed outflow): repetition, not
-                    // size, is what makes a merchant worth teaching. TEN, not
-                    // the old five — this queue used to be a cleanup aid for a
-                    // classifier that got most rows right, and is now the main
-                    // onboarding surface: with no built-in categories every
-                    // transaction lands here until it is taught, so the list has
-                    // to be worth working down rather than a sample of it.
-                    const ranked=[...groups.values()].sort((a,b)=>b.count-a.count||b.out-a.out);
-                    const top=ranked.slice(0,10);
-                    if(top.length===0)return null;
-                    return (
-                      <div style={{marginTop:8,background:"var(--bg)",borderRadius:8,padding:"8px 10px"}}>
-                        <div style={{fontSize:10,fontWeight:600,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em",marginBottom:6}}>
-                          Teach it — {ranked.length} merchant{ranked.length!==1?"s":""} to categorize this month
-                        </div>
-                        {top.map(g=>(
-                          <button key={g.key} onClick={()=>setSelTx(g.tx)}
-                            style={{display:"flex",alignItems:"center",gap:8,width:"100%",background:"none",border:"none",
-                              padding:"4px 0",cursor:"pointer",fontFamily:"inherit",textAlign:"left"}}>
-                            <span style={{fontSize:11,fontWeight:500,color:"var(--text)",flex:1,minWidth:0,
-                              whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{g.key}</span>
-                            <span style={{fontSize:10,color:"var(--muted)",flexShrink:0}}>{g.count} txn{g.count!==1?"s":""}</span>
-                            <span style={{fontSize:11,fontFamily:"'DM Mono',monospace",color:"var(--text)",flexShrink:0}}>{fmt(g.out)}</span>
-                            <span style={{fontSize:11,color:"var(--muted)",flexShrink:0}}>›</span>
-                          </button>
-                        ))}
-                        <div style={{fontSize:10,color:"var(--muted)",marginTop:4,lineHeight:1.5}}>
-                          Tap one, pick or make its category, and say “always” — it remembers the merchant and
-                          backfills the transactions you already have.
-                          {ranked.length>top.length&&<> {ranked.length-top.length} more behind these.</>}
-                        </div>
-                        {/* rules!==null means the category_rules table exists;
-                            null is "feature not installed" (listCategoryRules'
-                            sentinel), so pre-migration this link is absent
-                            rather than opening an empty list. */}
-                        {rules&&rules.length>0&&(
-                          <button className="ibtn" onClick={()=>setRulesOpen(true)}
-                            style={{fontSize:10,color:"var(--muted)",minHeight:32,padding:"0 2px",marginTop:2}}>
-                            See what you've taught ›
-                          </button>
-                        )}
-                      </div>
-                    );
-                  })()}
                 </div>
                 );
               })}
+
+            {/* THE TEACH-QUEUE — deliberately OUTSIDE catRows.map (2026-08-05).
+                It used to render inside the `c.label===UNCATEGORIZED` branch,
+                which tied it to a row that only exists while Uncategorized has
+                COUNTED spending this month (catRows starts from spendingGroups).
+                So the moment the last untaught SPENDING merchant was taught, the
+                queue and its "See what you've taught" link vanished — while
+                untaught paychecks, transfer legs and card payments were still
+                sitting in Uncategorized with no way in. The queue is a property
+                of the month's untaught merchants, not of a category row, so it
+                lives at the card level and survives that.
+                Population and ordering are decided in src/teachQueue.js; the
+                spending count below and the Uncategorized row's "N txns" are now
+                both isSpend()-filtered, so the two numbers on this card agree. */}
+            {!loading&&(teachQueue.spending.length>0||teachQueue.other.length>0)&&(
+              <div style={{marginTop:16,background:"var(--bg)",borderRadius:8,padding:"10px 12px"}}>
+                <div style={{fontSize:10,fontWeight:600,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em",marginBottom:6}}>
+                  {teachQueue.spending.length>0
+                    ?<>Teach it — {teachQueue.spending.length} merchant{teachQueue.spending.length!==1?"s":""} spending this month</>
+                    :<>Teach it — nothing untaught spent money this month</>}
+                </div>
+                {/* Tapping a row opens the detail sheet for the group's most
+                    recent COUNTED transaction — the existing pick-a-category →
+                    offerToLearn → learnMerchant flow, dry-run preview and all;
+                    Uncategorized is never offerable there. */}
+                {teachQueue.spending.slice(0,TEACH_LIMIT).map(g=>(
+                  <button key={g.key} onClick={()=>setSelTx(g.tx)} style={TEACH_ROW}>
+                    <span style={TEACH_KEY}>{g.key}</span>
+                    <span style={{fontSize:10,color:"var(--muted)",flexShrink:0}}>{g.spendCount} txn{g.spendCount!==1?"s":""}</span>
+                    <span style={{fontSize:11,fontFamily:"'DM Mono',monospace",color:"var(--text)",flexShrink:0}}>{fmt(g.spent)}</span>
+                    <span style={{fontSize:11,color:"var(--muted)",flexShrink:0}}>›</span>
+                  </button>
+                ))}
+                {teachQueue.spending.length>0&&(
+                  <div style={{fontSize:10,color:"var(--muted)",marginTop:4,lineHeight:1.5}}>
+                    Tap one, pick or make its category, and say “always” — it remembers the merchant and
+                    backfills the transactions you already have.
+                    {teachQueue.spending.length>TEACH_LIMIT&&<> {teachQueue.spending.length-TEACH_LIMIT} more behind these.</>}
+                  </div>
+                )}
+                {/* Money in, transfer legs and card payments are in no spending
+                    total, so ranking them beside merchants was the old bug — but
+                    hiding them would be the worse one (they are still untaught
+                    Uncategorized money). They keep their own labelled list, with
+                    their REAL in/out amounts rather than the "$0" the old
+                    positive-only sum printed for an income merchant. */}
+                {teachQueue.other.length>0&&(<>
+                  <button className="ibtn" onClick={()=>setTeachOther(v=>!v)} aria-expanded={teachOther}
+                    style={{fontSize:10,color:"var(--muted)",minHeight:32,padding:"0 2px",marginTop:teachQueue.spending.length?6:0}}>
+                    {teachOther?"▾":"▸"} {teachQueue.other.length} more with no spending this month
+                  </button>
+                  {teachOther&&(<>
+                    <div style={{fontSize:10,color:"var(--muted)",lineHeight:1.5,marginBottom:2}}>
+                      Money in, transfer legs and card payments. None of it is in a spending total, which is
+                      why it isn't ranked above — but it is still Uncategorized, and a paycheck or a transfer
+                      is worth a category too.
+                    </div>
+                    {teachQueue.other.slice(0,TEACH_LIMIT).map(g=>(
+                      <button key={g.key} onClick={()=>setSelTx(g.tx)} style={TEACH_ROW}>
+                        <span style={TEACH_KEY}>{g.key}</span>
+                        <span style={{fontSize:10,color:"var(--muted)",flexShrink:0}}>{g.otherCount} txn{g.otherCount!==1?"s":""}</span>
+                        <span style={{fontSize:10,color:"var(--muted)",fontFamily:"'DM Mono',monospace",flexShrink:0}}>{nonSpendLabel(g,fmt)}</span>
+                        <span style={{fontSize:11,color:"var(--muted)",flexShrink:0}}>›</span>
+                      </button>
+                    ))}
+                    {teachQueue.other.length>TEACH_LIMIT&&(
+                      <div style={{fontSize:10,color:"var(--muted)",marginTop:4}}>
+                        {teachQueue.other.length-TEACH_LIMIT} more behind these.
+                      </div>
+                    )}
+                  </>)}
+                </>)}
+                {/* rules!==null means the category_rules table exists; null is
+                    "feature not installed" (listCategoryRules' sentinel), so
+                    pre-migration this link is absent rather than opening an
+                    empty list. */}
+                {rules&&rules.length>0&&(
+                  <button className="ibtn" onClick={()=>setRulesOpen(true)}
+                    style={{fontSize:10,color:"var(--muted)",minHeight:32,padding:"0 2px",marginTop:2}}>
+                    See what you've taught ›
+                  </button>
+                )}
+              </div>
+            )}
 
             {/* Custom categories used to sit in a separate block below this
                 list, name-and-colour only — no count, no amount, no target, and
@@ -4896,7 +4943,36 @@ export default function Dashboard({ refreshTick = 0 }) {
               const months=entityMonthly(rows);
               const totIn=months.reduce((s,m)=>s+m.income,0);
               const totOut=months.reduce((s,m)=>s+m.expenses,0);
-              const catsPresent=[...new Set(rows.filter(t=>!t.is_capital).map(t=>t.category))].sort();
+              // Categories offered in the "Category → Schedule E line" picker.
+              // Derived from the rows (a mapping only earns its place when the
+              // property actually has money in that category), but filtered to
+              // REAL user categories: `t.category` also carries the three
+              // MECHANISM labels, and offering to put "Transfers and card
+              // payments", "Return" or "Uncategorized" on a tax line is
+              // nonsense — Uncategorized is the app saying it does not know
+              // what a row is, so mapping it to line 14 would assert something
+              // false on a worksheet a preparer reads. `isBudgetableCategory`
+              // is the existing predicate for "not mechanism".
+              // `||emap[c]!=null` keeps a category that ALREADY has an explicit
+              // mapping pickable even if it is a mechanism label — a legacy
+              // mapping from before the categories wipe must stay visible and
+              // removable, never stranded as an invisible authority over line
+              // totals (the same reasoning as pinning the active Transactions
+              // chip so a set filter can always be cleared). Value-tested, not
+              // `in`: setEmapEntry DELETES on removal, so a present key always
+              // means a live mapping, and `in` would also answer true for
+              // Object.prototype names.
+              // NOTHING here changes what the report counts: scheduleEReport
+              // still reads every row, and a category with no mapping keeps
+              // landing in the VISIBLE amber "not on any line yet" bucket. The
+              // picker got narrower; the accounting did not move.
+              const catsPresent=[...new Set(rows.filter(t=>!t.is_capital).map(t=>t.category))]
+                .filter(c=>isBudgetableCategory(c)||emap[c]!=null).sort();
+              // Does the amber bucket hold anything the picker below can't
+              // offer? If so the "map these below" instruction is only half
+              // true, and the honest other half is "teach those rows a real
+              // category first".
+              const unmappedMechanism=rep.unmapped.some(u=>!isBudgetableCategory(u.category));
               return (
               <div className="card" key={e.id}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",gap:10}}>
@@ -4966,7 +5042,11 @@ export default function Dashboard({ refreshTick = 0 }) {
                           <span style={{fontFamily:"'DM Mono',monospace"}}>{fmtAuto(u.total)}</span>
                         </div>
                       ))}
-                      <div style={{fontSize:10,color:"var(--muted)",marginTop:2}}>Map these categories below and they move onto the worksheet.</div>
+                      <div style={{fontSize:10,color:"var(--muted)",marginTop:2}}>
+                        Map these categories below and they move onto the worksheet.
+                        {unmappedMechanism&&<> Uncategorized, Return and the transfer label aren't mappable —
+                          give those transactions a real category first.</>}
+                      </div>
                     </div>
                   )}
 
