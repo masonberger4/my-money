@@ -783,6 +783,10 @@ migration that DROPS should verify rather than trust.
 chats + search refinement — shipped 2026-08-04) and deleted per its own rule.
 The forward-looking doc is **`docs/next-iteration-plan-2026-08-04.md`**.
 
+**Active worklist:** `docs/improvement-backlog-2026-08-04.md` — the verified
+2026-08-04 six-dimension audit (delete entries as they ship); the ops/data
+tasks in Pending still outrank it.
+
 **Improvement backlog (2026-08-01 six-dimension audit):**
 `docs/improvement-backlog-2026-08-01.md` — everything SHIPPED (Batch 1,
 Sections 1–3; the last two — in-app saved chats and search refinement —
