@@ -746,9 +746,12 @@ export default async function handler(req, res) {
 
     return res.status(200).json({ results });
   } catch (err) {
+    // Log the full error server-side; never echo upstream bodies to the
+    // client — generic string + stable code only (same discipline as the
+    // other routes' catch-alls).
     console.error('sync error', err?.response?.data || err);
     return res
       .status(500)
-      .json({ error: err?.response?.data || err.message || 'Unknown error' });
+      .json({ error: 'sync_failed', message: 'Sync failed — try again.' });
   }
 }

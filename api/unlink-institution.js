@@ -154,9 +154,12 @@ export default async function handler(req, res) {
 
     return res.status(200).json({ ok: true, deleted: true });
   } catch (err) {
+    // Log the full error server-side; never echo upstream bodies (a whole
+    // PostgREST error object, schema details) to the client — generic string
+    // + stable code only, the sanitizeFeedMessage discipline for the catch-all.
     console.error('unlink-institution error', err?.response?.data || err);
     return res
       .status(500)
-      .json({ error: err?.response?.data || err.message || 'Unknown error' });
+      .json({ error: 'unlink_failed', message: 'Removing the bank failed — try again.' });
   }
 }

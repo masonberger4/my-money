@@ -164,7 +164,9 @@ export default async function handler(req, res) {
       console.error('assistant API error', err.status, err.message);
       return res.status(502).json({ error: 'assistant_api', message: `Assistant error (${err.status}).` });
     }
+    // Full error stays in the server log; the client gets a generic string +
+    // stable code (raw err.message can carry schema/config details).
     console.error('assistant error', err);
-    return res.status(500).json({ error: err.message || 'Unknown error' });
+    return res.status(500).json({ error: 'assistant_error', message: "The assistant couldn't answer — try again." });
   }
 }

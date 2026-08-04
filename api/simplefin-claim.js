@@ -102,7 +102,10 @@ export default async function handler(req, res) {
       console.warn('simplefin-claim rejected:', err.code, sanitizeFeedMessage(err.message));
       return res.status(400).json({ error: err.code, message: sanitizeFeedMessage(err.message) });
     }
+    // Full error stays in the server log; the client gets a generic string +
+    // stable code (raw err.message can carry schema/PostgREST details — the
+    // SimpleFinError branch above already sanitizes the feed-facing path).
     console.error('simplefin-claim error', err);
-    return res.status(500).json({ error: err.message || 'Unknown error' });
+    return res.status(500).json({ error: 'claim_failed', message: 'Connecting failed — try again.' });
   }
 }

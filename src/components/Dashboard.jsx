@@ -1282,6 +1282,10 @@ export default function Dashboard({ refreshTick = 0 }) {
   const [savedBusy,setSavedBusy]=useState(false);
   const chatSavedSnap=useRef(null);
   const didInitialSync=useRef(false);
+  // Last refreshTick this Dashboard has acted on — seeded with the mount-time
+  // value so the initial load doesn't double-invalidate (the first fetch has
+  // no warm cache to drop).
+  const lastRefreshTick=useRef(refreshTick);
   // {last_pulled_at,last_error} when the SimpleFIN feed looks unhealthy —
   // checked ONCE per mount, after the initial sync (never a status fetch on
   // every dashboard load; that was the LinkAccount antipattern).
@@ -1454,7 +1458,19 @@ export default function Dashboard({ refreshTick = 0 }) {
   function saveAsstEffort(e){setAsstEffort(e);setSetting("asst:effort",e).catch(()=>{});}
 
   // --- Rental & tax handlers ---
-  async function saveTaxMaps(next){setTaxMaps(next);try{await setSetting("tax:maps",JSON.stringify(next));}catch(err){console.error("saving tax maps failed",err);}}
+  // Optimistic with rollback + alert: a dropped mapping edit would leave the
+  // worksheet on screen disagreeing with what the other phone (and the next
+  // Tax-tab load) reads back.
+  async function saveTaxMaps(next){
+    const prev=taxMaps;
+    setTaxMaps(next);
+    try{await setSetting("tax:maps",JSON.stringify(next));}
+    catch(err){
+      console.error("saving tax maps failed",err);
+      setTaxMaps(prev);
+      window.alert(`Couldn't save that tax mapping: ${err.message||err}`);
+    }
+  }
   // A fresh entity's Schedule E mapping starts from the conservative defaults;
   // the FIRST edit copies them into the stored map and edits that. Never merge
   // the defaults over a stored map — that would resurrect a default the user
@@ -1483,16 +1499,31 @@ export default function Dashboard({ refreshTick = 0 }) {
       window.alert(`Couldn't add the property: ${err.message||err}\n\nIf this is a fresh deploy, the rental-tax migration may not have been applied yet.`);
     }
   }
+  // Both entity edits are optimistic with rollback + alert (the
+  // updateManualBalance pattern): a silently dropped rename/archive reads as
+  // saved on this phone while every other reader still has the old row.
   async function renameEntity(id,name){
     const n=(name||"").trim();
     if(!n)return;
-    setEntities(prev=>prev.map(e=>e.id===id?{...e,name:n}:e));
-    try{await updateEntity(id,{name:n});}catch(err){console.error("renaming the property failed",err);}
+    const prev=entities;
+    setEntities(p=>p.map(e=>e.id===id?{...e,name:n}:e));
+    try{await updateEntity(id,{name:n});}
+    catch(err){
+      console.error("renaming the property failed",err);
+      setEntities(prev);
+      window.alert(`Couldn't rename the property: ${err.message||err}`);
+    }
   }
   async function setEntityArchived(id,archived){
     const at=archived?new Date().toISOString():null;
-    setEntities(prev=>prev.map(e=>e.id===id?{...e,archived_at:at}:e));
-    try{await updateEntity(id,{archived_at:at});}catch(err){console.error("archiving the property failed",err);}
+    const prev=entities;
+    setEntities(p=>p.map(e=>e.id===id?{...e,archived_at:at}:e));
+    try{await updateEntity(id,{archived_at:at});}
+    catch(err){
+      console.error("archiving the property failed",err);
+      setEntities(prev);
+      window.alert(`Couldn't ${archived?"archive":"unarchive"} the property: ${err.message||err}`);
+    }
   }
   async function handleAddMileage(){
     if(!mileForm)return;
@@ -1509,8 +1540,14 @@ export default function Dashboard({ refreshTick = 0 }) {
     }
   }
   async function handleDeleteMileage(id){
-    setMileage(prev=>prev.filter(m=>m.id!==id));
-    try{await deleteMileage(id);}catch(err){console.error("deleting mileage failed",err);}
+    const prev=mileage;
+    setMileage(p=>p.filter(m=>m.id!==id));
+    try{await deleteMileage(id);}
+    catch(err){
+      console.error("deleting mileage failed",err);
+      setMileage(prev); // rollback: the row is still in the DB
+      window.alert(`Couldn't delete the drive: ${err.message||err}`);
+    }
   }
 
   const isCurrent = year===now.getFullYear()&&month===now.getMonth()+1;
@@ -1538,10 +1575,16 @@ export default function Dashboard({ refreshTick = 0 }) {
     // rolls forward into every month after it. Same monotonic-sequence guard
     // the cross-month search already uses.
     const seq=++loadSeq.current;
-    // The envelope walk reads transactions; this is the moment they may have
-    // moved (a sync, an import, a recategorisation, a learned rule), so drop
-    // the memoised spend sums.
-    invalidateEnvelopeSpending();
+    // Deliberately NO invalidateEnvelopeSpending() here (Mason, 2026-08-04):
+    // plain month navigation reuses the adapter's memoised rows/spend sums, so
+    // a month tap is state reads, not a refetch of the whole envelope walk +
+    // the 6-month window. The caches drop at the moments rows can actually
+    // move: every adapter write path, sync completion (the setSyncCompletionHook
+    // registration in dataAdapter — Refresh syncs, so it's covered), CSV/PDF
+    // import, the server-side mutations handled at their call sites
+    // (handleUnlink, the SimpleFIN modal's onConnected) — plus the
+    // foreground-return refreshTick bump in the fetchData effect, which is
+    // the one path that catches ANOTHER device's writes.
     const eseq=++envSeq.current;
     try{
       const[ov,sp,tx,cf,ac,bu,en,inc,ents,mv]=await Promise.all([
@@ -1615,6 +1658,18 @@ export default function Dashboard({ refreshTick = 0 }) {
     if(!ready)return;
     const syncFirst=!didInitialSync.current;
     if(syncFirst)didInitialSync.current=true;
+    // A refreshTick bump is App.jsx's foreground-return/focus signal — the
+    // stale-PWA case (screen frozen while the OTHER device wrote or the server
+    // sync landed rows via its session). None of the four invalidation moments
+    // fire on THIS device for that, so without this drop the reload below is
+    // answered by the warm rangeMemo/spendCache and paints the pre-background
+    // rows while the un-memoised balance reads freshen — the two halves of the
+    // screen disagree until a manual Refresh. Ref-compared so a re-run caused
+    // by year/month/ready (plain month navigation) still reuses the caches.
+    if(refreshTick!==lastRefreshTick.current){
+      lastRefreshTick.current=refreshTick;
+      invalidateEnvelopeSpending();
+    }
     fetchData(year,month,{sync:syncFirst}).then(()=>{
       if(!syncFirst)return;
       // The sync response can't answer "is the feed stale?" — a clean pull
@@ -1703,7 +1758,11 @@ export default function Dashboard({ refreshTick = 0 }) {
   // the derived debtRate and the two totals, the same recompute-every-derived-
   // field rule as saveTx — then writes; the accounts row is the client's own
   // (RLS-scoped) so updateAccount writes it directly.
+  // Rollback + alert on failure (the updateManualBalance pattern three
+  // functions down): a dropped APR/minimum silently mis-amortizes the payoff
+  // plan while the screen shows the typed value.
   function saveDebt(id,fields){
+    const prevDebt=debtData;
     setDebtData(prev=>{
       if(!prev)return prev;
       const debts=prev.debts.map(a=>{
@@ -1716,7 +1775,11 @@ export default function Dashboard({ refreshTick = 0 }) {
         totalDebt:debts.reduce((s,a)=>s+(Number(a.current_balance)||0),0),
         totalMinimums:debts.reduce((s,a)=>s+(Number(a.minimum_payment)||0),0)};
     });
-    updateAccount(id,fields).catch(err=>console.error("debt field save failed",err));
+    updateAccount(id,fields).catch(err=>{
+      console.error("debt field save failed",err);
+      setDebtData(prevDebt);
+      window.alert(`Couldn't save that debt field: ${err.message||err}`);
+    });
   }
 
   // Hand-typed balance edit on a MANUAL debt (fed balances are never
@@ -1887,10 +1950,23 @@ export default function Dashboard({ refreshTick = 0 }) {
     return n?<Pill label={n} color={ENTITY_CHIP} surface={surf.card}/>:null;
   },[entities,surf.card]);
 
+  // Optimistic with rollback + alert (the updateManualBalance pattern). This
+  // carries the TYPE editor: a dropped type correction is never restated by
+  // sync (type is user-owned after first insert), so a silently failed save
+  // would leave a mistyped card counting purchases as household spending with
+  // the screen showing the corrected type.
   async function saveAccount(id,fields){
+    const prevAccounts=accounts;
+    const prevSel=selAcct;
     setAccounts(prev=>prev.map(a=>a.id===id?{...a,...fields}:a));
     if(selAcct?.id===id)setSelAcct(prev=>({...prev,...fields}));
-    try{await updateAccount(id,fields);}catch(err){console.error("account update failed",err);}
+    try{await updateAccount(id,fields);}
+    catch(err){
+      console.error("account update failed",err);
+      setAccounts(prevAccounts);
+      if(prevSel?.id===id)setSelAcct(cur=>cur?.id===id?prevSel:cur);
+      window.alert(`Couldn't save that account change: ${err.message||err}`);
+    }
   }
 
   const [unlinking,setUnlinking]=useState(false);
@@ -2154,6 +2230,9 @@ export default function Dashboard({ refreshTick = 0 }) {
     setUnlinking(true);
     try{
       await unlinkInstitution(selAcct.institution_id);
+      // The server just hid (or deleted) the bank's rows — a write reloadData
+      // no longer invalidates for, so drop the memoised ranges here.
+      invalidateEnvelopeSpending();
       setSelAcct(null);
       setTxAcctFilter(null);
       // The removed bank's rows no longer appear (hidden for SimpleFIN, deleted
@@ -2162,7 +2241,9 @@ export default function Dashboard({ refreshTick = 0 }) {
       await reloadData(year,month);
     }catch(err){
       console.error("unlink failed",err);
-      window.alert(`Unlink failed: ${err.detail?.error||err.message}`);
+      // Prefer the human message the sanitized 500 body carries (the Ask tab
+      // pattern) — detail.error is the stable machine code, not display text.
+      window.alert(`Unlink failed: ${err.detail?.message||err.detail?.error||err.message}`);
     }finally{
       setUnlinking(false);
     }
@@ -4855,7 +4936,13 @@ export default function Dashboard({ refreshTick = 0 }) {
         <Suspense fallback={null}>
           <SimpleFinConnect
             onClose={()=>setConnectingSfin(false)}
-            onConnected={()=>reloadData(year,month)}
+            onConnected={()=>{
+              // Claim/Restore run a forced sync (the completion hook covers
+              // them), but permanent delete and disconnect mutate server-side
+              // WITHOUT a sync — invalidate here so all four outcomes refetch.
+              invalidateEnvelopeSpending();
+              reloadData(year,month);
+            }}
           />
         </Suspense>
       )}
