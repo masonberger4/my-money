@@ -347,3 +347,62 @@ test('teach → apply to history → re-import the same file: dedup holds, the r
   assert.equal(second.rows.filter(r => !r.isDuplicate && !r.isOverlap).length, 0, 'nothing to insert');
   assert.deepEqual(db.rows.map(r => r.mapped_category), ['Health and fitness', 'Health and fitness', 'Groceries']);
 });
+
+// --- countAll: the Taught-rules screen's match count -------------------------
+// The distinction this option exists for: dryRun counts rows the rule would
+// still CHANGE, so a rule that is already applied everywhere counts 0. Shown
+// in a "Taught rules" list as the rule's match count, that 0 reads as "this
+// rule matches nothing" and talks a human into deleting a working rule.
+
+test('countAll counts rows the rule matches even when they are ALREADY the target category', async () => {
+  const db = makeDb([
+    { id: 1, description: 'RUDYS SALON A', mapped_category: 'Health and fitness' },
+    { id: 2, description: 'RUDYS SALON B', mapped_category: 'Health and fitness' },
+    { id: 3, description: 'SAFEWAY 1', mapped_category: 'Groceries' },
+  ]);
+  // The dry run — "how many would change" — is 0: the rule is fully applied.
+  assert.equal(await apply(db, 'RUDYS SALON', 'Health and fitness', { dryRun: true }), 0);
+  // countAll — "how many does it match at all" — is the honest 2.
+  assert.equal(await apply(db, 'RUDYS SALON', 'Health and fitness', { countAll: true }), 2);
+});
+
+test('countAll never writes, even when rows would otherwise be updated', async () => {
+  const db = makeDb([
+    { id: 1, description: 'RUDYS SALON A', mapped_category: 'Uncategorized' },
+    { id: 2, description: 'RUDYS SALON B', mapped_category: 'Uncategorized' },
+  ]);
+  // updateBatch throwing would surface as a rejection; the count must come
+  // back clean and the rows must be untouched.
+  const n = await apply(db, 'RUDYS SALON', 'Health and fitness', { countAll: true });
+  assert.equal(n, 2);
+  assert.deepEqual(db.updateBatches, [], 'no write batches were issued');
+  assert.deepEqual(db.rows.map(r => r.mapped_category), ['Uncategorized', 'Uncategorized']);
+});
+
+test('countAll still honours the PGRST103 end-of-range contract across pages', async () => {
+  const rows = Array.from({ length: 20 }, (_, i) => ({
+    id: i + 1,
+    description: `RUDYS SALON VISIT ${i}`,
+    mapped_category: 'Health and fitness',
+  }));
+  const db = makeDb(rows);
+  assert.equal(await apply(db, 'RUDYS SALON', 'Health and fitness', { countAll: true, pageSize: 10 }), 20);
+});
+
+test('countAll of a rule that matches nothing is a real 0, distinct from a failure', async () => {
+  const db = makeDb([{ id: 1, description: 'SAFEWAY 1', mapped_category: 'Groceries' }]);
+  assert.equal(await apply(db, 'RUDYS SALON', 'Health and fitness', { countAll: true }), 0);
+  // A broken page must still THROW rather than resolve to 0 — the silent
+  // -failure distinction the whole module is built around.
+  const broken = makeDb([]);
+  broken.fetchPage = async () => ({ data: null, error: { code: '42P01', message: 'relation does not exist' } });
+  await assert.rejects(() =>
+    applyRuleToHistory({
+      descriptor: 'RUDYS SALON',
+      category: 'Health and fitness',
+      countAll: true,
+      fetchPage: broken.fetchPage,
+      updateBatch: broken.updateBatch,
+    })
+  );
+});

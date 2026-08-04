@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from "react";
-import { getOverview, getSpending, getBiggestMovers, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES, setCategoryRule, applyCategoryRuleToHistory, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, invalidateEnvelopeSpending, isEnvelopeSchemaMissing, targetNeed, readyToAssign, envelopePace, getEnvPace, setEnvPace as persistEnvPace, getRecIgnore, updateRecIgnore, monthKey, getEntities, createEntity, updateEntity, getTaxYearTransactions, getMileage, addMileage, deleteMileage, getReceiptTxIds, getDebts, getBalanceSnapshots, getNetWorthSeries, addManualTransaction, createManualAccount, updateManualBalance, getDataCoverage, signOut, autoFillMonth, setTargetOverride, effectiveTarget, getExpectedTransactions, addExpected, dismissExpected, matchExpectedManually, getSavedChats, saveChatToApp, deleteSavedChat } from "../dataAdapter.js";
+import { getOverview, getSpending, getBiggestMovers, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES, setCategoryRule, applyCategoryRuleToHistory, listCategoryRules, countCategoryRuleMatches, deleteCategoryRule, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, invalidateEnvelopeSpending, isEnvelopeSchemaMissing, targetNeed, readyToAssign, envelopePace, getEnvPace, setEnvPace as persistEnvPace, getRecIgnore, updateRecIgnore, monthKey, getEntities, createEntity, updateEntity, getTaxYearTransactions, getMileage, addMileage, deleteMileage, getReceiptTxIds, getDebts, getBalanceSnapshots, getNetWorthSeries, addManualTransaction, createManualAccount, updateManualBalance, getDataCoverage, signOut, autoFillMonth, setTargetOverride, effectiveTarget, getExpectedTransactions, addExpected, dismissExpected, matchExpectedManually, getSavedChats, saveChatToApp, deleteSavedChat } from "../dataAdapter.js";
 // Pure cores imported directly (never Supabase — the mock-harness alias rule
 // only covers dataAdapter/sync/db/apiClient; pure modules are safe).
 import { planAutoFill } from "../envelopes.js";
@@ -7,7 +7,7 @@ import { buildSearchFilters, searchIsActive } from "../searchFilters.js";
 import { expectedByCategory, expectedStatus, isMissedExpected, seedFromRecurring, projectFutureCycles } from "../expectedTx.js";
 import { payoffWhatIf, debtFreeMonth, isMortgage, amortizationSchedule, addMonths, MAX_MONTHS } from "../debtPayoff.js";
 import { SCHEDULE_E_LINES, RENTS_KEY, DEFAULT_SCHEDULE_E_MAP, scheduleEReport, entityMonthly, entityLedger, personalDeductionReport, DEDUCTION_BUCKETS, DEFAULT_DEDUCTION_MAP, mileageDeduction, scheduleECsv } from "../taxReport.js";
-import { merchantKey } from "../txClassify.js";
+import { merchantKey, matchLearnedRule } from "../txClassify.js";
 import { trimChatMsgs, buildSavedChat } from "../savedChats.js";
 import { patchTxShape } from "../spending.js";
 import { detectRecurring } from "../recurring.js";
@@ -1018,6 +1018,146 @@ function CategorySheet({name,color,when,rows,surf,getName,acctById,acctLabel,acc
         </>)}
 
         <button onClick={onClose} className="ibtn" style={{width:"100%",justifyContent:"center",marginTop:16}}>Done</button>
+      </div>
+    </div>
+  );
+}
+
+// The taught-rules review screen. Before this, a learned rule was an
+// invisible, unremovable write-time authority: deleteCategoryRule existed with
+// zero callers, category_rules.source was written and read by nothing, and a
+// mis-taught merchant silently recategorized every future import with no way
+// to see it, let alone undo it. That matters more as teaching becomes the
+// primary way categories get set.
+//
+// Two counts, deliberately different questions:
+//   • "N this month" — free, derived in render from the month's already-loaded
+//     rows via matchLearnedRule. No fetch, no cache, so the setState(null)
+//     gotcha never applies.
+//   • "Count all" — an on-demand paged scan per rule (countCategoryRuleMatches
+//     → applyRuleToHistory{countAll}). NOT the dry run: dryRun counts only rows
+//     the rule would still CHANGE, so a healthy, fully-applied rule reads 0 —
+//     which in a list like this reads as "matches nothing" and talks a human
+//     into deleting a rule that works. A FAILED count stays null and renders as
+//     an error, never as 0 (the offerToLearn distinction, verbatim).
+//
+// Deleting a rule changes ZERO existing transactions: mapped_category is
+// computed at WRITE time and nothing recomputes it at read time. The confirm
+// says exactly that. No undo and no auto-reclassify in v1 — a true undo needs
+// per-row pre-rule values (a migration), and "re-run the keyword table without
+// this rule" can write a third category nobody ever saw.
+function RulesSheet({rules,monthRows,monthLabel,txDescriptor,surf,getName,getColor,onDelete,onClose}) {
+  useEscClose(onClose);
+  const [counts,setCounts]=useState({});   // key → {n} | {error}
+  const [busyKey,setBusyKey]=useState(null);
+  const [deleting,setDeleting]=useState(null);
+
+  // Free per-rule count over the month already in memory.
+  const thisMonth=useMemo(()=>{
+    const m=new Map();
+    for(const t of monthRows||[]){
+      const d=txDescriptor(t);
+      if(!d)continue;
+      for(const r of rules){
+        if(matchLearnedRule(d,{[r.merchant_key]:r.category})) m.set(r.merchant_key,(m.get(r.merchant_key)||0)+1);
+      }
+    }
+    return m;
+  },[rules,monthRows,txDescriptor]);
+
+  const showSource=useMemo(()=>new Set(rules.map(r=>r.source||"user")).size>1,[rules]);
+
+  async function countAll(r){
+    setBusyKey(r.merchant_key);
+    try{
+      const n=await countCategoryRuleMatches(r.merchant_key,r.category);
+      setCounts(c=>({...c,[r.merchant_key]:{n}}));
+    }catch(err){
+      console.error("rule count failed",err);
+      // null-means-FAILED, never 0.
+      setCounts(c=>({...c,[r.merchant_key]:{error:err.message||String(err)}}));
+    }finally{ setBusyKey(null); }
+  }
+
+  return (
+    <div className="overlay" onClick={onClose}>
+      <div className="modal" role="dialog" aria-modal="true" onClick={e=>e.stopPropagation()}
+        style={{width:"min(460px,92vw)",maxHeight:"82vh",overflowY:"auto"}}>
+        <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
+          <span style={{fontSize:16,fontWeight:600,color:"var(--text)"}}>Taught rules</span>
+          <span style={{flex:1}}/>
+          <span style={{fontSize:13,color:"var(--muted)",fontFamily:"'DM Mono',monospace"}}>{rules.length}</span>
+        </div>
+        <div style={{fontSize:12,color:"var(--muted)",marginBottom:14,lineHeight:1.5}}>
+          Merchants you've taught. New transactions matching one of these get its category
+          automatically — these beat the app's own guesses.
+        </div>
+
+        {rules.length===0?(
+          <div style={{fontSize:13,color:"var(--muted)",padding:"18px 0",textAlign:"center"}}>
+            Nothing taught yet. Set a category on a transaction and choose “always” to teach a merchant.
+          </div>
+        ):rules.map(r=>{
+          const cnt=counts[r.merchant_key];
+          const mo=thisMonth.get(r.merchant_key)||0;
+          const c=chipOn(getColor(r.category),surf.card);
+          return (
+            <div key={r.merchant_key} style={{padding:"10px 0",borderTop:"1px solid var(--border)"}}>
+              <div style={{display:"flex",alignItems:"center",gap:8}}>
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={{fontSize:13,fontWeight:500,fontFamily:"'DM Mono',monospace",
+                    whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{r.merchant_key}</div>
+                  <div style={{fontSize:11,color:"var(--muted)",marginTop:3,display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
+                    <span style={{display:"inline-flex",alignItems:"center",gap:4}}>
+                      <span style={{width:8,height:8,borderRadius:2,background:c.dot,flexShrink:0}}/>
+                      {getName(r.category)}
+                    </span>
+                    <span>· {mo} in {monthLabel}</span>
+                    {showSource&&<span>· {r.source||"user"}</span>}
+                  </div>
+                </div>
+                <button className="ibtn" onClick={()=>setDeleting(r)} aria-label={`Delete rule for ${r.merchant_key}`}
+                  style={{minWidth:32,minHeight:32,fontSize:13,color:"var(--danger)"}}>✕</button>
+              </div>
+              <div style={{marginTop:6,fontSize:11}}>
+                {busyKey===r.merchant_key?(
+                  <span style={{color:"var(--muted)"}}>Counting…</span>
+                ):cnt?.error?(
+                  // A failed count must never render as a real 0.
+                  <span style={{color:"var(--danger)"}}>Couldn't count matches — tap to retry.{" "}
+                    <button className="ibtn" onClick={()=>countAll(r)} style={{fontSize:11,minHeight:32,padding:"0 6px"}}>Retry</button>
+                  </span>
+                ):cnt?(
+                  <span style={{color:"var(--muted)"}}>{cnt.n} transaction{cnt.n!==1?"s":""} match all-time</span>
+                ):(
+                  <button className="ibtn" onClick={()=>countAll(r)}
+                    style={{fontSize:11,minHeight:32,padding:"0 6px",color:"var(--muted)"}}>Count all…</button>
+                )}
+              </div>
+            </div>
+          );
+        })}
+
+        {deleting&&(
+          <div style={{marginTop:14,padding:12,borderRadius:10,background:"var(--bg)",fontSize:12,lineHeight:1.55}}>
+            <div style={{fontWeight:600,marginBottom:6}}>Forget “{deleting.merchant_key}”?</div>
+            <div style={{color:"var(--muted)"}}>
+              Future transactions from this merchant go back to the app's own guess until you teach it
+              again — which may be a different category, not necessarily uncategorized.{" "}
+              <strong style={{color:"var(--text)"}}>Transactions already categorized keep their
+              category</strong> — this only changes what happens next time.
+            </div>
+            <div style={{display:"flex",gap:8,marginTop:10}}>
+              <button className="ibtn" onClick={()=>setDeleting(null)} style={{minHeight:36,padding:"0 12px"}}>Cancel</button>
+              <button className="ibtn" onClick={()=>{const d=deleting;setDeleting(null);onDelete(d);}}
+                style={{minHeight:36,padding:"0 12px",color:"var(--danger)",fontWeight:600}}>Forget it</button>
+            </div>
+          </div>
+        )}
+
+        <div style={{display:"flex",justifyContent:"flex-end",marginTop:14}}>
+          <button className="ibtn" onClick={onClose} style={{minHeight:36,padding:"0 14px"}}>Done</button>
+        </div>
       </div>
     </div>
   );
@@ -2074,6 +2214,23 @@ export default function Dashboard({ refreshTick = 0 }) {
     return ()=>window.removeEventListener("keydown",h,true);
   },[selTx,pickingCat,addingCat]);
 
+  // Taught-rules screen. `rules` is null both before the first load AND when
+  // the category_rules table is missing (listCategoryRules returns null, the
+  // getReceiptTxIds sentinel) — the entry links key on `rules!==null`, so the
+  // feature is simply absent pre-migration instead of rendering an empty list
+  // that claims nothing has been taught. An epoch counter, not a null
+  // sentinel, drives refetching (the setState(null) gotcha).
+  const [rulesOpen,setRulesOpen]=useState(false);
+  const [rules,setRules]=useState(null);
+  const [rulesEpoch,setRulesEpoch]=useState(0);
+  // Declared ABOVE anySheetOpen deliberately: that computation reads
+  // rulesOpen, and a `const` read before its declaration in the same function
+  // body is a temporal-dead-zone ReferenceError that kills the whole
+  // Dashboard on first render. npm test never renders this component and vite
+  // build never evaluates it, so nothing but the harness or the real app
+  // catches it — it shipped green once. Keep sheet-flag state above the
+  // anySheetOpen line.
+
   // Back gesture closes the open sheet, not the app (backlog Session B item 4).
   // ONE history entry is pushed when the first overlay opens (stacked sheets
   // share it — the tx sheet over a drill-in is one back-swipe, matching the
@@ -2085,7 +2242,7 @@ export default function Dashboard({ refreshTick = 0 }) {
   // window used to push a racing entry and then be flash-closed by the landing
   // pop — and (b) lets onMount consume an {mmSheet:true} entry stranded by a
   // reload-with-sheet-open, so the first back gesture isn't a dead press.
-  const anySheetOpen=!!(selTx||catDrill||taxDrill||schedDebtId||monthPicker||importing||connectingSfin||quickAdd||targetEdit||moveFrom||pickingCat||addingCat);
+  const anySheetOpen=!!(selTx||catDrill||taxDrill||schedDebtId||monthPicker||importing||connectingSfin||quickAdd||targetEdit||moveFrom||pickingCat||addingCat||rulesOpen);
   const anySheetOpenRef=useRef(false);
   anySheetOpenRef.current=anySheetOpen;
   const sheetHistRef=useRef(null);
@@ -2098,7 +2255,7 @@ export default function Dashboard({ refreshTick = 0 }) {
   const closeAllSheets=useCallback(()=>{
     setSelTx(null);setCatDrill(null);setTaxDrill(null);setSchedDebtId(null);setMonthPicker(false);
     setImporting(false);setConnectingSfin(false);setQuickAdd(false);
-    setTargetEdit(null);setMoveFrom(null);setPickingCat(false);setAddingCat(false);
+    setTargetEdit(null);setMoveFrom(null);setPickingCat(false);setAddingCat(false);setRulesOpen(false);
   },[]);
   useEffect(()=>{
     let st=null;
@@ -2143,6 +2300,40 @@ export default function Dashboard({ refreshTick = 0 }) {
     setLearnPrompt({descriptor,key,category,count,previewError});
   }
 
+  // Load the taught rules whenever the epoch moves (mount, open, after a
+  // teach or a delete). Sequence-guarded so a slow response can't overwrite a
+  // newer one; a failure leaves `rules` alone rather than blanking the list.
+  // Keyed on the tab too, not just the epoch: both entry links key on `rules`
+  // being non-null, and the epoch only moves on a teach or a delete — which
+  // are reached THROUGH those links. So a single flaky load at mount would
+  // otherwise hide the feature for the whole session, indistinguishable from
+  // pre-migration. Re-running when the Categories tab is opened gives a
+  // transient failure somewhere to retry (the expected-transactions rule:
+  // a failed load must not latch absence).
+  const rulesSeq=useRef(0);
+  useEffect(()=>{
+    if(tab!=="categories"&&rules!==null)return;
+    const seq=++rulesSeq.current;
+    listCategoryRules()
+      .then(rows=>{ if(rulesSeq.current===seq) setRules(rows); })
+      .catch(err=>console.error("taught rules load failed",err));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[rulesEpoch,tab]);
+  const invalidateRules=useCallback(()=>setRulesEpoch(e=>e+1),[]);
+
+  // Deleting a rule touches no transaction row (mapped_category is written at
+  // classify time), so there is nothing to patch or reload here — just the
+  // list itself. Failure alerts rather than failing silently.
+  async function forgetRule(rule){
+    try{
+      await deleteCategoryRule(rule.merchant_key);
+      invalidateRules();
+    }catch(err){
+      console.error("rule delete failed",err);
+      alert(`Couldn't forget that rule — ${err.message||err}`);
+    }
+  }
+
   // A rule rewrites OTHER transactions, so there is no id to patch and the
   // optimistic path can't help: the lists reloadData doesn't cover have to be
   // refetched or the relabelled rows keep their old category on screen — the
@@ -2179,6 +2370,9 @@ export default function Dashboard({ refreshTick = 0 }) {
         : `Remembered — ${learnPrompt.key} is ${getName(learnPrompt.category)}. No past transactions needed changing; future ones will use it.`);
       await reloadData(year,month);
       await refetchOpenLists();
+      // The taught-rules list has a new row — refresh it too, or the screen
+      // opened right after teaching is missing the rule just created.
+      invalidateRules();
     }catch(err){
       console.error("learning the merchant failed",err);
       setLearnPrompt(null);
@@ -2996,6 +3190,16 @@ export default function Dashboard({ refreshTick = 0 }) {
                         <div style={{fontSize:10,color:"var(--muted)",marginTop:4,lineHeight:1.5}}>
                           Tap one, pick its category, and it'll offer to remember the merchant.
                         </div>
+                        {/* rules!==null means the category_rules table exists;
+                            null is "feature not installed" (listCategoryRules'
+                            sentinel), so pre-migration this link is absent
+                            rather than opening an empty list. */}
+                        {rules&&rules.length>0&&(
+                          <button className="ibtn" onClick={()=>setRulesOpen(true)}
+                            style={{fontSize:10,color:"var(--muted)",minHeight:32,padding:"0 2px",marginTop:2}}>
+                            See what you've taught ›
+                          </button>
+                        )}
                       </div>
                     );
                   })()}
@@ -3015,6 +3219,14 @@ export default function Dashboard({ refreshTick = 0 }) {
               Double-click a name to rename it · ＋ target sets what you want to fund each month; the Budget tab
               is where you put real dollars in
             </div>
+            {rules&&(
+              <div style={{marginTop:10,display:"flex",justifyContent:"center"}}>
+                <button className="ibtn" onClick={()=>setRulesOpen(true)}
+                  style={{fontSize:12,color:"var(--muted)",minHeight:36,padding:"0 10px"}}>
+                  Taught rules ({rules.length}) ›
+                </button>
+              </div>
+            )}
           </div>
         )}
 
@@ -4865,6 +5077,12 @@ export default function Dashboard({ refreshTick = 0 }) {
           rows={drillRows} surf={surf} getName={getName}
           acctById={acctById} acctLabel={acctLabel} acctColor={acctColor}
           onPick={t=>setSelTx(t)} onClose={()=>setCatDrill(null)}/>
+      )}
+
+      {rulesOpen&&rules&&(
+        <RulesSheet rules={rules} monthRows={txs} monthLabel={monthLabel(year,month)}
+          txDescriptor={txDescriptor} surf={surf} getName={getName} getColor={getColor}
+          onDelete={forgetRule} onClose={()=>setRulesOpen(false)}/>
       )}
 
       {/* Property drill-in — same stacking rule as the category sheet above:
