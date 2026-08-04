@@ -85,9 +85,9 @@ entry once shipped.
 | `src/ruleHistory.js` | The learned-rule history-apply core, extracted from `applyCategoryRuleToHistory`: first-token ilike narrowing (`ilikeCandidatePattern`), ordered paging with the **PGRST103 end-of-range contract** (`isRangeExhaustedError`), re-matching via `matchLearnedRule`, skip-already-correct, dryRun, mapped_category-only writes, and `countAll` (counts rows the rule matches AT ALL and returns before any write — dryRun counts only rows it would still CHANGE, so a healthy applied rule reads 0, which in a rules LIST reads as "matches nothing"). Takes injected `fetchPage`/`updateBatch` so it tests with fakes; dataAdapter binds the real client. Covered by `test/categoryRules.test.js`. |
 | `src/taxReport.js` | The Tax tab's pure core, zero imports: `SCHEDULE_E_LINES` + `scheduleEReport` (category→line mapping, refund netting, capital expenses pulled out of the lines, a VISIBLE unmapped bucket — the Uncategorized lesson applied to tax lines), `entityMonthly` (per-property cash P&L) + `entityLedger` (the property drill-in's Money in/out/not-counted sections — totals pinned by test to `entityMonthly`'s sums), `personalDeductionReport` (charitable/medical/taxes-paid buckets), `MILEAGE_RATES` (effective-dated IRS rates — data that goes stale; verify at irs.gov each January) + `mileageDeduction`, and `scheduleECsv` (exports keep the stored positive=out sign; the column name says so). Covered by `test/taxReport.test.js`. |
 | `src/categoryList.js` | **THE ONE category list**, pure (imports only `categoryMap.js`): `userCategoryList` (the `dash:cats` registry ∪ names still carried by real data — a row, a budget, a by-date target, an envelope — minus the three MECHANISM internals, sorted by DISPLAY name), `missingCategories` (the zero-rows both the Categories and Budget lists top up with, so the two are the same set by construction) and `isDuplicateCategoryName` (case-insensitive, and blocks the mechanism names — a hand-made "Return" would collide with the synthesised one). Dashboard computes it ONCE as `userCats`; every tab, picker and sheet reads that. The only deliberate divergences are documented at the `userCats` memo: the mechanism three never enter a picker (but Uncategorized still renders its spending + teach-queue), and the Transactions chips still show only what is in view plus the pinned active filter — otherwise a set filter could not be cleared. `test/categoryList.test.js`. |
-| `src/categoryMap.js` | **SUPERSEDED-IN-PLAN 2026-08-04: Mason decided the app ships NO built-in categories — the user creates every category and teaches it (see `docs/next-iteration-plan-2026-08-04.md` "Harder, high value" §0, which ships AFTER the learned-rules screen). Until that lands the following is still true.** `ERA_CATEGORIES` (the taxonomy source of truth) + `applyAccountRules` (credit-card negatives → "Return", excluded from income); `UNCATEGORIZED`/`FALLBACK_CATEGORY` + `isBudgetableCategory`; pure JS, imported by server code too. No "Housing"/"Income" member; `Uncategorized` IS one. `mapPlaidCategory` was deleted with Plaid — nothing produces those codes now, and it was never called at read time, so historical rows are unaffected. |
+| `src/categoryMap.js` | **The MECHANISM set — no taxonomy lives here any more (2026-08-05).** The app ships NO built-in categories: the user creates every one (`dash:cats`) and teaches it. `ERA_CATEGORIES` survives as the three INTERNAL categories the models depend on — `TRANSFER_CATEGORY` ('Transfers and card payments', read by the card-payment veto), `RETURN_CATEGORY` ('Return', synthesised by `applyAccountRules` for credit-card negatives) and `UNCATEGORIZED` — which must stay hidden from every picker and can't be created, renamed or retired. Plus `FALLBACK_CATEGORY` (= `UNCATEGORIZED`) and `isBudgetableCategory` (exactly the complement of the mechanism three). Pure JS, imported by server code too. |
 | `src/csvImport.js` | Pure CSV-import core (no React/Supabase): `parseCsv`, `detectHeader`, `parseMoney`/`parseDate`, transfer flagging, dedup `plaid_tx_id` hashing, `buildRows`/`analyzeCsv` (both take `rules` + `overlapFrom`). Re-exports `guessCategory`/`transferRawCategory`/`invalidRuleCategories` from `txClassify.js`, which now owns the rule table. Plus `importPlan` (which sections the modal shows, derived from the file's dates vs the feed boundary) and the audit core: `reconcileCsv` (max-matching), `descSimilarity`, `csvDateRange`. Testable in isolation. |
-| `src/txClassify.js` | Learned-rule matching (`merchantKey`, `matchLearnedRule`) + the shared descriptor→category rule table + internal-transfer tagging (`guessCategory`, `transferRawCategory`, `classifyDescription`), validated against `ERA_CATEGORIES` at load. Lifted out of `csvImport.js` when SimpleFIN became a second caller: both feeds get a descriptor and no category, so both derive `mapped_category` at WRITE time from this one table. Pure JS — imported by server code too. |
+| `src/txClassify.js` | Learned-rule matching (`merchantKey`, `matchLearnedRule`) + internal-transfer/card-payment tagging (`guessCategory`, `transferRawCategory`, `classifyDescription`, `TRANSFER_RE`, `CARD_ISSUER_RE`/`STANDALONE_PAYMENT_RE`, `isCardPaymentDescriptor`, `isCardPurchase`). **The descriptor→category keyword table is GONE (2026-08-05)** — nothing is guessed. `guessCategory` is: transfer guards → learned rule → `Uncategorized`. The guards STAY and are REGRESSION-pinned: they protect the spending model, not taste. Lifted out of `csvImport.js` when SimpleFIN became a second caller — both feeds derive `mapped_category` at WRITE time here. Pure JS — imported by server code too. |
 | `src/debtPayoff.js` | The Debt tab's pure core, zero imports: monthly amortization, snowball/avalanche ordering, extra-payment what-if, stall detection (payment ≤ interest) + `MAX_MONTHS` runaway guard. Covered by `test/debtPayoff.test.js` (hand-computed constants). |
 | `src/recurring.js` | Pure recurring-detection core: `detectRecurring` matches the median gap against non-overlapping bands (weekly 5–9 / monthly 24–32 / annual 350–380), near-tolerance ±2/±4/±15 days, due-soon 2/7/30; `CANDIDATE_WINDOW_MONTHS` 40 (the first-shipped 25 forgot the LAST renewal is itself up to a year old — annual items vanished ~11 months a year; corrected arithmetic in the constant's comment, year-round sweep test pins it). Amount/gap gates + the `priceCreep` baseline judge each cadence over a RECENT slice anchored at the group's newest charge (`evalDays` 84/190/whole-group — else a mid-window price change drops a LIVE sub, and a settled hike re-flags as creep); with a clock, items overdue past `staleDays` (two missed cycles — 14/60, annual capped 60) drop as cancelled. `monthlyAmount` is the PER-CHARGE median (historical name) — render with a cadence suffix /wk /mo /yr (`spendingContext.js` suffixes too); the headline and sort use `monthlyEquivalent` (×52/12, ×1, ÷12). Detection excludes transfers by CATEGORY, never `_internal`. Household ignore list: ONE settings row `rec:ignore` (settings table per Mason's ruling, NOT localStorage; tolerant `parseIgnoreList`), applied at RENDER only — detection stays unfiltered, so toggling never refetches or touches the lazy cache's null sentinel; the WRITE is a single-key read-merge-write (`updateRecIgnore` → pure `toggleIgnoreKey`), never the whole array from component state (a failed mount-time read must not wipe the other phone's ignores), same-device toggles SERIALIZED through a promise chain; the two-phone race stays accepted single-key last-write-wins. Band EDGES + both guards REGRESSION-pinned in `test/recurring.test.js` (thresholds pinned as documentation). |
 | `src/netWorth.js` | Pure `netWorthSeries` (only import `displayBalance`): folds `balance_snapshots` into `[{date,total}]`, carrying each account's LAST value forward (a day where one bank reported must not read the others as zero; no snapshot yet ⇒ contributes 0). Totals arrive SIGNED (debts negated inside the fold) — render directly, NEVER through `displayBalance` again. Hidden accounts EXCLUDED (Mason 2026-08-03): filtered in `getNetWorthSeries` (dataAdapter) so the fold never sees them or their snapshots. Degrades to `[]` pre-snapshots-table. `test/netWorth.test.js`. |
@@ -261,14 +261,28 @@ playwright-core screenshot (`executablePath:'/opt/pw-browsers/chromium'`,
   payments" is NO LONGER a blanket spending exclusion (2026-08-03): internal
   is decided by STRUCTURE (the pairing), and the category's only remaining
   totals role is the card-payment veto — see the linked-boundary model below.
-- **`Uncategorized` is the fallback, and it is a real taxonomy member.** It IS
-  counted as spending (the money left) but is never budgetable and is never
-  offered in the manual category picker — the way to undo a wrong pick is
-  "Reset to automatic". It exists because the old fallback was "Shopping and
+- **THE APP SHIPS NO CATEGORIES (Mason, 2026-08-04; shipped 2026-08-05).** The
+  user creates every category — `dash:cats` is THE category system (colours in
+  `dash:colors`, rename aliases in `dash:names`) — and teaches which merchants
+  belong to it; `category_rules` + `merchantKey` make that automatic for every
+  later import and sync. There is no seed taxonomy and no keyword guessing.
+  This REVERSES the old "ERA_CATEGORIES is the taxonomy source of truth" rule:
+  a household never chose those ~18 names, and forcing every merchant into one
+  produced confidently-wrong answers that read exactly like correct ones
+  (NEWREZ, a mortgage, in "Utilities" at ~$3.8k/mo).
+- **`Uncategorized` is where every transaction STARTS, and this design needs it
+  more, not less.** It IS counted as spending (the money left) but is never
+  budgetable and is never offered in the picker — the way to undo a wrong pick
+  is "Reset to automatic". It exists because the old fallback was "Shopping and
   gear", a category actually in use, so "we don't know" was indistinguishable
   from a confident answer: 46% of a realistic merchant corpus landed there.
-  Now the unknown is visible and sized. Don't reintroduce a real category as
-  the fallback.
+  Now the unknown is visible and sized. Never reintroduce a real category as
+  the fallback, and never reintroduce a guess to avoid showing it.
+- **Three "categories" are MECHANISM, not taste** — `Transfers and card
+  payments` (the card-payment veto reads it; drop it and card payments count as
+  spending), `Return` (synthesised for credit-card negatives), `Uncategorized`.
+  They are internals: hidden from every picker, never created/renamed/retired
+  by the user, and `isBudgetableCategory` is exactly their complement.
 - **CSV history must never overlap a live feed.** `csv:` and `sfin:` dedup ids
   are separate namespaces and cannot see each other, so a CSV covering dates the
   feed already has double-counts every transaction in the overlap, with nothing
@@ -276,8 +290,10 @@ playwright-core screenshot (`executablePath:'/opt/pw-browsers/chromium'`,
   row dated on or after that account's earliest synced transaction
   (`getFeedCoverageStart` → `overlapFrom` → `isOverlap`). The boundary day
   itself belongs to the feed. This is what makes "rebuild history from CSV" safe.
-- **Categorization precedence at WRITE time:** learned rule (`category_rules`)
-  → keyword table (`src/txClassify.js`) → `Uncategorized`. At READ time
+- **Categorization precedence at WRITE time:** transfer/card-payment guards
+  (`src/txClassify.js`) → learned rule (`category_rules`) → `Uncategorized`.
+  There is no keyword table any more — an untaught merchant stays
+  Uncategorized. At READ time
   `user_category` still wins over all of it. Learned rules do NOT override the
   transfer/card-payment guards — those protect spending totals, and a rule that
   made card payments count as spending would be a footgun. Both write paths
@@ -588,7 +604,7 @@ files / Gotchas, plus the few rules noted inline here that live nowhere else.
 - **Rental tracking + tax prep (Tax tab)** — migration `20260730000001`,
   applied to PROD 2026-07-30; rules in Conventions.
 - **Category filter chips (Transactions tab)** — one chip per category
-  PRESENT in the rows in view (never the whole taxonomy, never
+  PRESENT in the rows in view (never the whole category list, never
   `spending.groups` — its `isSpend()` pass omits transfers/Return/loan rows
   visibly in the list), AND-composing with the account chips; pool is
   account-filtered but NOT category-filtered (a selection can't erase the
@@ -758,6 +774,26 @@ files / Gotchas, plus the few rules noted inline here that live nowhere else.
   throttle is server-side pull throttling — nothing client-side syncs hourly).
   `test/invalidationMatrix.test.js` + `test/sync.test.js`. No migration.
 
+- **User-owned categories (2026-08-05, Mason's decision — REVERSES the seed
+  taxonomy)** — migration `20260805000001_user_owned_categories.sql`. The app
+  ships no categories: `ERA_CATEGORIES` is now the mechanism three,
+  `src/txClassify.js`'s descriptor→category keyword table is deleted (the
+  transfer/card-payment guards stay — they protect the spending model), and
+  `DEFAULT_SCHEDULE_E_MAP` is gone so tax mapping is fully user-driven through
+  `tax:maps`. `src/categoryList.js` is the ONE list every tab reads (see its
+  key row); the Budget tab's old "budget another category" picker was removed
+  with it — the list is topped up to `userCats`, so that picker's set was
+  empty by construction and its button never rendered. The migration
+  PRESERVES before it wipes (legacy columns + `legacy_budgets` /
+  `legacy_budget_months` / `legacy_category_rules` archives, gated on a
+  `legacy_categories_saved` marker so a re-run can't launder post-wipe labels
+  into the archive) and **must be pasted AFTER the deploy is live** — the old
+  build derives `mapped_category` at write time, so a sync in the paste-to-
+  deploy window writes fresh taste labels the wipe already passed over.
+  `category_rules` is wiped with the rest: with the keyword table gone, rules
+  are the only categorizer, so a surviving rule re-mints a deleted category
+  onto the next synced row. `test/userOwnedCategories.test.js`.
+
 - **Taught-rules screen (2026-08-04)** — `RulesSheet` (Dashboard.jsx), two
   low-emphasis entry points (a `Taught rules (N) ›` footer under the
   Categories list, `See what you've taught ›` in the Uncategorized
@@ -776,8 +812,8 @@ files / Gotchas, plus the few rules noted inline here that live nowhere else.
   `mapped_category` is written at classify time and nothing recomputes it at
   read time — so nothing is patched or reloaded and the confirm says exactly
   that; no undo and no auto-reclassify in v1 (a true undo needs per-row
-  pre-rule values, and "re-run the keyword table without this rule" can write
-  a third category nobody ever saw). `rulesOpen` is in both `anySheetOpen` and
+  pre-rule values; with the keyword table now gone, a rule's deletion simply
+  leaves its rows on their stored label until something re-teaches them). `rulesOpen` is in both `anySheetOpen` and
   `closeAllSheets`, with `useEscClose` inside the component. No migration.
 - **Phone-first UX batch (Session B, 2026-08-04)** — six backlog items, no
   migration: Unhide confirm surfaces the guessed account type (pure
@@ -840,8 +876,15 @@ files / Gotchas, plus the few rules noted inline here that live nowhere else.
 
 ## Pending branches
 
-None in code. **Outstanding ops/data tasks from the 2026-08-03 double-count
-session** (diagnosis archived in `docs/double-count-diagnosis-2026-08-03.md`):
+**MIGRATION AWAITING MASON: `20260805000001_user_owned_categories.sql`** (the
+user-owned category wipe). Unlike every other migration here it is pasted
+**AFTER** the deploy is confirmed serving the new build — the file's DEPLOY
+ORDER block says why, and its verification SELECT must be run as a separate
+statement with every boolean column reading true. It archives before it
+deletes (`legacy_*` tables + columns), so it is reversible.
+
+Otherwise none in code. **Outstanding ops/data tasks from the 2026-08-03
+double-count session** (diagnosis archived in `docs/double-count-diagnosis-2026-08-03.md`):
 
 - ~~Set a spend cap on the Anthropic API key~~ **DONE 2026-08-04** — $25/mo
   cap, email alert at $10, in the Anthropic console. This IS the assistant's
@@ -872,8 +915,10 @@ session** (diagnosis archived in `docs/double-count-diagnosis-2026-08-03.md`):
   mistyped `depository/checking` under the Capital One org, its sibling is
   `credit` under the Discover org. Both hidden today (contributing $0); keep
   the credit-typed one. Eyeball the type on EVERY account at unhide time.
-- **Recategorize NEWREZ** out of "Utilities" (~$3.8k/mo, counted once,
-  wrong bucket) — learned rule or `user_category`.
+- **Recategorize NEWREZ** — RESOLVED IN KIND by the 2026-08-05 category wipe:
+  "Utilities" no longer exists and the rows read Uncategorized, so this is now
+  part of retraining (teach it whatever category Mason creates for it) rather
+  than a wrong-bucket fix.
 - **Statement backfill** — pre-May-2026 history for BECU savings, Cashback
   Debit and the cards via CSV/PDF import (the coverage panel on the Accounts
   tab shows each account's gap). Note: Checking (2644) rows end 2026-04-03
@@ -904,9 +949,9 @@ chats + search refinement — shipped 2026-08-04) and deleted per its own rule.
 The forward-looking doc is **`docs/next-iteration-plan-2026-08-04.md`**.
 
 **Worklist status: one specced item left in that doc** (`coverage_shortfall`
-surfacing — 2026-08-04 sweep; the learned-rules screen SHIPPED 2026-08-04,
-which also clears the stated prerequisite for the doc's Harder §0 user-owned
-category system); no other code backlog.
+surfacing — 2026-08-04 sweep). The learned-rules screen SHIPPED 2026-08-04 and
+**Harder §0, the user-owned category system, SHIPPED 2026-08-05** (see Merged
+features; its migration is the one Pending item). No other code backlog.
 `docs/improvement-backlog-2026-08-04.md` (the verified six-dimension audit) is
 **worked through — all five sessions A–E shipped 2026-08-04** and its three
 Section-2 questions are decided; it survives as an audit record. What remains

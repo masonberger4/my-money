@@ -1302,8 +1302,8 @@ export async function importCsvTransactions(accountId, rows, source = 'csv') {
 // like every stored row. The helper never reinterprets the sign.
 //
 // Category: derived at WRITE time via the shared precedence in
-// classifyDescription — learned rule (from `rules`) → keyword table →
-// Uncategorized — with `accountType` passed so a card purchase is never read as
+// classifyDescription — transfer/card-payment guards → learned rule (from
+// `rules`) → Uncategorized (there is no keyword table any more) — with `accountType` passed so a card purchase is never read as
 // a card payment. `user_category` is set ONLY when the user explicitly picked
 // one in the form; at read time it still wins over mapped_category.
 export function buildManualTxRow({ date, amount, description, category } = {}, { rules, accountType } = {}) {

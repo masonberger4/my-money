@@ -735,7 +735,10 @@ function QuickAddSheet({accounts,manualAccounts,allCats,getName,getColor,acctLab
         </>)}
 
         <div style={{fontSize:12,color:"var(--muted)",marginBottom:8}}>
-          Category <span style={{opacity:.7}}>— optional, auto-detected if left blank</span>
+          {/* No auto-detection to promise any more: the keyword classifier is
+              gone, so a blank pick lands in Uncategorized unless a learned rule
+              (or the transfer/card-payment guard) already covers the merchant. */}
+          Category <span style={{opacity:.7}}>— optional; blank stays Uncategorized until you teach it</span>
         </div>
         <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:16}}>
           {allCats.map(cat=>{
@@ -1315,13 +1318,9 @@ export default function Dashboard({ refreshTick = 0 }) {
   // --- Envelope budgeting (Budget tab) ---
   const [envelopes,setEnvelopes]=useState(null);
   const [income,setIncome]=useState(null);
-  // Categories the user has pulled into the Budget tab to start an envelope in,
-  // but hasn't assigned to yet — local only, nothing is written until they do.
-  const [extraEnvCats,setExtraEnvCats]=useState([]);
   const [targetEdit,setTargetEdit]=useState(null);   // category name
   const [moveFrom,setMoveFrom]=useState(null);       // category name
   const [envBusy,setEnvBusy]=useState(false);
-  const [pickingCat,setPickingCat]=useState(false);
   const monthRef=useRef(`${now.getFullYear()}-${now.getMonth()+1}`);
   const loadSeq=useRef(0);
   // Orders the two writers of envelope state (reloadData and runEnvelopeWrite)
@@ -2208,17 +2207,16 @@ export default function Dashboard({ refreshTick = 0 }) {
   // its listener each commit). stopImmediatePropagation keeps a single press
   // from closing two layers.
   useEffect(()=>{
-    if(!(selTx||pickingCat||addingCat))return;
+    if(!(selTx||addingCat))return;
     const h=e=>{
       if(e.key!=="Escape")return;
       e.stopImmediatePropagation();
       if(addingCat)setAddingCat(false);
-      else if(pickingCat)setPickingCat(false);
       else setSelTx(null);
     };
     window.addEventListener("keydown",h,true);
     return ()=>window.removeEventListener("keydown",h,true);
-  },[selTx,pickingCat,addingCat]);
+  },[selTx,addingCat]);
 
   // Taught-rules screen. `rules` is null both before the first load AND when
   // the category_rules table is missing (listCategoryRules returns null, the
@@ -2248,7 +2246,7 @@ export default function Dashboard({ refreshTick = 0 }) {
   // window used to push a racing entry and then be flash-closed by the landing
   // pop — and (b) lets onMount consume an {mmSheet:true} entry stranded by a
   // reload-with-sheet-open, so the first back gesture isn't a dead press.
-  const anySheetOpen=!!(selTx||catDrill||taxDrill||schedDebtId||monthPicker||importing||connectingSfin||quickAdd||targetEdit||moveFrom||pickingCat||addingCat||rulesOpen);
+  const anySheetOpen=!!(selTx||catDrill||taxDrill||schedDebtId||monthPicker||importing||connectingSfin||quickAdd||targetEdit||moveFrom||addingCat||rulesOpen);
   const anySheetOpenRef=useRef(false);
   anySheetOpenRef.current=anySheetOpen;
   const sheetHistRef=useRef(null);
@@ -2675,9 +2673,9 @@ export default function Dashboard({ refreshTick = 0 }) {
   const userCats=useMemo(()=>userCategoryList({
     registry:customCatNames,
     inUse:[...cats.map(c=>c.label),...Object.keys(budgets),...Object.keys(byDate),
-      ...(envelopes?.categories||[]).map(r=>r.category),...extraEnvCats,...txs.map(t=>t.category)],
+      ...(envelopes?.categories||[]).map(r=>r.category),...txs.map(t=>t.category)],
     getName,
-  }),[customCatNames,cats,budgets,byDate,envelopes,extraEnvCats,txs,getName]);
+  }),[customCatNames,cats,budgets,byDate,envelopes,txs,getName]);
 
   // The categories offered as filter chips on the Transactions tab: the ones
   // actually PRESENT in the rows in view — see difference 2 above.
@@ -2740,8 +2738,7 @@ export default function Dashboard({ refreshTick = 0 }) {
   // same categories the Categories tab does. Before this, an envelope only
   // appeared once money had been put in it — which under a taxonomy of 22
   // built-ins was a mercy and under a hand-made registry is just the tabs
-  // disagreeing. A topped-up row is the same zero row extraEnvCats produced,
-  // and carries no assignment: `assigned` 0 with no `budget_months` row is
+  // disagreeing. A topped-up row carries no assignment: `assigned` 0 with no `budget_months` row is
   // exactly "no envelope" to the walk (the zero-row-equivalence rule), so
   // nothing here writes, rolls over or changes a total.
   const envMap={};
@@ -2749,8 +2746,7 @@ export default function Dashboard({ refreshTick = 0 }) {
   const emptyEnvRow=k=>({category:k,assigned:0,rolledOver:0,spent:0,
     available:0,target:budgets[k]??null,targetKind:"monthly",targetDate:null,rollover:true});
   const envRows=[...(envelopes?.categories||[]),
-    ...missingCategories(userCats,new Set([...Object.keys(envMap),...extraEnvCats])).map(emptyEnvRow),
-    ...extraEnvCats.filter(k=>!envMap[k]).map(emptyEnvRow)];
+    ...missingCategories(userCats,new Set(Object.keys(envMap))).map(emptyEnvRow)];
   // Uncategorized (and any transfer bucket) is bookkeeping, not a budget — a
   // budget on it would be a budget on the classifier's ignorance. Its spending
   // still renders (the size of the unknown stays visible), but it takes no
@@ -2791,11 +2787,11 @@ export default function Dashboard({ refreshTick = 0 }) {
   const expMatchedShown=(expected?.matched||[]).filter(r=>String(r.due_date).slice(0,7)===monthKeyStr);
   const expByCat=expectedByCategory(expShown);
   const expShownTotal=expShown.reduce((s,r)=>s+(Number(r.amount)||0),0);
-  // Categories with no envelope row yet, offered by the "budget another
-  // category" picker. Now that envRows is topped up to the one list this is
-  // normally EMPTY — which is the point: the picker's job has become "create a
-  // category", and the sheet says so and offers the ＋ New category button.
-  const unbudgetedCats=missingCategories(userCats,new Set(envRows.map(r=>r.category)));
+  // NOTE: there is deliberately no "budget another category" picker any more.
+  // envRows is topped up to the one list (userCats), so every category the user
+  // has ALREADY has a row here — the set that picker used to offer is empty by
+  // construction. The only thing the Budget tab can still need is a category
+  // that doesn't exist yet, so the button below opens the create sheet directly.
 
   // Assigning during render is a side effect; the ref has to track the
   // *committed* month so an in-flight envelope write can tell it landed on a
@@ -3534,7 +3530,7 @@ export default function Dashboard({ refreshTick = 0 }) {
 
               {envRows.length===0&&(
                 <div style={{fontSize:12,color:"var(--muted)",textAlign:"center",padding:"20px 12px",lineHeight:1.6}}>
-                  No envelopes yet. Add a category below and assign it some money.
+                  No envelopes yet. Make a category below, then assign it some money.
                 </div>
               )}
 
@@ -3647,12 +3643,10 @@ export default function Dashboard({ refreshTick = 0 }) {
                 );
               })}
 
-              {unbudgetedCats.length>0&&(
-                <button className="ibtn" onClick={()=>setPickingCat(true)}
-                  style={{fontSize:11,width:"100%",justifyContent:"center",marginTop:4}}>
-                  + Budget another category
-                </button>
-              )}
+              <button className="ibtn" onClick={()=>{setAddCatFor(null);setAddingCat(true);}}
+                style={{fontSize:11,width:"100%",justifyContent:"center",marginTop:4}}>
+                ＋ New category
+              </button>
 
               <div style={{marginTop:16,fontSize:11,color:"var(--muted)",background:"var(--bg)",borderRadius:8,padding:"8px 12px",lineHeight:1.6}}>
                 Tap the amount to assign real dollars · tap what's been spent to see the transactions behind it ·
@@ -5443,41 +5437,6 @@ export default function Dashboard({ refreshTick = 0 }) {
           }}
           onClose={()=>setMoveFrom(null)}
           onMove={(f,t,amt)=>{setMoveFrom(null);doMove(f,t,amt);}}/>
-      )}
-
-      {/* Pull a category into the Budget tab so it can be assigned to */}
-      {pickingCat&&(
-        <div className="overlay" onClick={()=>setPickingCat(false)}>
-          <div className="modal" role="dialog" aria-modal="true" onClick={e=>e.stopPropagation()} style={{maxHeight:"70vh",overflowY:"auto"}}>
-            <div style={{fontSize:16,fontWeight:600,marginBottom:4,color:"var(--text)"}}>Budget another category</div>
-            <div style={{fontSize:12,color:"var(--muted)",marginBottom:16}}>
-              Adds it to this month's budget. Nothing is saved until you assign it money or set a target.
-            </div>
-            <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:18}}>
-              {unbudgetedCats.map(c=>(
-                <button key={c} onClick={()=>{setExtraEnvCats(p=>p.includes(c)?p:[...p,c]);setPickingCat(false);}}
-                  style={{fontSize:11,fontWeight:600,padding:"5px 10px",borderRadius:20,fontFamily:"inherit",cursor:"pointer",
-                    background:"var(--bg)",color:"var(--muted)",border:"1px solid var(--border)"}}>
-                  {getName(c)}
-                </button>
-              ))}
-              {/* Every category the user has already has an envelope row (the
-                  Budget list is topped up to the one list), so this picker is
-                  usually empty and its real job is creating a category. */}
-              {unbudgetedCats.length===0&&(
-                <div style={{fontSize:11,color:"var(--muted)",lineHeight:1.5}}>
-                  Every category you've made already has a row above. Make a new one to budget it.
-                </div>
-              )}
-            </div>
-            <button onClick={()=>{setPickingCat(false);setAddCatFor(null);setAddingCat(true);}}
-              style={{width:"100%",padding:"8px 0",borderRadius:8,border:"none",background:"var(--accent)",color:"var(--accent-text)",
-                fontFamily:"inherit",fontSize:14,fontWeight:500,cursor:"pointer",marginBottom:8}}>
-              ＋ New category
-            </button>
-            <button onClick={()=>setPickingCat(false)} className="ibtn" style={{width:"100%",justifyContent:"center"}}>Cancel</button>
-          </div>
-        </div>
       )}
 
       {/* Categories: make one, or retire one. This sheet is now the ONLY way a
