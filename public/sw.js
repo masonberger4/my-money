@@ -10,7 +10,7 @@
 //
 // Bump CACHE_VERSION on any change to this file or the precache list.
 
-const CACHE_VERSION = 'v4';
+const CACHE_VERSION = 'v5';
 const SHELL_CACHE = `shell-${CACHE_VERSION}`;
 const ASSET_CACHE = `assets-${CACHE_VERSION}`;
 
@@ -64,11 +64,33 @@ self.addEventListener('fetch', (event) => {
   }
 });
 
+// Cap on fingerprinted /assets/* entries. Vite fingerprints mean stale
+// entries are harmless but NOT free: every deploy (several/day) mints new
+// names, so without a prune the cache grows ~0.7–2.5 MB per deploy until iOS
+// evicts the PWA's storage — and the whole offline shell with it. One built
+// app is well under 20 files; 40 keeps the live set plus one previous deploy.
+const MAX_ASSET_ENTRIES = 40;
+
+async function pruneAssetCache() {
+  try {
+    const cache = await caches.open(ASSET_CACHE);
+    const keys = await cache.keys(); // insertion order: oldest first
+    for (const key of keys.slice(0, Math.max(0, keys.length - MAX_ASSET_ENTRIES))) {
+      await cache.delete(key);
+    }
+  } catch {
+    // Pruning is best-effort; never let it break a navigation response.
+  }
+}
+
 async function networkFirstShell(req) {
   try {
     const fresh = await fetch(req);
     const cache = await caches.open(SHELL_CACHE);
     if (fresh.ok) cache.put('/', fresh.clone());
+    // A successful navigation means a (possibly new) deploy just loaded —
+    // prune old fingerprinted assets in the background.
+    pruneAssetCache();
     return fresh;
   } catch {
     const cache = await caches.open(SHELL_CACHE);
