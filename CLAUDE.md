@@ -747,10 +747,13 @@ files / Gotchas, plus the few rules noted inline here that live nowhere else.
 - **Month-navigation cache reuse (2026-08-04, Mason's decision)** — plain
   month navigation reuses cached rows (`reloadData` no longer unconditionally
   clears spendCache/rangeMemo); invalidation only on write/sync/import + the
-  explicit Refresh button, with `runSync` completion hooked to invalidate.
-  Accepted staleness window: another device's write, bounded by the hourly
-  sync + Refresh. `test/invalidationMatrix.test.js` + `test/sync.test.js`.
-  No migration.
+  explicit Refresh button, with `runSync` completion hooked to invalidate —
+  plus the foreground-return `refreshTick` bump (App.jsx visibility/focus →
+  Dashboard's fetchData effect), which drops the caches so a re-foregrounded
+  PWA refetches ANOTHER device's writes (review fix: without it that path
+  replayed the warm memo and only balances freshened; note the sync's hourly
+  throttle is server-side pull throttling — nothing client-side syncs hourly).
+  `test/invalidationMatrix.test.js` + `test/sync.test.js`. No migration.
 
 ## Pending branches
 

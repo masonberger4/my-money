@@ -1282,6 +1282,10 @@ export default function Dashboard({ refreshTick = 0 }) {
   const [savedBusy,setSavedBusy]=useState(false);
   const chatSavedSnap=useRef(null);
   const didInitialSync=useRef(false);
+  // Last refreshTick this Dashboard has acted on — seeded with the mount-time
+  // value so the initial load doesn't double-invalidate (the first fetch has
+  // no warm cache to drop).
+  const lastRefreshTick=useRef(refreshTick);
   // {last_pulled_at,last_error} when the SimpleFIN feed looks unhealthy —
   // checked ONCE per mount, after the initial sync (never a status fetch on
   // every dashboard load; that was the LinkAccount antipattern).
@@ -1577,8 +1581,10 @@ export default function Dashboard({ refreshTick = 0 }) {
     // the 6-month window. The caches drop at the moments rows can actually
     // move: every adapter write path, sync completion (the setSyncCompletionHook
     // registration in dataAdapter — Refresh syncs, so it's covered), CSV/PDF
-    // import, and the server-side mutations handled at their call sites
-    // (handleUnlink, the SimpleFIN modal's onConnected).
+    // import, the server-side mutations handled at their call sites
+    // (handleUnlink, the SimpleFIN modal's onConnected) — plus the
+    // foreground-return refreshTick bump in the fetchData effect, which is
+    // the one path that catches ANOTHER device's writes.
     const eseq=++envSeq.current;
     try{
       const[ov,sp,tx,cf,ac,bu,en,inc,ents,mv]=await Promise.all([
@@ -1652,6 +1658,18 @@ export default function Dashboard({ refreshTick = 0 }) {
     if(!ready)return;
     const syncFirst=!didInitialSync.current;
     if(syncFirst)didInitialSync.current=true;
+    // A refreshTick bump is App.jsx's foreground-return/focus signal — the
+    // stale-PWA case (screen frozen while the OTHER device wrote or the server
+    // sync landed rows via its session). None of the four invalidation moments
+    // fire on THIS device for that, so without this drop the reload below is
+    // answered by the warm rangeMemo/spendCache and paints the pre-background
+    // rows while the un-memoised balance reads freshen — the two halves of the
+    // screen disagree until a manual Refresh. Ref-compared so a re-run caused
+    // by year/month/ready (plain month navigation) still reuses the caches.
+    if(refreshTick!==lastRefreshTick.current){
+      lastRefreshTick.current=refreshTick;
+      invalidateEnvelopeSpending();
+    }
     fetchData(year,month,{sync:syncFirst}).then(()=>{
       if(!syncFirst)return;
       // The sync response can't answer "is the feed stale?" — a clean pull
@@ -2223,7 +2241,9 @@ export default function Dashboard({ refreshTick = 0 }) {
       await reloadData(year,month);
     }catch(err){
       console.error("unlink failed",err);
-      window.alert(`Unlink failed: ${err.detail?.error||err.message}`);
+      // Prefer the human message the sanitized 500 body carries (the Ask tab
+      // pattern) — detail.error is the stable machine code, not display text.
+      window.alert(`Unlink failed: ${err.detail?.message||err.detail?.error||err.message}`);
     }finally{
       setUnlinking(false);
     }

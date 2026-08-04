@@ -128,3 +128,48 @@ test('the server-side mutations reloadData no longer covers invalidate at their 
     'onConnected must invalidate — permanent delete and disconnect run no sync'
   );
 });
+
+// --- Foreground return (review fix, 2026-08-04) -------------------------------
+// App.jsx's visibilitychange/focus handler bumps refreshTick precisely for the
+// stale-PWA case — ANOTHER device's writes (or the server sync landing rows
+// via its session) while this screen was frozen. None of the four invalidation
+// moments fire on THIS device for that, so the refreshTick-driven fetchData
+// effect must drop the caches itself, or it replays the warm rangeMemo/
+// spendCache while the un-memoised balance reads freshen (visible disagreement
+// with no alarm anywhere — the silent class again).
+
+test('the fetchData effect invalidates on a refreshTick bump (foreground return)', () => {
+  const code = stripComments(dashboard);
+  const start = code.indexOf('const syncFirst=!didInitialSync.current');
+  assert.notEqual(start, -1, 'fixture assumption: the fetchData effect gates on didInitialSync');
+  const body = code.slice(start, code.indexOf('},[year,month,ready,refreshTick,fetchData]', start));
+  assert.ok(body.length > 0 && body.length < 4000, 'fixture assumption: effect body sliced');
+  // Ref-compared: a tick CHANGE invalidates; plain month-nav re-runs must not.
+  assert.ok(
+    /refreshTick!==lastRefreshTick\.current/.test(body),
+    'the effect must compare refreshTick against the last acted-on tick — invalidating unconditionally would defeat month-navigation cache reuse'
+  );
+  const guarded = body.slice(body.indexOf('refreshTick!==lastRefreshTick.current'));
+  assert.ok(
+    guarded.includes('invalidateEnvelopeSpending()'),
+    'a changed refreshTick must drop the caches before fetchData, or the reload is served the pre-background rows from the warm memo'
+  );
+  assert.ok(
+    guarded.indexOf('invalidateEnvelopeSpending()') < guarded.indexOf('fetchData('),
+    'the invalidation must precede fetchData in the effect'
+  );
+});
+
+test('lastRefreshTick is seeded with the mount-time tick (initial load does not invalidate)', () => {
+  const code = stripComments(dashboard);
+  assert.ok(
+    /const lastRefreshTick=useRef\(refreshTick\)/.test(code),
+    'seed the ref with the prop so only a subsequent bump — not mount — invalidates'
+  );
+});
+
+test('App.jsx still bumps refreshTick on visibility return (the signal this wiring rides)', () => {
+  const app = stripComments(readFileSync(join(root, 'src', 'App.jsx'), 'utf8'));
+  assert.ok(app.includes('visibilitychange'), 'the foreground-return listener exists');
+  assert.ok(/setRefreshTick\(t\s*=>\s*t\s*\+\s*1\)/.test(app), 'and it bumps the tick Dashboard consumes');
+});

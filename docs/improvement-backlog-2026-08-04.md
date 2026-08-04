@@ -173,8 +173,10 @@ All five items landed, with tests for every guard:
    invalidation happens only on write/sync/import + the explicit Refresh
    button, and `runSync` completion is hooked to invalidate too.
    `test/invalidationMatrix.test.js` pins the matrix; `test/sync.test.js`
-   covers the runSync completion hook. Accepted staleness window: another
-   device's write, bounded by the hourly sync + Refresh.
+   covers the runSync completion hook. Review fix (same session): the
+   foreground-return `refreshTick` bump also invalidates, so a
+   re-foregrounded PWA refetches another device's writes instead of
+   replaying the warm memo.
 2. **Durable assistant throttle — DECIDED: NO.** The per-instance 10/min
    throttle stays as-is; no settings-row/KV limiter (the 2026-08-01
    "pragmatic > enterprise" trade stands). The dollar bound is an **ops

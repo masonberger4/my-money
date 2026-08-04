@@ -74,3 +74,22 @@ test('the four named routes return stable codes from their catch-alls', () => {
     assert.ok(src.includes(`error: '${code}'`), `${file} missing stable code ${code}`);
   }
 });
+
+// --- Client display sites of the sanitized bodies ------------------------------
+// The sanitized 500 shape is {error: stableCode, message: humanText}. Every
+// client site that renders one must prefer detail.message — showing the code
+// ('unlink_failed') is the cosmetic regression the sanitization review caught
+// at handleUnlink's alert.
+test('handleUnlink alert prefers detail.message over the stable code', () => {
+  const dash = readFileSync(
+    fileURLToPath(new URL('../src/components/Dashboard.jsx', import.meta.url)),
+    'utf8'
+  );
+  const start = dash.indexOf('async function handleUnlink');
+  assert.notEqual(start, -1, 'fixture assumption: handleUnlink exists');
+  const body = dash.slice(start, dash.indexOf('const cats=', start));
+  assert.ok(
+    body.includes('err.detail?.message||err.detail?.error||err.message'),
+    'the unlink failure alert must read detail.message first (the Ask tab / describeError pattern)'
+  );
+});
