@@ -774,6 +774,20 @@ files / Gotchas, plus the few rules noted inline here that live nowhere else.
   reload-stranded `{mmSheet:true}` entry at mount. Don't hand-roll
   history calls beside it.
 
+- **Performance batch (Session C, 2026-08-04)** — five backlog items, no
+  migration, no behavior change: vendor chunk split (vite `manualChunks` —
+  react/supabase-js survive deploys in the sw cache; main chunk 174 kB gz →
+  75 kB gz app + ~101 kB gz stable vendor); sw.js ASSET_CACHE prune
+  (cap 40 entries, **`/assets/*` keys ONLY** — the stable-URL precache
+  entries also live in ASSET_CACHE and cache hits never refresh insertion
+  order, so a whole-cache prune evicts the fonts; CACHE_VERSION now v6);
+  woff2 preloads in index.html (`crossorigin` required even same-origin);
+  narrow columns on the Recurring 40-month fetch; and Trends is lazy like
+  recurring/debt/tax — epoch-invalidated via `invalidateTrends`, which
+  **bumps `trendsSeq.current` itself**: the effect's own bump sits behind the
+  tab guard, so an invalidation while another tab is active would otherwise
+  let an in-flight load cache a pre-invalidation snapshot.
+
 ## Pending branches
 
 None in code. **Outstanding ops/data tasks from the 2026-08-03 double-count
@@ -840,8 +854,8 @@ active development). The file remains only as the audit record + that
 deferral's notes.
 
 **Active worklist:** `docs/improvement-backlog-2026-08-04.md` (six-dimension
-audit, verified). Session A + the month-navigation caching decision shipped
-2026-08-04 (see Merged features); Sessions B–E remain. Mason's 2026-08-04
+audit, verified). Sessions A–C + the month-navigation caching decision shipped
+2026-08-04 (see Merged features); Sessions D–E remain. Mason's 2026-08-04
 decisions recorded there: month-nav caching yes (shipped), no durable
 assistant throttle (the Anthropic spend cap is the Pending ops task), and the
 **dataAdapter.js internal split (backlog Session D item 4) is SCHEDULED as

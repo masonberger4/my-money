@@ -1143,16 +1143,29 @@ export default function Dashboard({ refreshTick = 0 }) {
   const [overview,setOverview]=useState(null);
   const [spending,setSpending]=useState(null);
   const [transactions,setTransactions]=useState(null);
+  // Trends data is LAZY like recurring/debt/tax (2026-08-04 perf session):
+  // reloadData no longer fetches the 6-month cash-flow window + the movers
+  // pair — the Trends effect below does, on first tab visit, cached until
+  // invalidateTrends() (epoch-bumped, the taxEpoch pattern — never a bare
+  // null sentinel, the setState(null) gotcha).
   const [cashFlow,setCashFlow]=useState(null);
   // Biggest movers (Trends): viewed month vs the month before, through the ONE
   // unified isSpend() model — the same count the cash-flow bars sum
-  // (cashSpending delegates to sumSpending). Plain reload
-  // state like `spending`: refetched by every reloadData, so it self-heals
-  // after edits (no lazy cache, no sentinel). Shape {y,m,list} — MONTH-TAGGED,
+  // (cashSpending delegates to sumSpending). Shape {y,m,list} — MONTH-TAGGED,
   // because the card header derives its "X vs Y" labels from live year/month:
   // an untagged list surviving a movers-only transient failure after a month
   // switch would silently render the OLD pair's deltas under the new labels.
   const [movers,setMovers]=useState(null);
+  const [trendsEpoch,setTrendsEpoch]=useState(0);
+  const [trendsLoading,setTrendsLoading]=useState(false);
+  const trendsSeq=useRef(0);
+  // The ONLY way to drop the Trends cache: clears both halves, bumps the seq
+  // HERE (not just via the effect — when another tab is active the effect
+  // re-run early-returns on the tab guard, so an in-flight Trends load would
+  // otherwise still pass the seq check and cache a pre-invalidation
+  // snapshot), and bumps the epoch so the effect re-runs even when the
+  // values were already null.
+  const invalidateTrends=useCallback(()=>{trendsSeq.current++;setCashFlow(null);setMovers(null);setTrendsEpoch(e=>e+1);},[]);
   const [accounts,setAccounts]=useState([]);
   const [budgets,setBudgets]=useState({});
   // By-date sinking funds, kept OUT of `budgets`: their amount is a
@@ -1622,11 +1635,10 @@ export default function Dashboard({ refreshTick = 0 }) {
     // the one path that catches ANOTHER device's writes.
     const eseq=++envSeq.current;
     try{
-      const[ov,sp,tx,cf,ac,bu,en,inc,ents,mv]=await Promise.all([
+      const[ov,sp,tx,ac,bu,en,inc,ents]=await Promise.all([
         cur?getOverview():Promise.resolve(null),
         getSpending({year:y,month:m}),
         getTransactions({year:y,month:m}),
-        getCashFlow({num_periods:6}),
         getAccounts(),
         // Tolerate the budgets table not existing yet (migration lands at merge).
         getBudgets().catch(()=>({budgets:{}})),
@@ -1639,24 +1651,16 @@ export default function Dashboard({ refreshTick = 0 }) {
         // entity picker; degrades to [] until the rental-tax migration lands
         // (inside getEntities) — undefined = transient failure, keep state.
         getEntities().catch(()=>undefined),
-        // Movers share the month fetches above through the range memo, so a
-        // lone failure here is next to impossible — but a nice-to-have section
-        // must not take down the reload; undefined = keep what's on screen.
-        getBiggestMovers({year:y,month:m}).catch(()=>undefined),
       ]);
       if(seq!==loadSeq.current)return false;
-      setOverview(ov);setSpending(sp);setTransactions(tx);setCashFlow(cf);
+      setOverview(ov);setSpending(sp);setTransactions(tx);
       setAccounts(ac.accounts||[]);
       // A transient entity-read failure keeps the previous list (the envelope
       // pattern): folding it into [] would blank the entity chips and every
       // property worksheet until the next successful reload.
       if(ents!==undefined)setEntities(ents.entities||[]);
-      // Month-tagged (see the state comment). On a transient failure keep the
-      // list only if it already describes THIS month pair; a stale pair drops
-      // to null so the card shows its skeleton instead of mislabeled deltas.
-      if(mv!==undefined)setMovers({y,m,list:mv.movers||[]});
-      else setMovers(cur=>cur&&cur.y===y&&cur.m===m?cur:null);
       invalidateTax(); // recompute lazily on next Tax-tab visit
+      invalidateTrends(); // Trends (cash flow + movers) refetches on next tab visit
       // A completed envelope write may have painted fresher rows while this
       // reload was in flight — don't overwrite them (or the freshly saved
       // budgets/targets) with a pre-write snapshot.
@@ -1717,6 +1721,36 @@ export default function Dashboard({ refreshTick = 0 }) {
       }).catch(err=>console.error("feed status check failed",err));
     });
   },[year,month,ready,refreshTick,fetchData]);
+
+  // Trends is lazy like recurring/debt/tax: the 6-month cash-flow window and
+  // the movers month-pair fetch only while the tab is open, cached until
+  // invalidateTrends() bumps the epoch (write/sync/import/reload — never a
+  // bare null sentinel; the epoch mints a fresh sequence so an in-flight
+  // response can't paint a pre-invalidation snapshot). cashFlow anchors on
+  // the CURRENT month (getCashFlow ignores the viewed month) so it survives
+  // month navigation; movers are month-tagged and refetch when the viewed
+  // pair changes. A movers-only failure keeps the skeleton (mlist null) and
+  // retries on the next state change/tab visit; a cash-flow failure leaves
+  // cashFlow null, retried on the next tab visit.
+  useEffect(()=>{
+    if(tab!=="trends")return;
+    const needCf=!cashFlow;
+    const needMv=!(movers&&movers.y===year&&movers.m===month);
+    if(!needCf&&!needMv)return;
+    const seq=++trendsSeq.current;
+    setTrendsLoading(true);
+    Promise.all([
+      needCf?getCashFlow({num_periods:6}):Promise.resolve(null),
+      needMv?getBiggestMovers({year,month}).catch(()=>undefined):Promise.resolve(undefined),
+    ])
+      .then(([cf,mv])=>{
+        if(seq!==trendsSeq.current)return;
+        if(cf)setCashFlow(cf);
+        if(mv!==undefined)setMovers({y:year,m:month,list:mv.movers||[]});
+      })
+      .catch(err=>{if(seq===trendsSeq.current)console.error(err);})
+      .finally(()=>{if(seq===trendsSeq.current)setTrendsLoading(false);});
+  },[tab,year,month,cashFlow,movers,trendsEpoch]);
 
   // Recurring detection is lazy: fetched + computed the first time the tab
   // opens (a ~40-month query — CANDIDATE_WINDOW_MONTHS, sized for annual),
@@ -4236,7 +4270,7 @@ export default function Dashboard({ refreshTick = 0 }) {
           <div style={{display:"flex",flexDirection:"column",gap:12}}>
             <div className="card">
               <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em",marginBottom:16}}>6-month spending</div>
-              {loading?<Sk h={140}/>:(
+              {loading||trendsLoading?<Sk h={140}/>:(
                 <>
                   <div style={{display:"flex",alignItems:"flex-end",gap:8,height:130,marginBottom:8}}>
                     {cfPs.map((p,i)=>{
@@ -4276,7 +4310,7 @@ export default function Dashboard({ refreshTick = 0 }) {
             </div>
             <div className="card">
               <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em",marginBottom:14}}>Income vs spending</div>
-              {loading?<Sk h={100}/>:cfPs.map((p,i)=>{
+              {loading||trendsLoading?<Sk h={100}/>:cfPs.map((p,i)=>{
                 const sw=maxSpend?(p.spending.amount/maxSpend)*100:0;
                 const iw=maxSpend?(p.income.amount/maxSpend)*100:0;
                 return (
@@ -4299,7 +4333,7 @@ export default function Dashboard({ refreshTick = 0 }) {
             <div className="card">
               <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em",marginBottom:4}}>Cash flow</div>
               <div style={{fontSize:11,color:"var(--muted)",marginBottom:14}}>Net cash into your checking account(s) each month — money in minus money out. Internal savings transfers are excluded.</div>
-              {loading?<Sk h={100}/>:(()=>{
+              {loading||trendsLoading?<Sk h={100}/>:(()=>{
                 const nets=cfPs.map(p=>({label:p.label,net:(p.income?.amount||0)-(p.spending?.amount||0)}));
                 const maxAbs=Math.max(...nets.map(n=>Math.abs(n.net)),1);
                 return nets.map((n,i)=>{
@@ -4339,7 +4373,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                 // Render only a list tagged with the viewed month — a stale
                 // pair under the header's freshly-derived labels would lie.
                 const mlist=movers&&movers.y===year&&movers.m===month?movers.list:null;
-                return loading||!mlist?<Sk h={100}/>:mlist.length===0?(
+                return loading||trendsLoading||!mlist?<Sk h={100}/>:mlist.length===0?(
                 <div style={{textAlign:"center",padding:"20px 0",color:"var(--muted)",fontSize:13}}>
                   Not much moved — category spending looks like last month.
                 </div>
