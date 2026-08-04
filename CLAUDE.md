@@ -755,6 +755,25 @@ files / Gotchas, plus the few rules noted inline here that live nowhere else.
   throttle is server-side pull throttling — nothing client-side syncs hourly).
   `test/invalidationMatrix.test.js` + `test/sync.test.js`. No migration.
 
+- **Phone-first UX batch (Session B, 2026-08-04)** — six backlog items, no
+  migration: Unhide confirm surfaces the guessed account type (pure
+  `src/unhideConfirm.js` — makes the "eyeball every unhide" practice
+  structural); 32–44px hit areas on the small ✕ glyphs; filter-only search
+  (`searchIsActive` — amount/date filters activate search without a 2-char
+  query); expected-bills discoverability hint; Escape-to-close +
+  `role="dialog"`/`aria-modal` on every overlay (`useEscClose`); and
+  back-gesture sheet dismissal — ONE shared history entry per overlay stack,
+  state machine pure in `src/sheetHistory.js` (`test/sheetHistory.test.js`).
+  Two rules from the review fixes: **the Dashboard-level Escape handler
+  listens in the CAPTURE phase** (the tx sheet stacks over
+  CategorySheet/PropertySheet, and bubble-phase listener order is
+  render-order-dependent — capture makes the topmost layer win
+  deterministically); and **all sheet-history pushes/backs go through
+  `createSheetHistory`** — its `pendingBack` flag defers a push while a
+  programmatic `back()`'s async popstate is in flight and consumes a
+  reload-stranded `{mmSheet:true}` entry at mount. Don't hand-roll
+  history calls beside it.
+
 ## Pending branches
 
 None in code. **Outstanding ops/data tasks from the 2026-08-03 double-count

@@ -3,7 +3,7 @@ import { getOverview, getSpending, getBiggestMovers, getTransactions, getCashFlo
 // Pure cores imported directly (never Supabase — the mock-harness alias rule
 // only covers dataAdapter/sync/db/apiClient; pure modules are safe).
 import { planAutoFill } from "../envelopes.js";
-import { buildSearchFilters } from "../searchFilters.js";
+import { buildSearchFilters, searchIsActive } from "../searchFilters.js";
 import { expectedByCategory, expectedStatus, isMissedExpected, seedFromRecurring, projectFutureCycles } from "../expectedTx.js";
 import { payoffWhatIf, debtFreeMonth, isMortgage, amortizationSchedule, addMonths, MAX_MONTHS } from "../debtPayoff.js";
 import { SCHEDULE_E_LINES, RENTS_KEY, DEFAULT_SCHEDULE_E_MAP, scheduleEReport, entityMonthly, entityLedger, personalDeductionReport, DEDUCTION_BUCKETS, DEFAULT_DEDUCTION_MAP, mileageDeduction, scheduleECsv } from "../taxReport.js";
@@ -14,6 +14,8 @@ import { detectRecurring } from "../recurring.js";
 import { unlinkInstitution, askAssistant, getSimpleFinStatus } from "../apiClient.js";
 import { ERA_CATEGORIES, UNCATEGORIZED, isBudgetableCategory } from "../categoryMap.js";
 import { displayBalance, isDebtAccount as isDebtType } from "../accountBalance.js";
+import { unhideConfirmMessage } from "../unhideConfirm.js";
+import { createSheetHistory } from "../sheetHistory.js";
 import { runSync } from "../sync.js";
 // Lazy: both are modals rendered only on user action, and CsvImport reaches the
 // whole statement-import stack — no reason for either in the initial bundle.
@@ -300,6 +302,32 @@ function AddDebtForm({busy,surf,onSave,onClose}) {
   );
 }
 
+// Shared Escape-to-close for every overlay sheet (backlog Session B item 6).
+// One keydown listener per open sheet, torn down on close. Pragmatic scope for
+// a two-user app: Escape + dialog semantics (role="dialog"/aria-modal on the
+// .modal div), no full focus trap. Each handler claims the event
+// (`stopImmediatePropagation`) so one Escape press closes ONE layer, never a
+// whole stack. Component sheets using this hook are never stacked on EACH
+// OTHER, but the tx detail sheet DOES stack over CategorySheet/PropertySheet
+// (their onPick opens it without closing the drill-in) — and listener order
+// between this hook and the Dashboard-level handler is render-order-dependent
+// (the inline onClose identity re-registers this one every commit). That's why
+// the Dashboard-level effect below listens in the CAPTURE phase: whenever the
+// tx sheet (or a picker over it) is open, it deterministically wins and closes
+// the topmost layer; this hook's bubble-phase listener only ever fires when
+// its sheet is the top.
+function useEscClose(onClose){
+  useEffect(()=>{
+    const h=e=>{
+      if(e.key!=="Escape")return;
+      e.stopImmediatePropagation();
+      onClose();
+    };
+    window.addEventListener("keydown",h);
+    return ()=>window.removeEventListener("keydown",h);
+  },[onClose]);
+}
+
 function Sk({w="100%",h=16,r=6}) {
   return <div style={{width:w,height:h,borderRadius:r,background:"var(--border)",animation:"pulse 1.5s ease-in-out infinite"}} />;
 }
@@ -310,6 +338,7 @@ function Sk({w="100%",h=16,r=6}) {
 // maxAhead allows them — the caller passes the same 12-on-budget / 0-elsewhere
 // rule that gates canNext, so the picker can never reach a month ‹/› can't.
 function MonthJumpSheet({year,month,now,maxAhead,onPick,onClose}) {
+  useEscClose(onClose);
   const [py,setPy]=useState(year);
   const nowY=now.getFullYear(),nowM=now.getMonth()+1;
   const maxIdx=nowY*12+(nowM-1)+maxAhead; // absolute month index cap
@@ -317,7 +346,7 @@ function MonthJumpSheet({year,month,now,maxAhead,onPick,onClose}) {
   const names=Array.from({length:12},(_,i)=>new Date(2000,i,1).toLocaleString("default",{month:"short"}));
   return (
     <div className="overlay" onClick={onClose}>
-      <div className="modal" onClick={e=>e.stopPropagation()} style={{width:"min(340px,92vw)"}}>
+      <div className="modal" role="dialog" aria-modal="true" aria-label="Jump to a month" onClick={e=>e.stopPropagation()} style={{width:"min(340px,92vw)"}}>
         <div style={{fontSize:12,color:"var(--muted)",marginBottom:10,textAlign:"center"}}>Jump to a month</div>
         <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:10,marginBottom:14}}>
           <button className="nbtn" onClick={()=>setPy(y=>y-1)} aria-label="Previous year">‹</button>
@@ -402,7 +431,7 @@ function EditName({name,onSave}) {
   if(ed) return (
     <input ref={ref} value={val} onChange={e=>setVal(e.target.value)}
       onBlur={()=>{setEd(false);onSave(val.trim()||name);}}
-      onKeyDown={e=>{if(e.key==="Enter"){setEd(false);onSave(val.trim()||name);}if(e.key==="Escape"){setEd(false);setVal(name);}}}
+      onKeyDown={e=>{if(e.key==="Enter"){setEd(false);onSave(val.trim()||name);}if(e.key==="Escape"){e.stopPropagation();setEd(false);setVal(name);}}}
       style={{font:"inherit",fontSize:13,fontWeight:500,color:"var(--text)",background:"var(--bg)",
         border:"1px solid var(--border)",borderRadius:4,padding:"1px 6px",width:"100%",outline:"none"}}/>
   );
@@ -429,7 +458,7 @@ function BudgetEdit({limit,onSave}) {
     <input ref={ref} value={val} inputMode="decimal" placeholder="$/mo"
       onChange={e=>setVal(numericish(e.target.value,{negative:false}))}
       onBlur={commit}
-      onKeyDown={e=>{if(e.key==="Enter")commit();if(e.key==="Escape"){setEd(false);setVal(limit!=null?String(limit):"");}}}
+      onKeyDown={e=>{if(e.key==="Enter")commit();if(e.key==="Escape"){e.stopPropagation();setEd(false);setVal(limit!=null?String(limit):"");}}}
       style={{font:"inherit",fontSize:16,width:76,color:"var(--text)",background:"var(--bg)",
         border:"1px solid var(--border)",borderRadius:6,padding:"1px 6px",outline:"none",textAlign:"right"}}/>
   );
@@ -456,7 +485,7 @@ function AssignEdit({value,onSave}) {
     <input ref={ref} value={val} inputMode="decimal" placeholder="$"
       onChange={e=>setVal(numericish(e.target.value))}
       onBlur={commit}
-      onKeyDown={e=>{if(e.key==="Enter")commit();if(e.key==="Escape"){setEd(false);setVal(value?String(value):"");}}}
+      onKeyDown={e=>{if(e.key==="Enter")commit();if(e.key==="Escape"){e.stopPropagation();setEd(false);setVal(value?String(value):"");}}}
       style={{font:"inherit",fontSize:16,width:72,color:"var(--text)",background:"var(--card)",
         border:"1px solid var(--accent)",borderRadius:6,padding:"1px 6px",outline:"none",textAlign:"right"}}/>
   );
@@ -485,7 +514,7 @@ function IncomeEdit({value,isDefault,onSave}) {
     <span style={{display:"inline-flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
       <input ref={ref} value={val} inputMode="decimal" placeholder="$"
         onChange={e=>setVal(numericish(e.target.value,{negative:false}))}
-        onKeyDown={e=>{if(e.key==="Enter")commit("month");if(e.key==="Escape"){setEd(false);setVal(value!=null?String(value):"");}}}
+        onKeyDown={e=>{if(e.key==="Enter")commit("month");if(e.key==="Escape"){e.stopPropagation();setEd(false);setVal(value!=null?String(value):"");}}}
         style={{font:"inherit",fontSize:16,width:96,color:"var(--text)",background:"var(--card)",
           border:"1px solid var(--accent)",borderRadius:6,padding:"2px 7px",outline:"none",textAlign:"right"}}/>
       <button className="ibtn" style={{fontSize:10,padding:"3px 8px"}} onClick={()=>commit("month")}>This month</button>
@@ -508,6 +537,7 @@ function IncomeEdit({value,isDefault,onSave}) {
 // month; a by-date target is a sinking fund — the amount you want to have by a
 // deadline, which the app spreads over the months remaining.
 function TargetSheet({name,row,busy,surf,year,month,onSave,onClose}) {
+  useEscClose(onClose);
   const hasOverride=row?.targetOverride!=null;
   // Scope: "all" edits the category-level target (budgets); "month" edits ONLY
   // the viewed month's target_override (budget_months) — it never touches
@@ -551,7 +581,7 @@ function TargetSheet({name,row,busy,surf,year,month,onSave,onClose}) {
   })();
   return (
     <div className="overlay" onClick={onClose}>
-      <div className="modal" onClick={e=>e.stopPropagation()}>
+      <div className="modal" role="dialog" aria-modal="true" onClick={e=>e.stopPropagation()}>
         <div style={{fontSize:16,fontWeight:600,marginBottom:4,color:"var(--text)"}}>Funding target</div>
         <div style={{fontSize:12,color:"var(--muted)",marginBottom:16}}>{name}</div>
 
@@ -631,6 +661,7 @@ function TargetSheet({name,row,busy,surf,year,month,onSave,onClose}) {
 // Category: left blank = let the write-time classifier decide (mapped_category);
 // an explicit pick becomes user_category, which still wins at read time.
 function QuickAddSheet({accounts,manualAccounts,allCats,getName,getColor,acctLabel,acctColor,busy,surf,onSave,onClose}) {
+  useEscClose(onClose);
   const [amount,setAmount]=useState("");
   const [dir,setDir]=useState("out"); // out = spent (positive); in = refund/income (negative)
   // Commit-on-blur: <input type=date> emits complete garbage years while typing
@@ -655,7 +686,7 @@ function QuickAddSheet({accounts,manualAccounts,allCats,getName,getColor,acctLab
     background:"var(--input-bg)",color:"var(--text)",fontSize:16,fontFamily:"inherit",outline:"none"};
   return (
     <div className="overlay" onClick={onClose}>
-      <div className="modal" onClick={e=>e.stopPropagation()} style={{maxHeight:"85vh",overflowY:"auto"}}>
+      <div className="modal" role="dialog" aria-modal="true" onClick={e=>e.stopPropagation()} style={{maxHeight:"85vh",overflowY:"auto"}}>
         <div style={{fontSize:16,fontWeight:600,marginBottom:4,color:"var(--text)"}}>Add transaction</div>
         <div style={{fontSize:12,color:"var(--muted)",marginBottom:16}}>
           Record cash or anything the bank feed can&rsquo;t see.
@@ -743,6 +774,7 @@ function QuickAddSheet({accounts,manualAccounts,allCats,getName,getColor,acctLab
 // Rule 3, "Roll With the Punches". Overspending one category is meant to be
 // answered by taking the money from another, not by pretending the plan held.
 function MoveSheet({from,rows,getName,chipFor,busy,surf,onMove,onClose}) {
+  useEscClose(onClose);
   const [to,setTo]=useState("");
   const [amount,setAmount]=useState("");
   const src=rows.find(r=>r.category===from);
@@ -753,7 +785,7 @@ function MoveSheet({from,rows,getName,chipFor,busy,surf,onMove,onClose}) {
   const overInk=inkOn(OVER_MONEY,surf.card),okInk=inkOn(OK_MONEY,surf.card);
   return (
     <div className="overlay" onClick={onClose}>
-      <div className="modal" onClick={e=>e.stopPropagation()} style={{maxHeight:"80vh",overflowY:"auto"}}>
+      <div className="modal" role="dialog" aria-modal="true" onClick={e=>e.stopPropagation()} style={{maxHeight:"80vh",overflowY:"auto"}}>
         <div style={{fontSize:16,fontWeight:600,marginBottom:4,color:"var(--text)"}}>Move money</div>
         <div style={{fontSize:12,color:"var(--muted)",marginBottom:16}}>
           Out of {getName(from)} — {fmtAuto(src?.available||0)} available
@@ -839,6 +871,7 @@ function DrillNum({onClick,title,style,children}) {
 // the computed rows under a "still owing after 50 years" banner.
 const SCHED_PREVIEW=24;
 function ScheduleSheet({debt,startMonth,acctLabel,onClose}){
+  useEscClose(onClose);
   const [showAll,setShowAll]=useState(false);
   const pay=Number(debt.minimum_payment)||0;
   const rate=debt.apr??debt.interest_rate;
@@ -851,7 +884,7 @@ function ScheduleSheet({debt,startMonth,acctLabel,onClose}){
   const monthCapped=sched.stalled&&sched.rows.length>=MAX_MONTHS;
   return (
     <div className="overlay" onClick={onClose}>
-      <div className="modal" onClick={e=>e.stopPropagation()}
+      <div className="modal" role="dialog" aria-modal="true" onClick={e=>e.stopPropagation()}
         style={{width:"min(460px,92vw)",maxHeight:"82vh",overflowY:"auto"}}>
         <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
           <span style={{fontSize:16,fontWeight:600,color:"var(--text)",minWidth:0,overflow:"hidden",
@@ -927,6 +960,7 @@ function ScheduleSheet({debt,startMonth,acctLabel,onClose}){
 }
 
 function CategorySheet({name,color,when,rows,surf,getName,acctById,acctLabel,acctColor,onPick,onClose}) {
+  useEscClose(onClose);
   const counted=rows.filter(t=>t.counted);
   const other=rows.filter(t=>!t.counted);
   const total=counted.reduce((s,t)=>s+t.amount,0);
@@ -953,7 +987,7 @@ function CategorySheet({name,color,when,rows,surf,getName,acctById,acctLabel,acc
   }
   return (
     <div className="overlay" onClick={onClose}>
-      <div className="modal" onClick={e=>e.stopPropagation()}
+      <div className="modal" role="dialog" aria-modal="true" onClick={e=>e.stopPropagation()}
         style={{width:"min(460px,92vw)",maxHeight:"82vh",overflowY:"auto"}}>
         <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
           <span style={{width:10,height:10,borderRadius:3,background:c.dot,flexShrink:0}}/>
@@ -999,6 +1033,7 @@ function CategorySheet({name,color,when,rows,surf,getName,acctById,acctLabel,acc
 // rather than patches (the one list that refetches itself), so `busy` shows
 // skeletons during the refetch instead of a stale list.
 function PropertySheet({name,year,rows,busy,receiptTxIds,surf,getName,getColor,acctById,acctLabel,acctColor,onPick,onClose}) {
+  useEscClose(onClose);
   const led=entityLedger(rows);
   const amber=inkOn("#C08A2E",surf.card);
   const c=chipOn(ENTITY_CHIP,surf.card);
@@ -1038,7 +1073,7 @@ function PropertySheet({name,year,rows,busy,receiptTxIds,surf,getName,getColor,a
   }
   return (
     <div className="overlay" onClick={onClose}>
-      <div className="modal" onClick={e=>e.stopPropagation()}
+      <div className="modal" role="dialog" aria-modal="true" onClick={e=>e.stopPropagation()}
         style={{width:"min(460px,92vw)",maxHeight:"82vh",overflowY:"auto"}}>
         <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
           <span style={{width:10,height:10,borderRadius:3,background:c.dot,flexShrink:0}}/>
@@ -1886,10 +1921,13 @@ export default function Dashboard({ refreshTick = 0 }) {
   useEffect(()=>{
     const q=searchQ.trim();
     const id=++searchSeq.current;
-    if(q.length<2){setSearchRes(null);setSearching(false);return;}
+    // Filter-only search: active filters run the search with no text query
+    // (searchIsActive is the shared gate — the adapter skips the ilike).
+    const filters=buildSearchFilters(searchFilters);
+    if(!searchIsActive(q,filters)){setSearchRes(null);setSearching(false);return;}
     setSearching(true);
     const h=setTimeout(()=>{
-      searchTransactions(q,{filters:buildSearchFilters(searchFilters)})
+      searchTransactions(q,{filters})
         .then(res=>{if(searchSeq.current===id){setSearchRes(res);setSearching(false);}})
         .catch(err=>{console.error("search failed",err);if(searchSeq.current===id){setSearchRes({transactions:[],hasMore:false});setSearching(false);}});
     },300);
@@ -1978,6 +2016,70 @@ export default function Dashboard({ refreshTick = 0 }) {
   const [quickAdd,setQuickAdd]=useState(false); // manual transaction quick-add sheet
   const [quickAddBusy,setQuickAddBusy]=useState(false);
 
+  // Escape closes the topmost INLINE overlay (the three sheets rendered
+  // directly in Dashboard's JSX rather than as components — they can't call
+  // useEscClose themselves). Priority is explicit because these DO stack: the
+  // category picker and the add-category manager sit over the tx sheet, so one
+  // press peels one layer. Registered in the CAPTURE phase so it beats every
+  // useEscClose bubble-phase listener whenever it's active — the tx sheet also
+  // stacks over CategorySheet/PropertySheet (their onPick), and without
+  // capture, which layer got the press depended on listener registration
+  // order, i.e. on render order (the drill-in's inline onClose re-registers
+  // its listener each commit). stopImmediatePropagation keeps a single press
+  // from closing two layers.
+  useEffect(()=>{
+    if(!(selTx||pickingCat||addingCat))return;
+    const h=e=>{
+      if(e.key!=="Escape")return;
+      e.stopImmediatePropagation();
+      if(addingCat)setAddingCat(false);
+      else if(pickingCat)setPickingCat(false);
+      else setSelTx(null);
+    };
+    window.addEventListener("keydown",h,true);
+    return ()=>window.removeEventListener("keydown",h,true);
+  },[selTx,pickingCat,addingCat]);
+
+  // Back gesture closes the open sheet, not the app (backlog Session B item 4).
+  // ONE history entry is pushed when the first overlay opens (stacked sheets
+  // share it — the tx sheet over a drill-in is one back-swipe, matching the
+  // overlay tap-out); popstate closes every overlay, and closing by tap/Escape
+  // consumes the entry with history.back() so the NEXT swipe leaves the app as
+  // usual. The state machine lives in src/sheetHistory.js (pure, tested): it
+  // owns the pendingBack flag that (a) defers a push while the programmatic
+  // back()'s asynchronous popstate is in flight — a sheet opened in that
+  // window used to push a racing entry and then be flash-closed by the landing
+  // pop — and (b) lets onMount consume an {mmSheet:true} entry stranded by a
+  // reload-with-sheet-open, so the first back gesture isn't a dead press.
+  const anySheetOpen=!!(selTx||catDrill||taxDrill||schedDebtId||monthPicker||importing||connectingSfin||quickAdd||targetEdit||moveFrom||pickingCat||addingCat);
+  const anySheetOpenRef=useRef(false);
+  anySheetOpenRef.current=anySheetOpen;
+  const sheetHistRef=useRef(null);
+  if(!sheetHistRef.current){
+    sheetHistRef.current=createSheetHistory({
+      push:()=>window.history.pushState({mmSheet:true},""),
+      back:()=>window.history.back(),
+    });
+  }
+  const closeAllSheets=useCallback(()=>{
+    setSelTx(null);setCatDrill(null);setTaxDrill(null);setSchedDebtId(null);setMonthPicker(false);
+    setImporting(false);setConnectingSfin(false);setQuickAdd(false);
+    setTargetEdit(null);setMoveFrom(null);setPickingCat(false);setAddingCat(false);
+  },[]);
+  useEffect(()=>{
+    let st=null;
+    try{st=window.history.state;}catch{/* history unavailable */}
+    sheetHistRef.current.onMount(st);
+    const onPop=()=>{
+      if(sheetHistRef.current.onPop(anySheetOpenRef.current))closeAllSheets();
+    };
+    window.addEventListener("popstate",onPop);
+    return ()=>window.removeEventListener("popstate",onPop);
+  },[closeAllSheets]);
+  useEffect(()=>{
+    sheetHistRef.current.onSheetsChange(anySheetOpen);
+  },[anySheetOpen]);
+
   // Learned merchant rules: after a manual recategorization, offer to remember
   // the merchant so the correction survives the next sync/import.
   const [learnPrompt,setLearnPrompt]=useState(null); // {descriptor,key,category,count}
@@ -2013,12 +2115,13 @@ export default function Dashboard({ refreshTick = 0 }) {
   // "it didn't apply to the others" symptom.
   const refetchOpenLists=useCallback(async()=>{
     const q=searchQ.trim();
+    const filters=buildSearchFilters(searchFilters);
     await Promise.all([
-      q.length>=2
+      searchIsActive(q,filters)
         // First page of the current filtered query — an appended load-more
         // tail is dropped here, but hasMore comes back true so it's one tap
         // away, and the refetched page is at least consistent.
-        ? searchTransactions(q,{filters:buildSearchFilters(searchFilters)}).then(setSearchRes).catch(err=>console.error("search refresh failed",err))
+        ? searchTransactions(q,{filters}).then(setSearchRes).catch(err=>console.error("search refresh failed",err))
         : Promise.resolve(),
       selAcct
         ? getAccountTransactions(selAcct.id)
@@ -2200,6 +2303,11 @@ export default function Dashboard({ refreshTick = 0 }) {
 
   async function handleToggleHide(){
     if(!selAcct)return;
+    // Unhide only: surface the guessed TYPE at the moment CLAUDE.md says it
+    // must be confirmed — unhiding is the deliberate act that blesses the
+    // guess, and a card mistyped as checking turns every purchase into
+    // household cash spending. Hiding needs no confirm (rows leave totals).
+    if(selAcct.hidden&&!window.confirm(unhideConfirmMessage(selAcct)))return;
     setTogglingHide(true);
     try{
       await saveAccount(selAcct.id,{hidden:!selAcct.hidden});
@@ -2254,7 +2362,7 @@ export default function Dashboard({ refreshTick = 0 }) {
   // While a search is active the Transactions tab renders results across all
   // months instead of the selected month; the account and category chips still
   // filter them.
-  const searchActive=searchQ.trim().length>=2;
+  const searchActive=searchIsActive(searchQ,buildSearchFilters(searchFilters));
   const searchTxs=searchRes?.transactions||[];
   // Account first, category second, so the category chips can be derived from
   // the account-filtered rows WITHOUT being narrowed by the category filter —
@@ -3003,6 +3111,17 @@ export default function Dashboard({ refreshTick = 0 }) {
                   contract): nothing here is in Available, the walk, or any
                   total. expected null/undefined ⇒ the card simply doesn't
                   render (pre-migration / not yet loaded). */}
+              {/* Discoverability hint (backlog Session B item 5): the feature's
+                  only entry point is the tiny "Expect" button on Recurring.
+                  Shown ONLY when expected is loaded-but-EMPTY — non-null means
+                  post-migration (the getReceiptTxIds pattern), so pre-migration
+                  and still-loading render nothing, and any real expectation
+                  replaces the hint with the card below. */}
+              {expected&&(expected.pending||[]).length===0&&(expected.matched||[]).length===0&&(
+                <div style={{fontSize:11,color:"var(--muted)",marginBottom:14}}>
+                  Track upcoming bills — tap Expect next to a charge on the Recurring tab.
+                </div>
+              )}
               {expected&&(expShown.length>0||expProjected.length>0||expMatchedShown.length>0)&&(
                 <div style={{background:"var(--bg)",borderRadius:10,padding:"12px 14px",marginBottom:14}}>
                   <div style={{display:"flex",alignItems:"baseline",gap:8,marginBottom:2}}>
@@ -3055,7 +3174,8 @@ export default function Dashboard({ refreshTick = 0 }) {
                                 if(r.cadence==="once"){doDismissExpected(r.id);return;}
                                 setExpMatchId(null);setExpDismissId(dismissOpen?null:r.id);
                               }}
-                              style={{background:"none",border:"none",color:"var(--muted)",cursor:"pointer",fontSize:12,padding:"2px",lineHeight:1,flexShrink:0}}>✕</button>
+                              style={{background:"none",border:"none",color:"var(--muted)",cursor:"pointer",fontSize:12,lineHeight:1,flexShrink:0,
+                                padding:0,minWidth:32,minHeight:32,margin:"-10px -6px",display:"inline-flex",alignItems:"center",justifyContent:"center"}}>✕</button>
                           </>)}
                         </div>
                         {dismissOpen&&(
@@ -3238,9 +3358,10 @@ export default function Dashboard({ refreshTick = 0 }) {
                 style={{width:"100%",padding:"9px 34px 9px 12px",borderRadius:8,border:"1px solid var(--border)",
                   background:"var(--bg)",color:"var(--text)",fontSize:16,fontFamily:"inherit",outline:"none"}}/>
               {searchQ&&(
-                <button onClick={()=>setSearchQ("")} title="Clear search"
-                  style={{position:"absolute",right:6,top:"50%",transform:"translateY(-50%)",background:"none",border:"none",
-                    cursor:"pointer",color:"var(--muted)",fontSize:18,lineHeight:1,padding:"2px 6px"}}>×</button>
+                <button onClick={()=>setSearchQ("")} title="Clear search" aria-label="Clear search"
+                  style={{position:"absolute",right:0,top:"50%",transform:"translateY(-50%)",background:"none",border:"none",
+                    cursor:"pointer",color:"var(--muted)",fontSize:18,lineHeight:1,padding:0,minWidth:40,minHeight:40,
+                    display:"inline-flex",alignItems:"center",justifyContent:"center"}}>×</button>
               )}
             </div>
             {/* Refinement row — only while a search is active. Amounts match by
@@ -3248,8 +3369,11 @@ export default function Dashboard({ refreshTick = 0 }) {
                 placeholder says ±). Amount inputs commit on change and ride the
                 search debounce; DATE inputs commit on BLUR with a year sanity
                 floor (sanitizeDateInput) — <input type="date"> emits complete
-                garbage years mid-typing (the CLAUDE.md gotcha). */}
-            {searchActive&&(()=>{
+                garbage years mid-typing (the CLAUDE.md gotcha).
+                Always rendered (not gated on searchActive) so a FILTER-ONLY
+                search is reachable: setting a bound with no text query
+                activates the search by itself. */}
+            {(()=>{
               const fSt={padding:"6px 8px",borderRadius:8,border:"1px solid var(--border)",background:"var(--bg)",
                 color:"var(--text)",fontSize:12,fontFamily:"inherit",outline:"none"};
               const setBoth=(k,v)=>{setFilterDraft(f=>({...f,[k]:v}));setSearchFilters(f=>({...f,[k]:v}));};
@@ -3364,9 +3488,11 @@ export default function Dashboard({ refreshTick = 0 }) {
                 {(()=>{
                   const cn=txCatFilter?getName(txCatFilter):null;
                   const q=searchQ.trim();
-                  if(searchActive&&cn&&searchRes?.hasMore)return `No ${cn} transactions in the first ${searchTxs.length} matches for "${q}" — try Load more.`;
-                  if(searchActive&&cn)return `No ${cn} transactions match "${q}".`;
-                  if(searchActive)return `No transactions match "${q}".`;
+                  // Filter-only search has no text query to quote.
+                  const what=q.length>=2?`"${q}"`:"the filters";
+                  if(searchActive&&cn&&searchRes?.hasMore)return `No ${cn} transactions in the first ${searchTxs.length} matches for ${what} — try Load more.`;
+                  if(searchActive&&cn)return `No ${cn} transactions match ${what}.`;
+                  if(searchActive)return `No transactions match ${what}.`;
                   if(cn&&txAcctFilter)return `No ${cn} transactions for this account this month.`;
                   if(cn)return `No ${cn} transactions this month.`;
                   if(txAcctFilter)return "No transactions for this account this month.";
@@ -4337,7 +4463,8 @@ export default function Dashboard({ refreshTick = 0 }) {
                       style={{fontSize:9,padding:"2px 7px",flexShrink:0}}>Expect</button>
                   ))}
                   <button title={`Ignore ${r.name} (hides it for the whole household)`} onClick={()=>toggleRecIgnore(r.key)}
-                    style={{background:"none",border:"none",color:"var(--muted)",cursor:"pointer",fontSize:13,padding:"4px 2px",lineHeight:1,flexShrink:0}}>✕</button>
+                    style={{background:"none",border:"none",color:"var(--muted)",cursor:"pointer",fontSize:13,lineHeight:1,flexShrink:0,
+                      padding:0,minWidth:36,minHeight:36,margin:"-10px -8px",display:"inline-flex",alignItems:"center",justifyContent:"center"}}>✕</button>
                 </div>
                 );
               })}
@@ -4741,7 +4868,7 @@ export default function Dashboard({ refreshTick = 0 }) {
         const allCats=[...ERA_CATEGORIES.filter(c=>c!==UNCATEGORIZED),...customCatNames.filter(n=>!ERA_CATEGORIES.includes(n))];
         return (
         <div className="overlay" onClick={()=>setSelTx(null)}>
-          <div className="modal" onClick={e=>e.stopPropagation()} style={{maxHeight:"80vh",overflowY:"auto"}}>
+          <div className="modal" role="dialog" aria-modal="true" onClick={e=>e.stopPropagation()} style={{maxHeight:"80vh",overflowY:"auto"}}>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",gap:10,marginBottom:4}}>
               <div style={{fontSize:16,fontWeight:600,color:"var(--text)",minWidth:0,flex:1}}>
                 <EditName name={selTx.merchant_name||selTx.description} onSave={v=>saveTx({user_description:v||null})}/>
@@ -4984,7 +5111,7 @@ export default function Dashboard({ refreshTick = 0 }) {
       {/* Pull a category into the Budget tab so it can be assigned to */}
       {pickingCat&&(
         <div className="overlay" onClick={()=>setPickingCat(false)}>
-          <div className="modal" onClick={e=>e.stopPropagation()} style={{maxHeight:"70vh",overflowY:"auto"}}>
+          <div className="modal" role="dialog" aria-modal="true" onClick={e=>e.stopPropagation()} style={{maxHeight:"70vh",overflowY:"auto"}}>
             <div style={{fontSize:16,fontWeight:600,marginBottom:4,color:"var(--text)"}}>Budget another category</div>
             <div style={{fontSize:12,color:"var(--muted)",marginBottom:16}}>
               Adds it to this month's budget. Nothing is saved until you assign it money or set a target.
@@ -5015,7 +5142,7 @@ export default function Dashboard({ refreshTick = 0 }) {
         const add=()=>{if(!canAdd)return;addCustomCat(newName,newColor);setNewName("");setNewColor("#7F77DD");setAddingCat(false);};
         return (
         <div className="overlay" onClick={()=>setAddingCat(false)}>
-          <div className="modal" onClick={e=>e.stopPropagation()} style={{maxHeight:"82vh",overflowY:"auto"}}>
+          <div className="modal" role="dialog" aria-modal="true" onClick={e=>e.stopPropagation()} style={{maxHeight:"82vh",overflowY:"auto"}}>
             <div style={{fontSize:16,fontWeight:600,marginBottom:4,color:"var(--text)"}}>Custom categories</div>
             <div style={{fontSize:12,color:"var(--muted)",marginBottom:16,lineHeight:1.5}}>
               They behave exactly like the built-in ones — same list, same color, same funding target.

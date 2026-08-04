@@ -40,44 +40,30 @@ All five items landed, with tests for every guard:
   and the `{confirm:'disconnect'}` server-side gate on the simplefin-status
   DELETE (`api/_lib/unlink.js` decisions; `test/unlink.test.js` additions).
 
-### Session B — phone-first UX (mostly S)
+### Session B — phone-first UX — **SHIPPED 2026-08-04 (this branch)**
 
-1. **[S, high] Unhide confirm surfaces the guessed type.** Dashboard.jsx
-   ~3448–3451: Unhide calls `handleToggleHide` (:2125) in one tap. CLAUDE.md's
-   own rule says unhiding IS the act that confirms the guessed type, but the UI
-   never shows the guess at that moment. Add a confirm on Unhide only ("Unhide
-   as Credit card? Type was guessed from the name — wrong type miscounts
-   spending"), or inline the type chips into it. Makes the "eyeball every
-   unhide" practice (Pending list, Discover 7933 twins) structural.
-2. **[S, medium] Enlarge sub-24px tap targets.** Recurring ignore ✕
-   (Dashboard.jsx:4259, ~17px wide, directly beside Expect :4256), Upcoming ✕
-   (:2977), search-clear × (:3162). A fat-finger ✕ hides a bill household-wide
-   (recoverable only via the collapsed "Ignored (n)" card). Grow hit areas via
-   padding/minWidth 32–44; glyphs stay small, no layout change.
-3. **[M, medium] Filter-only search.** Dashboard.jsx:2176 gates `searchActive`
-   (and the filter-row render :3171) on a 2-char text query, and
-   dataAdapter.js:1260 returns empty for `q.length<2` regardless of filters —
-   "all transactions over $500 in June" is impossible. Treat non-null
-   `buildSearchFilters(...)` as activating too; in `searchTransactions` skip
-   the ilike `.or()` when q is empty but filters exist (the amount/date
-   conjuncts already build independently, :1268–1270).
-4. **[S, medium] Back gesture closes the open sheet, not the app.** Zero
-   pushState/popstate in src/; all sheets are state flags. Push one history
-   entry when any overlay opens, close it on popstate — a single
-   top-of-Dashboard hook. (Refutation caveat: household is iPhone-only, so the
-   "Android closes the app" arm never occurs; on iOS the gain is that the
-   back-swipe dismisses sheets instead of doing nothing.)
-5. **[S, low] Expected-bills discoverability hint.** Dashboard.jsx:2925 renders
-   the Upcoming card only when expectations exist; the sole entry point is the
-   9px "Expect" button on Recurring. When `expected` is loaded-but-empty
-   (non-null ⇒ post-migration, the `getReceiptTxIds` pattern), render one muted
-   line: "Track upcoming bills — tap Expect next to a charge on the Recurring
-   tab."
-6. **[S, low] Escape-to-close + dialog semantics on overlays.** Escape handled
-   only in the four inline editors (:405/432/459/488); none of the ~10
-   `.overlay` sheets close on it, no `role="dialog"`/`aria-modal` anywhere.
-   One shared keydown hook + role/aria-modal on `.modal`. Pragmatic scope: no
-   full focus trap for a two-user app.
+All six items landed:
+- Items 1, 5, 6 in `2d438f6` — Unhide confirm surfaces the guessed type
+  (pure `unhideConfirmMessage` in `src/unhideConfirm.js`,
+  `test/unhideConfirm.test.js`), the expected-bills discoverability hint
+  (loaded-but-empty gate, the `getReceiptTxIds` pattern), and Escape-to-close
+  (`useEscClose`) + `role="dialog"`/`aria-modal` on every `.overlay` sheet
+  (no focus trap, per the pragmatic scope).
+- Items 2, 3, 4 in `599ac50` — 32–44px hit areas on the ignore/Upcoming/
+  search-clear ✕ glyphs (padding only, no layout change), filter-only search
+  (`searchIsActive` in `src/searchFilters.js` + empty-q filter path in
+  `searchTransactions`, `test/searchFilters.test.js` additions), and the
+  back-gesture sheet dismissal (one shared history entry per overlay stack).
+- Review fixes (this commit) — the Dashboard-level Escape handler moved to
+  the CAPTURE phase so Escape deterministically closes the TOPMOST layer when
+  the tx sheet stacks over CategorySheet/PropertySheet (listener order was
+  render-order-dependent); and the back-gesture history sync extracted to the
+  pure `src/sheetHistory.js` state machine (`test/sheetHistory.test.js`),
+  whose `pendingBack` flag fixes both low findings: a sheet opened while the
+  programmatic `back()`'s popstate is in flight no longer pushes a racing
+  entry / flash-closes, and a reload-with-sheet-open's stranded
+  `{mmSheet:true}` entry is consumed at mount so the first back gesture isn't
+  a dead press.
 
 ### Session C — performance (network + cache)
 

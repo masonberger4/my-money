@@ -5,6 +5,7 @@ import {
   sanitizeDateInput,
   buildSearchFilters,
   amountOrClause,
+  searchIsActive,
   DATE_YEAR_FLOOR,
 } from '../src/searchFilters.js';
 
@@ -90,4 +91,36 @@ test('amountOrClause output stays PostgREST-safe for parseAmount outputs', () =>
     assert.ok(!/[^a-z0-9.,()\-]/.test(clause), clause);
     assert.ok(!clause.includes('(('), clause);
   }
+});
+
+// --- searchIsActive: the shared "is a search on?" gate ------------------
+// Dashboard's searchActive flag and the adapter's early-out both use it, so
+// the two can never disagree about whether a filter-only search counts.
+
+test('searchIsActive: text query needs >= 2 chars', () => {
+  assert.equal(searchIsActive('', null), false);
+  assert.equal(searchIsActive('a', null), false);
+  assert.equal(searchIsActive('ab', null), true);
+  assert.equal(searchIsActive('  ab  ', null), true); // trimmed
+  assert.equal(searchIsActive(' a ', null), false);
+  assert.equal(searchIsActive(null, null), false);
+  assert.equal(searchIsActive(undefined, null), false);
+});
+
+test('searchIsActive: non-null filters activate with NO text query (filter-only search)', () => {
+  const filters = buildSearchFilters({ amtMin: '500' });
+  assert.notEqual(filters, null);
+  assert.equal(searchIsActive('', filters), true);
+  assert.equal(searchIsActive('a', filters), true); // short text + filters still active
+});
+
+test('searchIsActive: all-empty filters normalize to null and do NOT activate', () => {
+  const filters = buildSearchFilters({ amtMin: '', amtMax: '', dateFrom: '', dateTo: '' });
+  assert.equal(filters, null);
+  assert.equal(searchIsActive('', filters), false);
+});
+
+test('searchIsActive: date-only filters activate too', () => {
+  const filters = buildSearchFilters({ dateFrom: '2026-06-01', dateTo: '2026-06-30' });
+  assert.equal(searchIsActive('', filters), true);
 });

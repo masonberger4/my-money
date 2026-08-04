@@ -42,6 +42,14 @@ export function buildSearchFilters({ amtMin, amtMax, dateFrom, dateTo } = {}) {
   return { amountMin: min, amountMax: max, dateFrom: from, dateTo: to };
 }
 
+// Is a search "on"? Either a real text query (>=2 chars, the pre-existing
+// activation floor) OR any normalized filter — "all transactions over $500 in
+// June" needs no words. Shared by the Dashboard's searchActive flag and the
+// adapter's early-out so the two can't disagree about what counts as a search.
+export function searchIsActive(query, filters) {
+  return String(query ?? '').trim().length >= 2 || filters != null;
+}
+
 // The PostgREST .or() clause for |amount| in [min, max]. Both bounds:
 // (min<=a<=max) OR (-max<=a<=-min). Min only: a>=min OR a<=-min. Max only:
 // a in [-max, max] — one and() keeps it a valid or-list of a single branch.
