@@ -881,7 +881,8 @@ migration that DROPS should verify rather than trust.
 chats + search refinement — shipped 2026-08-04) and deleted per its own rule.
 The forward-looking doc is **`docs/next-iteration-plan-2026-08-04.md`**.
 
-**Worklist status: no active code backlog.**
+**Worklist status: two specced items in that doc** (learned-rules screen,
+`coverage_shortfall` surfacing — 2026-08-04 sweep); no other code backlog.
 `docs/improvement-backlog-2026-08-04.md` (the verified six-dimension audit) is
 **worked through — all five sessions A–E shipped 2026-08-04** and its three
 Section-2 questions are decided; it survives as an audit record. What remains
