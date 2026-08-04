@@ -9,6 +9,13 @@
 //   • mapped_category is derived the way the write path does it — through
 //     classifyDescription (with accountType), then the read layer's
 //     applyAccountRules (credit negatives → 'Return');
+//     Since the built-in taxonomy and the keyword classifier were deleted
+//     (2026-08-04) the ONLY way a row gets a category is a LEARNED RULE, so the
+//     fixture ships LEDGER_RULES below — the household having taught these
+//     merchants once. That is deliberately the new model, not a workaround: the
+//     categories the scenarios assert on are now user-created names, and the
+//     one merchant left untaught ('TOTALLY UNKNOWN VENDOR 9') is what keeps the
+//     Uncategorized bucket in the fixture;
 //   • hidden-account exclusion happens at the QUERY level, so tests compute
 //     ALL totals over visibleRows() — the ledger's stand-in for
 //     `.eq('accounts.hidden', false)`. The hidden account exists to pin that
@@ -16,6 +23,20 @@
 //     asserted through isSpend.
 import { classifyDescription } from '../../src/txClassify.js';
 import { applyAccountRules } from '../../src/categoryMap.js';
+
+// The household's taught merchants (`category_rules`), keyed by merchantKey —
+// digits dropped, every other token kept. Transfer and card-payment descriptors
+// are deliberately ABSENT: the guards decide those and a learned rule must
+// never override them.
+export const LEDGER_RULES = {
+  'PUGET SOUND ENERGY BILL PAY': 'Utilities',
+  'SAFEWAY EVERETT WA': 'Groceries',
+  'FARMERS MARKET STALL': 'Groceries',
+  'CAPITAL ONE TRAVEL PORTLAND': 'Travel and vacation',
+  'DISCOVER TIRE AND AUTO CENTER': 'Vehicle expenses',
+  'ACE HARDWARE STORE': 'Home maintenance and improvement',
+  'ACME COFFEE': 'Coffee and snacks',
+};
 
 export function makeAccounts() {
   return {
@@ -34,7 +55,7 @@ export function makeAccounts() {
 // (learned rules for the write-time classifier), raw_category/mapped_category
 // (to force a stored value), id/plaid_tx_id.
 export function makeTx(account, id, date, amount, description, overrides = {}) {
-  const { rules = null, ...fields } = overrides;
+  const { rules = LEDGER_RULES, ...fields } = overrides;
   // Write path: both feeds derive the category pair at write time.
   const { raw_category, mapped_category } = classifyDescription(description, amount, account.type, rules);
   const t = {

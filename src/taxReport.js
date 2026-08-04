@@ -41,13 +41,16 @@ export const SCHEDULE_E_LINES = [
 // positive (a returned deposit nets against rents).
 export const RENTS_KEY = 'rents';
 
-// Sensible-but-conservative defaults for a fresh entity mapping. Everything
-// else stays unmapped ON PURPOSE — an unmapped bucket the user can see beats a
-// silently wrong line (the Uncategorized lesson, applied to tax lines).
-export const DEFAULT_SCHEDULE_E_MAP = {
-  'Home maintenance and improvement': 14,
-  Utilities: 17,
-};
+// EMPTY BY DESIGN since the user-owned category system landed (2026-08-04).
+// This used to seed two built-in categories onto lines 14 and 17; those
+// built-ins no longer exist — the household creates every category — so there
+// is nothing honest to pre-map. Category→line mapping is now fully user-driven
+// through the existing `tax:maps` settings key, and everything unmapped shows
+// in the VISIBLE amber "not on any line yet" bucket rather than being guessed
+// (the Uncategorized lesson, applied to tax lines). Kept as an exported
+// constant so the callers' `?? DEFAULT_SCHEDULE_E_MAP` fallbacks keep meaning
+// "no mapping yet" without a second empty-object literal.
+export const DEFAULT_SCHEDULE_E_MAP = {};
 
 const round2 = (v) => Math.round(v * 100) / 100;
 
@@ -230,9 +233,10 @@ export const DEDUCTION_BUCKETS = [
   { key: 'taxes_paid', label: 'Taxes paid (property, etc.)' },
 ];
 
-export const DEFAULT_DEDUCTION_MAP = {
-  'Healthcare and pharmacy': 'medical',
-};
+// Empty for the same reason as DEFAULT_SCHEDULE_E_MAP: its only entry mapped a
+// deleted built-in category ('Healthcare and pharmacy' → medical). User-driven
+// via `tax:maps`; unmapped stays visible.
+export const DEFAULT_DEDUCTION_MAP = {};
 
 const DEDUCTION_KEYS = new Set(DEDUCTION_BUCKETS.map((b) => b.key));
 

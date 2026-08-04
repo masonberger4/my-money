@@ -26,19 +26,20 @@ test('rejects a missing date or non-numeric amount', () => {
   assert.throws(() => buildManualTxRow({ date: '2026-08-01', amount: 'nope' }), /numeric/);
 });
 
-test('write-time category: learned rule beats keyword beats Uncategorized', () => {
-  // Keyword table: STARBUCKS -> Coffee and snacks.
-  const keyword = buildManualTxRow({ date: '2026-08-01', amount: 5, description: 'STARBUCKS #123' });
-  assert.equal(keyword.mapped_category, 'Coffee and snacks');
+test('write-time category: a learned rule, or else Uncategorized', () => {
+  // Nothing is guessed since the keyword table's deletion (2026-08-04):
+  // STARBUCKS is just another untaught merchant.
+  const untaught = buildManualTxRow({ date: '2026-08-01', amount: 5, description: 'STARBUCKS #123' });
+  assert.equal(untaught.mapped_category, 'Uncategorized');
 
-  // Learned rule for the same merchant key wins over the keyword table.
+  // A learned rule for that merchant key is what assigns the category.
   const learned = buildManualTxRow(
     { date: '2026-08-01', amount: 5, description: 'STARBUCKS #123' },
     { rules: { STARBUCKS: 'Dining and drinks' } },
   );
   assert.equal(learned.mapped_category, 'Dining and drinks');
 
-  // No rule, no keyword hit -> the visible Uncategorized fallback.
+  // An unknown merchant with no rule -> the same visible Uncategorized.
   const unknown = buildManualTxRow({ date: '2026-08-01', amount: 5, description: 'ZZQ UNKNOWN VENDOR' });
   assert.equal(unknown.mapped_category, 'Uncategorized');
 });
@@ -97,7 +98,7 @@ test('inserts on a manual account: manual: id, source=manual, account_id, no hou
   const capture = {};
   const shaped = await addManualTransaction(
     { accountId: 'm1', date: '2026-08-01', amount: 25, description: 'STARBUCKS' },
-    { client: fakeClient(manualAcct, capture), getRules: async () => ({}) },
+    { client: fakeClient(manualAcct, capture), getRules: async () => ({ STARBUCKS: 'Coffee and snacks' }) },
   );
   assert.match(capture.payload.plaid_tx_id, /^manual:/);
   assert.equal(capture.payload.source, 'manual');

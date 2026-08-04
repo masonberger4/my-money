@@ -4,7 +4,6 @@ import assert from 'node:assert/strict';
 import {
   parseCsv,
   analyzeCsv,
-  invalidRuleCategories,
   transferRawCategory,
   guessCategory,
   importPlan,
@@ -74,12 +73,6 @@ test('ids are independent of row order within the file (distinct rows)', () => {
   );
 });
 
-// --- Category-rule validation ------------------------------------------------
-
-test('invalidRuleCategories() is empty — every rule targets a real taxonomy member', () => {
-  assert.deepEqual(invalidRuleCategories(), []);
-});
-
 // --- transferRawCategory / card-payment handling -----------------------------
 
 test('a genuine transfer descriptor gets a TRANSFER_OUT/IN raw_category by sign', () => {
@@ -114,8 +107,14 @@ test('an ordinary merchant string gets no transfer treatment', () => {
 test('the classifier fallback is the honest unknown, not a real category', () => {
   assert.equal(FALLBACK_CATEGORY, 'Uncategorized');
   assert.equal(guessCategory('TOTALLY UNKNOWN MERCHANT 42'), 'Uncategorized');
-  // …while a merchant we DO recognise as shopping still says so.
-  assert.equal(guessCategory('NORDSTROM RACK #12'), 'Shopping and gear');
+  // Since the keyword table's deletion (2026-08-04) EVERY untaught merchant
+  // reads this way — there is no recognised-merchant arm left. A rule the
+  // household taught is the only thing that moves a row off Uncategorized.
+  assert.equal(guessCategory('NORDSTROM RACK #12'), 'Uncategorized');
+  assert.equal(
+    guessCategory('NORDSTROM RACK #12', { rules: { 'NORDSTROM RACK': 'Clothes' } }),
+    'Clothes'
+  );
 });
 
 // --- The overlap guard -------------------------------------------------------

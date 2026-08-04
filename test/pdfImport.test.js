@@ -628,7 +628,14 @@ test('rowTotals excludes what buildRows drops (why it takes built rows, not the 
 // ---------------------------------------------------------------------------
 
 test('round-trip: categories, signs and transfer flags come out per the shared classifier', () => {
-  const rules = new Map([['MYSTERY VENDOR LLC', 'Side hustles and business']]);
+  // Every category here comes from a TAUGHT rule — since 2026-08-04 the
+  // classifier guesses nothing, so a merchant with no rule imports
+  // Uncategorized (asserted at the end of this test).
+  const rules = new Map([
+    ['MYSTERY VENDOR LLC', 'Side hustles and business'],
+    ['RIVER GROCERY', 'Groceries'],
+    ['ACME COFFEE', 'Coffee and snacks'],
+  ]);
   const res = applyTemplate([cardStatementPage(CARD_ROWS)], cardTemplate());
   const { rows } = buildRows(res.grid, { ...res.buildOpts, rules });
 
@@ -636,7 +643,7 @@ test('round-trip: categories, signs and transfer flags come out per the shared c
   assert.deepEqual(rows.map(r => r.amount), [45, 6.5, 250, 12, -141.66]);
 
   const byDesc = Object.fromEntries(rows.map(r => [r.description, r]));
-  assert.equal(byDesc['RIVER GROCERY 1467'].mapped_category, 'Groceries', 'keyword table');
+  assert.equal(byDesc['RIVER GROCERY 1467'].mapped_category, 'Groceries', 'learned rule, whole-token prefix');
   assert.equal(byDesc['ACME COFFEE 0042'].mapped_category, 'Coffee and snacks');
   assert.equal(byDesc['MYSTERY VENDOR LLC'].mapped_category, 'Side hustles and business', 'learned rule');
   assert.equal(byDesc['CAPITAL ONE MOBILE PYMT'].mapped_category, TRANSFER_CATEGORY, 'issuer + payment wording');
@@ -646,9 +653,14 @@ test('round-trip: categories, signs and transfer flags come out per the shared c
   assert.equal(transfer.isTransfer, true);
   assert.equal(transfer.mapped_category, TRANSFER_CATEGORY);
 
-  // Without the learned rule, the unknown merchant stays a VISIBLE unknown.
+  // Without the learned rules, EVERY ordinary merchant stays a VISIBLE
+  // unknown — only the transfer/card-payment guards still assign a category.
   const bare = buildRows(res.grid, res.buildOpts).rows;
-  assert.equal(bare.find(r => r.description === 'MYSTERY VENDOR LLC').mapped_category, FALLBACK_CATEGORY);
+  const bareByDesc = Object.fromEntries(bare.map(r => [r.description, r]));
+  assert.equal(bareByDesc['MYSTERY VENDOR LLC'].mapped_category, FALLBACK_CATEGORY);
+  assert.equal(bareByDesc['RIVER GROCERY 1467'].mapped_category, FALLBACK_CATEGORY);
+  assert.equal(bareByDesc['ACME COFFEE 0042'].mapped_category, FALLBACK_CATEGORY);
+  assert.equal(bareByDesc['CAPITAL ONE MOBILE PYMT'].mapped_category, TRANSFER_CATEGORY, 'the guards survive');
 });
 
 test('round-trip: re-parsing the same statement yields IDENTICAL plaid_tx_ids (idempotent re-import)', () => {

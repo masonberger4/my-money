@@ -1,23 +1,26 @@
-// Shared keyword classifier: bank descriptor → app category (+ internal-transfer
-// tagging). Pure JS, no React and no Supabase, so both the browser (CSV import)
+// Transfer/card-payment guards + learned-rule matching: bank descriptor → app
+// category. Pure JS, no React and no Supabase, so both the browser (CSV import)
 // and the serverless sync (SimpleFIN) can import it.
 //
-// Why it exists as its own module: Plaid shipped a category with every
-// transaction (src/categoryMap.js mapped it). SimpleFIN and raw bank CSVs do
-// not — they give a descriptor string and nothing else — so those feeds derive
-// `mapped_category` themselves, at WRITE time, from the same rule table. With
-// Plaid retired this table is the ONLY categorizer the app has, which raised
-// the bar for it considerably; see the four design notes below.
+// **The descriptor→category keyword table is GONE (Mason, 2026-08-04).** The app
+// ships no categories at all: the user creates every category and TEACHES which
+// merchants belong to it, and `category_rules` (matched here by
+// `matchLearnedRule`) makes it automatic thereafter. Nothing is guessed —
+// an untaught merchant is Uncategorized, honestly and visibly. That kills the
+// NEWREZ→"Utilities" class of confidently-wrong guesses at the root: the old
+// table had to invent a bucket for every merchant out of a taxonomy the
+// household never chose.
 //
-// Every rule target MUST be a valid ERA_CATEGORIES member; the table is
-// validated at module load so a bad edit can never write an invalid
-// mapped_category (dataAdapter reads it straight through as the effective
-// category). Order matters — first match wins, most specific first.
+// What SURVIVES here is not taste, it is MECHANISM: the transfer and
+// card-payment guards. "Transfers and card payments" is excluded from spending,
+// so a false positive there deletes money from every total silently — those
+// regexes are pinned by REGRESSION tests and must never be deleted alongside a
+// classifier cleanup.
 
-// One definition of each constant, in categoryMap. Unmatched merchants land in
+// One definition of each constant, in categoryMap. Untaught merchants land in
 // FALLBACK_CATEGORY, which IS UNCATEGORIZED — a real category as the fallback
 // made an unrecognised merchant indistinguishable from a confident answer.
-import { ERA_CATEGORIES, UNCATEGORIZED, TRANSFER_CATEGORY, FALLBACK_CATEGORY } from './categoryMap.js';
+import { TRANSFER_CATEGORY, FALLBACK_CATEGORY } from './categoryMap.js';
 
 export { TRANSFER_CATEGORY, FALLBACK_CATEGORY };
 
@@ -83,77 +86,10 @@ export function isCardPaymentDescriptor(descriptor) {
 }
 
 // ---------------------------------------------------------------------------
-// The rule table. Short tokens are deliberately context-bound: a bare \b76\b
-// matched "Store 76" and "Apartment 76 Rent", \bMAX\b matched "MAX MUSCLE",
-// \bBP\b matched "BP Consulting LLC" — confident wrong answers, which are worse
-// than an honest Uncategorized because nothing prompts you to check them.
-// ---------------------------------------------------------------------------
-const RAW_RULES = [
-  // Housing / mortgage — the taxonomy has no "Housing"; map to Utilities to
-  // match how Plaid's RENT_AND_UTILITIES already resolved (rent → Utilities).
-  [/NEWREZ|SHELLPOINT|\bMORTGAGE\b|LOANCARE|MR COOPER|WELLS FARGO HOME|RUSHMORE|SPS SELECT/i, 'Utilities'],
-  // Income / benefits — money-in, excluded from spending; category is cosmetic.
-  [/PAYROLL|DIRECT DEP|WA ST.*EMPLOY|EMPLOYMENT SECURITY|UNEMPLOYMENT|IRS TREAS|US TREASURY|SSA TREAS|TAX REF|INTEREST PAID|DIVIDEND/i, 'Cash, checks, and misc'],
-  // Utilities & telecom. "CITY OF …" needs a utility word — it was claiming
-  // "City of Kent Pool Pass".
-  [/PUGET SOUND ENERGY|PUGET SOUND|\bPSE\b|SEATTLE CITY LIGHT|SNOHOMISH PUD|\bPUD\b|CITY OF [A-Z. ]*(LIGHT|WATER|SEWER|UTIL|POWER)|PUBLIC UTILIT|WATER DIST|SEWER|COMCAST|XFINITY|CENTURYLINK|CENTURY LINK|ZIPLY|VERIZON|T-?MOBILE|\bAT&?T\b|WAVE BROADBAND|WASTE MGMT|WASTE MANAGEMENT|REPUBLIC SERVICES/i, 'Utilities'],
-  // Groceries — clear grocers only (Walmart/Target left to Shopping).
-  [/SAFEWAY|FRED MEYER|\bQFC\b|COSTCO WHSE|COSTCO WHOLESALE|TRADER JOE|WHOLE FOODS|WINCO|ALBERTSONS|KROGER|\bPCC\b|METROPOLITAN MARKET|\bH ?MART\b|GROCERY|SAFEWY|\bMARKET\b/i, 'Groceries'],
-  // Coffee & snacks.
-  [/STARBUCKS|DUTCH BROS|\bCOFFEE\b|PEETS|CARIBOU COFFEE|\bCAFFE\b|ESPRESSO|\bBAKERY\b|ICE CREAM|BASKIN|MOLLY MOON|\bDONUT|\bCREAMERY\b/i, 'Coffee and snacks'],
-  // Dining out & delivery.
-  [/RESTAURANT|\bGRILL\b|PIZZA|\bTACO\b|SUSHI|\bCAFE\b|MCDONALD|CHIPOTLE|DOORDASH|UBER EATS|GRUBHUB|PANERA|SUBWAY|CHICK-?FIL-?A|DAIRY QUEEN|\bDQ\s*(GRILL|#|\d)|BURGER|\bTAVERN\b|\bBREWING\b|\bBREWERY\b|\bPUB\b|\bBAR ?&|\bDELI\b|\bDRIVE-?IN\b|\bEATERY\b|\bKITCHEN\b|\bBISTRO\b|\bTHAI\b|\bPHO\b|\bRAMEN\b/i, 'Dining out'],
-  // Fuel / vehicle. 76 and BP need fuel context (mortgage rule above already
-  // claimed SHELLPOINT, and \bSHELL\b can't match it anyway).
-  [/CHEVRON|\bSHELL\b|\bARCO\b|\bUNION 76\b|\b76\s*(GAS|FUEL|STATION)\b|PHILLIPS 66|EXXON|\bFUEL\b|GAS STATION|GASOLINE|TEXACO|CONOCO|\bBP\s*#?\s*\d|\bBP (GAS|FUEL|OIL|STATION)\b|COSTCO GAS|FRED MEYER FUEL|LES SCHWAB|JIFFY LUBE|AUTO REPAIR|\bTIRE\b|AUTO PARTS|\bO'?REILLY\b|NAPA AUTO|CAR WASH|\bPARKING\b|\bTOLL\b|GOOD TO GO/i, 'Vehicle expenses'],
-  // Ride share vs transit.
-  [/\bUBER\b(?! EATS)|\bLYFT\b/i, 'Ride shares'],
-  [/SOUND TRANSIT|\bORCA\b|KING COUNTY METRO|METRO TRANSIT|WA STATE FERR|WSDOT|\bAMTRAK\b|LINK LIGHT RAIL/i, 'Public transit'],
-  // Travel & vacation — had NO rules at all, so the category was unreachable
-  // and a vacation month showed nothing.
-  [/AIRLINE|\bAIR LINES\b|ALASKA AIR|DELTA AIR|UNITED AIR|SOUTHWEST AIR|AMERICAN AIR|JETBLUE|SPIRIT AIR|FRONTIER AIR|\bAIRBNB\b|\bVRBO\b|EXPEDIA|BOOKING\.COM|HOTELS\.COM|PRICELINE|KAYAK|MARRIOTT|HILTON|\bHYATT\b|HOLIDAY INN|BEST WESTERN|\bMOTEL\b|\bHOTEL\b|\bRESORT\b|\bCRUISE\b|HERTZ|\bAVIS\b|ENTERPRISE RENT|RENTAL CAR|TSA PRE|GLOBAL ENTRY|TRAVEL/i, 'Travel and vacation'],
-  // Healthcare & pharmacy.
-  [/PHARMACY|WALGREENS|\bCVS\b|RITE AID|BARTELL|\bKAISER\b|CLINIC|HOSPITAL|MEDICAL|\bDENTAL\b|ORTHODON|\bOPTICAL\b|OPTOMETR|\bVISION\b|LABCORP|QUEST DIAG|SWEDISH|VIRGINIA MASON|\bURGENT CARE\b/i, 'Healthcare and pharmacy'],
-  // Health & fitness (personal care) — also previously unreachable. Matches
-  // Plaid's old PERSONAL_CARE → 'Health and fitness' mapping.
-  [/\bGYM\b|FITNESS|ORANGETHEORY|CROSSFIT|\bYOGA\b|PILATES|PELOTON|BARBER|\bSALON\b|GREAT CLIPS|SUPERCUTS|SPORT CLIPS|\bSPA\b|MASSAGE|\bNAILS?\b|SEPHORA|\bULTA\b|HAIRCUT|\bTANNING\b|CHIROPRACT/i, 'Health and fitness'],
-  // Entertainment & subscriptions. MAX only as HBO Max.
-  [/NETFLIX|SPOTIFY|\bHULU\b|DISNEY ?\+|DISNEYPLUS|\bHBO ?MAX\b|\bMAX\.COM\b|YOUTUBE|APPLE\.COM\/BILL|PRIME VIDEO|AUDIBLE|PATREON|NINTENDO|PLAYSTATION|\bXBOX\b|\bSTEAM\b|PARAMOUNT\+|\bAMC\b|REGAL CINEMA|CINEMARK|\bTHEATRE\b|\bTHEATER\b|TICKETMASTER|\bSTUBHUB\b/i, 'Entertainment and subscriptions'],
-  // Pets.
-  [/\bCHEWY\b|PETCO|PETSMART|\bVCA\b|VETERINAR|\bVET\b|MUD BAY|\bPET ?SUPP|ANIMAL HOSPITAL|HUMANE SOCIET/i, 'Pets'],
-  // Childcare — before Education so "PRESCHOOL" can't be read as schooling.
-  [/DAYCARE|CHILDCARE|KINDERCARE|PRESCHOOL|BRIGHT HORIZONS|\bNANNY\b|CHILD CARE/i, 'Childcare'],
-  // Education — previously unreachable.
-  [/TUITION|UNIVERSITY|\bCOLLEGE\b|\bSCHOOL\b|COURSERA|UDEMY|\bEDX\b|KHAN ACADEM|CHEGG|TEXTBOOK|STUDENT LOAN|SCHOLARSHIP|\bTUTOR/i, 'Education'],
-  // Home improvement retail.
-  [/HOME DEPOT|LOWES|LOWE'?S|ACE HARDWARE|MCLENDON|DUNN LUMBER|\bLUMBER\b|\bHARDWARE\b|\bIKEA\b|\bPLUMBING\b|\bELECTRICIAN\b|\bLANDSCAP/i, 'Home maintenance and improvement'],
-  // Side hustles & business — previously unreachable. Deliberately narrow:
-  // these words appear in personal spending too.
-  [/ETSY SELLER|SHOPIFY|SQUARESPACE|\bWIX\b|GODADDY|BUSINESS LICENSE|QUICKBOOKS|FRESHBOOKS|\bLLC FILING\b|SECRETARY OF STATE|ADOBE CREATIVE/i, 'Side hustles and business'],
-  // Cash, checks & misc — previously unreachable, which is why ATM withdrawals
-  // and Venmo were being counted as "Shopping and gear". P2P apps land here
-  // deliberately: the underlying purpose is unknowable from the descriptor, but
-  // it is at least countable and honestly labelled.
-  [/\bATM\b|CASH WITHDRAWAL|\bWITHDRAWAL\b|\bCHECK\s*#|\bCHECK\b(?!ING)|\bCHK\b|\bVENMO\b|\bZELLE\b|CASH APP|\bUSPS\b|UPS STORE|\bFEDEX\b|POST OFFICE|\bDMV\b|DEPT OF LICENSING|\bNOTARY\b|\bDONATION\b|GOFUNDME|RED CROSS|\bCHARITY\b/i, 'Cash, checks, and misc'],
-  // Shopping & gear — now an EXPLICIT rule rather than the silent fallback, so
-  // "this is shopping" is a decision and not the absence of one.
-  [/\bAMAZON\b|\bTARGET\b|WALMART|\bCOSTCO\b|\bREI\b|NORDSTROM|OLD NAVY|\bH ?& ?M\b|MARSHALLS|\bTJ ?MAXX\b|ROSS STORES|\bUNIQLO\b|\bZARA\b|\bNIKE\b|ADIDAS|\bETSY\b|\bEBAY\b|BEST BUY|\bAPPLE STORE\b|\bMACY'?S\b|KOHL'?S|\bWAYFAIR\b|BED BATH|\bMICHAELS\b|JOANN|BARNES ?& ?NOBLE|\bGOODWILL\b|VALUE VILLAGE/i, 'Shopping and gear'],
-];
-
-// Validate rule targets once, dropping (and warning about) any that aren't in
-// the shared taxonomy so an invalid label can never reach the database.
-const CATEGORY_RULES = RAW_RULES.filter(([, cat]) => {
-  if (ERA_CATEGORIES.includes(cat)) return true;
-  // eslint-disable-next-line no-console
-  console.warn(`[txClassify] dropping rule with invalid category: ${cat}`);
-  return false;
-});
-
-// ---------------------------------------------------------------------------
 // Learned merchant rules (the `category_rules` table).
 //
-// The keyword table can't know that "Rudys Columbia City" is a barbershop. A
-// correction teaches it once and every later import/sync agrees.
+// Since the keyword table's deletion these are the app's ONLY categorizer: a
+// correction teaches a merchant once and every later import/sync agrees.
 // ---------------------------------------------------------------------------
 
 // Normalized merchant identity. Store numbers and reference digits are noise —
@@ -203,22 +139,16 @@ export function guessCategory(description, opts = {}) {
     if (TRANSFER_RE.test(d)) return TRANSFER_CATEGORY;
     if (looksLikeCardPayment(d)) return TRANSFER_CATEGORY;
   }
-  // Learned rules beat the keyword table — they are the household's own
-  // knowledge, and they exist precisely because the table got it wrong. They do
-  // NOT beat the transfer guards above: those protect spending totals, and a
-  // rule that made card payments count as spending would be a footgun.
+  // Learned rules are the household's own knowledge and the ONLY categorizer
+  // left. They do NOT beat the transfer guards above: those protect spending
+  // totals, and a rule that made card payments count as spending would be a
+  // footgun.
   const learned = matchLearnedRule(d, rules);
   if (learned) return learned;
 
-  for (const [re, cat] of CATEGORY_RULES) {
-    if (re.test(d)) return cat;
-  }
+  // No guess. An untaught merchant is Uncategorized — visible and countable,
+  // never a confident wrong answer (see the module header).
   return FALLBACK_CATEGORY;
-}
-
-// Exposed for tests: assert no rule points at a category outside the taxonomy.
-export function invalidRuleCategories() {
-  return RAW_RULES.map(([, c]) => c).filter(c => !ERA_CATEGORIES.includes(c));
 }
 
 // Internal-transfer descriptors → raw_category so markInternalTransfers can

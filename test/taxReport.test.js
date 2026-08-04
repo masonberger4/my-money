@@ -21,6 +21,8 @@ import {
   entityLedger,
   personalDeductionReport,
   DEDUCTION_BUCKETS,
+  DEFAULT_SCHEDULE_E_MAP,
+  DEFAULT_DEDUCTION_MAP,
   MILEAGE_RATES,
   mileageRate,
   mileageDeduction,
@@ -187,6 +189,34 @@ test('mileageDeduction splits a straddling year by rate and counts unrated miles
     { rate: 0.725, miles: 100, amount: 72.5 },
     { rate: 0.76, miles: 100, amount: 76 },
   ]);
+});
+
+// The app ships no built-in categories (2026-08-04), so there is nothing
+// honest to pre-map onto a tax line: the two entries these maps used to carry
+// pointed at deleted built-ins ('Home maintenance and improvement' → 14,
+// Utilities → 17, 'Healthcare and pharmacy' → medical). Mapping is now fully
+// user-driven through the existing `tax:maps` settings key.
+test('the default tax maps are EMPTY — category→line mapping is fully user-driven', () => {
+  assert.deepEqual(DEFAULT_SCHEDULE_E_MAP, {});
+  assert.deepEqual(DEFAULT_DEDUCTION_MAP, {});
+});
+
+test('with the empty default map every expense lands in the VISIBLE unmapped bucket', () => {
+  // The behavior that makes an empty default safe: nothing is silently dropped
+  // and nothing is guessed onto a line — the preparer sees the whole amount
+  // sitting in "not on any line yet" (the Uncategorized lesson, tax edition).
+  const rows = [
+    tx({ amount: 300, category: 'Repairs' }),
+    tx({ amount: 120, category: 'Power bill' }),
+  ];
+  const r = scheduleEReport(rows, DEFAULT_SCHEDULE_E_MAP);
+  assert.equal(r.totalExpenses, 0, 'no line claims anything');
+  assert.equal(r.unmappedTotal, 420, 'every dollar is visible in the unmapped bucket');
+  assert.deepEqual(r.unmapped.map((u) => u.category).sort(), ['Power bill', 'Repairs']);
+  // And a user mapping is all it takes to place them.
+  const mapped = scheduleEReport(rows, { Repairs: 14, 'Power bill': 17 });
+  assert.equal(mapped.totalExpenses, 420);
+  assert.deepEqual(mapped.unmapped, []);
 });
 
 test('lines always contains every Schedule E line in order, including zeros', () => {

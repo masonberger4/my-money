@@ -21,7 +21,7 @@
 // surface — which test/csvImport.test.js imports from — is unchanged.
 import { guessCategory, transferRawCategory } from './txClassify.js';
 
-export { guessCategory, transferRawCategory, invalidRuleCategories } from './txClassify.js';
+export { guessCategory, transferRawCategory } from './txClassify.js';
 
 // ---------------------------------------------------------------------------
 // CSV tokenizer — a small state machine so quoted fields (embedded commas,

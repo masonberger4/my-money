@@ -93,9 +93,18 @@ test('REGRESSION: a rule taught from a descriptor carrying a city is over-specif
   assert.equal(matchLearnedRule('COSTCO GAS #0117', rules), null);
 });
 
-test('learned rules beat the keyword table but never the transfer guards', () => {
-  // COSTCO GAS is in the keyword table as Vehicle expenses; a rule overrides it.
-  assert.equal(guessCategory('COSTCO GAS #0117', {}), 'Vehicle expenses');
+test('NEW CONTRACT: nothing is guessed — an untaught merchant is Uncategorized', () => {
+  // The descriptor→category keyword table is deleted (2026-08-04). COSTCO GAS
+  // used to be guessed as 'Vehicle expenses' out of a taxonomy the household
+  // never chose; now the only way it gets a category is being taught. Kept as
+  // documentation of the reversal — this assertion IS the new model.
+  assert.equal(guessCategory('COSTCO GAS #0117', {}), 'Uncategorized');
+  assert.equal(guessCategory('STARBUCKS STORE 4471', {}), 'Uncategorized');
+  assert.equal(guessCategory('NEWREZ SHELLPOINT MORTGAGE', {}), 'Uncategorized');
+  assert.equal(guessCategory('NORDSTROM RACK #12', {}), 'Uncategorized');
+});
+
+test('learned rules categorize, but never beat the transfer guards', () => {
   assert.equal(guessCategory('COSTCO GAS #0117', { rules: { 'COSTCO GAS': 'gas' } }), 'gas');
   // …but a card payment stays a transfer whatever a rule says, because that
   // bucket is excluded from spending.

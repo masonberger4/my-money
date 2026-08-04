@@ -197,8 +197,29 @@ prior backlog. Both are S/M with no blockers and no migration.*
 
 ## Harder, high value
 
-0. **USER-OWNED CATEGORY SYSTEM — Mason's decision 2026-08-04. This REVERSES
-   recorded decisions; it is the next major line of work.** The app ships no
+0. **USER-OWNED CATEGORY SYSTEM — SHIPPED 2026-08-05.** What landed, against
+   the spec below: `ERA_CATEGORIES` reduced to the mechanism three
+   (`src/categoryMap.js`); the descriptor→category keyword table deleted from
+   `src/txClassify.js` while every transfer/card-payment guard stayed
+   (`guessCategory` is now transfer guards → learned rule → Uncategorized);
+   `DEFAULT_SCHEDULE_E_MAP` removed so tax mapping is fully user-driven through
+   `tax:maps`; `dash:cats` became THE category system, surfaced through the new
+   pure `src/categoryList.js` so the Categories tab, the Budget tab, the
+   Transactions chips and every picker read ONE list (which also retired the
+   Budget tab's "budget another category" picker — that set is empty by
+   construction once the list is topped up); and migration
+   `20260805000001_user_owned_categories.sql` preserves-then-wipes.
+   Two deviations from the spec as written, both deliberate:
+   `category_rules` is wiped and archived too (with the keyword table gone,
+   rules are the only categorizer, so a surviving rule re-mints a deleted
+   category onto the next synced row), and the migration is pasted **after**
+   the deploy rather than before, because the old build derives
+   `mapped_category` at write time. The teach-queue re-sizing named below was
+   NOT done — the queue is unchanged, and it is now the primary onboarding
+   surface, so that remains open. **Mason must still paste the migration**
+   (CLAUDE.md Pending). Original spec kept below as the record.
+
+   **Mason's decision 2026-08-04. This REVERSES recorded decisions.** The app ships no
    categories at all: the user creates every category, teaches which
    transactions belong to it (manual at first), and the learned-rule machinery
    makes it automatic thereafter. `category_rules` + `merchantKey` +
