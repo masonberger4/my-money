@@ -95,10 +95,8 @@ async function fetchRawBetween(start, end, columns) {
   const fetchAll = async withEntity => {
     const cols = columns ?? (withEntity ? TX_COLUMNS + TX_TAX_COLUMNS : TX_COLUMNS);
     const join = `accounts!inner(hidden, type, subtype${withEntity ? ', entity_id' : ''})`;
-    const rows = [];
-    const page = 1000;
-    for (let from = 0; ; from += page) {
-      const { data, error } = await supabase
+    return pagedRows((from, to) =>
+      supabase
         .from('transactions')
         .select(`${cols}, ${join}`)
         .eq('accounts.hidden', false)
@@ -109,12 +107,8 @@ async function fetchRawBetween(start, end, columns) {
         // boundary landing inside a run of same-dated rows can drop or repeat
         // one. Reachable now that the envelope walk can span years.
         .order('id', { ascending: false })
-        .range(from, from + page - 1);
-      if (error) throw error;
-      rows.push(...data);
-      if (data.length < page) break;
-    }
-    return rows;
+        .range(from, to)
+    );
   };
   try {
     return await fetchAll(!columns && transactionsHaveEntity);
@@ -137,6 +131,28 @@ async function fetchRawBetween(start, end, columns) {
 // pipelines below mutate rows (top-level fields only), and shared rows would
 // leak getCashFlow's `_internal` marks into the purchase-based model.
 const rangeMemo = createRangeMemo((start, end) => fetchRawBetween(start, end));
+
+// The ONE paged-loop discipline (exported for tests). Every whole-table /
+// whole-range read pages in 1000-row windows, and a result set that is an
+// exact multiple of the page size makes the next request start past the end —
+// PostgREST answers that with 416/PGRST103, not an empty page. Treat it as
+// end-of-data (isRangeExhaustedError), never a failure: an unguarded throw on
+// an exact N×1000 window errors the whole dashboard (the memo evicts on
+// rejection, so it recurs on every reload) and blocks CSV/PDF import.
+export async function pagedRows(fetchPage, page = 1000) {
+  const rows = [];
+  for (let from = 0; ; from += page) {
+    const { data, error } = await fetchPage(from, from + page - 1);
+    if (error) {
+      if (isRangeExhaustedError(error)) break;
+      throw error;
+    }
+    const batch = data || [];
+    rows.push(...batch);
+    if (batch.length < page) break;
+  }
+  return rows;
+}
 
 // `columns` exists for the envelope walk, which can span years: it needs only
 // the spending predicate's inputs, so it skips the wide column list (and the
@@ -1377,11 +1393,19 @@ export function isSimpleFinAccount(a) {
 let accountsHaveIsManual = true;
 let transactionsHaveSource = true;
 
-function isMissingColumnError(error, col) {
+// A missing COLUMN, and it must be THIS column: the name has to appear in the
+// error text (PostgREST/Postgres always name it) before the code counts.
+// Matching on PGRST204/42703 alone would let a DIFFERENT missing column flip a
+// feature's degrade flag — reading, say, an entity_id problem as "debt tracker
+// not installed" for the whole session, the exact missing-table/missing-column
+// conflation the CLAUDE.md gotcha forbids. Mirrors the test-pinned twin in
+// api/sync.js. Exported for tests only.
+export function isMissingColumnError(error, col) {
   if (!error) return false;
-  if (error.code === 'PGRST204' || error.code === '42703') return true;
   const blob = `${error.message || ''} ${error.details || ''} ${error.hint || ''}`.toLowerCase();
-  return blob.includes(col) && blob.includes('column');
+  if (!blob.includes(String(col).toLowerCase())) return false;
+  if (error.code === 'PGRST204' || error.code === '42703') return true;
+  return blob.includes('column');
 }
 
 function makeUuid() {
@@ -1554,14 +1578,13 @@ export async function getExistingTxIds(accountId) {
   const ids = new Set();
   const sources = new Set();
   if (!accountId) return { ids, sources };
-  const page = 1000;
   let selectCols = transactionsHaveSource ? 'plaid_tx_id, source' : 'plaid_tx_id';
-  for (let from = 0; ; from += page) {
+  const rows = await pagedRows(async (from, to) => {
     let { data, error } = await supabase
       .from('transactions')
       .select(selectCols)
       .eq('account_id', accountId)
-      .range(from, from + page - 1);
+      .range(from, to);
     if (error && selectCols !== 'plaid_tx_id' && isMissingColumnError(error, 'source')) {
       transactionsHaveSource = false;
       selectCols = 'plaid_tx_id';
@@ -1569,14 +1592,13 @@ export async function getExistingTxIds(accountId) {
         .from('transactions')
         .select(selectCols)
         .eq('account_id', accountId)
-        .range(from, from + page - 1));
+        .range(from, to));
     }
-    if (error) throw error;
-    for (const r of data) {
-      ids.add(r.plaid_tx_id);
-      if (r.source) sources.add(r.source);
-    }
-    if (data.length < page) break;
+    return { data, error };
+  });
+  for (const r of rows) {
+    ids.add(r.plaid_tx_id);
+    if (r.source) sources.add(r.source);
   }
   return { ids, sources };
 }
@@ -1616,23 +1638,18 @@ export async function getFeedCoverageStart(accountId) {
 // the shaped toTxShape form — scoped to the CSV's period so a one-month CSV
 // isn't compared against years of feed history.
 export async function getAccountTransactionsInRange(accountId, start, end) {
-  const rows = [];
-  if (!accountId || !start || !end) return rows;
-  const page = 1000;
-  for (let from = 0; ; from += page) {
-    const { data, error } = await supabase
+  if (!accountId || !start || !end) return [];
+  const rows = await pagedRows((from, to) =>
+    supabase
       .from('transactions')
       .select('plaid_tx_id, date, amount, description, merchant_name, mapped_category, user_category, pending')
       .eq('account_id', accountId)
       .gte('date', start)
       .lte('date', end)
       .order('date', { ascending: true })
-      .range(from, from + page - 1);
-    if (error) throw error;
-    for (const r of data) rows.push({ ...r, amount: Number(r.amount) });
-    if (data.length < page) break;
-  }
-  return rows;
+      .range(from, to)
+  );
+  return rows.map(r => ({ ...r, amount: Number(r.amount) }));
 }
 
 // Idempotent upsert of built CSV rows onto a manual account. onConflict

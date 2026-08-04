@@ -162,8 +162,10 @@ export default async function handler(req, res) {
       min_pull_minutes: MIN_PULL_MINUTES,
     });
   } catch (err) {
+    // Full error stays in the server log; the client gets a generic string +
+    // stable code (raw err.message can carry schema/PostgREST details).
     console.error('simplefin-status error', err);
-    return res.status(500).json({ error: err.message || 'Unknown error' });
+    return res.status(500).json({ error: 'status_failed', message: 'Could not read the connection status.' });
   }
 }
 
