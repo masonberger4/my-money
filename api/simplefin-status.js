@@ -1,6 +1,6 @@
 import { getServiceClient, requireUser } from './_lib/supabase.js';
 import { MIN_PULL_MINUTES } from './_lib/simplefin.js';
-import { unlinkSettingsKey, parseRestoreSet, restoreSet } from './_lib/unlink.js';
+import { unlinkSettingsKey, parseRestoreSet, restoreSet, disconnectAllowed } from './_lib/unlink.js';
 
 // Whether this household has SimpleFIN connected, and how the last pull went.
 //
@@ -13,8 +13,10 @@ import { unlinkSettingsKey, parseRestoreSet, restoreSet } from './_lib/unlink.js
 // POST { restore_institution_id } → undo a "Remove bank": clears the disabled
 //          tombstone and unhides exactly the accounts the soft-hide hid
 //          (recorded in settings at hide time). Returns { unhidden }.
-// DELETE → forget the stored access URL (stops all SimpleFIN syncing; leaves
-//          already-imported accounts and transactions in place).
+// DELETE { confirm: 'disconnect' } → forget the stored access URL (stops all
+//          SimpleFIN syncing; leaves already-imported accounts and
+//          transactions in place). The literal confirm is required — a bare
+//          authenticated DELETE is rejected 400.
 export default async function handler(req, res) {
   if (!['GET', 'POST', 'DELETE'].includes(req.method)) {
     return res.status(405).json({ error: 'Method not allowed' });
@@ -96,6 +98,12 @@ export default async function handler(req, res) {
     }
 
     if (req.method === 'DELETE') {
+      // Literal confirm gate (the unlink.js discipline): destructive api/
+      // actions never fire on a bare authenticated request. The UI already
+      // confirms; this makes the server require the same deliberateness.
+      if (!disconnectAllowed(req.body)) {
+        return res.status(400).json({ error: 'confirm_required', message: "Pass { confirm: 'disconnect' } to forget the SimpleFIN connection." });
+      }
       const { error } = await supabase
         .from('simplefin_access')
         .delete()

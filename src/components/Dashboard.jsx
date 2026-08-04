@@ -1454,7 +1454,19 @@ export default function Dashboard({ refreshTick = 0 }) {
   function saveAsstEffort(e){setAsstEffort(e);setSetting("asst:effort",e).catch(()=>{});}
 
   // --- Rental & tax handlers ---
-  async function saveTaxMaps(next){setTaxMaps(next);try{await setSetting("tax:maps",JSON.stringify(next));}catch(err){console.error("saving tax maps failed",err);}}
+  // Optimistic with rollback + alert: a dropped mapping edit would leave the
+  // worksheet on screen disagreeing with what the other phone (and the next
+  // Tax-tab load) reads back.
+  async function saveTaxMaps(next){
+    const prev=taxMaps;
+    setTaxMaps(next);
+    try{await setSetting("tax:maps",JSON.stringify(next));}
+    catch(err){
+      console.error("saving tax maps failed",err);
+      setTaxMaps(prev);
+      window.alert(`Couldn't save that tax mapping: ${err.message||err}`);
+    }
+  }
   // A fresh entity's Schedule E mapping starts from the conservative defaults;
   // the FIRST edit copies them into the stored map and edits that. Never merge
   // the defaults over a stored map — that would resurrect a default the user
@@ -1483,16 +1495,31 @@ export default function Dashboard({ refreshTick = 0 }) {
       window.alert(`Couldn't add the property: ${err.message||err}\n\nIf this is a fresh deploy, the rental-tax migration may not have been applied yet.`);
     }
   }
+  // Both entity edits are optimistic with rollback + alert (the
+  // updateManualBalance pattern): a silently dropped rename/archive reads as
+  // saved on this phone while every other reader still has the old row.
   async function renameEntity(id,name){
     const n=(name||"").trim();
     if(!n)return;
-    setEntities(prev=>prev.map(e=>e.id===id?{...e,name:n}:e));
-    try{await updateEntity(id,{name:n});}catch(err){console.error("renaming the property failed",err);}
+    const prev=entities;
+    setEntities(p=>p.map(e=>e.id===id?{...e,name:n}:e));
+    try{await updateEntity(id,{name:n});}
+    catch(err){
+      console.error("renaming the property failed",err);
+      setEntities(prev);
+      window.alert(`Couldn't rename the property: ${err.message||err}`);
+    }
   }
   async function setEntityArchived(id,archived){
     const at=archived?new Date().toISOString():null;
-    setEntities(prev=>prev.map(e=>e.id===id?{...e,archived_at:at}:e));
-    try{await updateEntity(id,{archived_at:at});}catch(err){console.error("archiving the property failed",err);}
+    const prev=entities;
+    setEntities(p=>p.map(e=>e.id===id?{...e,archived_at:at}:e));
+    try{await updateEntity(id,{archived_at:at});}
+    catch(err){
+      console.error("archiving the property failed",err);
+      setEntities(prev);
+      window.alert(`Couldn't ${archived?"archive":"unarchive"} the property: ${err.message||err}`);
+    }
   }
   async function handleAddMileage(){
     if(!mileForm)return;
@@ -1509,8 +1536,14 @@ export default function Dashboard({ refreshTick = 0 }) {
     }
   }
   async function handleDeleteMileage(id){
-    setMileage(prev=>prev.filter(m=>m.id!==id));
-    try{await deleteMileage(id);}catch(err){console.error("deleting mileage failed",err);}
+    const prev=mileage;
+    setMileage(p=>p.filter(m=>m.id!==id));
+    try{await deleteMileage(id);}
+    catch(err){
+      console.error("deleting mileage failed",err);
+      setMileage(prev); // rollback: the row is still in the DB
+      window.alert(`Couldn't delete the drive: ${err.message||err}`);
+    }
   }
 
   const isCurrent = year===now.getFullYear()&&month===now.getMonth()+1;
@@ -1703,7 +1736,11 @@ export default function Dashboard({ refreshTick = 0 }) {
   // the derived debtRate and the two totals, the same recompute-every-derived-
   // field rule as saveTx — then writes; the accounts row is the client's own
   // (RLS-scoped) so updateAccount writes it directly.
+  // Rollback + alert on failure (the updateManualBalance pattern three
+  // functions down): a dropped APR/minimum silently mis-amortizes the payoff
+  // plan while the screen shows the typed value.
   function saveDebt(id,fields){
+    const prevDebt=debtData;
     setDebtData(prev=>{
       if(!prev)return prev;
       const debts=prev.debts.map(a=>{
@@ -1716,7 +1753,11 @@ export default function Dashboard({ refreshTick = 0 }) {
         totalDebt:debts.reduce((s,a)=>s+(Number(a.current_balance)||0),0),
         totalMinimums:debts.reduce((s,a)=>s+(Number(a.minimum_payment)||0),0)};
     });
-    updateAccount(id,fields).catch(err=>console.error("debt field save failed",err));
+    updateAccount(id,fields).catch(err=>{
+      console.error("debt field save failed",err);
+      setDebtData(prevDebt);
+      window.alert(`Couldn't save that debt field: ${err.message||err}`);
+    });
   }
 
   // Hand-typed balance edit on a MANUAL debt (fed balances are never
@@ -1887,10 +1928,23 @@ export default function Dashboard({ refreshTick = 0 }) {
     return n?<Pill label={n} color={ENTITY_CHIP} surface={surf.card}/>:null;
   },[entities,surf.card]);
 
+  // Optimistic with rollback + alert (the updateManualBalance pattern). This
+  // carries the TYPE editor: a dropped type correction is never restated by
+  // sync (type is user-owned after first insert), so a silently failed save
+  // would leave a mistyped card counting purchases as household spending with
+  // the screen showing the corrected type.
   async function saveAccount(id,fields){
+    const prevAccounts=accounts;
+    const prevSel=selAcct;
     setAccounts(prev=>prev.map(a=>a.id===id?{...a,...fields}:a));
     if(selAcct?.id===id)setSelAcct(prev=>({...prev,...fields}));
-    try{await updateAccount(id,fields);}catch(err){console.error("account update failed",err);}
+    try{await updateAccount(id,fields);}
+    catch(err){
+      console.error("account update failed",err);
+      setAccounts(prevAccounts);
+      if(prevSel?.id===id)setSelAcct(cur=>cur?.id===id?prevSel:cur);
+      window.alert(`Couldn't save that account change: ${err.message||err}`);
+    }
   }
 
   const [unlinking,setUnlinking]=useState(false);

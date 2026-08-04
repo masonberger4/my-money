@@ -72,9 +72,11 @@ export function getSimpleFinStatus() {
 }
 
 // Forgets the stored access URL — stops SimpleFIN syncing but leaves the
-// accounts and transactions it already imported in place.
+// accounts and transactions it already imported in place. The server requires
+// the literal confirm string (the unlink permanent-delete discipline), so a
+// bare DELETE can never silently kill the feed.
 export function disconnectSimpleFin() {
-  return request('DELETE', '/api/simplefin-status');
+  return request('DELETE', '/api/simplefin-status', { confirm: 'disconnect' });
 }
 
 // Undo a "Remove bank": clears the disabled tombstone and unhides exactly the

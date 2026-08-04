@@ -63,3 +63,15 @@ export function isPermanentDeleteRequest(body) {
 export function permanentDeleteAllowed(body) {
   return body?.permanent === true && body?.confirm === PERMANENT_CONFIRM;
 }
+
+// The simplefin-status DELETE gate (forget the stored access URL). Same
+// literal-string discipline as permanentDeleteAllowed: `confirm` must be
+// exactly 'disconnect' — not truthy, not case-insensitive — so a bare
+// authenticated DELETE (a replayed request, a curious client, a buggy retry)
+// can never silently stop all syncing. Availability, not data loss, but the
+// failure mode is the silent-stale-dashboard shape.
+export const DISCONNECT_CONFIRM = 'disconnect';
+
+export function disconnectAllowed(body) {
+  return body?.confirm === DISCONNECT_CONFIRM;
+}
