@@ -8,6 +8,7 @@ import { matchExpected, rollForwardDate, isDuplicateExpected, isDuplicateRollFor
 import { isBudgetableCategory } from './categoryMap.js';
 import { isSpend, sumSpending, spendingGroups, biggestMovers, toTxShape, aggregateEnvelopeSpending } from './spending.js';
 import { createRangeMemo } from './monthMemo.js';
+import { setSyncCompletionHook } from './sync.js';
 import { amountOrClause } from './searchFilters.js';
 import { parseIgnoreList, toggleIgnoreKey, CANDIDATE_WINDOW_MONTHS } from './recurring.js';
 import { parseSavedChats, addSavedChat, removeSavedChat } from './savedChats.js';
@@ -126,8 +127,10 @@ async function fetchRawBetween(start, end, columns) {
 // in parallel and their ranges overlap — the memo dedupes in-flight requests
 // per range and serves contained ranges by slicing, so each reload fetches the
 // cash-flow window once instead of refetching the current month per caller.
-// Cleared by invalidateEnvelopeSpending(), the same reload-time invalidation
-// that drops spendCache. Callers always receive per-row shallow COPIES — the
+// Cleared by invalidateEnvelopeSpending(), the same invalidation that drops
+// spendCache — fired on write / sync / import / Refresh, NOT on plain month
+// navigation, which reuses warm entries (Mason, 2026-08-04). Reuse is safe
+// because callers never see the memo's rows: they get per-row shallow COPIES —
 // pipelines below mutate rows (top-level fields only), and shared rows would
 // leak getCashFlow's `_internal` marks into the purchase-based model.
 const rangeMemo = createRangeMemo((start, end) => fetchRawBetween(start, end));
@@ -262,10 +265,11 @@ export async function updateTransaction(id, fields) {
   if ('useful_life_years' in fields) allowed.useful_life_years = fields.useful_life_years;
   const { error } = await supabase.from('transactions').update(allowed).eq('id', id);
   if (error) throw error;
-  // Not every reader reloads through reloadData (which clears the memo):
-  // saveTx only bumps taxEpoch, and the Tax refetch must not be served the
-  // pre-edit rows out of a warm memo.
-  rangeMemo.clear();
+  // Writes are THE invalidation moment now that month navigation reuses the
+  // caches (Mason, 2026-08-04): drop the memoised ranges AND the envelope
+  // spend sums here — reloadData no longer invalidates, so a site that only
+  // cleared the range memo would leave spendCache serving pre-edit sums.
+  invalidateEnvelopeSpending();
 }
 
 export async function getTransactions({ year, month }) {
@@ -324,9 +328,10 @@ export async function updateAccount(id, fields) {
   const { error } = await supabase.from('accounts').update(allowed).eq('id', id);
   if (error) throw error;
   // hidden/type edits change which rows the raw fetch returns / how they
-  // classify — drop any memoised ranges rather than trust every caller to
-  // reload through invalidateEnvelopeSpending.
-  rangeMemo.clear();
+  // classify — drop the memoised ranges AND the envelope spend sums (isSpend
+  // reads the account type; hidden gates the query). reloadData no longer
+  // invalidates, so this write is the invalidation moment.
+  invalidateEnvelopeSpending();
 }
 
 // --- Debt tracker ------------------------------------------------------------
@@ -554,9 +559,10 @@ export async function applyCategoryRuleToHistory(descriptor, category, { dryRun 
     updateBatch: (ids, cat) =>
       supabase.from('transactions').update({ mapped_category: cat }).in('id', ids),
   });
-  // A real apply rewrites other rows' mapped_category; the recurring/tax
-  // refetches it triggers don't pass through invalidateEnvelopeSpending.
-  if (!dryRun) rangeMemo.clear();
+  // A real apply rewrites other rows' mapped_category — a write, so it is an
+  // invalidation moment (spend sums shift when categories move between
+  // spending and the transfer bucket's veto).
+  if (!dryRun) invalidateEnvelopeSpending();
   return result;
 }
 
@@ -920,9 +926,12 @@ export function deleteSavedChat(id) {
 // range grows by a month every month and is re-read after every envelope edit,
 // but an envelope edit CANNOT change a transaction — so assigning, moving money
 // or toggling rollover reuses this instead of re-downloading the household's
-// whole budgeting history. invalidateEnvelopeSpending() is called by the
-// dashboard's own reload, which is the only moment transactions can have moved
-// (a sync, a CSV/PDF import, a recategorisation, a learned rule applied).
+// whole budgeting history. Month navigation REUSES this cache (Mason,
+// 2026-08-04) — invalidateEnvelopeSpending() runs only at the four moments
+// transactions can actually have moved: a client write (every adapter write
+// path that touches transactions/accounts calls it), a completed sync (the
+// setSyncCompletionHook registration below), a CSV/PDF import, and the
+// dashboard's explicit Refresh (which syncs, so the hook covers it).
 let spendCache = null;
 // Generation counter: a fetch that was already in flight when the cache was
 // invalidated must not write its (pre-invalidation) result back in — network
@@ -933,11 +942,15 @@ let spendGen = 0;
 export function invalidateEnvelopeSpending() {
   spendCache = null;
   spendGen++;
-  // The raw range memo lives and dies by the same moment: reloadData calls
-  // this before its parallel fetches, so each reload starts from an empty memo
-  // and shares within itself only.
+  // The raw range memo lives and dies by the same moments — one invalidation
+  // covers both, so a write site can never clear one and strand the other.
   rangeMemo.clear();
 }
+
+// A completed sync may have upserted rows server-side — it is one of the four
+// invalidation moments. Registered as a callback so sync.js stays importable
+// without the adapter (test/sync.test.js drives it standalone).
+setSyncCompletionHook(invalidateEnvelopeSpending);
 
 async function getEnvelopeSpending(start, end) {
   const cacheKey = `${start}|${end}`;
@@ -1682,7 +1695,7 @@ export async function importCsvTransactions(accountId, rows, source = 'csv') {
     if (error) throw error;
     written += slice.length;
   }
-  rangeMemo.clear(); // new rows exist — memoised ranges are stale
+  invalidateEnvelopeSpending(); // new rows exist — every memoised read is stale
   return written;
 }
 
@@ -1780,7 +1793,7 @@ export async function addManualTransaction(
 
   // Credit-card refunds become "Return" — same pipeline step every read runs.
   data.mapped_category = applyAccountRules(data.mapped_category, data.amount, data.accounts?.type);
-  rangeMemo.clear(); // a new row exists — memoised ranges are stale
+  invalidateEnvelopeSpending(); // a new row exists — every memoised read is stale
   return toTxShape(data);
 }
 

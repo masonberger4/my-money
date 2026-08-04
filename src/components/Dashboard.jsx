@@ -1571,10 +1571,14 @@ export default function Dashboard({ refreshTick = 0 }) {
     // rolls forward into every month after it. Same monotonic-sequence guard
     // the cross-month search already uses.
     const seq=++loadSeq.current;
-    // The envelope walk reads transactions; this is the moment they may have
-    // moved (a sync, an import, a recategorisation, a learned rule), so drop
-    // the memoised spend sums.
-    invalidateEnvelopeSpending();
+    // Deliberately NO invalidateEnvelopeSpending() here (Mason, 2026-08-04):
+    // plain month navigation reuses the adapter's memoised rows/spend sums, so
+    // a month tap is state reads, not a refetch of the whole envelope walk +
+    // the 6-month window. The caches drop at the moments rows can actually
+    // move: every adapter write path, sync completion (the setSyncCompletionHook
+    // registration in dataAdapter — Refresh syncs, so it's covered), CSV/PDF
+    // import, and the server-side mutations handled at their call sites
+    // (handleUnlink, the SimpleFIN modal's onConnected).
     const eseq=++envSeq.current;
     try{
       const[ov,sp,tx,cf,ac,bu,en,inc,ents,mv]=await Promise.all([
@@ -2208,6 +2212,9 @@ export default function Dashboard({ refreshTick = 0 }) {
     setUnlinking(true);
     try{
       await unlinkInstitution(selAcct.institution_id);
+      // The server just hid (or deleted) the bank's rows — a write reloadData
+      // no longer invalidates for, so drop the memoised ranges here.
+      invalidateEnvelopeSpending();
       setSelAcct(null);
       setTxAcctFilter(null);
       // The removed bank's rows no longer appear (hidden for SimpleFIN, deleted
@@ -4909,7 +4916,13 @@ export default function Dashboard({ refreshTick = 0 }) {
         <Suspense fallback={null}>
           <SimpleFinConnect
             onClose={()=>setConnectingSfin(false)}
-            onConnected={()=>reloadData(year,month)}
+            onConnected={()=>{
+              // Claim/Restore run a forced sync (the completion hook covers
+              // them), but permanent delete and disconnect mutate server-side
+              // WITHOUT a sync — invalidate here so all four outcomes refetch.
+              invalidateEnvelopeSpending();
+              reloadData(year,month);
+            }}
           />
         </Suspense>
       )}

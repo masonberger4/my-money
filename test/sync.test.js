@@ -246,3 +246,110 @@ test('runSync + pullWasClean round-trip: clean pull → clean verdict, bodiless 
       assert.equal(pullWasClean(await runSync()), false);
     }
   ));
+
+// --- setSyncCompletionHook ----------------------------------------------------
+// Month-navigation caching (Mason, 2026-08-04): plain month switches reuse the
+// dataAdapter's memoised rows, so a completed sync MUST be an invalidation
+// moment — dataAdapter registers invalidateEnvelopeSpending through this hook
+// (pinned by test/invalidationMatrix.test.js). These tests pin the mechanism:
+// the hook fires per completed execute (success OR failure — a rejected pull
+// may still have written rows server-side before failing), never breaks the
+// sync itself, and re-registration replaces.
+import { setSyncCompletionHook } from '../src/sync.js';
+
+// Every test restores a null hook — later tests in this file must not
+// accidentally observe a counter from an earlier one.
+function withHook(fn) {
+  return async (...args) => {
+    try {
+      return await fn(...args);
+    } finally {
+      setSyncCompletionHook(null);
+    }
+  };
+}
+
+test('the completion hook fires once per successful sync, after the response', () =>
+  withFetchStub(
+    () => ({ body: { results: [{ institution: 'BECU', added: 1 }] } }),
+    withHook(async calls => {
+      let fired = 0;
+      setSyncCompletionHook(() => {
+        fired++;
+        // The request has already happened when the hook runs — the caches
+        // are dropped AFTER the new rows exist, never before.
+        assert.equal(calls.length, 1, 'hook must run after the fetch');
+      });
+      await runSync();
+      assert.equal(fired, 1);
+      await runSync({ force: true });
+      assert.equal(fired, 2, 'the force path notifies too — Refresh and retype ride it');
+    })
+  ));
+
+test('the completion hook fires even when the pull REJECTS — a failed sync may still have written rows', () =>
+  withFetchStub(
+    () => ({ status: 500, body: { error: 'server exploded' } }),
+    withHook(async () => {
+      let fired = 0;
+      setSyncCompletionHook(() => fired++);
+      await assert.rejects(runSync());
+      assert.equal(fired, 1, 'finally-semantics: rejection still notifies');
+    })
+  ));
+
+test('a throwing hook never turns a good sync into a failed one', () =>
+  withFetchStub(
+    () => ({ body: { results: [{ institution: 'BECU' }] } }),
+    withHook(async () => {
+      setSyncCompletionHook(() => {
+        throw new Error('cache bookkeeping exploded');
+      });
+      const errs = [];
+      const originalError = console.error;
+      console.error = (...args) => errs.push(args);
+      try {
+        const r = await runSync();
+        assert.deepEqual(r.failures, []);
+        assert.equal(errs.length, 1, 'the hook failure is logged, not propagated');
+      } finally {
+        console.error = originalError;
+      }
+    })
+  ));
+
+test('two single-flight joiners share one sync and therefore ONE hook firing', () =>
+  withFetchStub(
+    () => ({ body: { results: [{ institution: 'BECU' }] } }),
+    withHook(async calls => {
+      let fired = 0;
+      setSyncCompletionHook(() => fired++);
+      await Promise.all([runSync(), runSync()]);
+      assert.equal(calls.length, 1);
+      assert.equal(fired, 1, 'one execute → one invalidation');
+    })
+  ));
+
+test('re-registering the hook replaces the previous one — last registration wins', () =>
+  withFetchStub(
+    () => ({ body: { results: [{ institution: 'BECU' }] } }),
+    withHook(async () => {
+      let first = 0;
+      let second = 0;
+      setSyncCompletionHook(() => first++);
+      setSyncCompletionHook(() => second++);
+      await runSync();
+      assert.equal(first, 0);
+      assert.equal(second, 1);
+    })
+  ));
+
+test('a null hook is fine — syncs run un-notified (sync.js standalone)', () =>
+  withFetchStub(
+    () => ({ body: { results: [{ institution: 'BECU' }] } }),
+    withHook(async () => {
+      setSyncCompletionHook(null);
+      const r = await runSync();
+      assert.deepEqual(r.failures, []);
+    })
+  ));

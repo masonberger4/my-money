@@ -7,13 +7,39 @@ import { runServerSync } from './apiClient.js';
 
 let syncInFlight = null;
 
-async function execute(force) {
-  const { results } = await runServerSync({ force });
-  const failures = (results || []).filter(r => r.error);
-  for (const f of failures) {
-    console.warn('[sync] institution failed:', f.institution, f.error);
+// Month-navigation caching (Mason, 2026-08-04): plain month switches reuse the
+// dataAdapter's memoised rows, so a completed sync is one of the four moments
+// the caches MUST drop (write / sync / import / Refresh). dataAdapter registers
+// invalidateEnvelopeSpending here at module load — a callback rather than an
+// import, so this file stays loadable (and testable) without dragging the
+// whole adapter in. The hook fires in `finally`: a rejected pull may still
+// have written rows server-side before failing, and a spurious invalidation
+// only costs a refetch while a missed one shows stale money.
+let syncCompletionHook = null;
+export function setSyncCompletionHook(fn) {
+  syncCompletionHook = fn;
+}
+function notifySyncCompletion() {
+  try {
+    if (syncCompletionHook) syncCompletionHook();
+  } catch (err) {
+    // The hook is cache bookkeeping — it must never turn a good sync into a
+    // failed one.
+    console.error('[sync] completion hook failed', err);
   }
-  return { results, failures };
+}
+
+async function execute(force) {
+  try {
+    const { results } = await runServerSync({ force });
+    const failures = (results || []).filter(r => r.error);
+    for (const f of failures) {
+      console.warn('[sync] institution failed:', f.institution, f.error);
+    }
+    return { results, failures };
+  } finally {
+    notifySyncCompletion();
+  }
 }
 
 // Did this sync actually READ the feed, end to end?
