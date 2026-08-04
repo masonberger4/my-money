@@ -73,6 +73,128 @@ below relitigates a decided item.
    gitignored local check or a separate opt-in script — `npm test` must stay
    zero-dep and Postgres-free.
 
+*Items 7–8 came out of the **2026-08-04 code sweep** — neither appears in any
+prior backlog. Both are S/M with no blockers and no migration.*
+
+7. **Learned-rules review screen ("Taught rules")** — size **M**, no
+   migration. **Why:** `deleteCategoryRule` (`src/dataAdapter.js:563`) has
+   **zero callers**, and `category_rules.source` (migration
+   `20260728000001`, "for a future 'review learned rules' screen") is written
+   and read by nothing — every row is `'user'`. So a taught rule is an
+   invisible, unremovable write-time authority: a mis-taught merchant
+   silently recategorizes every future import, and the only fix is teaching
+   it again over the top. Nothing lists what has been taught.
+   - **Where:** a `RulesSheet` **component in Dashboard.jsx** (like
+     `CategorySheet`), not a 10th tab (the bar already scrolls at 390px), not
+     the Accounts tab (that's money *sources*), not folded into "+ Add
+     category" (that's the `dash:cats` **name registry** — the separation
+     CLAUDE.md drew). Two low-emphasis entry points: a footer link under the
+     Categories list (`Taught rules (12) ›`, ≥32px) and a contextual
+     `See what you've taught ›` in the Uncategorized teach-queue block
+     (`Dashboard.jsx:2996`).
+   - **Read:** new `listCategoryRules()` in dataAdapter's rule-CRUD block
+     (the façade file — **not** `src/adapters/*`). Returns **`null`, not
+     `[]`, when the table is missing**, latching the same `hasCategoryRules`
+     flag (the `getReceiptTxIds` sentinel — the entry link keys on that
+     difference and doesn't render at all pre-migration). `getCategoryRules()`
+     stays untouched: its `{}` shape is on the hot write path
+     (`api/sync.js`, `CsvImport.jsx`, `addManualTransaction`). Page it with
+     `isRangeExhaustedError` (`src/ruleHistory.js`) or an explicit
+     `.limit(500)` + a "showing the first 500" note — never silent truncation
+     (the Session A guard class).
+   - **Match counts, two, each honest about what it is:** a free
+     `N in {monthLabel}` derived **in render** from the already-loaded month
+     rows via `matchLearnedRule` (the teach-queue precedent — no cache, so no
+     `setState(null)` exposure); plus an on-demand per-rule "Count all" doing
+     **one** paged scan. **Do not reuse `{dryRun:true}` as the count** —
+     `applyRuleToHistory` (`src/ruleHistory.js:75`) counts only rows it would
+     still *change*, so a healthy already-applied rule reads **0** and a human
+     deletes it. Add a `countAll` option that drops the
+     `mapped_category !== category` clause and forces no-write, surfaced as
+     `countCategoryRuleMatches(key)`. Failure reuses the
+     **`count === null` means the preview FAILED** distinction verbatim
+     (`offerToLearn`, `Dashboard.jsx:2130-2143`) — never `0`.
+   - **Delete semantics, verified in the sweep:** deleting a rule changes
+     **zero existing rows**. `mapped_category` is computed at WRITE time only
+     and nothing recomputes it at read time (`effectiveCategory`/`toTxShape`
+     copy the stored column). The confirm must say so in one sentence.
+     **No undo and no auto-reclassify in v1:** a true undo needs a migration
+     recording each row's pre-rule value, and the next-best "re-run the
+     keyword table without this rule" can write a **third category nobody
+     ever saw** — the confidently-wrong failure this codebase refuses. The
+     sanctioned way to move history stays the row's own "Update past
+     transactions…" action, gated by its dry run.
+   - **Sheet wiring — all three or back-gesture/Escape break:** `rulesOpen`
+     into `anySheetOpen` (`Dashboard.jsx:2088`), `setRulesOpen(false)` into
+     `closeAllSheets` (2098), and — because it's a component — `useEscClose`
+     *inside* it, **not** the capture-phase inline-overlay list (2064-2075,
+     which is only for `selTx`/`pickingCat`/`addingCat`).
+   - **→ Mason decisions (flagged, not guessed):** (a) whether a "reclassify
+     these rows without this rule" action is wanted later — its own build, it
+     needs a candidate fetch joining `accounts.type` + `amount` for
+     `guessCategory`'s card-purchase guard; (b) whether `source` should render
+     per-row regardless (v1 shows it only when >1 distinct value exists).
+     The source spec's §4 cuts off mid-guard: the category-change picker must
+     restate CLAUDE.md's precedence rule (**learned rules never override the
+     transfer/card-payment guards**) — settle that at build.
+
+8. **Surface `coverage_shortfall`** — size **S/M**, **no migration**.
+   **Why:** `api/sync.js:669` returns `coverage_shortfall`
+   (`{wanted_from, served_from}`, built by `coverageShortfall` in
+   `api/_lib/simplefin.js:871`) and **nothing reads it** — `runSync`
+   (`src/sync.js:34`) hands the whole body back and all four callers drop it
+   (`Dashboard.jsx:1687`/`2329`, `CsvImport.jsx:518`,
+   `SimpleFinConnect.jsx:103`). The app holds ~3 months where
+   `FIRST_PULL_DAYS` says it wants 2 years, and the user is never told which
+   account to backfill. The key is also **absent on every steady-state pull**
+   (pinned, `test/syncOrchestration.test.js:332`), so a client listening to
+   sync responses would see it once and never again — the same
+   absence-has-no-alarm shape as the SimpleFIN deadlock.
+   - **Decided approach: derive from the LEDGER in `/api/simplefin-status`**,
+     not from the sync's transient value. Persisting on `simplefin_access`
+     was considered and **rejected**: it's per-*access-URL* so it can never
+     name the account to import into, it **becomes a lie** once a CSV/PDF
+     backfill fills the gap, and the client can't read that table anyway — it
+     would be the status route *plus* a migration *plus* a second source of
+     truth. (Same reasoning as "the `receipts` TABLE is the source of truth —
+     never `storage.list()`".) Also do **not** just recompute
+     `coverageShortfall(now − FIRST_PULL_DAYS, now)` server-side: 730 > 88
+     always, so that's a permanent banner unrelated to reality.
+   - **The derivation** (all inputs exist today): per visible account on an
+     active SimpleFIN-fed institution, flag when its `first_any` (min tx
+     date, **any source**, one indexed `limit 1` query) falls inside
+     `[accounts.created_at − MAX_LOOKBACK_DAYS, + GRACE_DAYS]`. The lower
+     bound makes the notice **self-clear** the moment a pre-wall backfill row
+     lands (no invalidation machinery); the upper bound stops a genuinely new
+     account nagging. Accepted false negatives recorded in the spec (a quiet
+     stretch right after the wall; an account whose first pull failed).
+   - **Constraints:** new pure `api/_lib/coverageGaps.js` (the
+     `api/_lib/unlink.js` decisions-pure pattern) + `feedReachWindow()` beside
+     `coverageShortfall`, so copy renders from the **server's** constants —
+     `FIRST_PULL_DAYS`/`MAX_LOOKBACK_DAYS` are env-overridable and must never
+     get a fourth hardcoded client copy (`CsvImport.jsx:193`'s
+     `FEED_LOOKBACK_DAYS` is already one drifting copy of `OVERLAP_DAYS`).
+     Cap the per-account scan at 25 + `truncated`; wrap the whole block in
+     try/catch that **omits the `coverage` key** on any error (missing key =
+     no notice — never render a gap you aren't sure of, and never 500 the
+     Accounts tab). Client pure core is a **new `src/feedCoverage.js`**,
+     deliberately not an addition to `src/coverage.js` — that's the TEMPORARY
+     panel's core (item 5) and the tell must outlive it.
+   - **Don't touch:** `api/sync.js` is unchanged, and **`pullWasClean` must
+     keep ignoring `coverage_shortfall`** — `test/csvImport.test.js:262` is
+     the REGRESSION keeping a shortfall from blocking the statement import
+     that is the remedy.
+   - **UI:** a quiet **neutral** strip, *not* a second variant of the amber
+     feed-health banner — amber means the feed is broken, while a first-pull
+     shortfall is the expected result of a first pull, and reusing amber
+     trains it as noise. Ack via a stored ISO date, re-raising when
+     `worst_from` moves past it.
+   - **→ Mason decisions (flagged):** `GRACE_DAYS = 21` is a judgment call;
+     and the spec names the ack key `feed:coverage-ack` but not its store —
+     CLAUDE.md's rule points at `settings` (account-level fact, not a
+     device/visual pref), confirm before building. The source spec's §4 (UI)
+     is unfinished — settle the strip's exact placement and copy at build.
+
 ## Harder, high value
 
 1. **Dashboard.jsx decomposition** — deferred by Mason 2026-08-01 and STILL
