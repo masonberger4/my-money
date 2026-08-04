@@ -563,6 +563,69 @@ export async function setCategoryRule(descriptor, category) {
 export async function deleteCategoryRule(merchantKeyValue) {
   const { error } = await supabase.from('category_rules').delete().eq('merchant_key', merchantKeyValue);
   if (error) throw error;
+  // Deleting a rule changes ZERO existing transactions — mapped_category is
+  // computed at WRITE time and nothing recomputes it at read time. So this is
+  // not a spending-total invalidation; it only changes what FUTURE imports
+  // will say. The Taught-rules confirm states this in as many words.
+}
+
+// The Taught-rules screen's read. Deliberately NOT getCategoryRules(): that
+// one returns the `{key: category}` map the hot write path wants
+// (api/sync.js, CsvImport, addManualTransaction) and its `{}` on a missing
+// table is load-bearing there. This one returns ROWS with their metadata, and
+// **null — not [] — when the table is missing**, so the caller can tell "the
+// feature isn't installed" from "nothing taught yet" (the getReceiptTxIds
+// sentinel; the entry link keys on it and doesn't render at all pre-migration).
+export async function listCategoryRules() {
+  if (!hasCategoryRules) return null;
+  const rows = [];
+  const page = 500;
+  for (let from = 0; ; from += page) {
+    const { data, error } = await supabase
+      .from('category_rules')
+      .select('merchant_key, category, source, updated_at')
+      // Ordered paging: an unordered result set can drop or repeat rows across
+      // the boundary (the Session A guard class).
+      .order('merchant_key', { ascending: true })
+      .range(from, from + page - 1);
+    if (error) {
+      // 416 on an exact-page-multiple result set is end-of-data, not failure.
+      if (isRangeExhaustedError(error)) break;
+      if (isMissingTableError(error)) {
+        hasCategoryRules = false;
+        return null;
+      }
+      throw error;
+    }
+    rows.push(...(data || []));
+    if (!data || data.length < page) break;
+  }
+  return rows;
+}
+
+// "How many transactions does this rule match at all?" — the on-demand count
+// behind each rule row. NOT the dry run: applyRuleToHistory's dryRun counts
+// only rows it would still CHANGE, so a working rule reads 0. countAll drops
+// that clause and never writes.
+//
+// Throws on failure like its sibling — the caller renders a failed count
+// differently from a real 0 (the count === null distinction).
+export async function countCategoryRuleMatches(descriptor, category) {
+  return applyRuleToHistory({
+    descriptor,
+    category,
+    countAll: true,
+    fetchPage: (pat, from, to) =>
+      supabase
+        .from('transactions')
+        .select('id, description, merchant_name, mapped_category')
+        .or(`description.ilike.${pat},merchant_name.ilike.${pat}`)
+        .order('id', { ascending: true })
+        .range(from, to),
+    updateBatch: () => {
+      throw new Error('countCategoryRuleMatches must never write');
+    },
+  });
 }
 
 // Apply a freshly-taught rule to history. Writes `mapped_category` only, so a

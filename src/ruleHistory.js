@@ -43,10 +43,19 @@ export function ilikeCandidatePattern(key) {
 // ALWAYS throws on a real failure and never returns 0 to mean "it didn't
 // work" — 0 genuinely means nothing matched, and callers render the two very
 // differently (see the dataAdapter comment on the silent-failure incident).
+//
+// `countAll` answers a DIFFERENT question: how many rows does this rule match
+// AT ALL, whatever they are currently categorized as. dryRun counts only rows
+// the rule would still CHANGE, so a healthy, already-applied rule counts 0 —
+// fine as "nothing left to update", ruinous as "this rule matches nothing",
+// which is how the Taught-rules list would talk a human into deleting a rule
+// that is working perfectly. countAll therefore drops the
+// `mapped_category !== category` clause and never writes.
 export async function applyRuleToHistory({
   descriptor,
   category,
   dryRun = false,
+  countAll = false,
   fetchPage,
   updateBatch,
   pageSize = 1000,
@@ -72,11 +81,11 @@ export async function applyRuleToHistory({
       // Classify on the same string the write path uses.
       const descriptors = [t.merchant_name, t.description].filter(Boolean);
       const hit = descriptors.some(d => matchLearnedRule(d, { [key]: category }));
-      if (hit && t.mapped_category !== category) matches.push(t.id);
+      if (hit && (countAll || t.mapped_category !== category)) matches.push(t.id);
     }
     if (data.length < pageSize) break;
   }
-  if (dryRun || matches.length === 0) return matches.length;
+  if (countAll || dryRun || matches.length === 0) return matches.length;
 
   for (let i = 0; i < matches.length; i += batchSize) {
     const { error } = await updateBatch(matches.slice(i, i + batchSize), category);
