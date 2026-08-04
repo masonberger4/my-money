@@ -122,10 +122,16 @@ async function fetchBudgetInputs(supabase, householdId, visibleIds, year, month)
 // formatting) so repeat requests produce byte-identical text — that's what
 // makes prompt caching hit across the turns of a conversation.
 //
-// buildSpendingContext does the two queries (its only I/O — the `new Date()`
-// computes the query cutoff and never appears in the output text) and
-// delegates all formatting to formatSpendingContext, which is pure and
-// covered by test/spendingContext.test.js for byte-determinism.
+// buildSpendingContext does the two queries (its only I/O) and delegates all
+// formatting to formatSpendingContext, which is pure and covered by
+// test/spendingContext.test.js for byte-determinism.
+//
+// The `new Date()` cutoff DOES reach the output text (as the partial-month
+// marker), so the determinism contract is the one the recurring and envelope
+// sections already live under: same DB state + same day ⇒ byte-identical. What
+// must never happen is two same-state calls on one day differing — a
+// wall-clock TIMESTAMP in the text would break exactly that; a date-only query
+// boundary does not.
 export async function buildSpendingContext(householdId) {
   const supabase = getServiceClient();
 
@@ -183,7 +189,10 @@ export async function buildSpendingContext(householdId) {
     now.getUTCMonth() + 1
   );
 
-  return formatSpendingContext(accounts, txs, { budget });
+  // `since` travels into the text: the oldest calendar month of a rolling
+  // 90-day window is partial, and the formatter must be able to SAY so rather
+  // than print it as a complete month (see partialMonth there).
+  return formatSpendingContext(accounts, txs, { budget, since: sinceStr });
 }
 
 // Pure formatter: rows in (the exact column shapes the queries above select),
@@ -222,14 +231,48 @@ export function formatSpendingContext(accounts, txs, extras = {}) {
         applyAccountRules(t.mapped_category, t.amount, acctById.get(t.account_id)?.type),
     }));
 
-  // Run the SAME linked-boundary pairing the app runs before anything folds a
-  // total: isSpend() reads `_internal`, so without this pass both legs of a
-  // washed cross-bank self-transfer look like ordinary rows and the out-leg
-  // counts as spending. It is deterministic (sorted inputs, maximum matching),
-  // so byte-determinism holds. Pairing sees the whole 90-day slice at once;
-  // a leg whose partner falls outside the window stays unpaired and counts —
-  // the same honest window-edge behaviour the month views have.
-  markInternalTransfers(usable);
+  // Bucket by month BEFORE pairing, then pair WITHIN each month — because the
+  // screens this section claims to match do exactly that: getSpending and
+  // getOverview go through getMonthTransactions, which fetches ONE calendar
+  // month and runs markInternalTransfers over precisely those rows.
+  //
+  // Pairing the whole 90-day slice at once is not the same window, and the
+  // difference is not symmetric: a wider window washes MORE, never less. An
+  // end-of-month sweep — $3,000 out of checking on 07-31, into savings on
+  // 08-02 — is ONE washed pair across 90 days but TWO unpaired legs across two
+  // month fetches, so July would read $3,000 lower here than on the Overview
+  // headline, and the header sentence below promises the opposite.
+  //
+  // What this deliberately keeps is the month views' own honest window edge: a
+  // pair straddling a month boundary stays unpaired on both sides and each leg
+  // counts — the same verdict the one model gives any pair crossing a boundary
+  // it cannot see across, and the behaviour dataAdapter's getBiggestMovers
+  // documents for its month windows. Matching the screens means matching that
+  // too, not just the easy cases.
+  const byMonth = new Map();
+  for (const t of usable) {
+    const key = monthKey(t.date);
+    const list = byMonth.get(key);
+    if (list) list.push(t);
+    else byMonth.set(key, [t]);
+  }
+  // isSpend() reads `_internal`, and the marks land on the `usable` copies —
+  // so the transaction list's "not counted as spending" marker further down
+  // agrees with these totals by construction, instead of being a second
+  // judgement made over a different window. Deterministic per bucket (sorted
+  // inputs, maximum matching), so byte-determinism holds.
+  for (const monthRows of byMonth.values()) markInternalTransfers(monthRows);
+
+  // The rolling window starts mid-month, so its OLDEST calendar month is
+  // PARTIAL (May 6–31, not May) while being emitted in the same
+  // `- YYYY-MM cat: $N` shape as every complete month. The header below tells
+  // the model to quote these totals as the app's own figure, so an unmarked
+  // partial row answers "what did I spend on groceries in May?" with a number
+  // the Categories tab contradicts for that same month. Mark it on the ROWS,
+  // not only in a header the model has left far behind by line 40.
+  // `since` is the query cutoff (YYYY-MM-DD); absent ⇒ nothing is claimed.
+  const since = extras.since || null;
+  const partialMonth = since && since.slice(8) !== '01' ? since.slice(0, 7) : null;
 
   const lines = [];
 
@@ -256,28 +299,28 @@ export function formatSpendingContext(accounts, txs, extras = {}) {
   // vetoes. The old wording told the model to drop the transfer category
   // wholesale, which is now wrong in both directions.
   lines.push('Transaction amounts (unlike the balances above): positive is money out. These totals already apply the app\'s spending rule, the same one the dashboard uses: money in never counts (that includes "Return"), card payments never count, and a transfer counts UNLESS it was matched to an equal-amount opposite leg on another of the household\'s own visible accounts. Quote these totals rather than re-adding the transaction rows below.');
+  if (partialMonth) {
+    lines.push(
+      `The window starts ${since}, so ${partialMonth} is INCOMPLETE: its lines below cover ${since} to the end of that month only, and its earlier days are missing. Say so if you quote them — never present ${partialMonth} as a full month's total.`
+    );
+  }
   // The fold is the SHARED one. It used to be a private loop here — every
   // positive row on a non-loan account counted — which meant the assistant
   // counted washed self-transfers and card payments that the screens exclude,
   // contradicting the dashboard (CLAUDE.md: this file "must match or the Ask
-  // tab contradicts the screen"). Bucket by month, then let spendingGroups
-  // apply isSpend() and effectiveCategory; per-month slicing is safe because
-  // both are per-row judgements and the pairing already ran over everything.
-  const byMonth = new Map();
-  for (const t of usable) {
-    const key = monthKey(t.date);
-    const list = byMonth.get(key);
-    if (list) list.push(t);
-    else byMonth.set(key, [t]);
-  }
+  // tab contradicts the screen"). spendingGroups applies isSpend() and
+  // effectiveCategory; the per-month buckets (and their per-month pairing) were
+  // built above, where the reasoning for that window lives.
+  //
   // Month ascending, then category — the section's long-standing order (the
   // amount-desc order spendingGroups returns is the Categories tab's concern).
   // Plain string comparison, never localeCompare: the output must not depend on
   // the serverless instance's locale data.
   const byLabel = (a, b) => (a.label < b.label ? -1 : a.label > b.label ? 1 : 0);
   for (const month of [...byMonth.keys()].sort()) {
+    const partial = month === partialMonth ? ` (partial month: ${since} onward only)` : '';
     for (const g of spendingGroups(byMonth.get(month)).sort(byLabel)) {
-      lines.push(`- ${month} ${g.label}: $${g.amount.toFixed(2)}`);
+      lines.push(`- ${month} ${g.label}: $${g.amount.toFixed(2)}${partial}`);
     }
   }
 
