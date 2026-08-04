@@ -154,6 +154,181 @@ test('missing envelope schema (budget: null / absent) omits the section cleanly'
   assert.equal(withNull, absent, 'null budget and no extras render identically');
 });
 
+// --- The unified spending model (REGRESSION) --------------------------------
+// The context used to compute spending with its own fold ("every positive row
+// on a non-loan account"), which never ran markInternalTransfers and never
+// applied isSpend's card-payment veto. Washed cross-bank self-transfers and
+// card payments therefore counted as spending in the assistant's answers while
+// every screen excluded them — exactly what CLAUDE.md forbids for this file
+// ("must match or the Ask tab contradicts the screen"). Post-category-wipe this
+// section is the assistant's ONLY spending figure, so the divergence was the
+// whole story.
+
+const BOUNDARY_ACCOUNTS = ACCOUNTS.concat([
+  { id: 'a-sav', name: 'Savings', nickname: null, mask: '4410', type: 'depository', subtype: 'savings', current_balance: 9000, hidden: false, institutions: { name: 'Synth CU' } },
+]);
+
+const row = (o) => ({
+  merchant_name: '', description: '', mapped_category: 'Uncategorized',
+  user_category: null, user_description: null, excluded: false, ...o,
+});
+
+// One real purchase, plus the two shapes the private fold got wrong:
+// a matched cross-bank self-transfer (both legs) and a card payment paid out of
+// checking to a card that is not linked here (so nothing can wash it).
+const BOUNDARY_TXS = [
+  row({ account_id: 'a-chk', date: '2026-07-08', amount: 85.5, description: 'SAFEWAY 1467' }),
+  row({ account_id: 'a-chk', date: '2026-07-02', amount: 500, description: 'ONLINE BANKING TRANSFER TO SAVINGS' }),
+  row({ account_id: 'a-sav', date: '2026-07-03', amount: -500, description: 'ONLINE BANKING TRANSFER FROM CHECKING' }),
+  row({ account_id: 'a-chk', date: '2026-07-11', amount: 250, description: 'CAPITAL ONE - PAYMENT' }),
+];
+
+test('REGRESSION: a washed transfer pair and a card payment stay out of the spending total', () => {
+  const text = formatSpendingContext(clone(BOUNDARY_ACCOUNTS), clone(BOUNDARY_TXS));
+  const spendLines = text
+    .split('\n')
+    .filter(l => /^- 2026-07 /.test(l));
+  // Only the purchase survives the shared isSpend(): 500 (paired both ways) and
+  // 250 (card payment) are gone, and the total is the purchase alone.
+  assert.deepEqual(spendLines, ['- 2026-07 Uncategorized: $85.50'], text);
+  assert.ok(!text.includes(': $835.50'), 'the old private fold summed all three');
+  assert.ok(!text.includes(': $585.50') && !text.includes(': $335.50'), text);
+});
+
+test('REGRESSION: the excluded rows still LIST, marked, so re-adding the list matches the total', () => {
+  const text = formatSpendingContext(clone(BOUNDARY_ACCOUNTS), clone(BOUNDARY_TXS));
+  const listed = text.split('\n').filter(l => /^2026-07-\d\d \| /.test(l));
+  assert.equal(listed.length, 4, 'every row is still visible to the assistant');
+  const marked = listed.filter(l => l.endsWith('| not counted as spending'));
+  assert.equal(marked.length, 2, listed.join('\n'));
+  assert.ok(marked.every(l => /TRANSFER TO SAVINGS|CAPITAL ONE - PAYMENT/.test(l)), marked.join('\n'));
+  // The purchase is unmarked, and so is the money-IN leg (a negative amount is
+  // already money in — marking it would just cost context).
+  assert.ok(!listed.find(l => l.includes('SAFEWAY')).endsWith('| not counted as spending'));
+  assert.ok(!listed.find(l => l.includes('TRANSFER FROM CHECKING')).endsWith('| not counted as spending'));
+});
+
+test('an UNPAIRED transfer out still counts — structure decides, not wording', () => {
+  // Same transfer, but the receiving account is not in the row set (money left
+  // the linked boundary). The linked-boundary model counts it; the old
+  // category-name rule would have dropped it.
+  const oneLeg = clone(BOUNDARY_TXS).filter(t => t.amount !== -500 && t.amount !== 250);
+  const text = formatSpendingContext(clone(BOUNDARY_ACCOUNTS), oneLeg);
+  assert.ok(text.includes('- 2026-07 Uncategorized: $585.50'), text);
+  const listed = text.split('\n').filter(l => /^2026-07-\d\d \| /.test(l));
+  assert.ok(listed.length && listed.every(l => !l.endsWith('| not counted as spending')), text);
+});
+
+test('the stale "never count the transfer category" instruction is gone from the context', () => {
+  const text = formatSpendingContext(clone(ACCOUNTS), clone(TXS));
+  assert.ok(
+    !/"Transfers and card payments" and "Return" are not real spending/.test(text),
+    'that stopped being true when the linked-boundary model shipped (2026-08-03)'
+  );
+  assert.ok(text.includes('positive is money out'), 'the sign convention is still stated');
+});
+
+test('byte-determinism holds through the pairing pass, which must not mutate the inputs', () => {
+  const accounts = clone(BOUNDARY_ACCOUNTS);
+  const txs = clone(BOUNDARY_TXS);
+  const first = formatSpendingContext(accounts, txs);
+  assert.equal(first, formatSpendingContext(clone(BOUNDARY_ACCOUNTS), clone(BOUNDARY_TXS)));
+  assert.deepEqual(txs, BOUNDARY_TXS, 'markInternalTransfers stamped copies, not the caller rows');
+  // A second run over the SAME arrays would double-mark if the rows carried
+  // `_internal` out of the first call.
+  assert.equal(formatSpendingContext(accounts, txs), first);
+});
+
+// --- The pairing WINDOW must be the month, not the 90-day slice (REGRESSION) --
+// getSpending / getOverview reach the DB through getMonthTransactions: one
+// calendar month fetched, markInternalTransfers run over exactly those rows.
+// This section once paired the whole 90-day slice at once, which is not the
+// same window — and the difference is one-directional, because a wider window
+// can only wash MORE. An end-of-month sweep was therefore washed for the Ask
+// tab and counted on the screen, while the header sentence told the model the
+// totals were "the same one the dashboard uses".
+
+// $3,000 leaves checking on 07-31 and lands in savings on 08-02: 3 days apart,
+// inside INTERNAL_MATCH_WINDOW_DAYS, so a 90-day pairing pass matches them.
+const STRADDLE_TXS = [
+  row({ account_id: 'a-chk', date: '2026-07-10', amount: 85.5, description: 'SAFEWAY 1467' }),
+  row({ account_id: 'a-chk', date: '2026-07-31', amount: 3000, description: 'ONLINE BANKING TRANSFER TO SAVINGS' }),
+  row({ account_id: 'a-sav', date: '2026-08-02', amount: -3000, description: 'ONLINE BANKING TRANSFER FROM CHECKING' }),
+];
+
+test('REGRESSION: a transfer pair straddling a month boundary is NOT washed — each leg counts, as in the month views', () => {
+  const text = formatSpendingContext(clone(BOUNDARY_ACCOUNTS), clone(STRADDLE_TXS));
+  const julyLines = text.split('\n').filter(l => /^- 2026-07 /.test(l));
+  assert.deepEqual(julyLines, ['- 2026-07 Uncategorized: $3085.50'], text);
+  // The exact number the 90-day pairing produced, and the exact contradiction:
+  // the Overview headline for July reads $3,085.50.
+  assert.ok(!text.includes('- 2026-07 Uncategorized: $85.50'), 'the 90-day window washed the out-leg');
+  // The in-leg is money in, so August contributes no spending line either way.
+  assert.ok(!/^- 2026-08 /m.test(text), text);
+});
+
+test('REGRESSION: the assistant\'s per-month total equals the same month fetched alone (the month view\'s window)', () => {
+  // Simulates getMonthTransactions: July's rows and nothing else. Whatever the
+  // surrounding window, the month's own line must be byte-identical — that IS
+  // the parity the header sentence promises.
+  const wide = formatSpendingContext(clone(BOUNDARY_ACCOUNTS), clone(STRADDLE_TXS));
+  const julyOnly = formatSpendingContext(
+    clone(BOUNDARY_ACCOUNTS),
+    clone(STRADDLE_TXS).filter(t => t.date.startsWith('2026-07'))
+  );
+  const july = t => t.split('\n').filter(l => /^- 2026-07 /.test(l));
+  assert.deepEqual(july(wide), july(julyOnly), 'the surrounding window changed a month total');
+});
+
+test('the transaction list\'s "not counted" marker follows the SAME per-month pairing as the totals', () => {
+  // The marker exists so a model re-adding the rows lands on the totals above,
+  // not beside them — so it must never be judged over a different window.
+  const text = formatSpendingContext(clone(BOUNDARY_ACCOUNTS), clone(STRADDLE_TXS));
+  const listed = text.split('\n').filter(l => /^2026-0[78]-\d\d \| /.test(l));
+  assert.equal(listed.length, 3, text);
+  const marked = listed.filter(l => l.endsWith('| not counted as spending'));
+  assert.deepEqual(marked, [], 'nothing is washed once the pairing is per-month');
+  // Re-adding the money-out rows reproduces the July total exactly.
+  const out = listed
+    .map(l => Number(l.slice(l.lastIndexOf('$') + 1).split(' ')[0]))
+    .filter(n => n > 0);
+  assert.equal(out.reduce((a, b) => a + b, 0).toFixed(2), '3085.50');
+});
+
+// --- The oldest month of a rolling window is PARTIAL -------------------------
+
+test('the partial oldest month is marked on the rows AND announced, so it is not quoted as a full month', () => {
+  const partialTxs = [
+    row({ account_id: 'a-chk', date: '2026-05-20', amount: 310, description: 'SAFEWAY 1467' }),
+    row({ account_id: 'a-chk', date: '2026-07-10', amount: 85.5, description: 'SAFEWAY 1467' }),
+  ];
+  const text = formatSpendingContext(clone(BOUNDARY_ACCOUNTS), clone(partialTxs), { since: '2026-05-06' });
+  assert.ok(
+    text.includes('- 2026-05 Uncategorized: $310.00 (partial month: 2026-05-06 onward only)'),
+    text
+  );
+  assert.ok(text.includes('2026-05 is INCOMPLETE'), 'and it is announced before the list');
+  // Only the oldest month is partial — a complete month must stay unqualified.
+  assert.ok(text.includes('- 2026-07 Uncategorized: $85.50\n'), text);
+  assert.ok(!/- 2026-07 [^\n]*partial/.test(text), 'a complete month must not be marked');
+});
+
+test('a window that starts on the 1st has no partial month, and no marker is emitted', () => {
+  const txs = [row({ account_id: 'a-chk', date: '2026-05-20', amount: 310, description: 'SAFEWAY 1467' })];
+  const text = formatSpendingContext(clone(BOUNDARY_ACCOUNTS), clone(txs), { since: '2026-05-01' });
+  assert.ok(text.includes('- 2026-05 Uncategorized: $310.00'), text);
+  assert.ok(!text.includes('partial month'), 'nothing is partial when the window starts on the 1st');
+  assert.ok(!text.includes('INCOMPLETE'), text);
+});
+
+test('byte-determinism holds with the partial-month marker, and `since` stays optional', () => {
+  const args = () => [clone(BOUNDARY_ACCOUNTS), clone(STRADDLE_TXS), { since: '2026-05-06' }];
+  assert.equal(formatSpendingContext(...args()), formatSpendingContext(...args()));
+  // Absent `since` claims nothing rather than guessing a boundary.
+  const noSince = formatSpendingContext(clone(BOUNDARY_ACCOUNTS), clone(STRADDLE_TXS));
+  assert.ok(!noSince.includes('partial month') && !noSince.includes('INCOMPLETE'), noSince);
+});
+
 test('monthly sums are emitted in sorted-key order (order-independent above the transaction list)', () => {
   // The transaction list itself follows input order (the query orders it);
   // everything above it — accounts and the monthly category sums — must not

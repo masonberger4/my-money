@@ -40,14 +40,12 @@ below relitigates a decided item.
      deliberately includes hidden accounts): overlapping date ranges + similar
      row counts ⇒ same card twice. Search cannot see them —
      `searchTransactions` inner-joins `accounts.hidden = false`.
-   - **NEWREZ recategorization** (~$3.8k/mo in "Utilities") — counted once,
-     just the wrong bucket. **Root cause is the keyword table**
-     (`src/txClassify.js`: `/NEWREZ|SHELLPOINT|MORTGAGE|…/ → 'Utilities'`,
-     because the taxonomy has no housing member). **Largely SUPERSEDED by the
-     user-owned category system** (Harder §0): that work deletes both the
-     keyword table and the taxonomy, so NEWREZ stops being mis-guessed by
-     construction and gets whatever category Mason creates for it. Fix it by
-     hand now only if the wrong bucket bothers him before that ships.
+   - ~~**NEWREZ recategorization**~~ — **RESOLVED BY CONSTRUCTION 2026-08-05.**
+     Its root cause was the keyword table (`/NEWREZ|SHELLPOINT|MORTGAGE|…/ →
+     'Utilities'`, because the taxonomy had no housing member); Harder §0
+     deleted both the table and the taxonomy, and the applied wipe left those
+     rows reading `Uncategorized`. Nothing to fix — it is one merchant to teach
+     during retraining.
    - **Pre-May statement backfill** — BECU savings, Cashback Debit, the cards,
      via CSV/PDF import; the Data coverage panel (Accounts tab) shows each
      gap. First confirm the Checking 2644→5481 re-key theory (rows abut at
@@ -214,10 +212,15 @@ prior backlog. Both are S/M with no blockers and no migration.*
    rules are the only categorizer, so a surviving rule re-mints a deleted
    category onto the next synced row), and the migration is pasted **after**
    the deploy rather than before, because the old build derives
-   `mapped_category` at write time. The teach-queue re-sizing named below was
-   NOT done — the queue is unchanged, and it is now the primary onboarding
-   surface, so that remains open. **Mason must still paste the migration**
-   (CLAUDE.md Pending). Original spec kept below as the record.
+   `mapped_category` at write time.
+   **The migration is APPLIED — pasted and verified against PROD 2026-08-05**,
+   every boolean column of its verification SELECT reading true. Live state:
+   every `mapped_category` is `Uncategorized` except the mechanism labels,
+   `user_category` is null except those, and `budgets` / `budget_months` /
+   `category_rules` are empty (archived to `legacy_*`). **Retraining is now the
+   live task.** The one piece of this item still OPEN: the teach-queue
+   re-sizing named below was NOT done — the queue is unchanged and is now the
+   primary onboarding surface. Original spec kept below as the record.
 
    **Mason's decision 2026-08-04. This REVERSES recorded decisions.** The app ships no
    categories at all: the user creates every category, teaches which
@@ -313,9 +316,13 @@ What field reports are actually useful, now that both phones run everything:
 - **Touch feel**: the Overview card-tile swipe (horizontal-intent
   threshold), the month jump picker, sheet scrolling — anything that feels
   wrong at 390px is a bug report.
-- **Classifier misses**: the VERBATIM descriptor string (from the detail
-  sheet), what it was categorized as, what it should be. Verbatim matters —
-  `merchantKey` and the keyword table both work off exact tokens.
+- **Teaching misses** (no classifier to miss any more — post-2026-08-05 the
+  only categorizer is a learned rule): a merchant that stayed `Uncategorized`
+  after being taught, or a taught rule that grabbed the wrong rows. Send the
+  VERBATIM descriptor string from the detail sheet — `merchantKey` works off
+  exact tokens, and the known over-specific-key limit lives in CLAUDE.md.
+  Also worth reporting: a transfer or card payment that started counting as
+  spending, since those guards are the only classification left in the code.
 - **Recurring tab under the 40-month window**: false positives (one-offs
   listed), false negatives (a real weekly/annual sub missing), wrong
   cadence suffixes, price-creep flags on long-settled changes.

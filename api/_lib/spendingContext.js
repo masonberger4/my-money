@@ -2,7 +2,10 @@ import { getServiceClient } from './supabase.js';
 import { applyAccountRules } from '../../src/categoryMap.js';
 import { displayBalance } from '../../src/accountBalance.js';
 import { detectRecurring } from '../../src/recurring.js';
-import { aggregateEnvelopeSpending } from '../../src/spending.js';
+// THE unified spending model (Mason, 2026-08-03). This module is the assistant's
+// only spending figure, so it reads the SAME pure core every screen reads —
+// never a private fold. See the fold below for why that is load-bearing.
+import { aggregateEnvelopeSpending, isSpend, spendingGroups } from '../../src/spending.js';
 import { markInternalTransfers } from '../../src/cashFlow.js';
 import { walkEnvelopes, shiftMonthKey } from '../../src/envelopes.js';
 import { isRangeExhaustedError } from '../../src/ruleHistory.js';
@@ -119,10 +122,16 @@ async function fetchBudgetInputs(supabase, householdId, visibleIds, year, month)
 // formatting) so repeat requests produce byte-identical text — that's what
 // makes prompt caching hit across the turns of a conversation.
 //
-// buildSpendingContext does the two queries (its only I/O — the `new Date()`
-// computes the query cutoff and never appears in the output text) and
-// delegates all formatting to formatSpendingContext, which is pure and
-// covered by test/spendingContext.test.js for byte-determinism.
+// buildSpendingContext does the two queries (its only I/O) and delegates all
+// formatting to formatSpendingContext, which is pure and covered by
+// test/spendingContext.test.js for byte-determinism.
+//
+// The `new Date()` cutoff DOES reach the output text (as the partial-month
+// marker), so the determinism contract is the one the recurring and envelope
+// sections already live under: same DB state + same day ⇒ byte-identical. What
+// must never happen is two same-state calls on one day differing — a
+// wall-clock TIMESTAMP in the text would break exactly that; a date-only query
+// boundary does not.
 export async function buildSpendingContext(householdId) {
   const supabase = getServiceClient();
 
@@ -157,6 +166,12 @@ export async function buildSpendingContext(householdId) {
       .in('account_id', visibleIds)
       .gte('date', sinceStr)
       .order('date', { ascending: false })
+      // id as the tiebreak: `date` alone leaves same-day rows in whatever order
+      // Postgres happens to return, which both reorders the transaction list and
+      // (at the 1500 cap) can change WHICH rows arrive — the two ways the text
+      // could differ for one DB state. Same ordering discipline as
+      // fetchBudgetInputs' paged read.
+      .order('id', { ascending: false })
       .limit(1500);
     if (txErr) throw txErr;
     txs = data || [];
@@ -174,7 +189,10 @@ export async function buildSpendingContext(householdId) {
     now.getUTCMonth() + 1
   );
 
-  return formatSpendingContext(accounts, txs, { budget });
+  // `since` travels into the text: the oldest calendar month of a rolling
+  // 90-day window is partial, and the formatter must be able to SAY so rather
+  // than print it as a complete month (see partialMonth there).
+  return formatSpendingContext(accounts, txs, { budget, since: sinceStr });
 }
 
 // Pure formatter: rows in (the exact column shapes the queries above select),
@@ -191,18 +209,70 @@ export function formatSpendingContext(accounts, txs, extras = {}) {
   const acctById = new Map((accounts || []).map(a => [a.id, a]));
 
   // Loan-account debits are loan payments, not purchases — the cash that paid
-  // them already counts on its way out of checking (mirrors sumSpending).
-  // Excluded transactions are the user saying "don't count this"; honour it.
+  // them already counts on its way out of checking (isSpend's own loan guard
+  // agrees; dropping them here also keeps them out of the listing and the
+  // recurring detector). Excluded transactions are the user saying "don't count
+  // this"; honour it.
   const loanIds = new Set(visible.filter(a => a.type === 'loan').map(a => a.id));
   const usable = (txs || [])
     .filter(t => !loanIds.has(t.account_id) && !t.excluded)
     // Effective category: the user's override wins over the account rules.
+    // These are COPIES, which is what lets the pairing pass below stamp
+    // `_internal` without mutating the caller's rows.
     .map(t => ({
       ...t,
+      // The accounts join every consumer of the shared model expects
+      // (isSpend's loan guard + credit-card-purchase guard,
+      // markInternalTransfers' loan exclusion). Rows whose account is missing
+      // read as non-loan/non-credit, the same convention isLoanAccount uses.
+      accounts: { type: acctById.get(t.account_id)?.type },
       mapped_category:
         t.user_category ||
         applyAccountRules(t.mapped_category, t.amount, acctById.get(t.account_id)?.type),
     }));
+
+  // Bucket by month BEFORE pairing, then pair WITHIN each month — because the
+  // screens this section claims to match do exactly that: getSpending and
+  // getOverview go through getMonthTransactions, which fetches ONE calendar
+  // month and runs markInternalTransfers over precisely those rows.
+  //
+  // Pairing the whole 90-day slice at once is not the same window, and the
+  // difference is not symmetric: a wider window washes MORE, never less. An
+  // end-of-month sweep — $3,000 out of checking on 07-31, into savings on
+  // 08-02 — is ONE washed pair across 90 days but TWO unpaired legs across two
+  // month fetches, so July would read $3,000 lower here than on the Overview
+  // headline, and the header sentence below promises the opposite.
+  //
+  // What this deliberately keeps is the month views' own honest window edge: a
+  // pair straddling a month boundary stays unpaired on both sides and each leg
+  // counts — the same verdict the one model gives any pair crossing a boundary
+  // it cannot see across, and the behaviour dataAdapter's getBiggestMovers
+  // documents for its month windows. Matching the screens means matching that
+  // too, not just the easy cases.
+  const byMonth = new Map();
+  for (const t of usable) {
+    const key = monthKey(t.date);
+    const list = byMonth.get(key);
+    if (list) list.push(t);
+    else byMonth.set(key, [t]);
+  }
+  // isSpend() reads `_internal`, and the marks land on the `usable` copies —
+  // so the transaction list's "not counted as spending" marker further down
+  // agrees with these totals by construction, instead of being a second
+  // judgement made over a different window. Deterministic per bucket (sorted
+  // inputs, maximum matching), so byte-determinism holds.
+  for (const monthRows of byMonth.values()) markInternalTransfers(monthRows);
+
+  // The rolling window starts mid-month, so its OLDEST calendar month is
+  // PARTIAL (May 6–31, not May) while being emitted in the same
+  // `- YYYY-MM cat: $N` shape as every complete month. The header below tells
+  // the model to quote these totals as the app's own figure, so an unmarked
+  // partial row answers "what did I spend on groceries in May?" with a number
+  // the Categories tab contradicts for that same month. Mark it on the ROWS,
+  // not only in a header the model has left far behind by line 40.
+  // `since` is the query cutoff (YYYY-MM-DD); absent ⇒ nothing is claimed.
+  const since = extras.since || null;
+  const partialMonth = since && since.slice(8) !== '01' ? since.slice(0, 7) : null;
 
   const lines = [];
 
@@ -223,18 +293,35 @@ export function formatSpendingContext(accounts, txs, extras = {}) {
   lines.push('## Monthly spending by category (last 90 days)');
   // "Amounts" here means TRANSACTION amounts, which use the opposite rule from
   // the account balances listed above — spell that out so the model can't
-  // conflate the two.
-  lines.push('Transaction amounts (unlike the balances above): positive is money out; "Transfers and card payments" and "Return" are not real spending.');
-  const byMonthCat = new Map();
-  for (const t of usable) {
-    if (t.amount <= 0) continue;
-    const key = `${monthKey(t.date)}|${t.mapped_category || 'Uncategorized'}`;
-    byMonthCat.set(key, (byMonthCat.get(key) || 0) + Number(t.amount));
+  // conflate the two. The rest of the sentence states the CURRENT model: since
+  // 2026-08-03 internal is decided by STRUCTURE (the pairing), so an unpaired
+  // transfer-worded row is real spending and only the card-payment verdict
+  // vetoes. The old wording told the model to drop the transfer category
+  // wholesale, which is now wrong in both directions.
+  lines.push('Transaction amounts (unlike the balances above): positive is money out. These totals already apply the app\'s spending rule, the same one the dashboard uses: money in never counts (that includes "Return"), card payments never count, and a transfer counts UNLESS it was matched to an equal-amount opposite leg on another of the household\'s own visible accounts. Quote these totals rather than re-adding the transaction rows below.');
+  if (partialMonth) {
+    lines.push(
+      `The window starts ${since}, so ${partialMonth} is INCOMPLETE: its lines below cover ${since} to the end of that month only, and its earlier days are missing. Say so if you quote them — never present ${partialMonth} as a full month's total.`
+    );
   }
-  const sortedKeys = [...byMonthCat.keys()].sort();
-  for (const key of sortedKeys) {
-    const [month, cat] = key.split('|');
-    lines.push(`- ${month} ${cat}: $${byMonthCat.get(key).toFixed(2)}`);
+  // The fold is the SHARED one. It used to be a private loop here — every
+  // positive row on a non-loan account counted — which meant the assistant
+  // counted washed self-transfers and card payments that the screens exclude,
+  // contradicting the dashboard (CLAUDE.md: this file "must match or the Ask
+  // tab contradicts the screen"). spendingGroups applies isSpend() and
+  // effectiveCategory; the per-month buckets (and their per-month pairing) were
+  // built above, where the reasoning for that window lives.
+  //
+  // Month ascending, then category — the section's long-standing order (the
+  // amount-desc order spendingGroups returns is the Categories tab's concern).
+  // Plain string comparison, never localeCompare: the output must not depend on
+  // the serverless instance's locale data.
+  const byLabel = (a, b) => (a.label < b.label ? -1 : a.label > b.label ? 1 : 0);
+  for (const month of [...byMonth.keys()].sort()) {
+    const partial = month === partialMonth ? ` (partial month: ${since} onward only)` : '';
+    for (const g of spendingGroups(byMonth.get(month)).sort(byLabel)) {
+      lines.push(`- ${month} ${g.label}: $${g.amount.toFixed(2)}${partial}`);
+    }
   }
 
   // --- Recurring subscriptions -----------------------------------------------
@@ -327,13 +414,20 @@ export function formatSpendingContext(accounts, txs, extras = {}) {
 
   lines.push('');
   lines.push('## Transactions (last 90 days, newest first)');
-  lines.push('Format: date | account | name | category | amount');
+  // The trailing marker is what keeps a model that re-adds the rows from
+  // landing on a different number than the totals above: without it, a washed
+  // transfer leg and a card payment are indistinguishable from purchases now
+  // that categories carry no such hint. Only money-OUT rows are marked (a
+  // negative amount is money in, which the header already covers), so the
+  // suffix is rare and costs almost nothing in the context window.
+  lines.push('Format: date | account | name | category | amount — a trailing "| not counted as spending" marks a money-out row the rule above excludes (a matched internal transfer or a card payment).');
   for (const t of usable) {
     const a = acctById.get(t.account_id);
     const acctLabel = a?.nickname || `${a?.name || 'Account'}${a?.mask ? ` ··${a.mask}` : ''}`;
     const name = t.user_description || t.merchant_name || t.description || 'Card transaction';
+    const skipped = Number(t.amount) > 0 && !isSpend(t);
     lines.push(
-      `${t.date} | ${acctLabel} | ${name} | ${t.mapped_category || 'Uncategorized'} | $${Number(t.amount).toFixed(2)}`
+      `${t.date} | ${acctLabel} | ${name} | ${t.mapped_category || 'Uncategorized'} | $${Number(t.amount).toFixed(2)}${skipped ? ' | not counted as spending' : ''}`
     );
   }
 
