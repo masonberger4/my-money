@@ -115,7 +115,8 @@ entry once shipped.
 | `api/_lib/supabase.js` | Service-role client + `requireUser` (JWT → householdId). |
 | `supabase/migrations/` | Ordered SQL migrations (additive-only on live data). |
 | `supabase/setup_all.sql` | One-paste fresh install — **DESTRUCTIVE, wipes all tables. Never run on live data. Never re-generate to include new migrations without that warning.** Convenience snapshot only — `migrations/` is the source of truth; ends with a column-level self-check that raises if it drifts behind migrations. |
-| `test/` | `npm test` — Node's built-in `node --test`, zero deps; plain-module helpers live in `test/helpers/` (the `*.test.js` glob skips them). Covers the pure cores: cashFlow (incl. brute-force max-matching parity), csvImport parsing/dedup-id idempotency + overlap guard, **pdfImport** (the whole template pipeline: shape tests, year inference incl. the Dec→Jan wrap, geometry, applyTemplate anchor/continuation REGRESSIONs, debit/credit netting, the buildRows round-trip), **reconcile** (the comparison audit, with its own brute-force parity), **spending** (the extracted purchase-based model against the synthetic ledger: 11 scenarios + seeded property tests), **categoryRules** (the ruleHistory core against a fake PostgREST incl. the exact-page-multiple REGRESSION; write-time precedence; the teach→apply→re-import sequence), txClassify (learned-rule matching + the over-specific-key limit), envelopes (both walk regressions + by-date targets + `effectiveTarget`/`planAutoFill`), **expectedTx** (matching, lifecycle, dup gates incl. the null-key roll-forward REGRESSION, the display-only walk-byte-identity REGRESSION), **envelopeIO** (Session 6 adapter I/O against a recording fake — the 42703 target_override retry, the conditional setAssigned(0) delete, roll-forward gating; its degrade tests run LAST, order matters), taxReport (conservation, capital exclusion, the 2026 mileage-rate boundary), **recurring** (thresholds pinned as documentation), **accountBalance** (incl. the −0 REGRESSION), **categoryMap**, simplefin classifier/clamp + **simplefinNormalize** (type-inference ordering REGRESSION, wire parsing) + **simplefinToken** (SSRF/claim flow against a stubbed fetch), **assistantModels** (+ a server source scan), **spendingContext** byte-determinism, **syncDecisions** (watermark advance/hold/reset + missing-table vs missing-column), **lockstep** (index.html↔ui.css `--bg`, sw.js guards, fonts precache, pdf.js legacy build), **sync** (pullWasClean + runSync single-flight via injected transport), **syncOrchestration** (`pullOneAccessUrl` against the fake Supabase client in `test/helpers/fakeSupabase.js`), **manualTx** (quick-add row building + gating), **unlink** (remove-bank soft-hide decisions), **monthMemo** (range memo + per-model copies), **debtPayoff**, **serializedUpdater** (the read-merge-write chain's four invariants), noPlaid, paletteContrast, apiLoads. Run before pushing. |
+| `vercel.json` | Build/rewrite config **plus the security headers** (CSP, HSTS, nosniff, Referrer-Policy, Permissions-Policy, frame-ancestors/X-Frame-Options DENY) applied at a catch-all `/(.*)`. Each CSP directive is derived from real code usage; the derivation is the ignored `_csp_derivation` key. **Nothing local exercises these headers — a too-strict edit breaks prod silently; `test/securityHeaders.test.js` is the guard** (see Gotchas). |
+| `test/` | `npm test` — Node's built-in `node --test`, zero deps; plain-module helpers live in `test/helpers/` (the `*.test.js` glob skips them). Covers the pure cores: cashFlow (incl. brute-force max-matching parity), csvImport parsing/dedup-id idempotency + overlap guard, **pdfImport** (the whole template pipeline: shape tests, year inference incl. the Dec→Jan wrap, geometry, applyTemplate anchor/continuation REGRESSIONs, debit/credit netting, the buildRows round-trip), **reconcile** (the comparison audit, with its own brute-force parity), **spending** (the extracted purchase-based model against the synthetic ledger: 11 scenarios + seeded property tests), **categoryRules** (the ruleHistory core against a fake PostgREST incl. the exact-page-multiple REGRESSION; write-time precedence; the teach→apply→re-import sequence), txClassify (learned-rule matching + the over-specific-key limit), envelopes (both walk regressions + by-date targets + `effectiveTarget`/`planAutoFill`), **expectedTx** (matching, lifecycle, dup gates incl. the null-key roll-forward REGRESSION, the display-only walk-byte-identity REGRESSION), **envelopeIO** (Session 6 adapter I/O against a recording fake — the 42703 target_override retry, the conditional setAssigned(0) delete, roll-forward gating; its degrade tests run LAST, order matters), taxReport (conservation, capital exclusion, the 2026 mileage-rate boundary), **recurring** (thresholds pinned as documentation), **accountBalance** (incl. the −0 REGRESSION), **categoryMap**, simplefin classifier/clamp + **simplefinNormalize** (type-inference ordering REGRESSION, wire parsing) + **simplefinToken** (SSRF/claim flow against a stubbed fetch), **assistantModels** (+ a server source scan), **spendingContext** byte-determinism, **syncDecisions** (watermark advance/hold/reset + missing-table vs missing-column), **lockstep** (index.html↔ui.css `--bg`, sw.js guards, fonts precache, pdf.js legacy build), **sync** (pullWasClean + runSync single-flight via injected transport), **syncOrchestration** (`pullOneAccessUrl` against the fake Supabase client in `test/helpers/fakeSupabase.js`), **manualTx** (quick-add row building + gating), **unlink** (remove-bank soft-hide decisions), **monthMemo** (range memo + per-model copies), **debtPayoff**, **serializedUpdater** (the read-merge-write chain's four invariants) + **settingsChains** (the two real call sites against a fake settings table), **securityHeaders** (the vercel.json CSP lockstep — script-hash recompute + per-directive pins), noPlaid, paletteContrast, apiLoads. Run before pushing. |
 
 ## Development workflow
 
@@ -802,6 +803,19 @@ files / Gotchas, plus the few rules noted inline here that live nowhere else.
   façade-only import rule is in the dataAdapter Key-files row and is
   load-bearing (mock-harness alias + shared module state).
 
+- **Security + test-infrastructure batch (Session E, 2026-08-04 — completes
+  the audit backlog)** — three items, no migration, no app behavior change:
+  settings read-merge-write race coverage (`test/settingsChains.test.js` drives
+  the REAL binding code via an exported `makeSettingsChains(db)` in
+  `src/adapters/settingsIO.js` against a fake settings table — the envelopeIO
+  recording-fake pattern; the chain primitive stays pinned in
+  `test/serializedUpdater.test.js`); **CSP + security headers in `vercel.json`**
+  (see the Gotcha — `test/securityHeaders.test.js` is the guard); and the
+  opt-in **SQL/RLS harness**, skippable so `npm test` stays Postgres-free,
+  adding this audit's two assertions to next-iteration plan item 6's spec
+  (`current_household_id()` stays public + executable; a
+  pg_tables-vs-pg_policies diff so a future table can't ship policy-less).
+
 ## Pending branches
 
 None in code. **Outstanding ops/data tasks from the 2026-08-03 double-count
@@ -855,9 +869,13 @@ migration that DROPS should verify rather than trust.
 chats + search refinement — shipped 2026-08-04) and deleted per its own rule.
 The forward-looking doc is **`docs/next-iteration-plan-2026-08-04.md`**.
 
-**Active worklist:** `docs/improvement-backlog-2026-08-04.md` — the verified
-2026-08-04 six-dimension audit (delete entries as they ship); the ops/data
-tasks in Pending still outrank it.
+**Worklist status: no active code backlog.**
+`docs/improvement-backlog-2026-08-04.md` (the verified six-dimension audit) is
+**worked through — all five sessions A–E shipped 2026-08-04** and its three
+Section-2 questions are decided; it survives as an audit record. What remains
+is the **needs-Mason ops/data work in Pending** (Anthropic spend cap, key
+rotation, payroll dupe, Discover twins, NEWREZ, statement backfill) plus the
+genuinely-open items noted below.
 
 **Improvement backlog (2026-08-01 six-dimension audit):**
 `docs/improvement-backlog-2026-08-01.md` — everything SHIPPED (Batch 1,
@@ -867,13 +885,10 @@ Dashboard.jsx decomposition stays DEFERRED (keep the single file during
 active development). The file remains only as the audit record + that
 deferral's notes.
 
-**Active worklist:** `docs/improvement-backlog-2026-08-04.md` (six-dimension
-audit, verified). Sessions A–C + the month-navigation caching decision shipped
-2026-08-04 (see Merged features); Sessions D–E remain. Mason's 2026-08-04
-decisions recorded there: month-nav caching yes (shipped), no durable
-assistant throttle (the Anthropic spend cap is the Pending ops task), and the
-**dataAdapter.js internal split (backlog Session D item 4) is SCHEDULED as
-its own quiet session** — no feature work alongside.
+Mason's 2026-08-04 decisions, recorded in that backlog: month-nav caching yes
+(shipped), **no durable assistant throttle** (the Anthropic spend cap is the
+Pending ops task instead), and the dataAdapter.js internal split gets its own
+quiet session (ran as Session D).
 
 Debt follow-ups: ALL THREE SHIPPED 2026-08-03 (manual debts, per-debt payoff
 schedule drill-in, net worth over time — Mason's call recorded: net worth
@@ -1067,6 +1082,18 @@ surgically, never the foundation.
   bundle.
 - The empty-institution count-query error must NOT fall back to the "connect
   your first account" screen (see App.jsx count handling).
+- **A too-strict CSP edit in `vercel.json` breaks production SILENTLY.** Those
+  headers are served by Vercel and by nothing else — `npm run build`, `npm
+  test` and the mock harness never see them, so a dropped directive or a
+  stale `script-src` hash ships green and only fails on the deployed site
+  (the pre-paint theme script blocked = a theme flash; a missing
+  `connect-src` host = every Supabase call blocked). **`test/securityHeaders.
+  test.js` is the guard**: it recomputes the sha256 of index.html's inline
+  theme script and pins every load-bearing directive, so editing either side
+  turns into a red test. Change the theme script and the test hands you the
+  new hash. The per-directive derivation lives in vercel.json's ignored
+  `_csp_derivation` key (JSON has no comments) — read it before adding or
+  removing an origin, and never widen a directive to make a symptom go away.
 - iOS PWA: apple-touch-icon must be PNG; service worker (`public/sw.js`) never
   caches `/api/*`; bump its CACHE_VERSION when changing it.
 - **pdf.js must be the LEGACY build** (`pdfjs-dist/legacy/build/…`). The modern
