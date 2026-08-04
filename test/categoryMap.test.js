@@ -36,12 +36,34 @@ test('isBudgetableCategory: the bookkeeping categories are not budgetable; real 
   assert.equal(isBudgetableCategory('Climbing Gym'), true, 'a custom category is a category');
 });
 
-test('ERA_CATEGORIES sanity: no duplicates, Uncategorized IS a member, no Housing/Income', () => {
+// The app ships NO categories (Mason, 2026-08-04): the user creates every one
+// of them in the `dash:cats` registry and teaches it. ERA_CATEGORIES is no
+// longer a taxonomy — it is exactly the three MECHANISM categories the app's
+// own models depend on, and they must stay hidden from the user's picker.
+test('ERA_CATEGORIES is the MECHANISM set: exactly the three internals, no taste categories', () => {
   assert.equal(new Set(ERA_CATEGORIES).size, ERA_CATEGORIES.length, 'no duplicates');
-  assert.ok(ERA_CATEGORIES.includes(UNCATEGORIZED), 'Uncategorized is a real taxonomy member');
-  assert.ok(ERA_CATEGORIES.includes(TRANSFER_CATEGORY));
-  assert.ok(ERA_CATEGORIES.includes(RETURN_CATEGORY));
-  assert.ok(!ERA_CATEGORIES.includes('Housing'), 'no Housing member — mortgage maps to Utilities');
+  assert.deepEqual(
+    new Set(ERA_CATEGORIES),
+    new Set([TRANSFER_CATEGORY, RETURN_CATEGORY, UNCATEGORIZED]),
+    'only the three internals'
+  );
+});
+
+test('REGRESSION: the deleted built-in taxonomy never comes back as a seed', () => {
+  // Re-seeding any of these would resurrect the confidently-wrong guess this
+  // change exists to kill (NEWREZ, a mortgage, landing in "Utilities").
+  for (const gone of [
+    'Groceries', 'Dining out', 'Utilities', 'Shopping and gear', 'Coffee and snacks',
+    'Vehicle expenses', 'Travel and vacation', 'Healthcare and pharmacy',
+    'Health and fitness', 'Entertainment and subscriptions', 'Childcare', 'Pets',
+    'Ride shares', 'Public transit', 'Home maintenance and improvement', 'Education',
+    'Side hustles and business', 'Cash, checks, and misc',
+  ]) {
+    assert.ok(!ERA_CATEGORIES.includes(gone), `${gone} is user-created now, never shipped`);
+    // …and each is a perfectly ordinary budgetable category if a user makes it.
+    assert.equal(isBudgetableCategory(gone), true);
+  }
+  assert.ok(!ERA_CATEGORIES.includes('Housing'), 'no Housing member');
   assert.ok(!ERA_CATEGORIES.includes('Income'), 'no Income member');
 });
 

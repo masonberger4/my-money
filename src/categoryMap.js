@@ -1,36 +1,41 @@
+// THE APP SHIPS NO CATEGORIES (Mason's decision, 2026-08-04).
+//
+// The user creates every category — the `dash:cats` registry is THE category
+// system, carrying colours via `dash:colors` and rename aliases via
+// `dash:names` — and teaches which merchants belong to it. `category_rules` +
+// `merchantKey` (src/txClassify.js) turn that manual correction into an
+// automatic rule for every later import and sync. The ~18 "taste" categories
+// that used to be seeded here, and the descriptor→category keyword table that
+// guessed against them, are BOTH deleted: a household never chose them, and
+// forcing every merchant into one of them produced confidently-wrong answers
+// (NEWREZ, a mortgage, landing in "Utilities" at ~$3.8k/mo) that read exactly
+// like correct ones.
+//
+// ERA_CATEGORIES is therefore no longer a taxonomy. It is the MECHANISM set:
+// the three internal categories the app's own models depend on, which must
+// survive and must stay HIDDEN from the user's category picker. They are not
+// taste and cannot be created, renamed or retired by the user.
 export const ERA_CATEGORIES = [
-  'Shopping and gear',
-  'Health and fitness',
-  'Entertainment and subscriptions',
-  'Travel and vacation',
-  'Dining out',
-  'Childcare',
-  'Groceries',
-  'Pets',
-  'Healthcare and pharmacy',
-  'Coffee and snacks',
-  'Vehicle expenses',
-  'Ride shares',
-  'Public transit',
-  'Home maintenance and improvement',
-  'Utilities',
-  'Education',
-  'Side hustles and business',
-  'Cash, checks, and misc',
+  // Read by the linked-boundary spending model's card-payment veto
+  // (`isCardPaymentRow`). Drop it and card payments count as spending.
   'Transfers and card payments',
+  // Synthesised by applyAccountRules() for credit-card negatives (refunds,
+  // statement credits, cashback): never spending, never income.
   'Return',
-  // Not a real spending category — the honest answer when the classifier does
-  // not recognise a merchant. It exists because the previous fallback was
-  // "Shopping and gear", a category actually in use, which made "we don't know"
-  // indistinguishable from "this is shopping" and quietly inflated it (46% of a
-  // realistic merchant corpus landed there). Uncategorized IS counted as
-  // spending — the money did leave — but it can't be budgeted, and it shows up
-  // in the Categories tab so the size of the unknown is visible.
+  // The "not taught yet" state, and this design needs it MORE than the old one
+  // did — it is now where every transaction starts. It exists because the
+  // previous fallback was "Shopping and gear", a category actually in use,
+  // which made "we don't know" indistinguishable from "this is shopping" and
+  // quietly inflated it (46% of a realistic merchant corpus landed there).
+  // Uncategorized IS counted as spending — the money did leave — but it can't
+  // be budgeted, and it shows up in the Categories tab so the size of the
+  // unknown stays visible.
   'Uncategorized',
 ];
 
 // Exported so csvImport/txClassify and the tests share one definition rather
-// than each keeping a copy that can drift.
+// than each keeping a copy that can drift. These three names are internals —
+// never offer them in the category picker and never let a user create one.
 export const TRANSFER_CATEGORY = 'Transfers and card payments';
 export const RETURN_CATEGORY = 'Return';
 export const UNCATEGORIZED = 'Uncategorized';

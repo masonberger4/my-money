@@ -239,17 +239,18 @@ test('ilike candidates that fail matchLearnedRule are NOT rewritten', async () =
 
 // --- Forward direction: write-time precedence --------------------------------
 
-test('precedence at write time: learned rule → keyword table → Uncategorized', () => {
+test('precedence at write time: learned rule → Uncategorized (the keyword table is gone)', () => {
   const rules = { 'SAFEWAY STORE': 'Coffee and snacks' };
-  // Learned beats the keyword table (which says Groceries).
+  // A taught rule is the ONLY thing that assigns a category now.
   assert.equal(
     classifyDescription('SAFEWAY STORE 12', 45, 'depository', rules).mapped_category,
     'Coffee and snacks'
   );
-  // Keyword table beats Uncategorized.
+  // Without one, the very same merchant is Uncategorized — nothing is guessed
+  // (2026-08-04: the descriptor→category table was deleted with the taxonomy).
   assert.equal(
     classifyDescription('SAFEWAY STORE 12', 45, 'depository', null).mapped_category,
-    'Groceries'
+    FALLBACK_CATEGORY
   );
   // Fallback is the honest unknown.
   assert.equal(
@@ -273,8 +274,10 @@ test('precedence through buildRows (the CSV/PDF write path)', () => {
   ].join('\n');
   const withRules = analyzeCsv(text, { rules: { 'SAFEWAY STORE': 'Coffee and snacks' } });
   assert.deepEqual(withRules.rows.map(r => r.mapped_category), ['Coffee and snacks', FALLBACK_CATEGORY]);
+  // With no rules at all, EVERY row imports Uncategorized — the import path
+  // guesses nothing either.
   const withoutRules = analyzeCsv(text);
-  assert.deepEqual(withoutRules.rows.map(r => r.mapped_category), ['Groceries', FALLBACK_CATEGORY]);
+  assert.deepEqual(withoutRules.rows.map(r => r.mapped_category), [FALLBACK_CATEGORY, FALLBACK_CATEGORY]);
 });
 
 test('REGRESSION: a learned rule NEVER overrides the transfer/card-payment guards', () => {
@@ -294,16 +297,17 @@ test('REGRESSION: a learned rule NEVER overrides the transfer/card-payment guard
   assert.equal(transfer.raw_category, 'TRANSFER_OUT', 'the wash tagging is untouched by rules');
 });
 
-test('deleting a rule: the next classification falls back to the keyword table; history is untouched', async () => {
+test('deleting a rule: the next classification falls back to Uncategorized; history is untouched', async () => {
   const db = makeDb([
     { id: 1, description: 'SAFEWAY STORE 12', mapped_category: 'Groceries' },
   ]);
   await apply(db, 'SAFEWAY STORE 12', 'Coffee and snacks');
   assert.equal(db.rows[0].mapped_category, 'Coffee and snacks');
 
-  // Rule deleted → rules map no longer carries it: new rows classify by the
-  // keyword table again…
-  assert.equal(classifyDescription('SAFEWAY STORE 12', 45, 'depository', {}).mapped_category, 'Groceries');
+  // Rule deleted → the rules map no longer carries it, and there is no keyword
+  // table left to fall back to: new rows arrive Uncategorized, waiting to be
+  // taught again…
+  assert.equal(classifyDescription('SAFEWAY STORE 12', 45, 'depository', {}).mapped_category, FALLBACK_CATEGORY);
   // …while the rewritten history stays as the rule left it.
   assert.equal(db.rows[0].mapped_category, 'Coffee and snacks');
 });
@@ -320,7 +324,7 @@ test('teach → apply to history → re-import the same file: dedup holds, the r
 
   // 1. First import, before any rule exists: RUDYS is an unknown merchant.
   const first = analyzeCsv(FILE);
-  assert.deepEqual(first.rows.map(r => r.mapped_category), [FALLBACK_CATEGORY, FALLBACK_CATEGORY, 'Groceries']);
+  assert.deepEqual(first.rows.map(r => r.mapped_category), [FALLBACK_CATEGORY, FALLBACK_CATEGORY, FALLBACK_CATEGORY]);
   const db = makeDb(
     first.rows.map((r, i) => ({
       id: i + 1,
@@ -333,7 +337,7 @@ test('teach → apply to history → re-import the same file: dedup holds, the r
   // 2. Teach the merchant and apply to history.
   const rules = { RUDYS: 'Health and fitness' };
   assert.equal(await apply(db, 'RUDYS', 'Health and fitness'), 2);
-  assert.deepEqual(db.rows.map(r => r.mapped_category), ['Health and fitness', 'Health and fitness', 'Groceries']);
+  assert.deepEqual(db.rows.map(r => r.mapped_category), ['Health and fitness', 'Health and fitness', FALLBACK_CATEGORY]);
 
   // 3. Re-import the same file with the rule now active: identical ids, every
   // row a duplicate, so the importable set is empty and the rewrite is not
@@ -345,7 +349,7 @@ test('teach → apply to history → re-import the same file: dedup holds, the r
   assert.deepEqual(second.rows.map(r => r.plaid_tx_id), first.rows.map(r => r.plaid_tx_id));
   assert.ok(second.rows.every(r => r.isDuplicate));
   assert.equal(second.rows.filter(r => !r.isDuplicate && !r.isOverlap).length, 0, 'nothing to insert');
-  assert.deepEqual(db.rows.map(r => r.mapped_category), ['Health and fitness', 'Health and fitness', 'Groceries']);
+  assert.deepEqual(db.rows.map(r => r.mapped_category), ['Health and fitness', 'Health and fitness', FALLBACK_CATEGORY]);
 });
 
 // --- countAll: the Taught-rules screen's match count -------------------------
