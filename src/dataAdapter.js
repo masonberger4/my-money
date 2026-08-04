@@ -8,6 +8,7 @@ import { matchExpected, rollForwardDate, isDuplicateExpected, isDuplicateRollFor
 import { isBudgetableCategory } from './categoryMap.js';
 import { isSpend, sumSpending, spendingGroups, biggestMovers, toTxShape, aggregateEnvelopeSpending } from './spending.js';
 import { createRangeMemo } from './monthMemo.js';
+import { amountOrClause } from './searchFilters.js';
 import { parseIgnoreList, toggleIgnoreKey, CANDIDATE_WINDOW_MONTHS } from './recurring.js';
 import { parseSavedChats, addSavedChat, removeSavedChat } from './savedChats.js';
 import { aggregateCoverage } from './coverage.js';
@@ -1247,7 +1248,14 @@ function ilikePattern(q) {
   return `%${escaped}%`;
 }
 
-export async function searchTransactions(query, { limit = 200 } = {}) {
+// filters is the normalized object from buildSearchFilters (src/searchFilters.js)
+// or null. Amount/date go SERVER-side so limit/offset paginate the FILTERED
+// set — a client-side filter over an unfiltered 200 would silently hide
+// matches past the cap. offset > 0 is the "Load more" page: ordered paging
+// (date desc, id desc as the total-order tiebreak) via .range, with the
+// exact-page-multiple 416 answered as "no more rows" (isRangeExhaustedError),
+// per the ruleHistory convention.
+export async function searchTransactions(query, { limit = 200, offset = 0, filters = null } = {}) {
   const q = (query || '').trim();
   if (q.length < 2) return { transactions: [], hasMore: false };
   const pat = ilikePattern(q);
@@ -1257,20 +1265,32 @@ export async function searchTransactions(query, { limit = 200 } = {}) {
     `merchant_name.ilike.${pat}`,
     `user_description.ilike.${pat}`,
   ];
-  const attempt = withEntity =>
-    supabase
+  // Chained .or() calls AND together in PostgREST — the text match and the
+  // absolute-amount match are independent conjuncts.
+  const amtOr = filters ? amountOrClause(filters.amountMin, filters.amountMax) : null;
+  const attempt = withEntity => {
+    let b = supabase
       .from('transactions')
       .select(`${withEntity ? TX_COLUMNS + TX_TAX_COLUMNS : TX_COLUMNS}, accounts!inner(hidden, type, subtype)`)
       .eq('accounts.hidden', false)
-      .or(ors.join(','))
+      .or(ors.join(','));
+    if (amtOr) b = b.or(amtOr);
+    if (filters?.dateFrom) b = b.gte('date', filters.dateFrom);
+    if (filters?.dateTo) b = b.lte('date', filters.dateTo);
+    return b
       .order('date', { ascending: false })
-      .limit(limit + 1);
+      .order('id', { ascending: false })
+      .range(offset, offset + limit);
+  };
   let { data, error } = await attempt(transactionsHaveEntity);
   if (error && transactionsHaveEntity && isMissingColumnError(error, 'entity_id')) {
     transactionsHaveEntity = false;
     ({ data, error } = await attempt(false));
   }
-  if (error) throw error;
+  if (error) {
+    if (isRangeExhaustedError(error)) return { transactions: [], hasMore: false };
+    throw error;
+  }
 
   for (const t of data) {
     t.mapped_category = applyAccountRules(t.mapped_category, t.amount, t.accounts?.type);

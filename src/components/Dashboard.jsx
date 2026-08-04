@@ -3,6 +3,7 @@ import { getOverview, getSpending, getBiggestMovers, getTransactions, getCashFlo
 // Pure cores imported directly (never Supabase — the mock-harness alias rule
 // only covers dataAdapter/sync/db/apiClient; pure modules are safe).
 import { planAutoFill } from "../envelopes.js";
+import { buildSearchFilters } from "../searchFilters.js";
 import { expectedByCategory, expectedStatus, isMissedExpected, seedFromRecurring, projectFutureCycles } from "../expectedTx.js";
 import { payoffWhatIf, debtFreeMonth, isMortgage, amortizationSchedule, addMonths, MAX_MONTHS } from "../debtPayoff.js";
 import { SCHEDULE_E_LINES, RENTS_KEY, DEFAULT_SCHEDULE_E_MAP, scheduleEReport, entityMonthly, entityLedger, personalDeductionReport, DEDUCTION_BUCKETS, DEFAULT_DEDUCTION_MAP, mileageDeduction, scheduleECsv } from "../taxReport.js";
@@ -61,6 +62,10 @@ const TYPE_CHIP = "#378ADD";
 // role as TYPE_CHIP (a settings control, not --accent), distinct hue so a
 // property assignment never reads as an account-type change.
 const ENTITY_CHIP = "#639922";
+
+// Search refinement (Transactions tab): the raw input strings behind the
+// amount/date filter row. Normalization lives in src/searchFilters.js.
+const EMPTY_SEARCH_FILTERS = { amtMin: "", amtMax: "", dateFrom: "", dateTo: "" };
 
 // Three-state theme control: system -> light -> dark -> system. An icon alone
 // can't say which of THREE states is active, so each one carries a label too.
@@ -1144,6 +1149,12 @@ export default function Dashboard({ refreshTick = 0 }) {
   const [searchRes,setSearchRes]=useState(null);
   const [searching,setSearching]=useState(false);
   const searchSeq=useRef(0);
+  // Search refinement: filterDraft mirrors the inputs (dates commit on BLUR —
+  // the mid-typing-year gotcha), searchFilters is what the search effect and
+  // load-more actually query with. Device-ephemeral, never persisted.
+  const [filterDraft,setFilterDraft]=useState(EMPTY_SEARCH_FILTERS);
+  const [searchFilters,setSearchFilters]=useState(EMPTY_SEARCH_FILTERS);
+  const [searchMore,setSearchMore]=useState(false);
   const [selAcct,setSelAcct]=useState(null);
   const [acctTxs,setAcctTxs]=useState(null);
   const [acctHasMore,setAcctHasMore]=useState(false);
@@ -1805,19 +1816,41 @@ export default function Dashboard({ refreshTick = 0 }) {
   const invalidateTax=useCallback(()=>{setTaxData(null);setTaxEpoch(e=>e+1);},[]);
 
   // Cross-month search: debounced 300ms, min 2 chars; the sequence id drops
-  // stale responses so fast typing can't render out-of-order results.
+  // stale responses so fast typing can't render out-of-order results. The
+  // amount/date filters are effect deps, so a filter change rides the SAME
+  // debounce + sequence guard — a stale filtered response can't render out
+  // of order, and every change restarts pagination from page one.
   useEffect(()=>{
     const q=searchQ.trim();
     const id=++searchSeq.current;
     if(q.length<2){setSearchRes(null);setSearching(false);return;}
     setSearching(true);
     const h=setTimeout(()=>{
-      searchTransactions(q)
+      searchTransactions(q,{filters:buildSearchFilters(searchFilters)})
         .then(res=>{if(searchSeq.current===id){setSearchRes(res);setSearching(false);}})
         .catch(err=>{console.error("search failed",err);if(searchSeq.current===id){setSearchRes({transactions:[],hasMore:false});setSearching(false);}});
     },300);
     return ()=>clearTimeout(h);
-  },[searchQ]);
+  },[searchQ,searchFilters]);
+
+  // "Load more": append the next server page of the SAME filtered query,
+  // offset by what's already on screen. Captures the sequence id — a
+  // query/filter change mid-flight bumps it and the stale page is dropped
+  // (appending it under new results would interleave two different queries).
+  // Appended rows land in searchRes, so patchAllTxLists keeps covering them.
+  async function loadMoreSearch(){
+    if(!searchRes||searchMore)return;
+    const id=searchSeq.current;
+    setSearchMore(true);
+    try{
+      const res=await searchTransactions(searchQ.trim(),{offset:searchRes.transactions.length,filters:buildSearchFilters(searchFilters)});
+      if(searchSeq.current===id)setSearchRes(prev=>prev?{...prev,transactions:[...prev.transactions,...res.transactions],hasMore:res.hasMore}:res);
+    }catch(err){
+      console.error("search load-more failed",err);
+    }finally{
+      setSearchMore(false);
+    }
+  }
 
   // Drill-in: load all transactions for the selected account
   useEffect(()=>{
@@ -1906,7 +1939,10 @@ export default function Dashboard({ refreshTick = 0 }) {
     const q=searchQ.trim();
     await Promise.all([
       q.length>=2
-        ? searchTransactions(q).then(setSearchRes).catch(err=>console.error("search refresh failed",err))
+        // First page of the current filtered query — an appended load-more
+        // tail is dropped here, but hasMore comes back true so it's one tap
+        // away, and the refetched page is at least consistent.
+        ? searchTransactions(q,{filters:buildSearchFilters(searchFilters)}).then(setSearchRes).catch(err=>console.error("search refresh failed",err))
         : Promise.resolve(),
       selAcct
         ? getAccountTransactions(selAcct.id)
@@ -1914,7 +1950,7 @@ export default function Dashboard({ refreshTick = 0 }) {
             .catch(err=>console.error("account list refresh failed",err))
         : Promise.resolve(),
     ]);
-  },[searchQ,selAcct]);
+  },[searchQ,searchFilters,selAcct]);
 
   async function learnMerchant(){
     if(!learnPrompt)return;
@@ -3126,6 +3162,41 @@ export default function Dashboard({ refreshTick = 0 }) {
                     cursor:"pointer",color:"var(--muted)",fontSize:18,lineHeight:1,padding:"2px 6px"}}>×</button>
               )}
             </div>
+            {/* Refinement row — only while a search is active. Amounts match by
+                ABSOLUTE VALUE (typing 80 finds an $80 charge or refund; the
+                placeholder says ±). Amount inputs commit on change and ride the
+                search debounce; DATE inputs commit on BLUR with a year sanity
+                floor (sanitizeDateInput) — <input type="date"> emits complete
+                garbage years mid-typing (the CLAUDE.md gotcha). */}
+            {searchActive&&(()=>{
+              const fSt={padding:"6px 8px",borderRadius:8,border:"1px solid var(--border)",background:"var(--bg)",
+                color:"var(--text)",fontSize:12,fontFamily:"inherit",outline:"none"};
+              const setBoth=(k,v)=>{setFilterDraft(f=>({...f,[k]:v}));setSearchFilters(f=>({...f,[k]:v}));};
+              const commitDate=(k,v)=>setSearchFilters(f=>f[k]===v?f:{...f,[k]:v});
+              const anyActive=!!buildSearchFilters(searchFilters);
+              return (
+                <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center",marginBottom:12}}>
+                  <input inputMode="decimal" value={filterDraft.amtMin} placeholder="± $ min"
+                    title="Smallest transaction size — matches money in or out"
+                    onChange={e=>setBoth("amtMin",e.target.value)} style={{...fSt,width:70}}/>
+                  <input inputMode="decimal" value={filterDraft.amtMax} placeholder="± $ max"
+                    title="Largest transaction size — matches money in or out"
+                    onChange={e=>setBoth("amtMax",e.target.value)} style={{...fSt,width:70}}/>
+                  <input type="date" value={filterDraft.dateFrom} title="From date"
+                    onChange={e=>setFilterDraft(f=>({...f,dateFrom:e.target.value}))}
+                    onBlur={e=>commitDate("dateFrom",e.target.value)} style={{...fSt,width:126}}/>
+                  <input type="date" value={filterDraft.dateTo} title="To date"
+                    onChange={e=>setFilterDraft(f=>({...f,dateTo:e.target.value}))}
+                    onBlur={e=>commitDate("dateTo",e.target.value)} style={{...fSt,width:126}}/>
+                  {anyActive&&(
+                    <button className="ibtn" style={{fontSize:11}}
+                      onClick={()=>{setFilterDraft(EMPTY_SEARCH_FILTERS);setSearchFilters(EMPTY_SEARCH_FILTERS);}}>
+                      Clear filters
+                    </button>
+                  )}
+                </div>
+              );
+            })()}
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10,gap:10}}>
               <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em"}}>
                 {searchActive?"Search results · all months":monthLabel(year,month)}
@@ -3212,7 +3283,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                 {(()=>{
                   const cn=txCatFilter?getName(txCatFilter):null;
                   const q=searchQ.trim();
-                  if(searchActive&&cn&&searchRes?.hasMore)return `No ${cn} transactions in the first 200 matches for "${q}".`;
+                  if(searchActive&&cn&&searchRes?.hasMore)return `No ${cn} transactions in the first ${searchTxs.length} matches for "${q}" — try Load more.`;
                   if(searchActive&&cn)return `No ${cn} transactions match "${q}".`;
                   if(searchActive)return `No transactions match "${q}".`;
                   if(cn&&txAcctFilter)return `No ${cn} transactions for this account this month.`;
@@ -3243,8 +3314,10 @@ export default function Dashboard({ refreshTick = 0 }) {
               );
             })}
             {searchActive&&!searching&&searchRes?.hasMore&&(
-              <div style={{textAlign:"center",marginTop:12,fontSize:11,color:"var(--muted)"}}>
-                Showing the first 200 matches — narrow your search.
+              <div style={{textAlign:"center",marginTop:12}}>
+                <button className="ibtn" style={{fontSize:11}} disabled={searchMore} onClick={loadMoreSearch}>
+                  {searchMore?"Loading…":`Load more (showing ${searchTxs.length})`}
+                </button>
               </div>
             )}
           </div>
