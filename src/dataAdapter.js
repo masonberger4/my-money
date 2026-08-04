@@ -3,17 +3,76 @@ import { applyAccountRules } from './categoryMap.js';
 import { merchantKey, classifyDescription } from './txClassify.js';
 import { applyRuleToHistory, isRangeExhaustedError } from './ruleHistory.js';
 import { markInternalTransfers, cashIncome, cashSpending } from './cashFlow.js';
-import { walkEnvelopes, monthKey, planMove, planAutoFill } from './envelopes.js';
+import { walkEnvelopes, monthKey } from './envelopes.js';
 import { matchExpected, rollForwardDate, isDuplicateExpected, isDuplicateRollForward } from './expectedTx.js';
-import { isBudgetableCategory } from './categoryMap.js';
 import { isSpend, sumSpending, spendingGroups, biggestMovers, toTxShape, aggregateEnvelopeSpending } from './spending.js';
 import { createRangeMemo } from './monthMemo.js';
 import { setSyncCompletionHook } from './sync.js';
 import { amountOrClause, searchIsActive } from './searchFilters.js';
-import { parseIgnoreList, toggleIgnoreKey, CANDIDATE_WINDOW_MONTHS } from './recurring.js';
-import { parseSavedChats, addSavedChat, removeSavedChat } from './savedChats.js';
+import { CANDIDATE_WINDOW_MONTHS } from './recurring.js';
 import { aggregateCoverage } from './coverage.js';
 import { netWorthSeries, clampSeries } from './netWorth.js';
+import {
+  pad2,
+  monthBounds,
+  monthLabel,
+  shiftMonth,
+  isMissingTableError,
+  isMissingColumnError,
+} from './adapters/shared.js';
+import {
+  hasOverrideColumn,
+  markOverrideColumnMissing,
+  isMissingOverrideColumnError,
+} from './adapters/envelopeIO.js';
+import { receiptsInstalled, markReceiptsMissing } from './adapters/receiptIO.js';
+
+// --- The façade contract (mock-harness boundary) ------------------------------
+// dataAdapter.js is the ONE import surface for all adapter I/O: the gitignored
+// harness aliases it (with sync/db/apiClient) by full-match regex, and
+// Dashboard imports only through those four modules. The cohesive clusters
+// below live in src/adapters/*.js — INTERNAL modules that only this file may
+// import — and are re-exported here byte-compatibly (the spending.js /
+// ruleHistory.js / monthMemo.js extraction precedent, applied to the I/O).
+export { isMissingColumnError } from './adapters/shared.js';
+export {
+  getBudgets,
+  setBudget,
+  isEnvelopeSchemaMissing,
+  getBudgetIncome,
+  setBudgetIncome,
+  getEnvPace,
+  setEnvPace,
+  setAssigned,
+  setTargetOverride,
+  autoFillMonth,
+  setCategoryRollover,
+  setTargetKind,
+  moveMoney,
+  fundTargets,
+} from './adapters/envelopeIO.js';
+export {
+  getRecIgnore,
+  setRecIgnore,
+  updateRecIgnore,
+  getSavedChats,
+  saveChatToApp,
+  deleteSavedChat,
+} from './adapters/settingsIO.js';
+export {
+  getEntities,
+  createEntity,
+  updateEntity,
+  getMileage,
+  addMileage,
+  deleteMileage,
+} from './adapters/taxIO.js';
+export {
+  getReceipts,
+  addReceipt,
+  deleteReceipt,
+  getReceiptUrl,
+} from './adapters/receiptIO.js';
 
 // Re-export the pure cash-flow model (src/cashFlow.js) so existing importers
 // and the CSV-import dry-run harness keep working.
@@ -47,29 +106,6 @@ export {
   effectiveCategory,
   aggregateEnvelopeSpending,
 } from './spending.js';
-
-function pad2(n) {
-  return String(n).padStart(2, '0');
-}
-
-function monthBounds(year, month) {
-  const start = `${year}-${pad2(month)}-01`;
-  const lastDay = new Date(year, month, 0).getDate();
-  const end = `${year}-${pad2(month)}-${pad2(lastDay)}`;
-  return { start, end };
-}
-
-function monthLabel(year, month) {
-  return new Date(year, month - 1, 1).toLocaleString('default', {
-    month: 'long',
-    year: 'numeric',
-  });
-}
-
-function shiftMonth(year, month, delta) {
-  const d = new Date(year, month - 1 + delta, 1);
-  return { year: d.getFullYear(), month: d.getMonth() + 1 };
-}
 
 const TX_COLUMNS =
   'id, plaid_tx_id, account_id, date, amount, merchant_name, description, mapped_category, raw_category, user_category, user_description, excluded, pending';
@@ -425,9 +461,7 @@ export async function getBalanceSnapshots(accountIds, sinceDate) {
     const { data, error } = await q;
     if (error) {
       if (isRangeExhaustedError(error)) break;
-      // Missing table: PGRST205 (PostgREST schema cache) or 42P01 (Postgres) —
-      // same pair as isEnvelopeSchemaMissing.
-      if (error.code === 'PGRST205' || error.code === '42P01') {
+      if (isMissingTableError(error)) {
         hasBalanceSnapshots = false;
         return [];
       }
@@ -502,7 +536,7 @@ export async function getCategoryRules() {
   if (!hasCategoryRules) return {};
   const { data, error } = await supabase.from('category_rules').select('merchant_key, category');
   if (error) {
-    if (error.code === 'PGRST205' || error.code === '42P01') {
+    if (isMissingTableError(error)) {
       hasCategoryRules = false;
       return {};
     }
@@ -575,81 +609,6 @@ export async function applyCategoryRuleToHistory(descriptor, category, { dryRun 
   return result;
 }
 
-// Budgets: one monthly dollar limit per category. No row = no budget.
-// RLS scopes reads to the household; household_id fills in server-side via
-// its column default (same as settings) — never send it from the client.
-// `budgets` maps category → MONTHLY target only. A by-date sinking fund's
-// amount is a multi-month TOTAL — handing it to the Categories tab as if it
-// were monthly would inflate the Targets strip and every bar denominator by
-// the un-prorated balance (a "$6,000 by June" fund is not a $6,000/month
-// budget). By-date targets come back separately in `byDate`.
-export async function getBudgets() {
-  let { data, error } = await supabase
-    .from('budgets')
-    .select('category, monthly_limit, target_kind, target_date');
-  // Pre-envelope-migration schema has no target_kind/target_date (42703);
-  // every row is a plain monthly target there.
-  if (error && error.code === '42703') {
-    ({ data, error } = await supabase.from('budgets').select('category, monthly_limit'));
-  }
-  if (error) throw error;
-  const budgets = {};
-  const byDate = {};
-  for (const row of data) {
-    // A null limit is a category keeping rollover/target settings without a
-    // target amount (post-envelope migration) — reads as "no target".
-    if (row.monthly_limit == null) continue;
-    if (row.target_kind === 'by_date') {
-      byDate[row.category] = { target: Number(row.monthly_limit), date: row.target_date || null };
-    } else {
-      budgets[row.category] = Number(row.monthly_limit);
-    }
-  }
-  return { budgets, byDate };
-}
-
-// Sets the category's funding target. Clearing it null-UPDATES the row rather
-// than deleting it, so a category keeps its rollover / target_date settings;
-// getBudgets() skips null limits, so it still reads as "no target". An UPDATE,
-// not an upsert: clearing a target on a category that never had a budgets row
-// must stay a no-op — an upserted null row would list that category on the
-// Budget tab every month forever, with no UI that ever deletes it.
-export async function setBudget(category, limit) {
-  const n = limit == null || limit === '' ? NaN : Number(limit);
-  const monthly_limit = Number.isFinite(n) && n > 0 ? n : null;
-  const { error } =
-    monthly_limit === null
-      ? await supabase.from('budgets').update({ monthly_limit }).eq('category', category)
-      : await supabase
-          .from('budgets')
-          .upsert({ category, monthly_limit }, { onConflict: 'household_id,category' });
-  if (!error) return;
-  // `monthly_limit` is NOT NULL until the envelope migration relaxes it, and
-  // previews share the PROD database — so on a preview whose migration hasn't
-  // been pasted yet, clearing a target would fail where it used to work. Fall
-  // back to the old behaviour (drop the row) rather than break it. 23502 is
-  // not_null_violation.
-  if (monthly_limit === null && error.code === '23502') {
-    const { error: delErr } = await supabase.from('budgets').delete().eq('category', category);
-    if (delErr) throw delErr;
-    return;
-  }
-  throw error;
-}
-
-// True for the errors that mean the envelope schema has not been installed —
-// a missing table (PGRST205 from PostgREST's schema cache, 42P01 from
-// Postgres) or the budgets columns the migration adds (42703). The dashboard
-// uses this to tell "migration not pasted yet" apart from a transient network
-// failure: only the former should show the not-set-up notice. Same pattern as
-// getCategoryRules above.
-export function isEnvelopeSchemaMissing(error) {
-  return (
-    !!error &&
-    (error.code === 'PGRST205' || error.code === '42P01' || error.code === '42703')
-  );
-}
-
 // --- Envelope budgeting (YNAB rules 1–3) -------------------------------------
 // Two tables back this:
 //   budgets       — per category: the funding TARGET (monthly_limit, with
@@ -667,8 +626,12 @@ export function isEnvelopeSchemaMissing(error) {
 // rolls forward.
 //
 // The walk itself lives in src/envelopes.js (pure, zero imports, covered by
-// test/envelopes.test.js). Everything below is I/O: read the rows, aggregate
-// spending through the shared isSpend() predicate, hand it to walkEnvelopes().
+// test/envelopes.test.js). The envelope WRITES (setAssigned, setTargetOverride,
+// autoFillMonth, moveMoney, fundTargets, …) live in src/adapters/envelopeIO.js
+// (internal; re-exported above). What stays HERE is the part coupled to the
+// transaction pipeline and its caches: getAssignmentsThrough (sharing the
+// target_override degrade flag through envelopeIO's accessors), the spend-sum
+// cache + invalidateEnvelopeSpending, and getEnvelopes.
 
 // Every assignment up to and including the viewed month. Paginated rather
 // than date-clamped: dropping old rows would drop real dollars out of a
@@ -681,15 +644,6 @@ export function isEnvelopeSchemaMissing(error) {
 // installed", so a bare 42703 caused by this one new column escaping from
 // here would shut the whole tab off. Only an error that NAMES target_override
 // triggers the retry; everything else still escapes to the gate untouched.
-let budgetMonthsHaveOverride = true;
-
-function isMissingOverrideColumnError(error) {
-  if (!error) return false;
-  if (error.code !== '42703' && error.code !== 'PGRST204') return false;
-  const blob = `${error.message || ''} ${error.details || ''} ${error.hint || ''}`.toLowerCase();
-  return blob.includes('target_override');
-}
-
 async function getAssignmentsThrough(monthStart, { client = supabase } = {}) {
   const rows = [];
   const page = 1000;
@@ -702,9 +656,9 @@ async function getAssignmentsThrough(monthStart, { client = supabase } = {}) {
         .order('month', { ascending: true })
         .order('category', { ascending: true })
         .range(from, from + page - 1);
-    let { data, error } = await attempt(budgetMonthsHaveOverride);
-    if (error && budgetMonthsHaveOverride && isMissingOverrideColumnError(error)) {
-      budgetMonthsHaveOverride = false;
+    let { data, error } = await attempt(hasOverrideColumn());
+    if (error && hasOverrideColumn() && isMissingOverrideColumnError(error)) {
+      markOverrideColumnMissing();
       ({ data, error } = await attempt(false));
     }
     // A row count that is an exact multiple of `page` makes the next request
@@ -731,205 +685,6 @@ async function getAssignmentsThrough(monthStart, { client = supabase } = {}) {
   return rows;
 }
 export { getAssignmentsThrough }; // exported for test/envelopeIO.test.js only
-
-// Household income for a month, for Ready to Assign. Hand-entered: the feed
-// still cannot be trusted for take-home pay (SimpleFIN only syncs what is
-// linked and unhidden, and a missed paycheck would silently read as less to
-// budget). `budget:income` is the recurring default; `budget:income:YYYY-MM`
-// overrides one month. Both live in `settings`, so this needs no migration.
-const INCOME_KEY = 'budget:income';
-
-export async function getBudgetIncome({ year, month }) {
-  const monthKeyStr = `${INCOME_KEY}:${monthKey(year, month)}`;
-  const { data, error } = await supabase
-    .from('settings')
-    .select('key, value')
-    .in('key', [INCOME_KEY, monthKeyStr]);
-  if (error) throw error;
-  const byKey = {};
-  for (const row of data || []) byKey[row.key] = row.value;
-  // settings.value is a TEXT column (see migration 2) — everything stored there
-  // is a string, so read it back as one. An empty string is not a zero.
-  const read = v => {
-    if (v == null || String(v).trim() === '') return null;
-    const n = Number(v);
-    return Number.isFinite(n) ? n : null;
-  };
-  const override = read(byKey[monthKeyStr]);
-  const fallback = read(byKey[INCOME_KEY]);
-  return {
-    income: override != null ? override : fallback,
-    isDefault: override == null && fallback != null,
-    monthlyDefault: fallback,
-  };
-}
-
-// `scope: 'month'` sets just this month; `scope: 'default'` sets the recurring
-// amount AND clears this month's override so the new default is what shows.
-export async function setBudgetIncome({ year, month }, amount, { scope = 'month' } = {}) {
-  const raw = amount == null ? '' : String(amount).trim();
-  const n = raw === '' ? null : Number(raw);
-  if (raw !== '' && !Number.isFinite(n)) return;
-  const monthKeyStr = `${INCOME_KEY}:${monthKey(year, month)}`;
-  const key = scope === 'default' ? INCOME_KEY : monthKeyStr;
-  if (n == null) {
-    const { error } = await supabase.from('settings').delete().eq('key', key);
-    if (error) throw error;
-  } else {
-    const { error } = await supabase
-      .from('settings')
-      .upsert({ key, value: String(n) }, { onConflict: 'household_id,key' });
-    if (error) throw error;
-  }
-  if (scope === 'default') {
-    const { error } = await supabase.from('settings').delete().eq('key', monthKeyStr);
-    if (error) throw error;
-  }
-}
-
-// Per-envelope pace-warning opt-in. Stored as ONE settings row keyed
-// 'env:pace' whose value is a JSON map { category: true } — the dash:colors /
-// dash:cats pattern (a name-keyed JSON blob), chosen because adding a real
-// budgets column would need a migration and this is a pure display preference.
-// Default OFF for every category (absent key ⇒ {}), so a fixed bill that spends
-// 100% on day 1 never false-alarms; opting in is a deliberate per-envelope act.
-const ENV_PACE_KEY = 'env:pace';
-
-export async function getEnvPace() {
-  const { data, error } = await supabase
-    .from('settings')
-    .select('value')
-    .eq('key', ENV_PACE_KEY)
-    .maybeSingle();
-  if (error) throw error;
-  if (!data || data.value == null || String(data.value).trim() === '') return {};
-  try {
-    const parsed = JSON.parse(data.value);
-    return parsed && typeof parsed === 'object' ? parsed : {};
-  } catch {
-    return {};
-  }
-}
-
-export async function setEnvPace(map) {
-  const clean = {};
-  for (const [k, v] of Object.entries(map || {})) if (v) clean[k] = true;
-  const { error } = await supabase
-    .from('settings')
-    .upsert({ key: ENV_PACE_KEY, value: JSON.stringify(clean) }, { onConflict: 'household_id,key' });
-  if (error) throw error;
-}
-
-// Recurring-charge ignore list — a HOUSEHOLD pref (settings table, NOT
-// localStorage: muting a subscription should mute it on both phones — Mason's
-// recorded ruling). ONE row keyed 'rec:ignore' holding a JSON array of the
-// recurring items' group keys (detectRecurring's `key`); parsing is the pure
-// parseIgnoreList in src/recurring.js. Display-only: detection stays
-// unfiltered and the Recurring tab filters at render, so toggling never
-// refetches (and never touches the lazy cache's null-means-refetch sentinel).
-const REC_IGNORE_KEY = 'rec:ignore';
-
-export async function getRecIgnore() {
-  const { data, error } = await supabase
-    .from('settings')
-    .select('value')
-    .eq('key', REC_IGNORE_KEY)
-    .maybeSingle();
-  if (error) throw error;
-  return parseIgnoreList(data?.value ?? null);
-}
-
-export async function setRecIgnore(keys) {
-  const seen = new Set();
-  const clean = [];
-  for (const k of keys || []) {
-    if (typeof k !== 'string' || !k || seen.has(k)) continue;
-    seen.add(k);
-    clean.push(k);
-  }
-  const { error } = await supabase
-    .from('settings')
-    .upsert({ key: REC_IGNORE_KEY, value: JSON.stringify(clean) }, { onConflict: 'household_id,key' });
-  if (error) throw error;
-}
-
-// Toggle ONE key with a read-merge-write: re-read the stored row at toggle
-// time and change only the toggled key (pure toggleIgnoreKey). Rebuilding the
-// whole array from component state let a failed mount-time read (recIgnore=[]
-// after a network blip) wipe every previously ignored charge for BOTH phones
-// on the first ✕ tap — and made the ordinary two-phone race last-array-wins.
-// A failed READ aborts before any write. Returns the merged list so the
-// caller can adopt keys the other phone added since mount.
-//
-// SAME-DEVICE toggles are serialized through a promise chain: two quick ✕
-// taps otherwise interleave (read A, read B, write [A], write [B]) and the
-// last write silently drops the first key — then the caller's
-// .then(setRecIgnore) reverts it on screen too. Chaining makes B's read see
-// A's committed write. The chain swallows rejections so one failed toggle
-// never dams the queue; callers still receive the real rejection. The
-// two-PHONE race stays the accepted single-key last-write-wins.
-let recIgnoreChain = Promise.resolve();
-export function updateRecIgnore(key, ignored) {
-  const run = recIgnoreChain.then(async () => {
-    const current = await getRecIgnore();
-    const next = toggleIgnoreKey(current, key, ignored);
-    await setRecIgnore(next);
-    return next;
-  });
-  recIgnoreChain = run.catch(() => {});
-  return run;
-}
-
-// Saved Ask-tab chats — HOUSEHOLD data (settings table, NOT device storage:
-// a chat saved on the laptop should be openable on the phone). ONE row keyed
-// 'asst:chats' holding a JSON array of {id,title,savedAt,msgs}; all parsing/
-// trimming/eviction decisions are pure in src/savedChats.js. The WRITE is a
-// read-merge-write serialized through a promise chain — the exact
-// updateRecIgnore discipline: two quick saves must not interleave (read A,
-// read B, write [A], write [B]) and drop one, and a failed mount-time read
-// must never let a rebuilt-from-state array wipe the other phone's saves.
-// A failed READ aborts before any write; the chain swallows rejections so one
-// failed save never dams the queue, while callers still get the rejection.
-const ASST_CHATS_KEY = 'asst:chats';
-
-export async function getSavedChats() {
-  const { data, error } = await supabase
-    .from('settings')
-    .select('value')
-    .eq('key', ASST_CHATS_KEY)
-    .maybeSingle();
-  if (error) throw error;
-  return parseSavedChats(data?.value ?? null);
-}
-
-async function setSavedChats(list) {
-  const { error } = await supabase
-    .from('settings')
-    .upsert({ key: ASST_CHATS_KEY, value: JSON.stringify(list) }, { onConflict: 'household_id,key' });
-  if (error) throw error;
-}
-
-let savedChatsChain = Promise.resolve();
-function updateSavedChats(merge) {
-  const run = savedChatsChain.then(async () => {
-    const current = await getSavedChats();
-    const next = merge(current);
-    await setSavedChats(next);
-    return next;
-  });
-  savedChatsChain = run.catch(() => {});
-  return run;
-}
-
-// Both return the merged stored list so the caller can adopt entries the
-// other phone added since its last read.
-export function saveChatToApp(chat) {
-  return updateSavedChats(current => addSavedChat(current, chat));
-}
-
-export function deleteSavedChat(id) {
-  return updateSavedChats(current => removeSavedChat(current, id));
-}
 
 // Per-(category, month) spend sums for the walk's range, memoised. The walk's
 // range grows by a month every month and is re-read after every envelope edit,
@@ -1010,243 +765,6 @@ export async function getEnvelopes({ year, month }) {
   }));
 
   return walkEnvelopes({ assignments: assignmentRows, spending, settings, year, month });
-}
-
-// Assigns dollars to a category for one month. Blank or zero removes the
-// assignment entirely (which is what keeps "no row = assigned 0" true) —
-// UNLESS the row carries a per-month target_override: the zero-row-equivalence
-// rule applies to ASSIGNED only, so a row with a non-null override is a REAL
-// row and is set to assigned 0 instead of deleted (deleting it would silently
-// discard the override). Negative is allowed — that's moving money back out
-// of an envelope. `client` is injectable for tests (the addManualTransaction
-// pattern).
-export async function setAssigned(category, { year, month }, amount, { client = supabase } = {}) {
-  const raw = amount == null ? '' : String(amount).trim();
-  const n = raw === '' ? 0 : Number(raw);
-  // A typo ("1-2") must not silently wipe an assignment — only an empty value
-  // clears one. Anything unparseable is ignored.
-  if (!Number.isFinite(n)) return;
-  const monthStart = `${year}-${pad2(month)}-01`;
-  if (n === 0) {
-    const del = () => client.from('budget_months').delete().eq('category', category).eq('month', monthStart);
-    if (!budgetMonthsHaveOverride) {
-      // Pre-migration: the old unconditional delete (no override can exist).
-      const { error } = await del();
-      if (error) throw error;
-      return;
-    }
-    const { error } = await del().is('target_override', null);
-    if (error) {
-      // 42703 NAMING target_override = the column isn't there yet — fall back
-      // to the old behaviour rather than break clearing an assignment on a
-      // preview. Anything else (incl. a bare 42703) escapes untouched.
-      if (isMissingOverrideColumnError(error)) {
-        budgetMonthsHaveOverride = false;
-        const { error: delErr } = await del();
-        if (delErr) throw delErr;
-        return;
-      }
-      throw error;
-    }
-    // A row the delete skipped (non-null override) still needs its assignment
-    // cleared. No row matches ⇒ no-op.
-    const { error: updErr } = await client
-      .from('budget_months')
-      .update({ assigned: 0, updated_at: new Date().toISOString() })
-      .eq('category', category)
-      .eq('month', monthStart);
-    if (updErr) throw updErr;
-    return;
-  }
-  const { error } = await client
-    .from('budget_months')
-    .upsert(
-      { category, month: monthStart, assigned: n, updated_at: new Date().toISOString() },
-      { onConflict: 'household_id,category,month' }
-    );
-  if (error) throw error;
-}
-
-// Per-month funding-target override (budget_months.target_override). Non-null
-// upserts the override — sent-columns-only, so an existing row's `assigned`
-// survives, and a fresh row gets the column default assigned 0, which does
-// NOT open an envelope (the walk's catStart rule). An override of 0 is a real
-// value ("ask nothing this month"), distinct from clearing. Clearing (null or
-// blank) null-UPDATEs the row, then deletes it only when it carries nothing
-// else (assigned = 0 AND target_override IS NULL) — the setBudget shape.
-export async function setTargetOverride(category, { year, month }, amount, { client = supabase } = {}) {
-  const monthStart = `${year}-${pad2(month)}-01`;
-  const raw = amount == null ? '' : String(amount).trim();
-  if (raw === '') {
-    const { error } = await client
-      .from('budget_months')
-      .update({ target_override: null, updated_at: new Date().toISOString() })
-      .eq('category', category)
-      .eq('month', monthStart);
-    if (error) {
-      // Pre-migration there is no override to clear — a no-op, not a failure.
-      if (isMissingOverrideColumnError(error)) {
-        budgetMonthsHaveOverride = false;
-        return;
-      }
-      throw error;
-    }
-    const { error: delErr } = await client
-      .from('budget_months')
-      .delete()
-      .eq('category', category)
-      .eq('month', monthStart)
-      .eq('assigned', 0)
-      .is('target_override', null);
-    if (delErr) throw delErr;
-    return;
-  }
-  const n = Number(raw);
-  // Targets are plain positive dollars (0 allowed — "ask nothing").
-  if (!Number.isFinite(n) || n < 0) return;
-  const { error } = await client
-    .from('budget_months')
-    .upsert(
-      { category, month: monthStart, target_override: n, updated_at: new Date().toISOString() },
-      { onConflict: 'household_id,category,month' }
-    );
-  if (error) throw error;
-}
-
-// Auto-fill: copy the previous month's assignments into the viewed month
-// ("Fill from July"). The plan itself is pure (planAutoFill in envelopes.js):
-// merge semantics — existing non-zero assignments in the viewed month are
-// skipped, zero sums are never written, an existing 0 row counts as absent.
-// The write is ONE bulk upsert of the plan's rows, sent-columns-only
-// (category, month, assigned, updated_at — NEVER target_override), so filling
-// onto a 0 row that carries an override leaves the override intact. Reads
-// never select target_override here for the same pre-migration reason as
-// getAssignmentsThrough. Returns the plan so the UI can confirm/summarize.
-export async function autoFillMonth({ year, month }, { client = supabase } = {}) {
-  const monthStart = `${year}-${pad2(month)}-01`;
-  const prev = shiftMonth(year, month, -1);
-  const prevStart = `${prev.year}-${pad2(prev.month)}-01`;
-  const [srcRes, existRes] = await Promise.all([
-    client.from('budget_months').select('category, assigned').eq('month', prevStart),
-    client.from('budget_months').select('category, assigned').eq('month', monthStart),
-  ]);
-  if (srcRes.error) throw srcRes.error;
-  if (existRes.error) throw existRes.error;
-
-  const plan = planAutoFill({
-    source: srcRes.data || [],
-    existing: existRes.data || [],
-    isBudgetable: isBudgetableCategory,
-  });
-  if (!plan.rows.length) return plan;
-
-  const updatedAt = new Date().toISOString();
-  const { error } = await client.from('budget_months').upsert(
-    plan.rows.map(r => ({
-      category: r.category,
-      month: monthStart,
-      assigned: r.assigned,
-      updated_at: updatedAt,
-    })),
-    { onConflict: 'household_id,category,month' }
-  );
-  if (error) throw error;
-  return plan;
-}
-
-// Rule 3: whether this category's leftover (or overspend) carries forward.
-// Each budgets writer sends only the columns it owns — a PostgREST upsert's
-// ON CONFLICT DO UPDATE touches only those, so setting a rollover flag never
-// clobbers monthly_limit or target_kind, and vice versa (verified against a
-// local Postgres stub).
-//
-// Asymmetric on purpose: rollover=false (non-default) may create a row, but
-// rollover=true first deletes a row that carries nothing else and otherwise
-// UPDATEs — walkEnvelopes lists every budgets row in every month and no UI
-// deletes one, so an idle ⟳ experiment on a never-budgeted category must not
-// pin it to the Budget tab forever.
-export async function setCategoryRollover(category, rollover) {
-  if (rollover) {
-    const { error: delErr } = await supabase
-      .from('budgets')
-      .delete()
-      .eq('category', category)
-      .is('monthly_limit', null)
-      .is('target_date', null);
-    if (delErr && delErr.code !== '42703') throw delErr;
-    const { error } = await supabase
-      .from('budgets')
-      .update({ rollover: true })
-      .eq('category', category);
-    if (error && error.code !== '42703') throw error;
-    return;
-  }
-  const { error } = await supabase
-    .from('budgets')
-    .upsert({ category, rollover: false }, { onConflict: 'household_id,category' });
-  if (error) throw error;
-}
-
-// Rule 2: 'monthly' funds the target every month; 'by_date' is a sinking fund
-// that should reach the target by `date`.
-export async function setTargetKind(category, kind, date = null) {
-  const target_kind = kind === 'by_date' ? 'by_date' : 'monthly';
-  const { error } = await supabase.from('budgets').upsert(
-    { category, target_kind, target_date: target_kind === 'by_date' ? date : null },
-    { onConflict: 'household_id,category' }
-  );
-  if (error) throw error;
-}
-
-// Rule 3's actual mechanic: cover an overspent category from one with room.
-// Both legs go in ONE upsert so a failure can never leave money duplicated or
-// destroyed. A leg that lands on exactly zero is written as a 0 row rather than
-// deleted — the walk treats a 0 assignment as "no envelope opened here", so the
-// two are equivalent and atomicity is worth more than tidiness.
-export async function moveMoney({ from, to, amount }, { year, month }) {
-  const monthStart = `${year}-${pad2(month)}-01`;
-  const { data, error: readErr } = await supabase
-    .from('budget_months')
-    .select('category, assigned')
-    .eq('month', monthStart)
-    .in('category', [from, to]);
-  if (readErr) throw readErr;
-  const current = {};
-  for (const row of data || []) current[row.category] = Number(row.assigned) || 0;
-
-  const legs = planMove({ from, to, amount, assignedByCategory: current });
-  if (!legs) return;
-
-  const updatedAt = new Date().toISOString();
-  const { error } = await supabase.from('budget_months').upsert(
-    legs.map(l => ({ ...l, month: monthStart, updated_at: updatedAt })),
-    { onConflict: 'household_id,category,month' }
-  );
-  if (error) throw error;
-}
-
-// Bulk-assign for "Fund targets". items: [{ category, amount }]. Amounts are
-// the *new* assigned totals for the month, not deltas. A total of exactly ZERO
-// is still written: it can be the funding step that lifts a negative
-// assignment back to zero, and a 0 row is defined as equivalent to no row —
-// filtering it out would leave the negative in place and the category's
-// "needs" chip asking forever.
-export async function fundTargets(items, { year, month }) {
-  const monthStart = `${year}-${pad2(month)}-01`;
-  const updatedAt = new Date().toISOString();
-  const rows = items
-    .filter(i => Number.isFinite(Number(i.amount)))
-    .map(i => ({
-      category: i.category,
-      month: monthStart,
-      assigned: Number(i.amount),
-      updated_at: updatedAt,
-    }));
-  if (!rows.length) return;
-  const { error } = await supabase
-    .from('budget_months')
-    .upsert(rows, { onConflict: 'household_id,category,month' });
-  if (error) throw error;
 }
 
 // Last N months of transactions (oldest full month through the current
@@ -1426,21 +944,6 @@ export function isSimpleFinAccount(a) {
 let accountsHaveIsManual = true;
 let transactionsHaveSource = true;
 
-// A missing COLUMN, and it must be THIS column: the name has to appear in the
-// error text (PostgREST/Postgres always name it) before the code counts.
-// Matching on PGRST204/42703 alone would let a DIFFERENT missing column flip a
-// feature's degrade flag — reading, say, an entity_id problem as "debt tracker
-// not installed" for the whole session, the exact missing-table/missing-column
-// conflation the CLAUDE.md gotcha forbids. Mirrors the test-pinned twin in
-// api/sync.js. Exported for tests only.
-export function isMissingColumnError(error, col) {
-  if (!error) return false;
-  const blob = `${error.message || ''} ${error.details || ''} ${error.hint || ''}`.toLowerCase();
-  if (!blob.includes(String(col).toLowerCase())) return false;
-  if (error.code === 'PGRST204' || error.code === '42703') return true;
-  return blob.includes('column');
-}
-
 function makeUuid() {
   const c = globalThis.crypto;
   if (c && typeof c.randomUUID === 'function') return c.randomUUID();
@@ -1582,7 +1085,7 @@ async function appendClientSnapshot(accountId, balance) {
     { onConflict: 'account_id,captured_on' },
   );
   if (error) {
-    if (error.code === 'PGRST205' || error.code === '42P01') hasBalanceSnapshots = false;
+    if (isMissingTableError(error)) hasBalanceSnapshots = false;
     else console.warn('balance snapshot append failed', error.message || error);
   }
 }
@@ -1818,59 +1321,14 @@ export async function addManualTransaction(
 }
 
 // --- Rental entities + tax lens ---------------------------------------------
-// The rental-tax migration (20260730000001) adds all of this at once, so one
-// table-level flag covers the reads that need it. Like category_rules, every
-// read degrades to "feature not installed" when the migration hasn't been
-// pasted yet (previews share the prod database).
+// The entity/mileage I/O lives in src/adapters/taxIO.js (internal;
+// re-exported above). These two flags stay HERE: they gate the entity COLUMN
+// fallbacks on the transaction/account reads in this file (fetchRawBetween,
+// getAccounts, getAccountTransactions, searchTransactions), not the taxIO
+// tables.
 
-let hasEntities = true;
-let hasMileage = true;
 let accountsHaveEntity = true;
 let transactionsHaveEntity = true;
-
-function isMissingTableError(error) {
-  return error && (error.code === 'PGRST205' || error.code === '42P01');
-}
-
-// Rental properties (kind='rental'; the schema also allows 'business' for a
-// future side-business, but nothing in the UI creates one yet). Archived
-// entities are returned too: a year-end report must still resolve an entity
-// archived mid-year — callers filter on archived_at for pickers.
-export async function getEntities() {
-  if (!hasEntities) return { entities: [] };
-  const { data, error } = await supabase
-    .from('entities')
-    .select('id, name, kind, created_at, archived_at')
-    .order('created_at', { ascending: true });
-  if (error) {
-    if (isMissingTableError(error)) {
-      hasEntities = false;
-      return { entities: [] };
-    }
-    throw error;
-  }
-  return { entities: data };
-}
-
-export async function createEntity(name, kind = 'rental') {
-  const { data, error } = await supabase
-    .from('entities')
-    .insert({ name, kind })
-    .select('id, name, kind, created_at, archived_at')
-    .single();
-  if (error) throw error;
-  return data;
-}
-
-// fields: { name } and/or { archived_at } (an ISO timestamp archives, null
-// restores). Archive rather than delete — transactions reference the row.
-export async function updateEntity(id, fields) {
-  const allowed = {};
-  if ('name' in fields) allowed.name = fields.name;
-  if ('archived_at' in fields) allowed.archived_at = fields.archived_at;
-  const { error } = await supabase.from('entities').update(allowed).eq('id', id);
-  if (error) throw error;
-}
 
 // Every transaction of one calendar year, shaped like toTxShape (which now
 // carries the tax fields), plus the EFFECTIVE entity resolved (tx.entity_id ??
@@ -1892,84 +1350,11 @@ export async function getTaxYearTransactions(year) {
   };
 }
 
-// --- Mileage log (hand-entered; valued by src/taxReport.js) ------------------
-
-export async function getMileage(year) {
-  if (!hasMileage) return { mileage: [] };
-  const { data, error } = await supabase
-    .from('mileage_log')
-    .select('id, entity_id, on_date, miles, purpose')
-    .gte('on_date', `${year}-01-01`)
-    .lte('on_date', `${year}-12-31`)
-    .order('on_date', { ascending: false })
-    .limit(2000);
-  if (error) {
-    if (isMissingTableError(error)) {
-      hasMileage = false;
-      return { mileage: [] };
-    }
-    throw error;
-  }
-  return { mileage: data };
-}
-
-export async function addMileage({ on_date, miles, purpose, entity_id }) {
-  const { data, error } = await supabase
-    .from('mileage_log')
-    .insert({ on_date, miles, purpose: purpose || null, entity_id: entity_id || null })
-    .select('id, entity_id, on_date, miles, purpose')
-    .single();
-  if (error) throw error;
-  return data;
-}
-
-export async function deleteMileage(id) {
-  const { error } = await supabase.from('mileage_log').delete().eq('id', id);
-  if (error) throw error;
-}
-
 // --- Receipts (photo attachments; migration 20260731000001) ------------------
-// Images live in the PRIVATE 'receipts' Storage bucket; the receipts table is
-// the index the app trusts (never storage.list()). Paths are
-// <household_id>/<transaction_id>/<uuid>.<ext> — the first segment is what the
-// storage policy scopes on. Display always goes through short-lived signed
-// URLs minted per render; a signed URL is never stored. USER-OWNED like
-// user_category: sync and the importers never touch any of this, so
-// attachments survive re-pulls. Degrades to "not installed" pre-migration
-// like the rental-tax reads.
-
-let hasReceipts = true;
-
-// The storage path needs the household id, which the client doesn't otherwise
-// hold (RLS defaults fill it on table inserts). current_household_id() is a
-// plain public-schema function, so PostgREST exposes it as an rpc. Cached —
-// the household can't change within a session.
-let cachedHouseholdId = null;
-async function getHouseholdId() {
-  if (cachedHouseholdId) return cachedHouseholdId;
-  const { data, error } = await supabase.rpc('current_household_id');
-  if (error) throw error;
-  if (!data) throw new Error('No household for this user');
-  cachedHouseholdId = data;
-  return data;
-}
-
-export async function getReceipts(transactionId) {
-  if (!hasReceipts) return { receipts: [] };
-  const { data, error } = await supabase
-    .from('receipts')
-    .select('id, transaction_id, storage_path, mime, created_at')
-    .eq('transaction_id', transactionId)
-    .order('created_at', { ascending: true });
-  if (error) {
-    if (isMissingTableError(error)) {
-      hasReceipts = false;
-      return { receipts: [] };
-    }
-    throw error;
-  }
-  return { receipts: data };
-}
+// The receipt I/O (upload/list/delete/signed URLs + the design notes) lives in
+// src/adapters/receiptIO.js (internal; re-exported above). getReceiptTxIds
+// stays HERE (its paged loop belongs to this file's pagedGuards-scanned
+// discipline) and shares the degrade flag through receiptIO's accessors.
 
 // The Tax tab's "which transactions have a receipt?" read: the whole table's
 // transaction_ids as a Set. The table is one row per photo a human took —
@@ -1978,7 +1363,7 @@ export async function getReceipts(transactionId) {
 // Tax tab can tell "no receipts yet" from "the feature doesn't exist" and
 // skip the no-receipt nag instead of flagging every capital expense.
 export async function getReceiptTxIds() {
-  if (!hasReceipts) return null;
+  if (!receiptsInstalled()) return null;
   const ids = new Set();
   const page = 1000;
   for (let from = 0; ; from += page) {
@@ -1989,7 +1374,7 @@ export async function getReceiptTxIds() {
       .range(from, from + page - 1);
     if (error) {
       if (isMissingTableError(error)) {
-        hasReceipts = false;
+        markReceiptsMissing();
         return null;
       }
       // End-of-range on an exact-multiple-of-1000 result set is end-of-data,
@@ -2003,55 +1388,6 @@ export async function getReceiptTxIds() {
     if (data.length < page) break;
   }
   return ids;
-}
-
-// blob: the ALREADY-COMPRESSED image (src/receiptImage.js) — this function
-// does no resizing. Upload the object first, then insert the index row; a
-// failure between the two orphans a blob (accepted, ~200 KB) rather than
-// creating a row pointing at nothing.
-export async function addReceipt(transactionId, blob, mime = 'image/jpeg') {
-  const householdId = await getHouseholdId();
-  const ext = mime === 'image/png' ? 'png' : mime === 'image/webp' ? 'webp' : 'jpg';
-  const path = `${householdId}/${transactionId}/${crypto.randomUUID()}.${ext}`;
-  const { error: upErr } = await supabase.storage
-    .from('receipts')
-    .upload(path, blob, { contentType: mime, upsert: false });
-  if (upErr) throw upErr;
-  const { data, error } = await supabase
-    .from('receipts')
-    .insert({ transaction_id: transactionId, storage_path: path, mime })
-    .select('id, transaction_id, storage_path, mime, created_at')
-    .single();
-  if (error) {
-    // Roll the object back so a failed insert doesn't strand a blob the index
-    // will never find. Best-effort — if this remove also fails, the orphan is
-    // the accepted outcome.
-    await supabase.storage.from('receipts').remove([path]).catch(() => {});
-    throw error;
-  }
-  return data;
-}
-
-// Object first, then row: the row is the index, so deleting it last means a
-// half-completed delete leaves a still-listed receipt whose image 404s only
-// until retried, never an invisible orphan.
-export async function deleteReceipt(receipt) {
-  const { error: rmErr } = await supabase.storage
-    .from('receipts')
-    .remove([receipt.storage_path]);
-  if (rmErr) throw rmErr;
-  const { error } = await supabase.from('receipts').delete().eq('id', receipt.id);
-  if (error) throw error;
-}
-
-// Mint a fresh signed URL per render — 1 hour outlives any open sheet, and
-// nothing caches it (the service worker passes cross-origin through).
-export async function getReceiptUrl(storagePath) {
-  const { data, error } = await supabase.storage
-    .from('receipts')
-    .createSignedUrl(storagePath, 3600);
-  if (error) throw error;
-  return data.signedUrl;
 }
 
 // TEMPORARY TROUBLESHOOTING AID (see src/coverage.js) — per-account transaction

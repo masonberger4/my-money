@@ -93,34 +93,29 @@ All five items landed, no migrations:
   the fonts after ~4 deploys and broke the offline shell's font guarantee
   (CACHE_VERSION v5 → v6).
 
-### Session D — code health (dedup + consistency, all S except the split)
+### Session D — code health (dedup + consistency) — **SHIPPED 2026-08-04 (this branch)**
 
-1. **[S, medium] Extract `makeSerializedUpdater` + route settings I/O through
-   db.js.** `updateRecIgnore` (dataAdapter ~841) and `updateSavedChats` (~884)
-   are the same promise-chain read-merge-write discipline byte-for-byte; a
-   third hand copy that forgets the `.catch(()=>{})` dams the queue after one
-   network blip. Also ~8–10 direct `.from('settings')` select/upsert sites
-   reimplement db.js's getSetting/setSetting (already a harness-mocked alias) —
-   route them through it. Caveats: signatures differ slightly, and two sites
-   need a delete path db.js lacks.
-2. **[S, low] Call `isMissingTableError` at the three inline
-   PGRST205/42P01 sites** (dataAdapter ~400, ~475, ~1528 — declarations hoist).
-   Otherwise a future third missing-table code updates the helper and the
-   inline sites silently degrade three graceful-degrade paths.
-3. **[S, low] Trim theme.js's unused exports** (THEME_STORAGE_KEY, getThemePref,
-   setThemePref, resolveTheme, getResolvedTheme, applyTheme,
-   subscribeSystemTheme — zero external importers). Either make them
-   module-private or test them (`resolveTheme` is pure and trivially
-   testable — the better move given the testing culture). Prevents a future
-   session "reusing" `setThemePref` and bypassing `useTheme`'s subscription.
-4. **[L, medium] Split dataAdapter.js internally along its documented seams**
-   (2,319 lines, ~80 exports, seven concerns per its own Key-files row).
-   Move envelope I/O (~950–1250), receipt I/O (~1900–2000), tax I/O (~380–500)
-   into `src/adapters/*.js` that ONLY dataAdapter.js imports and re-exports —
-   the spending.js/ruleHistory.js/monthMemo.js precedent; consumers and the
-   harness full-match alias are untouched. NOT covered by the Dashboard.jsx
-   deferral, but it's an L with shared module state (feature-detect flags,
-   promise chains, memo invalidation) — see the Needs-Mason note on timing.
+All four items landed, no migrations, no behavior change (façade preserved):
+- Items 1, 2, 3 in `ec46f27` — `makeSerializedUpdater`
+  (`src/serializedUpdater.js`, pure, zero imports; both
+  `updateRecIgnore`/`updateSavedChats` now bind it —
+  `test/serializedUpdater.test.js` pins the four invariants incl. the
+  swallowed-rejection queue guarantee), the direct `.from('settings')` sites
+  routed through db.js (`getSettings`/`deleteSetting` added for the batch-read
+  and delete-path callers), the inline PGRST205/42P01 checks replaced by the
+  shared `isMissingTableError`, and theme.js's seven unused exports made
+  module-private (the trim option; `useTheme`/`initTheme`/`subscribeTheme`/
+  `readToken`/`THEME_PREFS` stay the public surface).
+- Item 4 in `5abb885` — dataAdapter.js split internally along its documented
+  seams into `src/adapters/{envelopeIO,receiptIO,settingsIO,taxIO,shared}.js`.
+  INTERNAL modules only `dataAdapter.js` imports; the façade re-exports
+  everything, so consumers, return shapes, and the harness's full-match
+  `dataAdapter.js` alias are untouched (the mock-harness boundary rule now
+  recorded in CLAUDE.md's Key-files row). Per Mason's Section-2 decision this
+  ran as its own quiet session, no feature work alongside.
+- Review fix (this commit) — the same-PR CLAUDE.md update the maintenance
+  rule requires: the Key-files table now records the `src/adapters/*` split,
+  the façade-only import rule, and `src/serializedUpdater.js`.
 
 ### Session E — testing + security infrastructure (M items)
 
@@ -164,7 +159,7 @@ All five items landed, no migrations:
    in CLAUDE.md's Pending section.
 3. **dataAdapter.js split (Session D item 4) — DECIDED: gets its own future
    session**, quiet (no feature work alongside), not deferred indefinitely.
-   Session D item 4 below is the spec; treat it as SCHEDULED.
+   That session ran 2026-08-04 — Session D item 4 above, SHIPPED.
 
 ## Section 3 — Refuted / downgraded this round (don't re-propose)
 
