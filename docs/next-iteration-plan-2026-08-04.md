@@ -97,67 +97,46 @@ below relitigates a decided item.
 *Items 7–8 came out of the **2026-08-04 code sweep** — neither appears in any
 prior backlog. Both are S/M with no blockers and no migration.*
 
-7. **Learned-rules review screen ("Taught rules")** — size **M**, no
-   migration. **Why:** `deleteCategoryRule` (`src/dataAdapter.js:563`) has
-   **zero callers**, and `category_rules.source` (migration
-   `20260728000001`, "for a future 'review learned rules' screen") is written
-   and read by nothing — every row is `'user'`. So a taught rule is an
-   invisible, unremovable write-time authority: a mis-taught merchant
-   silently recategorizes every future import, and the only fix is teaching
-   it again over the top. Nothing lists what has been taught.
-   - **Where:** a `RulesSheet` **component in Dashboard.jsx** (like
-     `CategorySheet`), not a 10th tab (the bar already scrolls at 390px), not
-     the Accounts tab (that's money *sources*), not folded into "+ Add
-     category" (that's the `dash:cats` **name registry** — the separation
-     CLAUDE.md drew). Two low-emphasis entry points: a footer link under the
-     Categories list (`Taught rules (12) ›`, ≥32px) and a contextual
-     `See what you've taught ›` in the Uncategorized teach-queue block
-     (`Dashboard.jsx:2996`).
-   - **Read:** new `listCategoryRules()` in dataAdapter's rule-CRUD block
-     (the façade file — **not** `src/adapters/*`). Returns **`null`, not
-     `[]`, when the table is missing**, latching the same `hasCategoryRules`
-     flag (the `getReceiptTxIds` sentinel — the entry link keys on that
-     difference and doesn't render at all pre-migration). `getCategoryRules()`
-     stays untouched: its `{}` shape is on the hot write path
-     (`api/sync.js`, `CsvImport.jsx`, `addManualTransaction`). Page it with
-     `isRangeExhaustedError` (`src/ruleHistory.js`) or an explicit
-     `.limit(500)` + a "showing the first 500" note — never silent truncation
-     (the Session A guard class).
-   - **Match counts, two, each honest about what it is:** a free
-     `N in {monthLabel}` derived **in render** from the already-loaded month
-     rows via `matchLearnedRule` (the teach-queue precedent — no cache, so no
-     `setState(null)` exposure); plus an on-demand per-rule "Count all" doing
-     **one** paged scan. **Do not reuse `{dryRun:true}` as the count** —
-     `applyRuleToHistory` (`src/ruleHistory.js:75`) counts only rows it would
-     still *change*, so a healthy already-applied rule reads **0** and a human
-     deletes it. Add a `countAll` option that drops the
-     `mapped_category !== category` clause and forces no-write, surfaced as
-     `countCategoryRuleMatches(key)`. Failure reuses the
-     **`count === null` means the preview FAILED** distinction verbatim
-     (`offerToLearn`, `Dashboard.jsx:2130-2143`) — never `0`.
-   - **Delete semantics, verified in the sweep:** deleting a rule changes
-     **zero existing rows**. `mapped_category` is computed at WRITE time only
-     and nothing recomputes it at read time (`effectiveCategory`/`toTxShape`
-     copy the stored column). The confirm must say so in one sentence.
-     **No undo and no auto-reclassify in v1:** a true undo needs a migration
-     recording each row's pre-rule value, and the next-best "re-run the
-     keyword table without this rule" can write a **third category nobody
-     ever saw** — the confidently-wrong failure this codebase refuses. The
-     sanctioned way to move history stays the row's own "Update past
-     transactions…" action, gated by its dry run.
-   - **Sheet wiring — all three or back-gesture/Escape break:** `rulesOpen`
-     into `anySheetOpen` (`Dashboard.jsx:2088`), `setRulesOpen(false)` into
-     `closeAllSheets` (2098), and — because it's a component — `useEscClose`
-     *inside* it, **not** the capture-phase inline-overlay list (2064-2075,
-     which is only for `selTx`/`pickingCat`/`addingCat`).
-   - **→ Mason decisions (flagged, not guessed):** (a) whether a "reclassify
-     these rows without this rule" action is wanted later — its own build, it
-     needs a candidate fetch joining `accounts.type` + `amount` for
-     `guessCategory`'s card-purchase guard; (b) whether `source` should render
-     per-row regardless (v1 shows it only when >1 distinct value exists).
-     The source spec's §4 cuts off mid-guard: the category-change picker must
-     restate CLAUDE.md's precedence rule (**learned rules never override the
-     transfer/card-payment guards**) — settle that at build.
+7. ~~**Learned-rules review screen ("Taught rules")**~~ — **SHIPPED
+   2026-08-04**, no migration. A learned rule used to be an invisible,
+   unremovable write-time authority (`deleteCategoryRule` had zero callers,
+   `category_rules.source` was read by nothing). What was built:
+   - **`RulesSheet` in Dashboard.jsx** (a component, not a 10th tab): one row
+     per rule — `merchant_key`, its category with the shared colour dot, and a
+     free `N in {month}` derived **in render** from the month rows already in
+     memory via `matchLearnedRule` (no fetch, no cache, so the `setState(null)`
+     gotcha never applies). `source` renders only when >1 distinct value
+     exists (Mason decision (b) left as specced). `useEscClose` inside the
+     component; `rulesOpen` wired into `anySheetOpen` **and** `closeAllSheets`
+     so Escape and the back gesture work.
+   - **Two entry points:** `Taught rules (N) ›` under the Categories list, and
+     `See what you've taught ›` in the Uncategorized teach-queue block.
+   - **`listCategoryRules()`** (dataAdapter façade) returns ROWS with metadata
+     and **`null`, not `[]`, when the table is missing** (the `getReceiptTxIds`
+     sentinel, latching `hasCategoryRules`); both entry links key on
+     `rules !== null`, so pre-migration the feature is absent rather than
+     showing an empty list that claims nothing was taught. Ordered paging with
+     the `isRangeExhaustedError` end-of-range contract. `getCategoryRules()`'s
+     `{}` map is untouched — it's on the hot write path.
+   - **`countCategoryRuleMatches()` + `applyRuleToHistory({countAll})`** — the
+     on-demand "Count all" per rule. **Deliberately NOT the dry run:** dryRun
+     counts only rows it would still *change*, so a healthy, fully-applied rule
+     reads 0, which in a list reads as "matches nothing" and talks a human into
+     deleting a working rule. `countAll` drops the `mapped_category !==
+     category` clause and returns before any write (its `updateBatch` throws by
+     construction). A FAILED count stays null and renders as an error with a
+     Retry, never as a real 0 (the `offerToLearn` distinction).
+   - **Delete semantics:** forgetting a rule changes **zero existing
+     transactions** — `mapped_category` is written at classify time and nothing
+     recomputes it at read time — so there is nothing to patch or reload, only
+     the list. The confirm says so in as many words. **No undo, no
+     auto-reclassify** (v1, as specced). Teaching a merchant also bumps the
+     rules epoch, so the screen opened straight after a teach shows the new row.
+   - **Still open for Mason:** (a) a later "reclassify these rows without this
+     rule" action; (b) whether `source` should always render. The category
+     picker's precedence restatement (learned rules never override the
+     transfer/card-payment guards) was not needed — the picker was untouched.
+   4 `countAll` tests in `test/categoryRules.test.js`.
 
 8. **Surface `coverage_shortfall`** — size **S/M**, **no migration**.
    **Why:** `api/sync.js:669` returns `coverage_shortfall`
@@ -243,7 +222,9 @@ prior backlog. Both are S/M with no blockers and no migration.*
    - **Sequencing: the learned-rules screen ships FIRST** (spec in
      Low-hanging fruit), because training becomes the ONLY path to a category
      and a bad rule must be reviewable//fixable/deletable before it is the
-     sole mechanism.
+     sole mechanism. **That prerequisite is now MET — the Taught-rules screen
+     SHIPPED 2026-08-04** (item 7): rules are listable, countable and
+     deletable, so this work is unblocked on that count.
 
    **The structural catch — three built-ins are MECHANISM, not taste, and must
    survive as internals hidden from the picker:** `Transfers and card

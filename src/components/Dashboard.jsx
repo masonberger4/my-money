@@ -1142,8 +1142,9 @@ function RulesSheet({rules,monthRows,monthLabel,txDescriptor,surf,getName,getCol
           <div style={{marginTop:14,padding:12,borderRadius:10,background:"var(--bg)",fontSize:12,lineHeight:1.55}}>
             <div style={{fontWeight:600,marginBottom:6}}>Forget “{deleting.merchant_key}”?</div>
             <div style={{color:"var(--muted)"}}>
-              Future transactions from this merchant go back to being uncategorized until you teach it
-              again. <strong style={{color:"var(--text)"}}>Transactions already categorized keep their
+              Future transactions from this merchant go back to the app's own guess until you teach it
+              again — which may be a different category, not necessarily uncategorized.{" "}
+              <strong style={{color:"var(--text)"}}>Transactions already categorized keep their
               category</strong> — this only changes what happens next time.
             </div>
             <div style={{display:"flex",gap:8,marginTop:10}}>
@@ -2213,6 +2214,23 @@ export default function Dashboard({ refreshTick = 0 }) {
     return ()=>window.removeEventListener("keydown",h,true);
   },[selTx,pickingCat,addingCat]);
 
+  // Taught-rules screen. `rules` is null both before the first load AND when
+  // the category_rules table is missing (listCategoryRules returns null, the
+  // getReceiptTxIds sentinel) — the entry links key on `rules!==null`, so the
+  // feature is simply absent pre-migration instead of rendering an empty list
+  // that claims nothing has been taught. An epoch counter, not a null
+  // sentinel, drives refetching (the setState(null) gotcha).
+  const [rulesOpen,setRulesOpen]=useState(false);
+  const [rules,setRules]=useState(null);
+  const [rulesEpoch,setRulesEpoch]=useState(0);
+  // Declared ABOVE anySheetOpen deliberately: that computation reads
+  // rulesOpen, and a `const` read before its declaration in the same function
+  // body is a temporal-dead-zone ReferenceError that kills the whole
+  // Dashboard on first render. npm test never renders this component and vite
+  // build never evaluates it, so nothing but the harness or the real app
+  // catches it — it shipped green once. Keep sheet-flag state above the
+  // anySheetOpen line.
+
   // Back gesture closes the open sheet, not the app (backlog Session B item 4).
   // ONE history entry is pushed when the first overlay opens (stacked sheets
   // share it — the tx sheet over a drill-in is one back-swipe, matching the
@@ -2256,15 +2274,6 @@ export default function Dashboard({ refreshTick = 0 }) {
   // Learned merchant rules: after a manual recategorization, offer to remember
   // the merchant so the correction survives the next sync/import.
   const [learnPrompt,setLearnPrompt]=useState(null); // {descriptor,key,category,count}
-  // Taught-rules screen. `rules` is null both before the first load AND when
-  // the category_rules table is missing (listCategoryRules returns null, the
-  // getReceiptTxIds sentinel) — the entry links key on `rules!==null`, so the
-  // feature is simply absent pre-migration instead of rendering an empty list
-  // that claims nothing has been taught. An epoch counter, not a null
-  // sentinel, drives refetching (the setState(null) gotcha).
-  const [rulesOpen,setRulesOpen]=useState(false);
-  const [rules,setRules]=useState(null);
-  const [rulesEpoch,setRulesEpoch]=useState(0);
   const [learnedNote,setLearnedNote]=useState(null);
   const [learning,setLearning]=useState(false);
   // Clear the prompt when a different transaction is opened.
@@ -2294,13 +2303,22 @@ export default function Dashboard({ refreshTick = 0 }) {
   // Load the taught rules whenever the epoch moves (mount, open, after a
   // teach or a delete). Sequence-guarded so a slow response can't overwrite a
   // newer one; a failure leaves `rules` alone rather than blanking the list.
+  // Keyed on the tab too, not just the epoch: both entry links key on `rules`
+  // being non-null, and the epoch only moves on a teach or a delete — which
+  // are reached THROUGH those links. So a single flaky load at mount would
+  // otherwise hide the feature for the whole session, indistinguishable from
+  // pre-migration. Re-running when the Categories tab is opened gives a
+  // transient failure somewhere to retry (the expected-transactions rule:
+  // a failed load must not latch absence).
   const rulesSeq=useRef(0);
   useEffect(()=>{
+    if(tab!=="categories"&&rules!==null)return;
     const seq=++rulesSeq.current;
     listCategoryRules()
       .then(rows=>{ if(rulesSeq.current===seq) setRules(rows); })
       .catch(err=>console.error("taught rules load failed",err));
-  },[rulesEpoch]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[rulesEpoch,tab]);
   const invalidateRules=useCallback(()=>setRulesEpoch(e=>e+1),[]);
 
   // Deleting a rule touches no transaction row (mapped_category is written at
