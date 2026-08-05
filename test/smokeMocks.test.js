@@ -77,3 +77,17 @@ for (const [suffix, mockPath] of [
     );
   });
 }
+
+// The harness must be PORTABLE. Its first CI run failed because the mocks were
+// copied out of a sandbox with absolute paths baked in ('/home/user/…'), which
+// resolve on exactly one machine. Vite reports that as a pre-transform error
+// and the render check fails with a stack trace nobody wants to read twice.
+test('the smoke harness contains no machine-absolute imports', () => {
+  const files = ['./smoke/mocks/dataAdapter.js', './smoke/mocks/db.js', './smoke/mocks/sync.js',
+    './smoke/mocks/apiClient.js', './smoke/main.jsx', './smoke/vite.config.js', './smoke/render.mjs'];
+  const offenders = [];
+  for (const f of files) {
+    for (const m of read(f).matchAll(/from\s*['"](\/[^'"]+)['"]/g)) offenders.push(`${f}: ${m[1]}`);
+  }
+  assert.deepEqual(offenders, [], `absolute import path(s) — use a relative path:\n  ${offenders.join('\n  ')}`);
+});

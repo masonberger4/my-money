@@ -1,9 +1,11 @@
-// Mock dataAdapter for the screenshot harness.
-import { toTxShape, spendingGroups, biggestMovers } from '/home/user/my-money/src/spending.js';
-import { markInternalTransfers } from '/home/user/my-money/src/cashFlow.js';
-export { targetNeed, readyToAssign, envelopePace, monthKey, effectiveTarget } from '/home/user/my-money/src/envelopes.js';
-import { walkEnvelopes } from '/home/user/my-money/src/envelopes.js';
-import { normalizeMerchant } from '/home/user/my-money/src/recurring.js';
+// Mock dataAdapter for the CI render check. Imports are RELATIVE on purpose:
+// absolute paths work on one machine and fail on every CI runner — which is
+// exactly how this file failed its own first CI run.
+import { toTxShape, spendingGroups, biggestMovers } from '../../../src/spending.js';
+import { markInternalTransfers } from '../../../src/cashFlow.js';
+export { targetNeed, readyToAssign, envelopePace, monthKey, effectiveTarget } from '../../../src/envelopes.js';
+import { walkEnvelopes } from '../../../src/envelopes.js';
+import { normalizeMerchant } from '../../../src/recurring.js';
 export const ACCOUNT_TYPES = ['depository', 'credit', 'loan'];
 export const ACCOUNT_SUBTYPES = ['checking', 'savings'];
 
