@@ -14,6 +14,8 @@ import { detectRecurring } from "../recurring.js";
 import { unlinkInstitution, askAssistant, getSimpleFinStatus } from "../apiClient.js";
 import { UNCATEGORIZED, isBudgetableCategory } from "../categoryMap.js";
 import { userCategoryList, missingCategories, isDuplicateCategoryName } from "../categoryList.js";
+import { parentIndex, parentOf, hasChildren, eligibleParents, canSetParent,
+  setRegistryParent, groupCategories, groupMembers, rollupFields } from "../categoryTree.js";
 import { teachQueueGroups, nonSpendLabel } from "../teachQueue.js";
 import { displayBalance, isDebtAccount as isDebtType } from "../accountBalance.js";
 import { unhideConfirmMessage } from "../unhideConfirm.js";
@@ -778,11 +780,16 @@ function QuickAddSheet({accounts,manualAccounts,allCats,getName,getColor,acctLab
 
 // Rule 3, "Roll With the Punches". Overspending one category is meant to be
 // answered by taking the money from another, not by pretending the plan held.
-function MoveSheet({from,rows,getName,chipFor,busy,surf,onMove,onClose}) {
+// `rows` is the DESTINATION population (assignable leaves — a parent takes no
+// assignment, so money moved into one would land in an envelope with no
+// editor). The SOURCE is passed separately because a parent that still holds a
+// pre-nesting balance must be able to move it out even though it can never
+// receive one.
+function MoveSheet({from,srcRow,rows,getName,chipFor,busy,surf,onMove,onClose}) {
   useEscClose(onClose);
   const [to,setTo]=useState("");
   const [amount,setAmount]=useState("");
-  const src=rows.find(r=>r.category===from);
+  const src=srcRow||rows.find(r=>r.category===from);
   const n=Number(amount);
   const valid=Number.isFinite(n)&&n>0&&!!to&&to!==from;
   const after=valid?(src?.available||0)-n:null;
@@ -974,7 +981,7 @@ function ScheduleSheet({debt,startMonth,acctLabel,onClose}){
   );
 }
 
-function CategorySheet({name,color,when,rows,surf,getName,acctById,acctLabel,acctColor,onPick,onClose}) {
+function CategorySheet({name,color,when,rows,kids,surf,getName,acctById,acctLabel,acctColor,onPick,onClose}) {
   useEscClose(onClose);
   const counted=rows.filter(t=>t.counted);
   const other=rows.filter(t=>!t.counted);
@@ -1013,6 +1020,9 @@ function CategorySheet({name,color,when,rows,surf,getName,acctById,acctLabel,acc
         </div>
         <div style={{fontSize:12,color:"var(--muted)",marginBottom:14}}>
           {when} · {counted.length} transaction{counted.length!==1?"s":""}
+          {/* Drilled in from a parent's rollup: say so, so the total here can
+              be reconciled against the row that was tapped. */}
+          {kids?.length>0&&<> · including {kids.map(getName).join(", ")}</>}
         </div>
 
         {rows.length===0?(
@@ -1451,9 +1461,16 @@ export default function Dashboard({ refreshTick = 0 }) {
   const [addCatFor,setAddCatFor]=useState(null);
   const [newName,setNewName]=useState("");
   const [newColor,setNewColor]=useState("#7F77DD");
+  const [newParent,setNewParent]=useState("");
   // The category whose transactions are being drilled into (raw label), opened
   // from a Categories row or a Budget envelope.
   const [catDrill,setCatDrill]=useState(null);
+  // Tapping a PARENT's rollup drills into all of its rows, children included —
+  // the tap-a-number rule: the list behind a number must sum to the number that
+  // was tapped. Kept as a separate piece of state so `catDrill` stays a plain
+  // category name for every other reader (the sheet's title, its colour, the
+  // sheet-history stack).
+  const [catDrillKids,setCatDrillKids]=useState([]);
   // Teach-queue: whether the "no counted spending" merchants (paychecks,
   // transfer legs, card payments) are expanded. Collapsed by default so the
   // queue leads with what it is for, but never dropped — the count is always on
@@ -1650,13 +1667,27 @@ export default function Dashboard({ refreshTick = 0 }) {
   // Adding a custom category seeds dash:colors too, so from creation onward one
   // store answers "what colour is this category" for built-in and custom alike
   // and the row's swatch edits the same place every other row's does.
-  async function addCustomCat(name,color){
+  // `parent` is optional and is a NAME, not an id — the registry is keyed by
+  // name everywhere else (colours, aliases, budgets, rules, transactions), and a
+  // name is what survives the registry entry being retired and re-added.
+  async function addCustomCat(name,color,parent){
     const n=name.trim();
     if(!n)return;
+    const p=(parent||"").trim();
+    const entry={id:Date.now().toString(),name:n,color};
+    if(p&&canSetParent(catIndex,n,p).ok)entry.parent=p;
     await Promise.all([
-      customCatNames.includes(n)?Promise.resolve():saveCats([...customCats,{id:Date.now().toString(),name:n,color}]),
+      customCatNames.includes(n)?Promise.resolve():saveCats([...customCats,entry]),
       saveColors({...customColors,[n]:color}),
     ]);
+  }
+  // Change or remove a category's parent. Registry-only: no transaction, budget,
+  // envelope, learned rule or tax mapping references the link, so removing one
+  // re-flattens the display and moves not a single dollar. Guarded by the pure
+  // canSetParent so the one-level rule can't be bypassed by a stale render.
+  function saveCatParent(name,parent){
+    if(!canSetParent(catIndex,name,parent||null).ok)return;
+    saveCats(setRegistryParent(customCats,name,parent||null));
   }
   // Retiring one only takes the name out of the pickers. Its colour, its target
   // and any transactions already filed under it are keyed by the NAME and stay
@@ -2693,6 +2724,25 @@ export default function Dashboard({ refreshTick = 0 }) {
     getName,
   }),[customCatNames,cats,budgets,byDate,envelopes,txs,getName]);
 
+  // ── ONE LEVEL OF NESTING ────────────────────────────────────────────────
+  // The parent/child links, read out of the SAME `dash:cats` registry the one
+  // list comes from (see src/categoryTree.js for the rules, and for why nothing
+  // is stored on a transaction). `userCats` is passed as the known-names set so
+  // a parent retired from the registry, but still carried by real data, keeps
+  // its children under it.
+  //
+  // This does NOT add a second answer to "what categories exist": the one list
+  // is unchanged, and nesting only decides how those same names are ARRANGED.
+  // That is what keeps Categories, Budget and the Transactions chips in
+  // agreement. The chips stay LEAF-level and always will — a transaction stores
+  // one label and it is the leaf, so a chip row derived from the rows in view
+  // can only ever contain leaves. Filtering by a parent would need an OR over
+  // its children, which is the cross-month browse this file already declines.
+  const catIndex=useMemo(()=>parentIndex(customCats,userCats),[customCats,userCats]);
+  // Parents take no assignment, target or move (see the Budget tab's comment):
+  // `available = assigned + carry − spent` needs exactly one owner per dollar.
+  const isParentCat=useCallback(c=>hasChildren(catIndex,c),[catIndex]);
+
   // The categories offered as filter chips on the Transactions tab: the ones
   // actually PRESENT in the rows in view — see difference 2 above.
   // `t.category` is already the effective category (dataAdapter's
@@ -2723,9 +2773,20 @@ export default function Dashboard({ refreshTick = 0 }) {
     }
     return m;
   },[txs]);
-  const drillRows=catDrill?(txsByCategory.get(catDrill)||[]):[];
+  const drillRows=catDrill
+    ?[catDrill,...catDrillKids].flatMap(c=>txsByCategory.get(c)||[])
+        .sort((a,b)=>String(b.transaction_date).localeCompare(String(a.transaction_date)))
+    :[];
   // Only offer the drill-in when there is something behind the number.
-  const openDrill=useCallback(cat=>(txsByCategory.get(cat)||[]).length?()=>setCatDrill(cat):null,[txsByCategory]);
+  const openDrill=useCallback(cat=>(txsByCategory.get(cat)||[]).length
+    ?()=>{setCatDrill(cat);setCatDrillKids([]);}:null,[txsByCategory]);
+  // A parent's rollup: its own rows PLUS its children's, which is exactly what
+  // the number beside it added up.
+  const openDrillGroup=useCallback((cat,kids)=>{
+    const members=[cat,...(kids||[])];
+    return members.some(c=>(txsByCategory.get(c)||[]).length)
+      ?()=>{setCatDrill(cat);setCatDrillKids(kids||[]);}:null;
+  },[txsByCategory]);
 
   // The teach-queue's population — see src/teachQueue.js for the decision and
   // its reasoning. Derived in render (no cached state, so the setState(null)
@@ -2755,6 +2816,80 @@ export default function Dashboard({ refreshTick = 0 }) {
     }
     return rows;
   })();
+  // Nesting is applied to THAT list, not to a second one: same rows, arranged.
+  // A parent's rollup is own + children (groupMembers includes the parent, so
+  // rows the user tagged straight to "Transportation" before "Gas" existed are
+  // still counted — dropping them would make money vanish off the tab).
+  const catRowByLabel=new Map(catRows.map(r=>[r.label,r]));
+  const catGroups=groupCategories(catRows.map(r=>r.label),catIndex,getName)
+    .map(node=>{
+      const members=groupMembers(node);
+      return {
+        ...node,
+        members,
+        rows:node.children.map(c=>catRowByLabel.get(c)).filter(Boolean),
+        own:catRowByLabel.get(node.name),
+        roll:rollupFields(members,n=>catRowByLabel.get(n),["amount","transaction_count"]),
+      };
+    });
+  // ONE row renderer for the Categories tab, used at both levels — a
+  // subcategory row is byte-identical to the row it was before it got a parent,
+  // just indented. Two renderers would be two chances to drift.
+  function catRowNode(c,i,{indent=false,note=null}={}){
+    const lim=budgets[c.label];
+    const hasB=lim!=null;
+    const ratio=hasB&&lim>0?c.amount/lim:0;
+    // The bar sits on the --track fill, not the card: contrast is
+    // computed against THAT. The #D85A30/#FAC775 pair is semantic
+    // status, not palette, but it needs the same treatment to stay
+    // visible on a dark track — the stored hexes are untouched.
+    const barColor=markOn(hasB?(ratio>=1?"#D85A30":ratio>=0.8?"#FAC775":getColor(c.label)):getColor(c.label),surf.track);
+    const barW=hasB?Math.min(ratio,1)*100:(c.amount/maxCat)*100;
+    return (
+    <div key={c.label} style={{marginBottom:14,animationDelay:i*.03+"s",
+      ...(indent?{marginLeft:14,paddingLeft:10,borderLeft:"1px solid var(--border)"}:null)}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:5}}>
+        <div style={{display:"flex",alignItems:"center",gap:8,flex:1,minWidth:0}}>
+          <Swatch color={getColor(c.label)} onChange={hex=>saveColors({...customColors,[c.label]:hex})}/>
+          <EditName name={getName(c.label)} onSave={v=>saveNames({...customNames,[c.label]:v})}/>
+          {note&&<span style={{fontSize:10,color:"var(--muted)",flexShrink:0}}>{note}</span>}
+          <DrillNum onClick={openDrill(c.label)} title={`See the ${getName(c.label)} transactions`}
+            style={{fontSize:11,color:"var(--muted)",flexShrink:0,marginLeft:4}}>
+            {c.transaction_count} txn{c.transaction_count!==1?"s":""}
+          </DrillNum>
+        </div>
+        <div style={{display:"flex",alignItems:"baseline",gap:5,marginLeft:12,flexShrink:0}}>
+          <DrillNum onClick={openDrill(c.label)} title={`See the ${getName(c.label)} transactions`}
+            style={{fontSize:13,fontFamily:"'DM Mono',monospace"}}>{fmt(c.amount)}</DrillNum>
+          {/* No budget on Uncategorized — it would be a budget on
+              the classifier's ignorance, and the number moves as
+              merchants get learned rather than as spending changes. */}
+          {isBudgetableCategory(c.label)&&(byDate[c.label]
+            ?<button onClick={()=>setTab("budget")}
+                title="Sinking fund — a total to reach by a date, not a monthly cap. Edit it on the Budget tab."
+                style={{background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",padding:0,
+                  fontSize:11,color:"var(--muted)",flexShrink:0}}>
+                {fmtAuto(byDate[c.label].target)} by {monthYear(byDate[c.label].date)}
+              </button>
+            :<BudgetEdit limit={lim} onSave={v=>saveBudget(c.label,v)}/>)}
+        </div>
+      </div>
+      <div style={{display:"flex",alignItems:"center",gap:8}}>
+        <div className="bar-bg"><div className="bar-fill" style={{width:barW+"%",background:barColor}}/></div>
+        <span style={{fontSize:11,color:hasB&&ratio>=1?inkOn("#D85A30",surf.card):"var(--muted)",width:38,textAlign:"right",flexShrink:0}}>
+          {hasB?(lim>0?Math.round(ratio*100)+"%":"—"):`${c.percent_of_total?.toFixed(0)}%`}
+        </span>
+      </div>
+      {c.label===UNCATEGORIZED&&(
+        <div style={{fontSize:10,color:"var(--muted)",marginTop:5,lineHeight:1.5}}>
+          Everything starts here — the app doesn't guess. Still counted as spending. Teach a
+          merchant once and every future transaction from it files itself.
+        </div>
+      )}
+    </div>
+    );
+  }
+
   const budgetedSpent=cats.reduce((s,c)=>budgets[c.label]!=null?s+c.amount:s,0);
   const budgetedTotal=Object.values(budgets).reduce((s,v)=>s+v,0);
   const budgetLeft=budgetedTotal-budgetedSpent;
@@ -2779,9 +2914,159 @@ export default function Dashboard({ refreshTick = 0 }) {
   // still renders (the size of the unknown stays visible), but it takes no
   // assignments, targets or moves — so it is also excluded from Fund targets
   // and the move sheet's destinations.
+  // ── NESTING ON THE BUDGET TAB ─────────────────────────────────────────────
+  // Assignments and targets live on the LEAF only; a parent shows a read-only
+  // rollup. This is not squeamishness — `available = assigned + carry − spent`
+  // needs exactly one owner per dollar. If both levels could hold an
+  // assignment, "Transportation has $400 available" is ambiguous (its own $400,
+  // or its children's, or the sum?), the walk would double-count a dollar
+  // assigned at both levels, and a move between a parent and its own child
+  // would be a no-op that looks like a transfer. Mason asked for TOTALS at both
+  // levels, which the rollup gives; parent-level BUDGETING is a separate
+  // decision and deliberately not taken here.
+  //
+  // A category that already had an assignment or target before it was made a
+  // parent keeps both — nothing is deleted and nothing is hidden: its own money
+  // renders as a read-only line inside the group and is part of the rollup. It
+  // just can't be edited or funded while it has subcategories, and it keeps the
+  // ⇄ so that money can be moved OUT rather than stranded. Removing the
+  // subcategories' parent link hands the editors straight back.
+  // ONE Budget-tab row renderer, used at both levels: a subcategory row is
+  // identical to the row it was before it had a parent, just indented. The
+  // editors on it are the LEAF editors, which is the whole assignment rule.
+  function envRowNode(r,{indent=false,note=null}={}){
+                // Re-read here rather than closing over the Budget tab's IIFE:
+                // this renderer is called from component scope now.
+                const okCard=inkOn(OK_MONEY,surf.card),overCard=inkOn(OVER_MONEY,surf.card);
+                const budgetable=isBudgetableCategory(r.category);
+                const pot=r.assigned+r.rolledOver;
+                const ratio=pot>0?r.spent/pot:0;
+                // An unbudgetable row has no envelope; its available is just
+                // −spent, which must not read as an overspend alarm.
+                const over=budgetable&&r.available<0;
+                const barW=pot>0?Math.min(ratio,1)*100:0;
+                const barColor=markOn(over?OVER_MONEY:ratio>=0.8?"#FAC775":getColor(r.category),surf.track);
+                const need=budgetable?targetNeed(r,{year,month}):0;
+                // Pace warning: opt-in, budgetable envelopes only, off the
+                // spent the walk already produced (never recomputed) against a
+                // flat month-pace. Display-only — nothing here feeds available.
+                const paceOn=budgetable&&!!envPace[r.category];
+                const pace=paceOn?envelopePace({assigned:r.assigned,spent:r.spent,year,month,today:paceToday}):null;
+                return (
+                  <div key={r.category} style={{marginBottom:16,
+                    ...(indent?{marginLeft:14,paddingLeft:10,borderLeft:"1px solid var(--border)"}:null)}}>
+                    <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:5}}>
+                      <Swatch color={getColor(r.category)} onChange={hex=>saveColors({...customColors,[r.category]:hex})}/>
+                      <span style={{fontSize:13,fontWeight:500,color:"var(--text)",minWidth:0,overflow:"hidden",
+                        textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{getName(r.category)}</span>
+                      {note&&<span style={{fontSize:10,color:"var(--muted)",flexShrink:0}}>{note}</span>}
+                      <span style={{flex:1}}/>
+                      {/* An unbudgetable row has no envelope, so a negative
+                          "available" would be a false alarm — show its spend. */}
+                      <span style={{fontSize:13,fontWeight:600,fontFamily:"'DM Mono',monospace",flexShrink:0,
+                        color:!budgetable?"var(--muted)":over?overCard:r.available>0?okCard:"var(--muted)"}}>
+                        {budgetable?fmtAuto(r.available):fmtAuto(r.spent)}
+                      </span>
+                    </div>
+
+                    <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:5}}>
+                      <div className="bar-bg"><div className="bar-fill" style={{width:barW+"%",background:barColor}}/></div>
+                      <span style={{fontSize:11,width:38,textAlign:"right",flexShrink:0,color:over?overCard:"var(--muted)"}}>
+                        {pot>0?Math.round(ratio*100)+"%":"—"}
+                      </span>
+                    </div>
+
+                    {budgetable?(
+                      <div style={{display:"flex",alignItems:"center",gap:6,fontSize:11,color:"var(--muted)",flexWrap:"wrap"}}>
+                        {r.assigned!==0&&<span>Assigned</span>}
+                        <AssignEdit value={r.assigned} onSave={v=>saveAssigned(r.category,v)}/>
+                        {r.rolledOver!==0&&(<>
+                          <span>·</span>
+                          <span style={{color:r.rolledOver>0?okCard:overCard}}>{signed(r.rolledOver)} rolled</span>
+                        </>)}
+                        {r.spent!==0&&(<><span>·</span>
+                          <DrillNum onClick={openDrill(r.category)} title={`See the ${getName(r.category)} transactions`}>
+                            {fmtAuto(r.spent)} spent
+                          </DrillNum></>)}
+                        {/* Expected bills still to come — DISPLAY-ONLY, never
+                            part of Available (the envelopePace contract). */}
+                        {expByCat[r.category]>0&&(<>
+                          <span>·</span>
+                          <span title="Expected bills still to come this month — display only, never counted in Available">
+                            {fmtAuto(expByCat[r.category])} expected
+                          </span>
+                          {r.available<expByCat[r.category]&&(()=>{const cs=chipOn("#C08A2E",surf.card);return(
+                            <span style={{fontSize:10,fontWeight:600,padding:"2px 6px",borderRadius:6,
+                              color:cs.ink,background:cs.bg,flexShrink:0}}
+                              title={`${fmtAuto(expByCat[r.category])} still expected but only ${fmtAuto(r.available)} available`}>
+                              may run short</span>);})()}
+                        </>)}
+                        <span style={{flex:1}}/>
+                        {(()=>{const eff=effectiveTarget(r);const hasOv=r.targetOverride!=null;return(
+                        <button onClick={()=>setTargetEdit(r.category)} disabled={envBusy}
+                          title={hasOv?`This month's target is overridden — other months keep ${r.target!=null?fmtAuto(r.target):"no target"}`:"Set a funding target for this category"}
+                          style={{background:"none",border:`1px solid ${eff!=null?"var(--accent)":"var(--border)"}`,
+                            borderRadius:20,cursor:"pointer",fontFamily:"inherit",padding:"2px 8px",fontSize:10,
+                            color:eff!=null?"var(--accent)":"var(--muted)",flexShrink:0}}>
+                          {eff==null?"＋ target"
+                            :hasOv?<>{fmtAuto(r.targetOverride)}<span style={{opacity:.7,fontWeight:500}}> · {monShort} only</span></>
+                            :r.targetKind==="by_date"?`${fmtAuto(r.target)} by ${monthYear(r.targetDate)}`
+                            :`${fmtAuto(r.target)}/mo`}
+                        </button>);})()}
+                        {need>0&&<span style={{color:"var(--accent)",fontSize:10}}>needs {fmtAuto(need)}</span>}
+                        {pace&&(()=>{const cs=chipOn("#C08A2E",surf.card);return(
+                          <span style={{fontSize:10,fontWeight:600,padding:"2px 6px",borderRadius:6,
+                            color:cs.ink,background:cs.bg,flexShrink:0}}
+                            title={`Spent ${fmtAuto(r.spent)} of the ${fmtAuto(r.assigned)} assigned, ahead of the ${Math.round(pace.elapsed*100)}% of the month elapsed`}>
+                            ⏱ ahead of pace</span>);})()}
+                        <button onClick={()=>togglePace(r.category)} disabled={envBusy}
+                          title={paceOn
+                            ?"Pace warning on — flags when spending runs ahead of the month. Tap to turn off"
+                            :"Warn when this envelope is spending ahead of a flat month pace (best for fungible categories like groceries, not fixed bills)"}
+                          style={{background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",padding:"0 2px",
+                            fontSize:13,lineHeight:1,color:paceOn?"var(--accent)":"var(--border)",flexShrink:0}}>⏱</button>
+                        <button onClick={()=>setMoveFrom(r.category)} disabled={envBusy}
+                          title="Move money between this envelope and another"
+                          style={{background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",padding:"0 2px",
+                            fontSize:13,lineHeight:1,color:"var(--muted)",flexShrink:0}}>⇄</button>
+                        <button onClick={()=>saveRollover(r.category,!r.rollover)}
+                          disabled={envBusy||(r.targetKind==="by_date"&&r.target!=null)}
+                          title={r.targetKind==="by_date"&&r.target!=null
+                            ?"A sinking fund only reaches its date because leftovers carry — rollover stays on while the by-date target exists"
+                            :r.rollover?"Leftover rolls into next month — tap to turn off":"Leftover resets each month — tap to roll it over"}
+                          style={{background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",padding:"0 2px",
+                            fontSize:13,lineHeight:1,color:r.rollover?"var(--accent)":"var(--border)",flexShrink:0}}>⟳</button>
+                      </div>
+                    ):(
+                      <div style={{fontSize:11,color:"var(--muted)"}}>
+                        <DrillNum onClick={openDrill(r.category)} title={`See the ${getName(r.category)} transactions`}>
+                          {fmtAuto(r.spent)} spent
+                        </DrillNum> · can't be budgeted — categorize these transactions to give them an envelope
+                      </div>
+                    )}
+                  </div>
+                );
+  }
+
+  const envRowByCat=new Map(envRows.map(r=>[r.category,r]));
+  const envGroups=groupCategories(envRows.map(r=>r.category),catIndex,getName).map(node=>({
+    ...node,
+    members:groupMembers(node),
+    own:envRowByCat.get(node.name),
+    rows:node.children.map(c=>envRowByCat.get(c)).filter(Boolean),
+    roll:rollupFields(groupMembers(node),n=>envRowByCat.get(n),
+      ["assigned","rolledOver","spent","available"]),
+  }));
   const budgetableRows=envRows.filter(r=>isBudgetableCategory(r.category));
   // What each targeted category still needs this month to hit its target.
-  const fundNeeds=budgetableRows.map(r=>({row:r,need:targetNeed(r,{year,month})})).filter(x=>x.need>0);
+  // Fund targets and move destinations skip PARENTS: a parent takes no
+  // assignment, so funding one would write to an envelope the UI refuses to
+  // show an editor for, and a move into one would land money nobody can see.
+  // (A parent is still a legal move SOURCE — that is how a pre-nesting balance
+  // gets out.) `budgetableRows` itself is untouched: it is the population the
+  // walk and every total read.
+  const assignableRows=budgetableRows.filter(r=>!isParentCat(r.category));
+  const fundNeeds=assignableRows.map(r=>({row:r,need:targetNeed(r,{year,month})})).filter(x=>x.need>0);
   const fundTotal=fundNeeds.reduce((s,x)=>s+x.need,0);
   const rta=envelopes?readyToAssign(income?.income,envelopes.totals):null;
   // "Fill from ⟨prev month⟩" — the auto-fill's source month and its label.
@@ -3181,55 +3466,52 @@ export default function Dashboard({ refreshTick = 0 }) {
               </div>
             )}
             {loading?[1,2,3,4,5].map(i=><div key={i} style={{marginBottom:14}}><Sk h={14}/></div>):
-              catRows.map((c,i)=>{
-                const lim=budgets[c.label];
-                const hasB=lim!=null;
-                const ratio=hasB&&lim>0?c.amount/lim:0;
-                // The bar sits on the --track fill, not the card: contrast is
-                // computed against THAT. The #D85A30/#FAC775 pair is semantic
-                // status, not palette, but it needs the same treatment to stay
-                // visible on a dark track — the stored hexes are untouched.
-                const barColor=markOn(hasB?(ratio>=1?"#D85A30":ratio>=0.8?"#FAC775":getColor(c.label)):getColor(c.label),surf.track);
-                const barW=hasB?Math.min(ratio,1)*100:(c.amount/maxCat)*100;
+              catGroups.map((g,gi)=>{
+                // A category with no parent renders exactly as it did before
+                // nesting existed — same row, same order, no wrapper.
+                if(g.children.length===0)return catRowNode(g.own,gi);
+                const kids=g.children;
+                const roll=g.roll;
+                // The GROUP row: a read-only rollup of own + children. Tapping
+                // either number opens all of those rows together, so the list
+                // behind the number sums to the number that was tapped.
+                const open=openDrillGroup(g.name,kids);
+                const barW=maxCat>0?(roll.amount/maxCat)*100:0;
                 return (
-                <div key={c.label} style={{marginBottom:14,animationDelay:i*.03+"s"}}>
+                <div key={g.name} style={{marginBottom:14,animationDelay:gi*.03+"s"}}>
                   <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:5}}>
                     <div style={{display:"flex",alignItems:"center",gap:8,flex:1,minWidth:0}}>
-                      <Swatch color={getColor(c.label)} onChange={hex=>saveColors({...customColors,[c.label]:hex})}/>
-                      <EditName name={getName(c.label)} onSave={v=>saveNames({...customNames,[c.label]:v})}/>
-                      <DrillNum onClick={openDrill(c.label)} title={`See the ${getName(c.label)} transactions`}
+                      <Swatch color={getColor(g.name)} onChange={hex=>saveColors({...customColors,[g.name]:hex})}/>
+                      <EditName name={getName(g.name)} onSave={v=>saveNames({...customNames,[g.name]:v})}/>
+                      <span style={{fontSize:10,color:"var(--muted)",flexShrink:0}}>
+                        {kids.length} subcategor{kids.length!==1?"ies":"y"}
+                      </span>
+                      <DrillNum onClick={open} title={`See every ${getName(g.name)} transaction, subcategories included`}
                         style={{fontSize:11,color:"var(--muted)",flexShrink:0,marginLeft:4}}>
-                        {c.transaction_count} txn{c.transaction_count!==1?"s":""}
+                        {roll.transaction_count} txn{roll.transaction_count!==1?"s":""}
                       </DrillNum>
                     </div>
-                    <div style={{display:"flex",alignItems:"baseline",gap:5,marginLeft:12,flexShrink:0}}>
-                      <DrillNum onClick={openDrill(c.label)} title={`See the ${getName(c.label)} transactions`}
-                        style={{fontSize:13,fontFamily:"'DM Mono',monospace"}}>{fmt(c.amount)}</DrillNum>
-                      {/* No budget on Uncategorized — it would be a budget on
-                          the classifier's ignorance, and the number moves as
-                          merchants get learned rather than as spending changes. */}
-                      {isBudgetableCategory(c.label)&&(byDate[c.label]
-                        ?<button onClick={()=>setTab("budget")}
-                            title="Sinking fund — a total to reach by a date, not a monthly cap. Edit it on the Budget tab."
-                            style={{background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",padding:0,
-                              fontSize:11,color:"var(--muted)",flexShrink:0}}>
-                            {fmtAuto(byDate[c.label].target)} by {monthYear(byDate[c.label].date)}
-                          </button>
-                        :<BudgetEdit limit={lim} onSave={v=>saveBudget(c.label,v)}/>)}
-                    </div>
+                    <DrillNum onClick={open} title={`See every ${getName(g.name)} transaction, subcategories included`}
+                      style={{fontSize:14,fontWeight:600,fontFamily:"'DM Mono',monospace",marginLeft:12,flexShrink:0}}>
+                      {fmt(roll.amount)}
+                    </DrillNum>
                   </div>
                   <div style={{display:"flex",alignItems:"center",gap:8}}>
-                    <div className="bar-bg"><div className="bar-fill" style={{width:barW+"%",background:barColor}}/></div>
-                    <span style={{fontSize:11,color:hasB&&ratio>=1?inkOn("#D85A30",surf.card):"var(--muted)",width:38,textAlign:"right",flexShrink:0}}>
-                      {hasB?(lim>0?Math.round(ratio*100)+"%":"—"):`${c.percent_of_total?.toFixed(0)}%`}
+                    <div className="bar-bg"><div className="bar-fill" style={{width:barW+"%",background:markOn(getColor(g.name),surf.track)}}/></div>
+                    <span style={{fontSize:11,color:"var(--muted)",width:38,textAlign:"right",flexShrink:0}}>
+                      {roll.transaction_count?`${((roll.amount/(totalSpent||1))*100).toFixed(0)}%`:"—"}
                     </span>
                   </div>
-                  {c.label===UNCATEGORIZED&&(
-                    <div style={{fontSize:10,color:"var(--muted)",marginTop:5,lineHeight:1.5}}>
-                      Everything starts here — the app doesn't guess. Still counted as spending. Teach a
-                      merchant once and every future transaction from it files itself.
-                    </div>
-                  )}
+                  {/* The parent's OWN rows — money tagged straight to
+                      "Transportation", typically from before its subcategories
+                      existed. It keeps a full row (target editor and all): it is
+                      an ordinary leaf label as far as every transaction, budget
+                      and rule is concerned. Hidden when there is nothing on it,
+                      so an ordinary heading doesn't repeat its own name. */}
+                  {(g.own?.amount||budgets[g.name]!=null||byDate[g.name])&&(
+                    catRowNode(g.own||{label:g.name,amount:0,transaction_count:0,percent_of_total:0},gi,
+                      {indent:true,note:"directly"}))}
+                  {g.rows.map((c,i)=>catRowNode(c,i,{indent:true}))}
                 </div>
                 );
               })}
@@ -3581,112 +3863,66 @@ export default function Dashboard({ refreshTick = 0 }) {
                 </div>
               )}
 
-              {envRows.map(r=>{
-                const budgetable=isBudgetableCategory(r.category);
-                const pot=r.assigned+r.rolledOver;
-                const ratio=pot>0?r.spent/pot:0;
-                // An unbudgetable row has no envelope; its available is just
-                // −spent, which must not read as an overspend alarm.
-                const over=budgetable&&r.available<0;
-                const barW=pot>0?Math.min(ratio,1)*100:0;
-                const barColor=markOn(over?OVER_MONEY:ratio>=0.8?"#FAC775":getColor(r.category),surf.track);
-                const need=budgetable?targetNeed(r,{year,month}):0;
-                // Pace warning: opt-in, budgetable envelopes only, off the
-                // spent the walk already produced (never recomputed) against a
-                // flat month-pace. Display-only — nothing here feeds available.
-                const paceOn=budgetable&&!!envPace[r.category];
-                const pace=paceOn?envelopePace({assigned:r.assigned,spent:r.spent,year,month,today:paceToday}):null;
+              {envGroups.map(g=>{
+                // No parent, no children: exactly the row it was before.
+                if(g.children.length===0)return g.own?envRowNode(g.own):null;
+                const roll=g.roll;
+                const ownHas=!!(g.own&&(g.own.assigned||g.own.rolledOver||g.own.spent||g.own.target!=null));
                 return (
-                  <div key={r.category} style={{marginBottom:16}}>
-                    <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:5}}>
-                      <Swatch color={getColor(r.category)} onChange={hex=>saveColors({...customColors,[r.category]:hex})}/>
-                      <span style={{fontSize:13,fontWeight:500,color:"var(--text)",minWidth:0,overflow:"hidden",
-                        textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{getName(r.category)}</span>
-                      <span style={{flex:1}}/>
-                      {/* An unbudgetable row has no envelope, so a negative
-                          "available" would be a false alarm — show its spend. */}
-                      <span style={{fontSize:13,fontWeight:600,fontFamily:"'DM Mono',monospace",flexShrink:0,
-                        color:!budgetable?"var(--muted)":over?overCard:r.available>0?okCard:"var(--muted)"}}>
-                        {budgetable?fmtAuto(r.available):fmtAuto(r.spent)}
-                      </span>
-                    </div>
-
-                    <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:5}}>
-                      <div className="bar-bg"><div className="bar-fill" style={{width:barW+"%",background:barColor}}/></div>
-                      <span style={{fontSize:11,width:38,textAlign:"right",flexShrink:0,color:over?overCard:"var(--muted)"}}>
-                        {pot>0?Math.round(ratio*100)+"%":"—"}
-                      </span>
-                    </div>
-
-                    {budgetable?(
-                      <div style={{display:"flex",alignItems:"center",gap:6,fontSize:11,color:"var(--muted)",flexWrap:"wrap"}}>
-                        {r.assigned!==0&&<span>Assigned</span>}
-                        <AssignEdit value={r.assigned} onSave={v=>saveAssigned(r.category,v)}/>
-                        {r.rolledOver!==0&&(<>
-                          <span>·</span>
-                          <span style={{color:r.rolledOver>0?okCard:overCard}}>{signed(r.rolledOver)} rolled</span>
-                        </>)}
-                        {r.spent!==0&&(<><span>·</span>
-                          <DrillNum onClick={openDrill(r.category)} title={`See the ${getName(r.category)} transactions`}>
-                            {fmtAuto(r.spent)} spent
-                          </DrillNum></>)}
-                        {/* Expected bills still to come — DISPLAY-ONLY, never
-                            part of Available (the envelopePace contract). */}
-                        {expByCat[r.category]>0&&(<>
-                          <span>·</span>
-                          <span title="Expected bills still to come this month — display only, never counted in Available">
-                            {fmtAuto(expByCat[r.category])} expected
-                          </span>
-                          {r.available<expByCat[r.category]&&(()=>{const cs=chipOn("#C08A2E",surf.card);return(
-                            <span style={{fontSize:10,fontWeight:600,padding:"2px 6px",borderRadius:6,
-                              color:cs.ink,background:cs.bg,flexShrink:0}}
-                              title={`${fmtAuto(expByCat[r.category])} still expected but only ${fmtAuto(r.available)} available`}>
-                              may run short</span>);})()}
-                        </>)}
-                        <span style={{flex:1}}/>
-                        {(()=>{const eff=effectiveTarget(r);const hasOv=r.targetOverride!=null;return(
-                        <button onClick={()=>setTargetEdit(r.category)} disabled={envBusy}
-                          title={hasOv?`This month's target is overridden — other months keep ${r.target!=null?fmtAuto(r.target):"no target"}`:"Set a funding target for this category"}
-                          style={{background:"none",border:`1px solid ${eff!=null?"var(--accent)":"var(--border)"}`,
-                            borderRadius:20,cursor:"pointer",fontFamily:"inherit",padding:"2px 8px",fontSize:10,
-                            color:eff!=null?"var(--accent)":"var(--muted)",flexShrink:0}}>
-                          {eff==null?"＋ target"
-                            :hasOv?<>{fmtAuto(r.targetOverride)}<span style={{opacity:.7,fontWeight:500}}> · {monShort} only</span></>
-                            :r.targetKind==="by_date"?`${fmtAuto(r.target)} by ${monthYear(r.targetDate)}`
-                            :`${fmtAuto(r.target)}/mo`}
-                        </button>);})()}
-                        {need>0&&<span style={{color:"var(--accent)",fontSize:10}}>needs {fmtAuto(need)}</span>}
-                        {pace&&(()=>{const cs=chipOn("#C08A2E",surf.card);return(
-                          <span style={{fontSize:10,fontWeight:600,padding:"2px 6px",borderRadius:6,
-                            color:cs.ink,background:cs.bg,flexShrink:0}}
-                            title={`Spent ${fmtAuto(r.spent)} of the ${fmtAuto(r.assigned)} assigned, ahead of the ${Math.round(pace.elapsed*100)}% of the month elapsed`}>
-                            ⏱ ahead of pace</span>);})()}
-                        <button onClick={()=>togglePace(r.category)} disabled={envBusy}
-                          title={paceOn
-                            ?"Pace warning on — flags when spending runs ahead of the month. Tap to turn off"
-                            :"Warn when this envelope is spending ahead of a flat month pace (best for fungible categories like groceries, not fixed bills)"}
-                          style={{background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",padding:"0 2px",
-                            fontSize:13,lineHeight:1,color:paceOn?"var(--accent)":"var(--border)",flexShrink:0}}>⏱</button>
-                        <button onClick={()=>setMoveFrom(r.category)} disabled={envBusy}
-                          title="Move money between this envelope and another"
-                          style={{background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",padding:"0 2px",
-                            fontSize:13,lineHeight:1,color:"var(--muted)",flexShrink:0}}>⇄</button>
-                        <button onClick={()=>saveRollover(r.category,!r.rollover)}
-                          disabled={envBusy||(r.targetKind==="by_date"&&r.target!=null)}
-                          title={r.targetKind==="by_date"&&r.target!=null
-                            ?"A sinking fund only reaches its date because leftovers carry — rollover stays on while the by-date target exists"
-                            :r.rollover?"Leftover rolls into next month — tap to turn off":"Leftover resets each month — tap to roll it over"}
-                          style={{background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",padding:"0 2px",
-                            fontSize:13,lineHeight:1,color:r.rollover?"var(--accent)":"var(--border)",flexShrink:0}}>⟳</button>
-                      </div>
-                    ):(
-                      <div style={{fontSize:11,color:"var(--muted)"}}>
-                        <DrillNum onClick={openDrill(r.category)} title={`See the ${getName(r.category)} transactions`}>
-                          {fmtAuto(r.spent)} spent
-                        </DrillNum> · can't be budgeted — categorize these transactions to give them an envelope
-                      </div>
-                    )}
+                <div key={g.name} style={{marginBottom:18}}>
+                  {/* GROUP HEADING — a read-only rollup of own + children.
+                      No assign editor, no target button, no move destination:
+                      one owner per dollar (see the envGroups comment). */}
+                  <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
+                    <Swatch color={getColor(g.name)} onChange={hex=>saveColors({...customColors,[g.name]:hex})}/>
+                    <span style={{fontSize:13,fontWeight:600,color:"var(--text)",minWidth:0,overflow:"hidden",
+                      textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{getName(g.name)}</span>
+                    <span style={{fontSize:10,color:"var(--muted)",flexShrink:0}}>rollup</span>
+                    <span style={{flex:1}}/>
+                    <span title="Assigned + rolled over − spent, across this category and its subcategories"
+                      style={{fontSize:13,fontWeight:600,fontFamily:"'DM Mono',monospace",flexShrink:0,
+                        color:roll.available<0?overCard:roll.available>0?okCard:"var(--muted)"}}>
+                      {fmtAuto(roll.available)}
+                    </span>
                   </div>
+                  <div style={{display:"flex",alignItems:"center",gap:6,fontSize:11,color:"var(--muted)",flexWrap:"wrap",marginBottom:8}}>
+                    <span>{fmtAuto(roll.assigned)} assigned</span>
+                    {roll.rolledOver!==0&&<><span>·</span><span style={{color:roll.rolledOver>0?okCard:overCard}}>{signed(roll.rolledOver)} rolled</span></>}
+                    <span>·</span>
+                    <DrillNum onClick={openDrillGroup(g.name,g.children)}
+                      title={`See every ${getName(g.name)} transaction, subcategories included`}>
+                      {fmtAuto(roll.spent)} spent
+                    </DrillNum>
+                    <span>·</span>
+                    <span>{g.children.length} subcategor{g.children.length!==1?"ies":"y"} — assign in each</span>
+                  </div>
+                  {/* The parent's OWN envelope, if it has one from before it
+                      became a parent. Read-only here (it takes no new
+                      assignment) but never hidden, and it keeps ⇄ so the money
+                      can be moved out rather than stranded. */}
+                  {ownHas&&(
+                    <div style={{marginLeft:14,paddingLeft:10,borderLeft:"1px solid var(--border)",marginBottom:10,
+                      display:"flex",alignItems:"center",gap:6,fontSize:11,color:"var(--muted)",flexWrap:"wrap"}}>
+                      <span>Tagged directly:</span>
+                      <span style={{fontFamily:"'DM Mono',monospace"}}>{fmtAuto(g.own.assigned)} assigned</span>
+                      {g.own.spent!==0&&(<><span>·</span>
+                        <DrillNum onClick={openDrill(g.name)} title={`See the ${getName(g.name)} transactions`}>
+                          {fmtAuto(g.own.spent)} spent
+                        </DrillNum></>)}
+                      <span>·</span>
+                      <span style={{color:g.own.available<0?overCard:"var(--muted)"}}>{fmtAuto(g.own.available)} available</span>
+                      <button onClick={()=>setMoveFrom(g.name)} disabled={envBusy}
+                        title="Move this money into one of the subcategories"
+                        style={{background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",padding:"0 2px",
+                          fontSize:13,lineHeight:1,color:"var(--muted)",flexShrink:0}}>⇄</button>
+                      <span style={{width:"100%",fontSize:10,lineHeight:1.5}}>
+                        A category with subcategories takes no new assignment — assign in the subcategories, or
+                        remove the “part of” link to budget it directly again.
+                      </span>
+                    </div>
+                  )}
+                  {g.rows.map(c=>envRowNode(c,{indent:true}))}
+                </div>
                 );
               })}
 
@@ -5215,7 +5451,7 @@ export default function Dashboard({ refreshTick = 0 }) {
           drops back to this list rather than to the dashboard. */}
       {catDrill&&(
         <CategorySheet name={catDrill} color={getColor(catDrill)} when={monthLabel(year,month)}
-          rows={drillRows} surf={surf} getName={getName}
+          rows={drillRows} kids={catDrillKids} surf={surf} getName={getName}
           acctById={acctById} acctLabel={acctLabel} acctColor={acctColor}
           onPick={t=>setSelTx(t)} onClose={()=>setCatDrill(null)}/>
       )}
@@ -5509,7 +5745,7 @@ export default function Dashboard({ refreshTick = 0 }) {
 
       {/* Move money between envelopes (rule 3) */}
       {moveFrom&&(
-        <MoveSheet from={moveFrom} rows={budgetableRows} getName={getName} busy={envBusy} surf={surf}
+        <MoveSheet from={moveFrom} srcRow={envMap[moveFrom]} rows={assignableRows} getName={getName} busy={envBusy} surf={surf}
           chipFor={(cat,active)=>{
             if(!active)return {bg:"var(--bg)",ink:"var(--muted)",border:"var(--border)"};
             const c=chipOn(getColor(cat),surf.card);
@@ -5532,11 +5768,14 @@ export default function Dashboard({ refreshTick = 0 }) {
         // would collide with the one applyAccountRules synthesises).
         const dup=isDuplicateCategoryName(newName,customCatNames);
         const canAdd=!!newName.trim()&&!dup;
+        // A brand-new category has no children, so every top-level category is
+        // an eligible parent.
+        const parentOptions=eligibleParents(userCats,catIndex,null);
         const close=()=>{setAddingCat(false);setAddCatFor(null);};
         const add=()=>{
           if(!canAdd)return;
           const n=newName.trim();
-          addCustomCat(n,newColor);
+          addCustomCat(n,newColor,newParent);
           // Created from a transaction's picker: file that transaction under it
           // and offer to teach the merchant, exactly as tapping an existing
           // chip would. Guarded on the id in case the sheet moved on.
@@ -5545,7 +5784,7 @@ export default function Dashboard({ refreshTick = 0 }) {
             setLearnedNote(null);
             offerToLearn(n);
           }
-          setNewName("");setNewColor("#7F77DD");close();
+          setNewName("");setNewColor("#7F77DD");setNewParent("");close();
         };
         return (
         <div className="overlay" onClick={close}>
@@ -5570,6 +5809,26 @@ export default function Dashboard({ refreshTick = 0 }) {
                     border:newColor===c?"3px solid var(--text)":"2px solid transparent",transition:"border .1s"}}/>
               ))}
             </div>
+            {/* OPTIONAL nesting, one level. The options are the one list's
+                TOP-LEVEL categories (eligibleParents drops the mechanism three
+                and anything that is already a subcategory), so picking one can
+                never make a third level. Nothing about the transaction changes:
+                rows tagged to this category still store THIS name — the parent
+                is display + arithmetic, held in the registry alone. */}
+            {parentOptions.length>0&&(<>
+              <div style={{fontSize:12,color:"var(--muted)",marginBottom:6}}>Part of (optional)</div>
+              <select value={newParent} onChange={e=>setNewParent(e.target.value)}
+                style={{width:"100%",padding:"9px 12px",borderRadius:8,border:"1px solid var(--border)",
+                  background:"var(--input-bg)",color:"var(--text)",fontSize:16,fontFamily:"inherit",outline:"none",marginBottom:6}}>
+                <option value="">Nothing — its own category</option>
+                {parentOptions.map(c=><option key={c} value={c}>{getName(c)}</option>)}
+              </select>
+              <div style={{fontSize:10,color:"var(--muted)",lineHeight:1.5,marginBottom:16}}>
+                A subcategory keeps its own total, its own budget and its own transactions — the parent just
+                also shows the two added together.
+              </div>
+            </>)}
+
             <div style={{display:"flex",gap:8}}>
               <button onClick={close} className="ibtn" style={{flex:1,justifyContent:"center"}}>Cancel</button>
               <button onClick={add} disabled={!canAdd}
@@ -5581,16 +5840,48 @@ export default function Dashboard({ refreshTick = 0 }) {
             {customCats.length>0&&(<>
               <div style={{borderTop:"1px solid var(--border)",margin:"18px 0 12px"}}/>
               <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em",marginBottom:10}}>Yours</div>
-              {customCats.map(c=>(
-                <div key={c.id} style={{display:"flex",alignItems:"center",gap:8,marginBottom:9}}>
-                  {/* Reads getColor, the same call the row and the Budget tab
-                      make — so what's shown here is what's shown there. */}
-                  <span style={{width:11,height:11,borderRadius:3,background:markOn(getColor(c.name),surf.card),flexShrink:0}}/>
-                  <span style={{fontSize:13,fontWeight:500,color:"var(--text)",flex:1,minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{getName(c.name)}</span>
-                  <button onClick={()=>removeCustomCat(c.id)} title={`Stop offering ${getName(c.name)}`}
-                    style={{background:"none",border:"none",cursor:"pointer",color:"var(--muted)",fontSize:18,lineHeight:1,padding:"0 2px",flexShrink:0}}>×</button>
+              {customCats.map(c=>{
+                // Where a category's parent is CHANGED or REMOVED. The options
+                // exclude itself, the mechanism three and every existing
+                // subcategory; when this category already HAS subcategories the
+                // list comes back empty and the picker is replaced by a note —
+                // one level means a parent can never also be a child.
+                const opts=eligibleParents(userCats,catIndex,c.name);
+                const kid=parentOf(catIndex,c.name);
+                const isParent=hasChildren(catIndex,c.name);
+                return (
+                <div key={c.id} style={{marginBottom:9}}>
+                  <div style={{display:"flex",alignItems:"center",gap:8}}>
+                    {/* Reads getColor, the same call the row and the Budget tab
+                        make — so what's shown here is what's shown there. */}
+                    <span style={{width:11,height:11,borderRadius:3,background:markOn(getColor(c.name),surf.card),flexShrink:0}}/>
+                    <span style={{fontSize:13,fontWeight:500,color:"var(--text)",flex:1,minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{getName(c.name)}</span>
+                    <button onClick={()=>removeCustomCat(c.id)} title={`Stop offering ${getName(c.name)}`}
+                      style={{background:"none",border:"none",cursor:"pointer",color:"var(--muted)",fontSize:18,lineHeight:1,padding:"0 2px",minWidth:32,minHeight:32,flexShrink:0}}>×</button>
+                  </div>
+                  <div style={{display:"flex",alignItems:"center",gap:6,marginLeft:19,marginTop:2}}>
+                    <span style={{fontSize:10,color:"var(--muted)",flexShrink:0}}>Part of</span>
+                    {isParent?(
+                      <span style={{fontSize:10,color:"var(--muted)"}}>
+                        nothing — it has subcategories of its own (one level only)
+                      </span>
+                    ):(
+                      <select value={kid||""} onChange={e=>saveCatParent(c.name,e.target.value)}
+                        aria-label={`What ${getName(c.name)} is part of`}
+                        style={{flex:1,minWidth:0,padding:"3px 6px",borderRadius:6,border:"1px solid var(--border)",
+                          background:"var(--input-bg)",color:"var(--text)",fontSize:11,fontFamily:"inherit",outline:"none"}}>
+                        <option value="">nothing</option>
+                        {/* A parent carried by real data but retired from the
+                            registry still appears, or changing it would be the
+                            only way to see it. */}
+                        {kid&&!opts.includes(kid)&&<option value={kid}>{getName(kid)}</option>}
+                        {opts.map(o=><option key={o} value={o}>{getName(o)}</option>)}
+                      </select>
+                    )}
+                  </div>
                 </div>
-              ))}
+                );
+              })}
               <div style={{fontSize:10,color:"var(--muted)",lineHeight:1.5,marginTop:8}}>
                 Removing one just stops offering it. Its color, its target and any transactions already filed
                 under it are kept — adding the same name back restores all of it, and while rows still point at

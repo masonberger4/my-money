@@ -85,6 +85,7 @@ entry once shipped.
 | `src/ruleHistory.js` | The learned-rule history-apply core, extracted from `applyCategoryRuleToHistory`: first-token ilike narrowing (`ilikeCandidatePattern`), ordered paging with the **PGRST103 end-of-range contract** (`isRangeExhaustedError`), re-matching via `matchLearnedRule`, skip-already-correct, dryRun, mapped_category-only writes, and `countAll` (counts rows the rule matches AT ALL and returns before any write — dryRun counts only rows it would still CHANGE, so a healthy applied rule reads 0, which in a rules LIST reads as "matches nothing"). Takes injected `fetchPage`/`updateBatch` so it tests with fakes; dataAdapter binds the real client. Covered by `test/categoryRules.test.js`. |
 | `src/taxReport.js` | The Tax tab's pure core, zero imports: `SCHEDULE_E_LINES` + `scheduleEReport` (category→line mapping, refund netting, capital expenses pulled out of the lines, a VISIBLE unmapped bucket — the Uncategorized lesson applied to tax lines), `entityMonthly` (per-property cash P&L) + `entityLedger` (the property drill-in's Money in/out/not-counted sections — totals pinned by test to `entityMonthly`'s sums), `personalDeductionReport` (charitable/medical/taxes-paid buckets), `MILEAGE_RATES` (effective-dated IRS rates — data that goes stale; verify at irs.gov each January) + `mileageDeduction`, and `scheduleECsv` (exports keep the stored positive=out sign; the column name says so). Covered by `test/taxReport.test.js`. |
 | `src/categoryList.js` | **THE ONE category list**, pure (imports only `categoryMap.js`): `userCategoryList` (the `dash:cats` registry ∪ names still carried by real data — a row, a budget, a by-date target, an envelope — minus the three MECHANISM internals, sorted by DISPLAY name), `missingCategories` (the zero-rows both the Categories and Budget lists top up with, so the two are the same set by construction) and `isDuplicateCategoryName` (case-insensitive, and blocks the mechanism names — a hand-made "Return" would collide with the synthesised one). Dashboard computes it ONCE as `userCats`; every tab, picker and sheet reads that. The only deliberate divergences are documented at the `userCats` memo: the mechanism three never enter a picker (but Uncategorized still renders its spending + teach-queue), and the Transactions chips still show only what is in view plus the pinned active filter — otherwise a set filter could not be cleared. `test/categoryList.test.js`. |
+| `src/categoryTree.js` | **ONE LEVEL of category nesting** (Mason, 2026-08-05: totals for Transportation as a whole *and* for gasoline), pure, one import: `parentIndex` (registry links, validated — dangling/self/mechanism/grandchild links are DROPPED, never obeyed), `eligibleParents`/`canSetParent` (the one-level rule enforced in both directions; a category that already has children is offered no parent), `setRegistryParent`, `groupCategories` (order-PRESERVING for top-level rows, so an unnested category renders exactly as before), `groupMembers` (includes the parent itself — rows tagged directly to it before its children existed still count) and `rollupFields`. `test/categoryTree.test.js`. |
 | `src/teachQueue.js` | The Categories-tab teach-queue's POPULATION, pure + zero-import: `teachQueueGroups(rows, keyOf)` folds the month's Uncategorized rows into `{spending, other}`, SPLIT on the adapter's `counted` flag (never re-derived — the CategorySheet rule), and `nonSpendLabel`. Ranked list = merchants with counted spend, ordered count-first / spend-tiebreak / alphabetical (teaching writes a rule that fires forever, so repetition beats size); everything with NO counted spend — paychecks, washed transfer legs, card payments, hand-excluded rows — keeps its own labelled list with its real in/out totals rather than being dropped or printed as "$0" (the unknowns-stay-visible rule). `keyOf` is injected (Dashboard passes `merchantKey(txDescriptor(t))`, the SAME key the classifier learns on). `test/teachQueue.test.js`, which also carries the two Dashboard source pins: the queue renders at CARD level, not inside the `c.label===UNCATEGORIZED` branch, and the Schedule E picker filters on `isBudgetableCategory`. |
 | `src/categoryMap.js` | **The MECHANISM set — no taxonomy lives here any more (2026-08-05).** The app ships NO built-in categories: the user creates every one (`dash:cats`) and teaches it. `ERA_CATEGORIES` survives as the three INTERNAL categories the models depend on — `TRANSFER_CATEGORY` ('Transfers and card payments', read by the card-payment veto), `RETURN_CATEGORY` ('Return', synthesised by `applyAccountRules` for credit-card negatives) and `UNCATEGORIZED` — which must stay hidden from every picker and can't be created, renamed or retired. Plus `FALLBACK_CATEGORY` (= `UNCATEGORIZED`) and `isBudgetableCategory` (exactly the complement of the mechanism three). Pure JS, imported by server code too. |
 | `src/csvImport.js` | Pure CSV-import core (no React/Supabase): `parseCsv`, `detectHeader`, `parseMoney`/`parseDate`, transfer flagging, dedup `plaid_tx_id` hashing, `buildRows`/`analyzeCsv` (both take `rules` + `overlapFrom`). Re-exports `guessCategory`/`transferRawCategory` from `txClassify.js`, which owns classification (transfer guards + learned rules — there is no keyword table). Plus `importPlan` (which sections the modal shows, derived from the file's dates vs the feed boundary) and the audit core: `reconcileCsv` (max-matching), `descSimilarity`, `csvDateRange`. Testable in isolation. |
@@ -374,6 +375,39 @@ Categories agree on spending by construction.
   server validates the choice and only sends `thinking`/`effort` to models that
   support them (Haiku 4.5 predates both — sending them 400s). Requires
   `ANTHROPIC_API_KEY` in Vercel (else the Ask tab shows "not configured").
+
+### Category nesting (one level — decided 2026-08-05, don't relitigate)
+- **A transaction stores ONE label and it is the LEAF.** A gas purchase is
+  tagged `Gas`, never `Transportation/Gas` and never both. The parent lives
+  ONLY in the `dash:cats` registry, as an optional `parent` field holding the
+  PARENT'S NAME. That is why the feature needed **no migration and no schema
+  change**, and why every learned rule, `budgets`/`budget_months` row, tax
+  mapping and envelope kept working untouched — all of them are keyed on the
+  same leaf label as before. Deleting every `parent` field returns the app to
+  its pre-nesting behaviour and loses nothing.
+- **Totals at BOTH levels is the feature.** A parent's total is own + children
+  (`groupMembers` includes the parent, so rows tagged to it before its children
+  existed still count — dropping them would make money vanish off the tab), and
+  tapping a parent's number drills into ALL of those rows: the tap-a-number
+  rule, unchanged.
+- **Budgets/envelopes are assigned at the LEAF; a parent shows a read-only
+  rollup.** `available = assigned + carry − spent` needs exactly one owner per
+  dollar — with assignments at both levels, "Transportation has $400 available"
+  is ambiguous and the walk double-counts. A parent takes no assignment, no
+  target and is no move DESTINATION (it stays a legal move SOURCE, so a
+  pre-nesting balance can be moved out rather than stranded; that balance still
+  renders, read-only, inside the group). **Parent-level budgeting is a separate
+  future decision, not an oversight.**
+- **One level only, and mechanism categories are never a parent or a child.**
+  Names stay globally unique (`isDuplicateCategoryName`) because the leaf label
+  is what transactions store.
+- **The Transactions chips stay LEAF-level** — rows carry leaf labels, so a
+  chip row derived from the rows in view can only contain leaves. Filtering by a
+  parent would need an OR over its children: the same cross-month browse this
+  codebase already declines.
+- Nesting adds NO second answer to "what categories exist": `userCategoryList`
+  is unchanged and nesting only decides how those same names are ARRANGED,
+  which is what keeps Categories, Budget and the chips in agreement.
 
 ### Envelope budgeting (decided — don't relitigate)
 The Budget tab's model. `available = assigned + carry − spent`, walked from each
