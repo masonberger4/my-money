@@ -1,0 +1,71 @@
+name: CI
+
+# Why this exists, in one line: `npm test` and `vite build` both pass on an app
+# that cannot render, so those two alone are not a gate. See the `smoke` job.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# A newer push supersedes an in-flight run for the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Fast, zero-dependency. node --test over test/, plus the production build
+  # with placeholder env (the real VITE_* values are baked at build time on
+  # Vercel; placeholders prove the bundle compiles without leaking secrets).
+  checks:
+    name: tests + build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      # Includes test/apiLoads.test.js, which is the ONLY thing that catches a
+      # dangling import in api/ — nothing else loads those files, so a broken
+      # route otherwise ships green and 500s on the first real request.
+      - run: npm test
+      - name: build (placeholder env)
+        env:
+          VITE_SUPABASE_URL: https://placeholder.supabase.co
+          VITE_SUPABASE_ANON_KEY: placeholder
+        run: npm run build
+
+  # The gate the other two can't be: renders the real Dashboard in a real
+  # browser against mocked I/O. A use-before-declaration in Dashboard.jsx is a
+  # ReferenceError on first render that passes tests AND build — it shipped
+  # once and showed every user the ErrorBoundary. This catches that class.
+  smoke:
+    name: render check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      # --no-save: the browser driver is CI-only and must not become a
+      # dependency of the app (the suite stays zero-dep by design).
+      - name: install browser driver
+        run: |
+          npm install --no-save playwright-core@1 playwright@1
+          npx playwright install --with-deps chromium
+      - name: boot harness and assert the app renders
+        run: |
+          npx vite --config test/smoke/vite.config.js --port 5199 > /tmp/vite-smoke.log 2>&1 &
+          # Plain poll rather than a wait-on dependency.
+          for i in $(seq 1 60); do
+            curl -sf http://localhost:5199 >/dev/null && break
+            sleep 1
+          done
+          curl -sf http://localhost:5199 >/dev/null || (echo "harness never came up"; cat /tmp/vite-smoke.log; exit 1)
+          node test/smoke/render.mjs
+      - name: harness log on failure
+        if: failure()
+        run: cat /tmp/vite-smoke.log || true
