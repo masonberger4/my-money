@@ -76,19 +76,35 @@ export function isMissingTableError(error, table) {
 
 // The household's learned merchant→category rules, as a plain object for
 // classifyDescription. Read under service_role (RLS bypassed). Returns {} when
-// the migration hasn't been pasted yet — categorization simply falls back to
-// the keyword table, which is exactly the old behavior.
+// the migration hasn't been pasted yet — nothing is guessed, so an untaught
+// merchant simply stays Uncategorized.
+//
+// Shape: { merchantKey: [{ amount, category }, ...] } — `amount: null` is the
+// any-amount rule (see src/txClassify.js). The `amount` COLUMN arrives with
+// migration 20260805000002, which is pasted AFTER the deploy, so this must
+// keep working without it: a missing COLUMN retries the narrower select, which
+// is a SEPARATE test from a missing TABLE (conflating them would read a column
+// problem as "no rules at all" and silently revert every taught merchant on
+// the next pull).
 async function loadCategoryRules(supabase, householdId) {
-  const { data, error } = await supabase
-    .from('category_rules')
-    .select('merchant_key, category')
-    .eq('household_id', householdId);
+  const read = cols =>
+    supabase.from('category_rules').select(cols).eq('household_id', householdId);
+  let { data, error } = await read('merchant_key, category, amount');
+  if (error && isMissingColumnError(error, 'amount')) {
+    ({ data, error } = await read('merchant_key, category'));
+  }
   if (error) {
     if (isMissingTableError(error, 'category_rules')) return {};
     throw error;
   }
   const rules = {};
-  for (const r of data || []) rules[r.merchant_key] = r.category;
+  for (const r of data || []) {
+    const amt = r.amount == null || r.amount === '' ? null : Number(r.amount);
+    (rules[r.merchant_key] ||= []).push({
+      amount: Number.isFinite(amt) ? amt : null,
+      category: r.category,
+    });
+  }
   return rules;
 }
 

@@ -29,7 +29,7 @@ export function ilikeCandidatePattern(key) {
 // Apply `descriptor → category` to historical rows.
 //
 //   fetchPage(pattern, from, to) → { data, error } — a page of candidate rows
-//     ({ id, description, merchant_name, mapped_category }), ordered by id
+//     ({ id, description, merchant_name, mapped_category, amount }), ordered by id
 //     ascending (paging an unordered result set can drop or repeat rows
 //     across the boundary, and a dropped row here is a transaction the rule
 //     silently fails to fix). May answer an out-of-range request with the
@@ -44,6 +44,16 @@ export function ilikeCandidatePattern(key) {
 // work" — 0 genuinely means nothing matched, and callers render the two very
 // differently (see the dataAdapter comment on the silent-failure incident).
 //
+// `amount` (optional) scopes the rule to transactions of exactly that amount,
+// in the app convention (positive = money out). It is threaded into the
+// re-match as the RULE's amount while the ROW's own amount is what it is
+// compared against, so an amount-scoped rule rewrites only the rows it would
+// actually classify. `amount` null/undefined is the any-amount rule and
+// behaves exactly as before. This is why fetchPage must select `amount`:
+// without it every row's amount reads undefined and a scoped rule matches
+// nothing at all — silently, which would look like "the rule is fine, there
+// is just no history".
+//
 // `countAll` answers a DIFFERENT question: how many rows does this rule match
 // AT ALL, whatever they are currently categorized as. dryRun counts only rows
 // the rule would still CHANGE, so a healthy, already-applied rule counts 0 —
@@ -54,6 +64,7 @@ export function ilikeCandidatePattern(key) {
 export async function applyRuleToHistory({
   descriptor,
   category,
+  amount = null,
   dryRun = false,
   countAll = false,
   fetchPage,
@@ -80,7 +91,11 @@ export async function applyRuleToHistory({
     for (const t of data) {
       // Classify on the same string the write path uses.
       const descriptors = [t.merchant_name, t.description].filter(Boolean);
-      const hit = descriptors.some(d => matchLearnedRule(d, { [key]: category }));
+      // The rules bag carries the entry shape txClassify understands, and the
+      // ROW's amount is what the scoped rule is tested against.
+      const bag = { [key]: [{ amount: amount == null ? null : Number(amount), category }] };
+      const rowAmount = typeof t.amount === 'number' ? t.amount : Number(t.amount);
+      const hit = descriptors.some(d => matchLearnedRule(d, bag, rowAmount));
       if (hit && (countAll || t.mapped_category !== category)) matches.push(t.id);
     }
     if (data.length < pageSize) break;

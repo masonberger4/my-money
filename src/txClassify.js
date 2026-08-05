@@ -106,26 +106,65 @@ export function merchantKey(descriptor) {
     .join(' ');
 }
 
-// rules: Map (or plain object) of merchantKey → category.
+// Amounts are compared at CENT precision — the stored rule amount came off a
+// real transaction and the row being classified is another real transaction,
+// so anything looser would start merging neighbouring payments.
+function sameAmount(a, b) {
+  if (typeof a !== 'number' || typeof b !== 'number') return false;
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return false;
+  return Math.round(a * 100) === Math.round(b * 100);
+}
+
+// A rules bag maps merchantKey → EITHER a category string (the any-amount
+// rule, and the only shape that existed before amount scoping) OR an array of
+// { amount, category } entries, where `amount: null` is that same any-amount
+// rule. Both shapes are read here so no caller has to normalize, and a loader
+// that never learned about amounts keeps working unchanged.
+function entriesFor(value) {
+  if (value == null) return [];
+  if (typeof value === 'string') return [{ amount: null, category: value }];
+  if (Array.isArray(value)) return value.filter(e => e && e.category);
+  return [];
+}
+
+// rules: Map (or plain object) — see entriesFor for the accepted shapes.
+// `amount` is the row's amount in the app convention (positive = money out);
+// omit it and only any-amount rules can match, which is the honest behaviour
+// for a caller that doesn't know the amount.
+//
 // Matches exactly, or on a whole-token prefix so a rule learned as "RUDYS"
 // covers "RUDYS COLUMBIA CITY" without a rule on "COSTCO" swallowing
 // "COSTCO GAS" — the prefix must end at a token boundary, and longer (more
 // specific) rules win over shorter ones.
-export function matchLearnedRule(descriptor, rules) {
+//
+// PRECEDENCE, pinned by test: an amount-scoped rule beats EVERY any-amount
+// rule, even one with a longer key; length only breaks ties within a tier.
+// An exact amount is a deliberate, narrow assertion about one recurring
+// payment ("Zelle Transfer for $1,800.00 is rent") and the whole point is that
+// it survives beside the generic rule for the same merchant — which, being the
+// same key or a shorter one, would otherwise shadow it half the time depending
+// on how the descriptor happened to be worded.
+export function matchLearnedRule(descriptor, rules, amount) {
   if (!rules) return null;
   const key = merchantKey(descriptor);
   if (!key) return null;
   const get = k => (rules instanceof Map ? rules.get(k) : rules[k]);
-
-  const exact = get(key);
-  if (exact) return exact;
-
   const keys = rules instanceof Map ? [...rules.keys()] : Object.keys(rules);
-  let best = null;
+
+  let best = null; // { tier, len, category }
   for (const rk of keys) {
-    if (rk && key.startsWith(rk + ' ') && (!best || rk.length > best.length)) best = rk;
+    if (!rk) continue;
+    if (rk !== key && !key.startsWith(rk + ' ')) continue;
+    for (const e of entriesFor(get(rk))) {
+      const scoped = e.amount != null;
+      if (scoped && !sameAmount(Number(e.amount), amount)) continue;
+      const tier = scoped ? 1 : 0;
+      if (!best || tier > best.tier || (tier === best.tier && rk.length > best.len)) {
+        best = { tier, len: rk.length, category: e.category };
+      }
+    }
   }
-  return best ? get(best) : null;
+  return best ? best.category : null;
 }
 
 // opts: { accountType, amount, rules } — all optional. Without accountType and
@@ -143,7 +182,7 @@ export function guessCategory(description, opts = {}) {
   // left. They do NOT beat the transfer guards above: those protect spending
   // totals, and a rule that made card payments count as spending would be a
   // footgun.
-  const learned = matchLearnedRule(d, rules);
+  const learned = matchLearnedRule(d, rules, amount);
   if (learned) return learned;
 
   // No guess. An untaught merchant is Uncategorized — visible and countable,

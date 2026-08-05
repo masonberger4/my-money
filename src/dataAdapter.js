@@ -531,10 +531,29 @@ export async function getAccountTransactions(accountId, { limit = 500 } = {}) {
 // previews share the production database, so this has to work before the
 // migration is pasted.
 let hasCategoryRules = true;
+// The `amount` column arrives with migration 20260805000002, which is pasted
+// AFTER the deploy (it drops a PK). Previews share the production database, so
+// every read here has to work before it lands: a missing COLUMN falls back to
+// selecting without it, which is a different failure from a missing TABLE and
+// is tested separately (the CLAUDE.md conflation gotcha).
+let rulesHaveAmount = true;
 
-export async function getCategoryRules() {
+// Shape: { merchantKey: [{ amount, category }, ...] } — one entry per stored
+// rule row, `amount: null` being the any-amount rule. txClassify's
+// matchLearnedRule reads this array shape directly (and still reads the older
+// bare-string shape, so nothing had to change in lockstep).
+// `opts.client` is a test seam only (the envelopeIO recording-fake pattern);
+// production callers pass nothing.
+export async function getCategoryRules({ client = supabase } = {}) {
   if (!hasCategoryRules) return {};
-  const { data, error } = await supabase.from('category_rules').select('merchant_key, category');
+  const read = cols => client.from('category_rules').select(cols);
+  let { data, error } = await read(
+    rulesHaveAmount ? 'merchant_key, category, amount' : 'merchant_key, category'
+  );
+  if (error && rulesHaveAmount && isMissingColumnError(error, 'amount')) {
+    rulesHaveAmount = false;
+    ({ data, error } = await read('merchant_key, category'));
+  }
   if (error) {
     if (isMissingTableError(error)) {
       hasCategoryRules = false;
@@ -543,25 +562,67 @@ export async function getCategoryRules() {
     throw error;
   }
   const rules = {};
-  for (const r of data || []) rules[r.merchant_key] = r.category;
+  for (const r of data || []) {
+    // PostgREST hands numerics back as strings often enough that coercing here
+    // is the only place it needs handling — the matcher compares numbers.
+    const amount = r.amount == null || r.amount === '' ? null : Number(r.amount);
+    (rules[r.merchant_key] ||= []).push({
+      amount: Number.isFinite(amount) ? amount : null,
+      category: r.category,
+    });
+  }
   return rules;
 }
 
 // Teach a merchant. household_id fills in from its column default — never send
 // it from the client (same pattern as setBudget/setSetting).
-export async function setCategoryRule(descriptor, category) {
+//
+// `amount` (optional, app convention: positive = money out) scopes the rule to
+// transactions of exactly that amount; null/undefined is the any-amount rule.
+//
+// WHY THIS IS NO LONGER AN UPSERT: uniqueness is now carried by two PARTIAL
+// unique indexes (`... where amount is null` / `... where amount is not null`,
+// migration 20260805000002), and ON CONFLICT cannot infer a partial index —
+// PostgREST would answer "no unique or exclusion constraint matching the ON
+// CONFLICT specification". So the write deletes the exact
+// (merchant_key, amount) slot and inserts. Teaching a merchant is a rare,
+// deliberate user action, not a hot path, so two round trips are fine — and
+// the delete is slot-scoped, so it can never take out the sibling rule for the
+// same merchant at a different amount.
+export async function setCategoryRule(descriptor, category, amount = null, { client = supabase } = {}) {
   const key = merchantKey(descriptor);
   if (!key) throw new Error('Cannot learn a rule from an empty description');
-  const { error } = await supabase
-    .from('category_rules')
-    .upsert({ merchant_key: key, category, updated_at: new Date().toISOString() },
-            { onConflict: 'household_id,merchant_key' });
+  const amt = amount == null || amount === '' ? null : Number(amount);
+  const scoped = amt != null && Number.isFinite(amt);
+
+  const clearSlot = async () => {
+    const del = client.from('category_rules').delete().eq('merchant_key', key);
+    if (!rulesHaveAmount) return del; // pre-migration: one rule per merchant
+    return scoped ? del.eq('amount', amt) : del.is('amount', null);
+  };
+  let { error: delErr } = await clearSlot();
+  // Pre-migration there is no amount column: degrade to the old
+  // one-rule-per-merchant behaviour rather than failing the teach outright.
+  if (delErr && rulesHaveAmount && isMissingColumnError(delErr, 'amount')) {
+    rulesHaveAmount = false;
+    ({ error: delErr } = await clearSlot());
+  }
+  if (delErr) throw delErr;
+
+  const row = { merchant_key: key, category, updated_at: new Date().toISOString() };
+  if (scoped && rulesHaveAmount) row.amount = amt;
+  const { error } = await client.from('category_rules').insert(row);
   if (error) throw error;
   return key;
 }
 
-export async function deleteCategoryRule(merchantKeyValue) {
-  const { error } = await supabase.from('category_rules').delete().eq('merchant_key', merchantKeyValue);
+export async function deleteCategoryRule(merchantKeyValue, amount = null, { client = supabase } = {}) {
+  const amt = amount == null || amount === '' ? null : Number(amount);
+  const scoped = amt != null && Number.isFinite(amt);
+  const q = client.from('category_rules').delete().eq('merchant_key', merchantKeyValue);
+  // Slot-scoped like setCategoryRule: deleting the $1,800 Zelle rule must
+  // leave the any-amount Zelle rule alone, and vice versa.
+  const { error } = await (!rulesHaveAmount ? q : scoped ? q.eq('amount', amt) : q.is('amount', null));
   if (error) throw error;
   // Deleting a rule changes ZERO existing transactions — mapped_category is
   // computed at WRITE time and nothing recomputes it at read time. So this is
@@ -576,14 +637,16 @@ export async function deleteCategoryRule(merchantKeyValue) {
 // **null — not [] — when the table is missing**, so the caller can tell "the
 // feature isn't installed" from "nothing taught yet" (the getReceiptTxIds
 // sentinel; the entry link keys on it and doesn't render at all pre-migration).
-export async function listCategoryRules() {
+export async function listCategoryRules({ client = supabase } = {}) {
   if (!hasCategoryRules) return null;
   const rows = [];
   const page = 500;
   for (let from = 0; ; from += page) {
-    const { data, error } = await supabase
+    const { data, error } = await client
       .from('category_rules')
-      .select('merchant_key, category, source, updated_at')
+      .select(rulesHaveAmount
+        ? 'merchant_key, category, amount, source, updated_at'
+        : 'merchant_key, category, source, updated_at')
       // Ordered paging: an unordered result set can drop or repeat rows across
       // the boundary (the Session A guard class).
       .order('merchant_key', { ascending: true })
@@ -591,13 +654,24 @@ export async function listCategoryRules() {
     if (error) {
       // 416 on an exact-page-multiple result set is end-of-data, not failure.
       if (isRangeExhaustedError(error)) break;
+      // Pre-migration the amount column isn't there yet: retry this same page
+      // without it. Checked BEFORE the missing-table test and name-checked, so
+      // a column problem can never read as "the feature isn't installed".
+      if (rulesHaveAmount && isMissingColumnError(error, 'amount')) {
+        rulesHaveAmount = false;
+        from -= page; // redo this page with the narrower select
+        continue;
+      }
       if (isMissingTableError(error)) {
         hasCategoryRules = false;
         return null;
       }
       throw error;
     }
-    rows.push(...(data || []));
+    rows.push(...(data || []).map(r => ({
+      ...r,
+      amount: r.amount == null || r.amount === '' ? null : Number(r.amount),
+    })));
     if (!data || data.length < page) break;
   }
   return rows;
@@ -610,15 +684,16 @@ export async function listCategoryRules() {
 //
 // Throws on failure like its sibling — the caller renders a failed count
 // differently from a real 0 (the count === null distinction).
-export async function countCategoryRuleMatches(descriptor, category) {
+export async function countCategoryRuleMatches(descriptor, category, amount = null) {
   return applyRuleToHistory({
     descriptor,
     category,
+    amount,
     countAll: true,
     fetchPage: (pat, from, to) =>
       supabase
         .from('transactions')
-        .select('id, description, merchant_name, mapped_category')
+        .select('id, description, merchant_name, mapped_category, amount')
         .or(`description.ilike.${pat},merchant_name.ilike.${pat}`)
         .order('id', { ascending: true })
         .range(from, to),
@@ -646,15 +721,18 @@ export async function countCategoryRuleMatches(descriptor, category) {
 // The whole loop — narrowing, PGRST103 paging contract, re-matching, dryRun —
 // lives in src/ruleHistory.js (pure, tested with fakes); this wrapper only
 // binds the real client.
-export async function applyCategoryRuleToHistory(descriptor, category, { dryRun = false } = {}) {
+export async function applyCategoryRuleToHistory(descriptor, category, { dryRun = false, amount = null } = {}) {
   const result = await applyRuleToHistory({
     descriptor,
     category,
+    amount,
     dryRun,
     fetchPage: (pat, from, to) =>
       supabase
         .from('transactions')
-        .select('id, description, merchant_name, mapped_category')
+        // `amount` is selected because an amount-scoped rule is re-matched
+        // against the ROW's amount — without the column it would match nothing.
+        .select('id, description, merchant_name, mapped_category, amount')
         .or(`description.ilike.${pat},merchant_name.ilike.${pat}`)
         // Same tiebreaker reasoning as getTransactionsBetween: paging an
         // unordered result set can drop or repeat rows across the boundary,
