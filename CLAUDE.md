@@ -979,36 +979,22 @@ migration that DROPS should verify rather than trust.
 
 ## Roadmap
 
-**Session plan:** the 2026-08-02 plan is SPENT (its last two items — saved
-chats + search refinement — shipped 2026-08-04) and deleted per its own rule.
-The forward-looking doc is **`docs/next-iteration-plan-2026-08-04.md`**.
+**The forward-looking doc is `docs/next-iteration-plan-2026-08-04.md`** — the
+ONLY one. Both six-dimension audit backlogs (2026-08-01, 2026-08-04) and the
+2026-08-02 session plan shipped out completely and were deleted per the
+delete-when-spent rule; what survived them — the refuted-don't-re-propose list
+and Mason's recorded decisions — moved into that doc, and their decided rules
+are in this file. Git history holds the rest.
 
-**Worklist status: one specced item left in that doc** (`coverage_shortfall`
-surfacing — 2026-08-04 sweep). The learned-rules screen SHIPPED 2026-08-04 and
-**Harder §0, the user-owned category system, SHIPPED 2026-08-05 with its
-migration applied and verified** (see Merged features). No other code backlog.
-`docs/improvement-backlog-2026-08-04.md` (the verified six-dimension audit) is
-**worked through — all five sessions A–E shipped 2026-08-04** and its three
-Section-2 questions are decided; it survives as an audit record. What remains
-is the **needs-Mason data work in Pending** (payroll dupe, Discover twins,
-statement backfill — the spend cap and key rotation are DONE 2026-08-04, and
-NEWREZ is resolved by construction) plus the genuinely-open items noted below.
-**Retraining is the live task now**: post-wipe, every category is created and
-taught by hand, so the Uncategorized teach-queue (Categories tab) and the
-Taught-rules screen are the working surfaces.
-
-**Improvement backlog (2026-08-01 six-dimension audit):**
-`docs/improvement-backlog-2026-08-01.md` — everything SHIPPED (Batch 1,
-Sections 1–3; the last two — in-app saved chats and search refinement —
-2026-08-04; see Merged features) EXCEPT the one deliberate deferral: the
-Dashboard.jsx decomposition stays DEFERRED (keep the single file during
-active development). The file remains only as the audit record + that
-deferral's notes.
-
-Mason's 2026-08-04 decisions, recorded in that backlog: month-nav caching yes
-(shipped), **no durable assistant throttle** (the Anthropic spend cap is the
-Pending ops task instead), and the dataAdapter.js internal split gets its own
-quiet session (ran as Session D).
+**Worklist status:** one specced code item left (`coverage_shortfall`
+surfacing). Everything else is either shipped, deliberately deferred (the
+Dashboard.jsx decomposition — keep the single file during active development),
+or gated on Mason. What outranks the code: the **needs-Mason data work in
+Pending** (payroll dupe, Discover twins, statement backfill; the spend cap and
+key rotation are DONE, and NEWREZ is resolved by construction).
+**Retraining is the live task**: post-wipe every category is created and taught
+by hand, so the Uncategorized teach-queue and the Taught-rules screen are the
+working surfaces.
 
 Debt follow-ups: ALL THREE SHIPPED 2026-08-03 (manual debts, per-debt payoff
 schedule drill-in, net worth over time — Mason's call recorded: net worth

@@ -1,10 +1,11 @@
 # Next-iteration plan — 2026-08-04 (findings + feedback guide)
 
-Written the day the 2026-08-02 session plan spent itself (saved chats + search
-refinement shipped; `docs/session-plan-2026-08-02.md` deleted per its own rule)
-and the 2026-08-01 backlog closed except the one deliberate deferral. This doc
-is the holding pen for what comes next. CLAUDE.md wins on any conflict; nothing
-below relitigates a decided item.
+**THE single forward-looking doc.** Both six-dimension audit backlogs
+(2026-08-01 and 2026-08-04) shipped out completely and were deleted 2026-08-05
+per the delete-when-spent rule — their decided rules live in CLAUDE.md, their
+history in git, and the one thing worth carrying forward (what was refuted, so
+it doesn't come back) is the last section here. CLAUDE.md wins on any conflict;
+nothing below relitigates a decided item.
 
 ## Low-hanging fruit
 
@@ -271,9 +272,9 @@ prior backlog. Both are S/M with no blockers and no migration.*
 
 1. **Dashboard.jsx decomposition** — deferred by Mason 2026-08-01 and STILL
    deferred; the file is now **4,983 lines** (`wc -l`, 2026-08-04). The
-   staged plan is recorded in `docs/improvement-backlog-2026-08-01.md`
-   Section 3: sheets/formatters first → shared TxRow → read-only tabs, every
-   new module importing through dataAdapter.js (the harness-alias rule).
+   staged plan (carried out of the deleted 2026-08-01 backlog): sheets and
+   formatters first → a shared TxRow → the read-only tabs, every new module
+   importing through dataAdapter.js so it stays inside the harness aliases.
    First big investment when feature pace slows; not before Mason says so.
 
 2. **Deriving RTA income (the income wall)** — CLAUDE.md's envelope section
@@ -332,6 +333,30 @@ What field reports are actually useful, now that both phones run everything:
 - **Feed health**: the amber banner appearing, or any account >1 day stale —
   with the bank name (per-bank failures arrive inside an HTTP 200).
 
+## Refuted / decided — do NOT re-propose
+
+Carried out of the deleted 2026-08-04 audit backlog. Six of its 39 findings
+were refuted in the adversarial pass; these are the ones a future audit would
+otherwise raise again.
+
+- **"Android back closes the app"** — refuted as stated: the household is
+  iPhone-only. Survives only as the iOS back-swipe sheet dismissal (shipped).
+- **"Fonts blocked behind the JS parse"** — overstated: Vite emits the CSS as
+  its own `<link>`, so fonts wait on CSS, not JS. Preload shipped anyway.
+- **"RLS entirely untested"** — policy COVERAGE was hand-verified complete
+  across all 16 migrations; no missing policy exists. The opt-in harness
+  shipped; the fuller spec is item 6 above.
+- **"The 2-char search gate is a decided rule"** — refuted: it was pre-existing
+  activation behavior, never a recorded decision.
+- Anything relitigating the sign conventions, the unified linked-boundary
+  model, hidden-by-default accounts, theme tokens, or the envelope walk was
+  screened out against CLAUDE.md's decided lists.
+
+**Mason's 2026-08-04 decisions** (all executed; recorded here because the doc
+that held them is gone): month-navigation caching **yes** (shipped); **no**
+durable assistant throttle — the Anthropic spend cap is the control, and it is
+set; the dataAdapter split got **its own quiet session** (shipped).
+
 ## Next backlog
 
 This doc is an interim holding pen, not a verified backlog. The mechanism
@@ -340,4 +365,4 @@ performance, security, testing/reliability, data insights — the
 2026-08-01 shape), fed by this list plus Mason's field reports above, each
 finding re-verified against the code before it becomes a work item. When
 that audit lands, this file collapses to a one-line pointer or is deleted,
-per the improvement-backlog precedent.
+per the delete-when-spent precedent.
