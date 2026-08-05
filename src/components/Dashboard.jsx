@@ -1072,20 +1072,30 @@ function CategorySheet({name,color,when,rows,kids,surf,getName,acctById,acctLabe
 // says exactly that. No undo and no auto-reclassify in v1 — a true undo needs
 // per-row pre-rule values (a migration), and "re-run the keyword table without
 // this rule" can write a third category nobody ever saw.
+// A merchant key is no longer unique in this list: amount-scoped rules mean
+// one key can carry several rules ("ZELLE TRANSFER" generally, and again for
+// $1,800.00). Everything keyed per-rule — the React key, the count map, the
+// busy flag — has to key on the PAIR or the rows collide and one row's count
+// paints under another's label.
+function ruleId(r){ return `${r.merchant_key}|${r.amount==null?"":r.amount}`; }
+
 function RulesSheet({rules,monthRows,monthLabel,txDescriptor,surf,getName,getColor,onDelete,onClose}) {
   useEscClose(onClose);
-  const [counts,setCounts]=useState({});   // key → {n} | {error}
+  const [counts,setCounts]=useState({});   // ruleId → {n} | {error}
   const [busyKey,setBusyKey]=useState(null);
   const [deleting,setDeleting]=useState(null);
 
-  // Free per-rule count over the month already in memory.
+  // Free per-rule count over the month already in memory. Matching goes
+  // through the shared matcher with the ROW's amount so a scoped rule counts
+  // only the rows it would actually claim.
   const thisMonth=useMemo(()=>{
     const m=new Map();
     for(const t of monthRows||[]){
       const d=txDescriptor(t);
       if(!d)continue;
       for(const r of rules){
-        if(matchLearnedRule(d,{[r.merchant_key]:r.category})) m.set(r.merchant_key,(m.get(r.merchant_key)||0)+1);
+        const bag={[r.merchant_key]:[{amount:r.amount??null,category:r.category}]};
+        if(matchLearnedRule(d,bag,t.amount)) m.set(ruleId(r),(m.get(ruleId(r))||0)+1);
       }
     }
     return m;
@@ -1094,14 +1104,14 @@ function RulesSheet({rules,monthRows,monthLabel,txDescriptor,surf,getName,getCol
   const showSource=useMemo(()=>new Set(rules.map(r=>r.source||"user")).size>1,[rules]);
 
   async function countAll(r){
-    setBusyKey(r.merchant_key);
+    setBusyKey(ruleId(r));
     try{
-      const n=await countCategoryRuleMatches(r.merchant_key,r.category);
-      setCounts(c=>({...c,[r.merchant_key]:{n}}));
+      const n=await countCategoryRuleMatches(r.merchant_key,r.category,r.amount??null);
+      setCounts(c=>({...c,[ruleId(r)]:{n}}));
     }catch(err){
       console.error("rule count failed",err);
       // null-means-FAILED, never 0.
-      setCounts(c=>({...c,[r.merchant_key]:{error:err.message||String(err)}}));
+      setCounts(c=>({...c,[ruleId(r)]:{error:err.message||String(err)}}));
     }finally{ setBusyKey(null); }
   }
 
@@ -1124,15 +1134,23 @@ function RulesSheet({rules,monthRows,monthLabel,txDescriptor,surf,getName,getCol
             Nothing taught yet. Set a category on a transaction and choose “always” to teach a merchant.
           </div>
         ):rules.map(r=>{
-          const cnt=counts[r.merchant_key];
-          const mo=thisMonth.get(r.merchant_key)||0;
+          const rid=ruleId(r);
+          const cnt=counts[rid];
+          const mo=thisMonth.get(rid)||0;
           const c=chipOn(getColor(r.category),surf.card);
           return (
-            <div key={r.merchant_key} style={{padding:"10px 0",borderTop:"1px solid var(--border)"}}>
+            <div key={rid} style={{padding:"10px 0",borderTop:"1px solid var(--border)"}}>
               <div style={{display:"flex",alignItems:"center",gap:8}}>
                 <div style={{flex:1,minWidth:0}}>
                   <div style={{fontSize:13,fontWeight:500,fontFamily:"'DM Mono',monospace",
-                    whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{r.merchant_key}</div>
+                    whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
+                    {r.merchant_key}
+                    {/* The amount is part of the rule's IDENTITY here, not a
+                        detail: two rows differing only by it are otherwise
+                        indistinguishable, and deleting "the Zelle rule" would
+                        be a coin flip. */}
+                    {r.amount!=null&&<span style={{color:"var(--accent)"}}> · {fmtX(r.amount)}</span>}
+                  </div>
                   <div style={{fontSize:11,color:"var(--muted)",marginTop:3,display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
                     <span style={{display:"inline-flex",alignItems:"center",gap:4}}>
                       <span style={{width:8,height:8,borderRadius:2,background:c.dot,flexShrink:0}}/>
@@ -1142,11 +1160,12 @@ function RulesSheet({rules,monthRows,monthLabel,txDescriptor,surf,getName,getCol
                     {showSource&&<span>· {r.source||"user"}</span>}
                   </div>
                 </div>
-                <button className="ibtn" onClick={()=>setDeleting(r)} aria-label={`Delete rule for ${r.merchant_key}`}
+                <button className="ibtn" onClick={()=>setDeleting(r)}
+                  aria-label={`Delete rule for ${r.merchant_key}${r.amount!=null?` at ${fmtX(r.amount)}`:""}`}
                   style={{minWidth:32,minHeight:32,fontSize:13,color:"var(--danger)"}}>✕</button>
               </div>
               <div style={{marginTop:6,fontSize:11}}>
-                {busyKey===r.merchant_key?(
+                {busyKey===rid?(
                   <span style={{color:"var(--muted)"}}>Counting…</span>
                 ):cnt?.error?(
                   // A failed count must never render as a real 0.
@@ -1166,7 +1185,17 @@ function RulesSheet({rules,monthRows,monthLabel,txDescriptor,surf,getName,getCol
 
         {deleting&&(
           <div style={{marginTop:14,padding:12,borderRadius:10,background:"var(--bg)",fontSize:12,lineHeight:1.55}}>
-            <div style={{fontWeight:600,marginBottom:6}}>Forget “{deleting.merchant_key}”?</div>
+            <div style={{fontWeight:600,marginBottom:6}}>
+              Forget “{deleting.merchant_key}{deleting.amount!=null?` for ${fmtX(deleting.amount)}`:""}”?
+            </div>
+            {/* Naming the scope matters most when both exist: forgetting the
+                $1,800.00 rule leaves the merchant-wide one running, and the
+                user needs to know which one is about to go. */}
+            {deleting.amount!=null&&(
+              <div style={{color:"var(--muted)",marginBottom:6}}>
+                Only the {fmtX(deleting.amount)} rule. Any rule for other {deleting.merchant_key} transactions stays.
+              </div>
+            )}
             <div style={{color:"var(--muted)"}}>
               Future transactions from this merchant go back to the app's own guess until you teach it
               again — which may be a different category, not necessarily uncategorized.{" "}
@@ -2341,15 +2370,33 @@ export default function Dashboard({ refreshTick = 0 }) {
   // "nothing to update", which is exactly how a broken preview passed for a
   // working one: the row being edited always matches its own rule, so a real 0
   // is only possible when the merchant appears nowhere else.
-  async function offerToLearn(category){
+  // scope 'any' teaches the merchant; scope 'amount' teaches the merchant AT
+  // THIS EXACT AMOUNT. The narrow one exists because a descriptor can be
+  // genuinely ambiguous — "Zelle Transfer" is rent at $1,800.00 and a dozen
+  // other things at every other amount — and the merchant-wide rule would be
+  // WRONG for most of them. Defaulting to 'any' keeps the common case one tap.
+  const previewSeq=useRef(0);
+  async function offerToLearn(category,scope="any"){
     if(!selTx)return;
     const descriptor=txDescriptor(selTx);
     const key=merchantKey(descriptor);
     if(!key)return;
+    const amount=typeof selTx.amount==="number"?selTx.amount:null;
+    // An amount-scoped rule needs an amount to scope BY. A row without a
+    // usable one only gets the merchant-wide offer rather than a scope
+    // toggle that would silently teach the wrong thing.
+    const eff=amount===null?"any":scope;
+    const seq=++previewSeq.current;
+    // Show the prompt immediately with a pending count; the preview is a
+    // round trip and the toggle must not feel dead while it runs.
+    setLearnPrompt({descriptor,key,category,amount,scope:eff,count:null,previewError:null,counting:true});
     let count=null,previewError=null;
-    try{ count=await applyCategoryRuleToHistory(descriptor,category,{dryRun:true}); }
+    try{ count=await applyCategoryRuleToHistory(descriptor,category,{dryRun:true,amount:eff==="amount"?amount:null}); }
     catch(err){ console.error("rule preview failed",err); previewError=err.message||String(err); }
-    setLearnPrompt({descriptor,key,category,count,previewError});
+    // Guard: two fast toggles must not let the slower response paint its count
+    // under the other scope's label (the movers month-tagging lesson).
+    if(previewSeq.current!==seq)return;
+    setLearnPrompt(p=>p?{...p,count,previewError,counting:false}:p);
   }
 
   // Load the taught rules whenever the epoch moves (mount, open, after a
@@ -2378,7 +2425,7 @@ export default function Dashboard({ refreshTick = 0 }) {
   // list itself. Failure alerts rather than failing silently.
   async function forgetRule(rule){
     try{
-      await deleteCategoryRule(rule.merchant_key);
+      await deleteCategoryRule(rule.merchant_key,rule.amount??null);
       invalidateRules();
     }catch(err){
       console.error("rule delete failed",err);
@@ -2412,14 +2459,18 @@ export default function Dashboard({ refreshTick = 0 }) {
     if(!learnPrompt)return;
     setLearning(true);
     try{
-      await setCategoryRule(learnPrompt.descriptor,learnPrompt.category);
-      const n=await applyCategoryRuleToHistory(learnPrompt.descriptor,learnPrompt.category);
+      const amt=learnPrompt.scope==="amount"?learnPrompt.amount:null;
+      await setCategoryRule(learnPrompt.descriptor,learnPrompt.category,amt);
+      const n=await applyCategoryRuleToHistory(learnPrompt.descriptor,learnPrompt.category,{amount:amt});
       setLearnPrompt(null);
       // Say which of the two things happened. "Remembered" alone reads as
-      // success even when nothing was relabelled.
+      // success even when nothing was relabelled. The subject has to name the
+      // SCOPE too — "ZELLE TRANSFER is Rent" would be a false statement of
+      // what was just saved when only the $1,800.00 ones are.
+      const subject=amt===null?learnPrompt.key:`${learnPrompt.key} for ${fmtX(amt)}`;
       setLearnedNote(n>0
-        ? `Remembered — ${learnPrompt.key} is ${getName(learnPrompt.category)}, and ${n} past transaction${n!==1?"s":""} updated.`
-        : `Remembered — ${learnPrompt.key} is ${getName(learnPrompt.category)}. No past transactions needed changing; future ones will use it.`);
+        ? `Remembered — ${subject} is ${getName(learnPrompt.category)}, and ${n} past transaction${n!==1?"s":""} updated.`
+        : `Remembered — ${subject} is ${getName(learnPrompt.category)}. No past transactions needed changing; future ones will use it.`);
       await reloadData(year,month);
       await refetchOpenLists();
       // The taught-rules list has a new row — refresh it too, or the screen
@@ -5532,7 +5583,19 @@ export default function Dashboard({ refreshTick = 0 }) {
                 </button>
               )}
             </div>
-            <div style={{fontSize:10,color:"var(--muted)",marginTop:-10,marginBottom:12}}>Double-click the name to rename this transaction.</div>
+            {/* The RAW bank descriptor, shown only when it differs from the
+                name on screen. Two things collapse into that name — the
+                cleanup in bankName() and any hand rename — so the text the
+                classifier actually matched on can be invisible here. That
+                matters now that a learned rule is the only categorizer: the
+                rule is taught from this string, and "why didn't my rule
+                fire?" is unanswerable if the string is never shown. */}
+            {selTx.description&&selTx.description!==(selTx.merchant_name||"")&&(
+              <div style={{fontSize:10,color:"var(--muted)",marginTop:-10,marginBottom:8,fontFamily:"'DM Mono',monospace",wordBreak:"break-word"}}>
+                Bank text: {selTx.description}
+              </div>
+            )}
+            <div style={{fontSize:10,color:"var(--muted)",marginTop:-4,marginBottom:12}}>Double-click the name to rename this transaction.</div>
 
             <div style={{fontSize:12,color:"var(--muted)",marginBottom:8}}>Category</div>
             <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:6}}>
@@ -5571,7 +5634,14 @@ export default function Dashboard({ refreshTick = 0 }) {
             {selTx.user_category&&(
               <button onClick={()=>saveTx({user_category:null})}
                 style={{background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",fontSize:11,color:"var(--muted)",textDecoration:"underline",padding:0,marginBottom:6}}>
-                Reset to automatic ({getName(selTx.auto_category)})
+                {/* "Reset to automatic (Uncategorized)" read as though the app
+                    had an automatic answer it was declining to use. Post-wipe
+                    that is the common case — nothing is guessed, so the stored
+                    automatic value IS Uncategorized until a rule is taught —
+                    and the honest wording is that this clears the override. */}
+                {selTx.auto_category===UNCATEGORIZED
+                  ?"Remove my category (back to Uncategorized)"
+                  :`Reset to automatic (${getName(selTx.auto_category)})`}
               </button>
             )}
 
@@ -5581,10 +5651,38 @@ export default function Dashboard({ refreshTick = 0 }) {
             {learnPrompt&&(
               <div style={{marginTop:10,background:"var(--bg)",borderRadius:8,padding:"10px 12px"}}>
                 <div style={{fontSize:11,color:"var(--text)",lineHeight:1.5,marginBottom:8}}>
-                  Always categorize <strong>{learnPrompt.key}</strong> as <strong>{getName(learnPrompt.category)}</strong>?
-                  {learnPrompt.count>0&&<> Also updates {learnPrompt.count} past transaction{learnPrompt.count!==1?"s":""}.</>}
-                  {learnPrompt.count===0&&<> No past transactions match it.</>}
+                  Always categorize <strong>{learnPrompt.key}</strong>
+                  {learnPrompt.scope==="amount"&&<> for <strong>{fmtX(learnPrompt.amount)}</strong></>}
+                  {" "}as <strong>{getName(learnPrompt.category)}</strong>?
+                  {/* counting is its own state: a pending preview must not
+                      render as the real "no past transactions match it", which
+                      is exactly how a broken preview once passed for a working
+                      one. */}
+                  {learnPrompt.counting&&<> Checking past transactions…</>}
+                  {!learnPrompt.counting&&learnPrompt.count>0&&<> Also updates {learnPrompt.count} past transaction{learnPrompt.count!==1?"s":""}.</>}
+                  {!learnPrompt.counting&&learnPrompt.count===0&&<> No past transactions match it.</>}
                 </div>
+                {/* The scope choice. Only offered when the row has an amount to
+                    scope by — see offerToLearn. */}
+                {learnPrompt.amount!==null&&(
+                  <div style={{display:"flex",gap:6,marginBottom:8}}>
+                    {/* Deliberately NOT "Every ${key}" — a long merchant key
+                        wrapped the button to three lines. The key is already
+                        named in the sentence above; the buttons only have to
+                        distinguish the two scopes. */}
+                    {[["any","Any amount"],["amount",`Only ${fmtX(learnPrompt.amount)}`]].map(([s,label])=>{
+                      const on=learnPrompt.scope===s;
+                      return (
+                        <button key={s} onClick={()=>offerToLearn(learnPrompt.category,s)}
+                          style={{flex:1,fontSize:10,fontWeight:600,padding:"5px 8px",borderRadius:20,fontFamily:"inherit",cursor:"pointer",
+                            background:on?"var(--accent)":"var(--card)",color:on?"var(--accent-text)":"var(--muted)",
+                            border:`1px solid ${on?"var(--accent)":"var(--border)"}`,transition:"all .15s"}}>
+                          {label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
                 {learnPrompt.previewError&&(
                   <div style={{fontSize:10,color:inkOn("#D85A30",surf.bg),lineHeight:1.5,marginBottom:8}}>
                     Couldn't check past transactions: {learnPrompt.previewError}. The rule will still be

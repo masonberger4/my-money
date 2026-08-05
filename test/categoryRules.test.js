@@ -19,7 +19,13 @@ import {
   ilikeCandidatePattern,
   isRangeExhaustedError,
 } from '../src/ruleHistory.js';
-import { classifyDescription, merchantKey } from '../src/txClassify.js';
+import { classifyDescription, matchLearnedRule, merchantKey } from '../src/txClassify.js';
+import {
+  getCategoryRules,
+  setCategoryRule,
+  deleteCategoryRule,
+  listCategoryRules,
+} from '../src/dataAdapter.js';
 import { effectiveCategory } from '../src/spending.js';
 import { analyzeCsv } from '../src/csvImport.js';
 import { TRANSFER_CATEGORY, FALLBACK_CATEGORY } from '../src/categoryMap.js';
@@ -62,6 +68,10 @@ function makeDb(rows) {
         description: r.description,
         merchant_name: r.merchant_name,
         mapped_category: r.mapped_category,
+        // The real fetchPage selects amount too — an amount-scoped rule is
+        // re-matched against the ROW's amount, so omitting it here would make
+        // the scoped tests pass for the wrong reason.
+        amount: r.amount,
       }));
     // PostgREST answers a Range starting past the last row with 416/PGRST103.
     if (from > 0 && from >= hits.length) {
@@ -409,4 +419,227 @@ test('countAll of a rule that matches nothing is a real 0, distinct from a failu
       updateBatch: broken.updateBatch,
     })
   );
+});
+
+// --- Amount-scoped rules -----------------------------------------------------
+//
+// The pure precedence rules live in test/txClassify.test.js; what is pinned
+// here is the HISTORY-APPLY and the ADAPTER I/O around them — the two places
+// where an amount can silently go missing (a select that omits the column, a
+// delete that takes out the wrong slot).
+
+test('an amount-scoped apply rewrites only rows with that exact amount', async () => {
+  const db = makeDb([
+    { id: 1, description: 'ZELLE TRANSFER TO SMITH', amount: 1800, mapped_category: 'Uncategorized' },
+    { id: 2, description: 'ZELLE TRANSFER TO SMITH', amount: 1800.0, mapped_category: 'Uncategorized' },
+    { id: 3, description: 'ZELLE TRANSFER TO JONES', amount: 45, mapped_category: 'Uncategorized' },
+  ]);
+  const n = await apply(db, 'ZELLE TRANSFER', 'Rent', { amount: 1800 });
+  assert.equal(n, 2);
+  assert.deepEqual(db.rows.map(r => r.mapped_category), ['Rent', 'Rent', 'Uncategorized']);
+});
+
+test('an amount-scoped rule matches on cents, not on sign or rounding luck', async () => {
+  const db = makeDb([
+    { id: 1, description: 'ZELLE TRANSFER', amount: 1800.0, mapped_category: 'Uncategorized' },
+    { id: 2, description: 'ZELLE TRANSFER', amount: -1800, mapped_category: 'Uncategorized' },
+    { id: 3, description: 'ZELLE TRANSFER', amount: 1800.01, mapped_category: 'Uncategorized' },
+  ]);
+  assert.equal(await apply(db, 'ZELLE TRANSFER', 'Rent', { amount: 1800 }), 1);
+  assert.deepEqual(db.rows.map(r => r.mapped_category), ['Rent', 'Uncategorized', 'Uncategorized']);
+});
+
+test('numeric-as-string amounts (PostgREST) still match', async () => {
+  const db = makeDb([
+    { id: 1, description: 'ZELLE TRANSFER', amount: '1800.00', mapped_category: 'Uncategorized' },
+  ]);
+  assert.equal(await apply(db, 'ZELLE TRANSFER', 'Rent', { amount: '1800' }), 1);
+});
+
+test('an any-amount apply is unchanged by the new parameter', async () => {
+  const db = makeDb([
+    { id: 1, description: 'ZELLE TRANSFER', amount: 1800, mapped_category: 'Uncategorized' },
+    { id: 2, description: 'ZELLE TRANSFER', amount: 45, mapped_category: 'Uncategorized' },
+  ]);
+  assert.equal(await apply(db, 'ZELLE TRANSFER', 'Transfers', {}), 2);
+});
+
+test('a scoped countAll counts only the matching amount and never writes', async () => {
+  const db = makeDb([
+    { id: 1, description: 'ZELLE TRANSFER', amount: 1800, mapped_category: 'Rent' },
+    { id: 2, description: 'ZELLE TRANSFER', amount: 20, mapped_category: 'Rent' },
+  ]);
+  assert.equal(await apply(db, 'ZELLE TRANSFER', 'Rent', { amount: 1800, countAll: true }), 1);
+  assert.equal(db.updateBatches.length, 0);
+});
+
+test('a scoped rule cannot see amounts if the page omits the column — so the page must carry it', async () => {
+  // REGRESSION guard for the fetchPage contract: this is what a select that
+  // forgot `amount` looks like, and it must fail loudly here rather than in
+  // production as "the rule matches nothing".
+  const db = makeDb([{ id: 1, description: 'ZELLE TRANSFER', amount: 1800, mapped_category: 'Uncategorized' }]);
+  const inner = db.fetchPage;
+  db.fetchPage = async (...a) => {
+    const res = await inner(...a);
+    if (res.data) res.data = res.data.map(({ amount, ...rest }) => rest);
+    return res;
+  };
+  assert.equal(await apply(db, 'ZELLE TRANSFER', 'Rent', { amount: 1800 }), 0);
+});
+
+// --- Adapter I/O (recording fake — the envelopeIO pattern) -------------------
+//
+// ORDER MATTERS, as in test/envelopeIO.test.js: dataAdapter holds a
+// module-level `rulesHaveAmount` degrade flag that only ever flips true→false,
+// so the pre-migration fallback tests run LAST.
+
+function fakeRulesClient(script, calls = []) {
+  return {
+    from(table) {
+      const q = { table, op: 'select', payload: null, filters: [], columns: null };
+      const b = {
+        select(cols) { if (q.op === 'select') q.columns = cols; return b; },
+        insert(p) { q.op = 'insert'; q.payload = p; return b; },
+        delete() { q.op = 'delete'; return b; },
+        eq(c, v) { q.filters.push(['eq', c, v]); return b; },
+        is(c, v) { q.filters.push(['is', c, v]); return b; },
+        order() { return b; },
+        range() { return b; },
+        then(resolve, reject) {
+          calls.push(q);
+          if (!script.length) throw new Error(`fakeRulesClient: unscripted ${q.op} on ${q.table}`);
+          const next = script.shift();
+          const out = typeof next === 'function' ? next(q) : next;
+          return Promise.resolve(out ?? { data: null, error: null }).then(resolve, reject);
+        },
+      };
+      return b;
+    },
+  };
+}
+
+const amountMissingError = {
+  code: '42703',
+  message: 'column category_rules.amount does not exist',
+  details: null,
+  hint: null,
+};
+
+test('getCategoryRules groups multiple rows per key into { amount, category } entries', async () => {
+  const calls = [];
+  const client = fakeRulesClient([
+    {
+      data: [
+        { merchant_key: 'ZELLE TRANSFER', category: 'Transfers', amount: null },
+        // PostgREST hands numerics back as strings often enough to matter.
+        { merchant_key: 'ZELLE TRANSFER', category: 'Rent', amount: '1800.00' },
+        { merchant_key: 'SAFEWAY', category: 'Groceries', amount: null },
+      ],
+      error: null,
+    },
+  ], calls);
+  const rules = await getCategoryRules({ client });
+  assert.match(calls[0].columns, /amount/);
+  assert.deepEqual(rules, {
+    'ZELLE TRANSFER': [
+      { amount: null, category: 'Transfers' },
+      { amount: 1800, category: 'Rent' },
+    ],
+    SAFEWAY: [{ amount: null, category: 'Groceries' }],
+  });
+  // And the bag it produces is exactly what the matcher consumes.
+  assert.equal(matchLearnedRule('ZELLE TRANSFER TO SMITH', rules, 1800), 'Rent');
+  assert.equal(matchLearnedRule('ZELLE TRANSFER TO SMITH', rules, 45), 'Transfers');
+});
+
+test('setCategoryRule writes the exact slot: delete .eq(amount) then insert', async () => {
+  const calls = [];
+  const client = fakeRulesClient([{ error: null }, { error: null }], calls);
+  await setCategoryRule('Zelle Transfer to Smith', 'Rent', 1800, { client });
+
+  assert.equal(calls[0].op, 'delete');
+  assert.deepEqual(calls[0].filters, [
+    ['eq', 'merchant_key', 'ZELLE TRANSFER TO SMITH'],
+    ['eq', 'amount', 1800],
+  ]);
+  assert.equal(calls[1].op, 'insert');
+  assert.equal(calls[1].payload.amount, 1800);
+  assert.equal(calls[1].payload.category, 'Rent');
+  // Never an upsert: ON CONFLICT cannot infer a partial unique index.
+  assert.equal(calls.some(c => c.op === 'upsert'), false);
+});
+
+test('an any-amount setCategoryRule scopes its delete with .is(amount, null)', async () => {
+  const calls = [];
+  const client = fakeRulesClient([{ error: null }, { error: null }], calls);
+  await setCategoryRule('Safeway #1234', 'Groceries', null, { client });
+  assert.deepEqual(calls[0].filters, [
+    ['eq', 'merchant_key', 'SAFEWAY'],
+    ['is', 'amount', null],
+  ]);
+  assert.equal('amount' in calls[1].payload, false);
+});
+
+test('deleteCategoryRule removes only the matching slot', async () => {
+  const calls = [];
+  const client = fakeRulesClient([{ error: null }, { error: null }], calls);
+  await deleteCategoryRule('ZELLE TRANSFER', 1800, { client });
+  assert.deepEqual(calls[0].filters, [
+    ['eq', 'merchant_key', 'ZELLE TRANSFER'],
+    ['eq', 'amount', 1800],
+  ]);
+  await deleteCategoryRule('ZELLE TRANSFER', null, { client });
+  assert.deepEqual(calls[1].filters, [
+    ['eq', 'merchant_key', 'ZELLE TRANSFER'],
+    ['is', 'amount', null],
+  ]);
+});
+
+test('listCategoryRules returns amount on the rows, coerced to a number', async () => {
+  const calls = [];
+  const client = fakeRulesClient([
+    { data: [{ merchant_key: 'ZELLE TRANSFER', category: 'Rent', amount: '1800.00', source: 'user', updated_at: 'x' }], error: null },
+  ], calls);
+  const rows = await listCategoryRules({ client });
+  assert.match(calls[0].columns, /amount/);
+  assert.equal(rows[0].amount, 1800);
+});
+
+// --- pre-migration degrade (flips the module flag — keep LAST) ---------------
+
+test('getCategoryRules degrades when the amount COLUMN is missing', async () => {
+  const calls = [];
+  const client = fakeRulesClient([
+    amountMissingError && { data: null, error: amountMissingError },
+    { data: [{ merchant_key: 'SAFEWAY', category: 'Groceries' }], error: null },
+  ], calls);
+  const rules = await getCategoryRules({ client });
+  assert.match(calls[0].columns, /amount/);
+  assert.doesNotMatch(calls[1].columns, /amount/);
+  assert.deepEqual(rules, { SAFEWAY: [{ amount: null, category: 'Groceries' }] });
+});
+
+test('with the column missing, writes stop sending and filtering on it', async () => {
+  const calls = [];
+  const client = fakeRulesClient([{ error: null }, { error: null }], calls);
+  await setCategoryRule('Safeway', 'Groceries', 1800, { client });
+  // no .is/.eq on amount at all, and the insert omits the column
+  assert.deepEqual(calls[0].filters, [['eq', 'merchant_key', 'SAFEWAY']]);
+  assert.equal('amount' in calls[1].payload, false);
+
+  const calls2 = [];
+  const c2 = fakeRulesClient([{ error: null }], calls2);
+  await deleteCategoryRule('SAFEWAY', 1800, { client: c2 });
+  assert.deepEqual(calls2[0].filters, [['eq', 'merchant_key', 'SAFEWAY']]);
+});
+
+test('listCategoryRules drops the amount column rather than reading it as a missing table', async () => {
+  const calls = [];
+  const client = fakeRulesClient([
+    { data: [{ merchant_key: 'SAFEWAY', category: 'Groceries', source: 'user', updated_at: 'x' }], error: null },
+  ], calls);
+  const rows = await listCategoryRules({ client });
+  assert.doesNotMatch(calls[0].columns, /amount/);
+  assert.equal(rows[0].amount, null);
+  assert.notEqual(rows, null);
 });

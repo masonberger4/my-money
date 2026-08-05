@@ -339,6 +339,26 @@ playwright-core screenshot (`executablePath:'/opt/pw-browsers/chromium'`,
   "SAFEWAY #1234" and "SAFEWAY 8892" collapse but "COSTCO GAS" and
   "COSTCO WHSE" stay distinct; matching is exact or whole-token prefix,
   longest rule wins.
+- **A learned rule may be scoped to an exact AMOUNT (2026-08-05, Mason's
+  case).** `category_rules.amount` is null for the ordinary merchant-wide rule
+  and a number — app convention, positive = money out — for a rule that only
+  claims rows at that exact amount. The case that forced it: "Zelle Transfer"
+  is rent at $1,800.00 and a dozen unrelated things at every other amount, so
+  the merchant-wide rule is WRONG for most of the merchant's rows and teaching
+  it would silently recategorize them. **An amount-scoped rule outranks EVERY
+  any-amount rule, even one with a longer key** — key length only breaks ties
+  within a tier. The narrow rule is a deliberate assertion about one recurring
+  payment and must survive beside the generic rule for the same merchant, which
+  would otherwise shadow it depending on how the descriptor happened to be
+  worded. Amounts compare at cent precision and **the sign is significant**.
+  A rules bag therefore maps key → EITHER a category string (the legacy
+  any-amount shape, still read everywhere) OR an array of `{amount, category}`;
+  no loader had to be rewritten. The rule table's PK could not hold a nullable
+  column, so it is TWO partial unique indexes — which is also why
+  `setCategoryRule` is a slot-scoped delete-then-insert rather than an upsert
+  (ON CONFLICT cannot infer a partial index). Migration
+  `20260805000002_category_rule_amounts.sql`, **inverted deploy order — paste
+  AFTER the deploy**, since it drops the PK the old build's upsert names.
   **Known limit, pinned by a REGRESSION test in `test/txClassify.test.js`:** the
   prefix runs rule→row, so a rule is only general if the descriptor it was
   taught from was ALREADY the short form. Teach from "COSTCO GAS #0117 SEATTLE
@@ -980,8 +1000,14 @@ files / Gotchas, plus the few rules noted inline here that live nowhere else.
 
 ## Pending branches
 
-None in code, and **no migration is outstanding** — `20260805000001` was pasted
-and verified 2026-08-05 (see the applied-to-PROD note below).
+**ONE migration outstanding: `20260805000002_category_rule_amounts.sql`
+(amount-scoped learned rules).** Its deploy order is **INVERTED** — paste it
+only after the deploy is confirmed serving the new build, because it drops the
+PK the old build's `onConflict:'household_id,merchant_key'` upsert depends on.
+Everything degrades gracefully until then (an amount-scoped rule simply can't
+be saved yet); verify with the migration's own SELECT, which returns five
+readable booleans. `20260805000001` was pasted and verified 2026-08-05 (see the
+applied-to-PROD note below).
 
 **Outstanding ops/data tasks from the 2026-08-03 double-count session**
 (diagnosis archived in `docs/double-count-diagnosis-2026-08-03.md`):
