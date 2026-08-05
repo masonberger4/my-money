@@ -357,6 +357,29 @@ that held them is gone): month-navigation caching **yes** (shipped); **no**
 durable assistant throttle — the Anthropic spend cap is the control, and it is
 set; the dataAdapter split got **its own quiet session** (shipped).
 
+## Shipped since this doc was written
+
+- **Subcategories, one level (2026-08-05, Mason's decision)** — "we want totals
+  for both": a parent ("Transportation") and its children ("Gas", "Parking"),
+  with spending totals at both levels. **No migration and no schema change** —
+  transactions still store exactly one label, the LEAF, and the parent link is
+  an optional `parent` field in the `dash:cats` registry, so every learned
+  rule, budget row, tax mapping and envelope kept working untouched. Money is
+  owned at the leaf (`available = assigned + carry − spent` needs one owner per
+  dollar); a parent shows a read-only rollup and takes no assignment or target.
+  Pure core `src/categoryTree.js` + `test/categoryTree.test.js`; the decided
+  rules are in CLAUDE.md's Conventions.
+  - **Parent-level BUDGETING is deliberately NOT built** and is a separate
+    decision for Mason — assignments at both levels make "Transportation has
+    $400 available" ambiguous and let the walk double-count a dollar. Don't
+    propose it as a bug.
+  - Review fix worth remembering: `groupCategories` preserves the caller's
+    order, which is right for a leaf and wrong for a heading — a parent with no
+    rows of its own sorted into the appended zero-spend tail while rendering a
+    large rollup, dragging its children to the bottom of a biggest-spend-first
+    list. Groups are re-ranked after grouping (`orderGroups`). Any future
+    grouped list has the same trap: **sort by the number the row displays.**
+
 ## Next backlog
 
 This doc is an interim holding pen, not a verified backlog. The mechanism

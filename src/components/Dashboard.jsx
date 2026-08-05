@@ -15,7 +15,8 @@ import { unlinkInstitution, askAssistant, getSimpleFinStatus } from "../apiClien
 import { UNCATEGORIZED, isBudgetableCategory } from "../categoryMap.js";
 import { userCategoryList, missingCategories, isDuplicateCategoryName } from "../categoryList.js";
 import { parentIndex, parentOf, hasChildren, eligibleParents, canSetParent,
-  setRegistryParent, groupCategories, groupMembers, rollupFields } from "../categoryTree.js";
+  setRegistryParent, groupCategories, groupMembers, rollupFields,
+  orderGroups, earliestMemberRank } from "../categoryTree.js";
 import { teachQueueGroups, nonSpendLabel } from "../teachQueue.js";
 import { displayBalance, isDebtAccount as isDebtType } from "../accountBalance.js";
 import { unhideConfirmMessage } from "../unhideConfirm.js";
@@ -2821,7 +2822,7 @@ export default function Dashboard({ refreshTick = 0 }) {
   // rows the user tagged straight to "Transportation" before "Gas" existed are
   // still counted — dropping them would make money vanish off the tab).
   const catRowByLabel=new Map(catRows.map(r=>[r.label,r]));
-  const catGroups=groupCategories(catRows.map(r=>r.label),catIndex,getName)
+  const catGroups=orderGroups(groupCategories(catRows.map(r=>r.label),catIndex,getName)
     .map(node=>{
       const members=groupMembers(node);
       return {
@@ -2831,7 +2832,16 @@ export default function Dashboard({ refreshTick = 0 }) {
         own:catRowByLabel.get(node.name),
         roll:rollupFields(members,n=>catRowByLabel.get(n),["amount","transaction_count"]),
       };
-    });
+    }),
+    // This list is biggest-spend-first and a group RENDERS its rollup, so the
+    // group has to sort by that rollup. Without this a heading with no rows of
+    // its own is never in `cats` at all, lands in the appended zero-spend tail,
+    // and the tab's largest group renders below every $3 leaf — children in tow.
+    g=>-g.roll.amount);
+  // Bars are relative to the largest thing ACTUALLY RENDERED at top level, not
+  // to the largest single leaf: a rollup can exceed every leaf, which pegged
+  // the biggest group's bar at 100% (or past it) and made the column unreadable.
+  const maxCatBar=Math.max(...catGroups.map(g=>g.children.length?g.roll.amount:(g.own?.amount||0)),0)||maxCat;
   // ONE row renderer for the Categories tab, used at both levels — a
   // subcategory row is byte-identical to the row it was before it got a parent,
   // just indented. Two renderers would be two chances to drift.
@@ -2844,7 +2854,7 @@ export default function Dashboard({ refreshTick = 0 }) {
     // status, not palette, but it needs the same treatment to stay
     // visible on a dark track — the stored hexes are untouched.
     const barColor=markOn(hasB?(ratio>=1?"#D85A30":ratio>=0.8?"#FAC775":getColor(c.label)):getColor(c.label),surf.track);
-    const barW=hasB?Math.min(ratio,1)*100:(c.amount/maxCat)*100;
+    const barW=hasB?Math.min(ratio,1)*100:(c.amount/maxCatBar)*100;
     return (
     <div key={c.label} style={{marginBottom:14,animationDelay:i*.03+"s",
       ...(indent?{marginLeft:14,paddingLeft:10,borderLeft:"1px solid var(--border)"}:null)}}>
@@ -3049,14 +3059,21 @@ export default function Dashboard({ refreshTick = 0 }) {
   }
 
   const envRowByCat=new Map(envRows.map(r=>[r.category,r]));
-  const envGroups=groupCategories(envRows.map(r=>r.category),catIndex,getName).map(node=>({
+  // Same ordering bug as the Categories tab, different list order: envRows is
+  // the envelope walk followed by the appended empty rows, so a heading parent
+  // that has no budget_months row of its own is an appended emptyEnvRow and its
+  // whole group renders after every real envelope. The Budget list isn't sorted
+  // by magnitude, so a group takes the position of its earliest-placed member
+  // instead — the group sits where its children already sat.
+  const envPos=new Map(envRows.map((r,i)=>[r.category,i]));
+  const envGroups=orderGroups(groupCategories(envRows.map(r=>r.category),catIndex,getName).map(node=>({
     ...node,
     members:groupMembers(node),
     own:envRowByCat.get(node.name),
     rows:node.children.map(c=>envRowByCat.get(c)).filter(Boolean),
     roll:rollupFields(groupMembers(node),n=>envRowByCat.get(n),
       ["assigned","rolledOver","spent","available"]),
-  }));
+  })),node=>earliestMemberRank(node,n=>envPos.get(n)));
   const budgetableRows=envRows.filter(r=>isBudgetableCategory(r.category));
   // What each targeted category still needs this month to hit its target.
   // Fund targets and move destinations skip PARENTS: a parent takes no
@@ -3476,7 +3493,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                 // either number opens all of those rows together, so the list
                 // behind the number sums to the number that was tapped.
                 const open=openDrillGroup(g.name,kids);
-                const barW=maxCat>0?(roll.amount/maxCat)*100:0;
+                const barW=maxCatBar>0?(roll.amount/maxCatBar)*100:0;
                 return (
                 <div key={g.name} style={{marginBottom:14,animationDelay:gi*.03+"s"}}>
                   <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:5}}>

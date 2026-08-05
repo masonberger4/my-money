@@ -158,6 +158,43 @@ export function groupCategories(list = [], index, getName) {
   }));
 }
 
+// Re-position the GROUPS after grouping. `groupCategories` preserves the
+// caller's order for top-level rows, which is right for a plain leaf but wrong
+// for a heading: a parent used purely as a heading has no transactions of its
+// own, so on a biggest-spend-first list it arrives in the zero-spend tail and
+// drags every child down with it — while the number it RENDERS is the rollup.
+// A row must sort by the number it shows, so the caller ranks each group by
+// whatever its own list is ordered on (the rollup on the Categories tab, the
+// earliest member's walk position on the Budget tab).
+//
+// Stable ascending by `keyOf`, so equal keys keep the grouping order and a
+// caller that wants biggest-first just returns a negated value. Non-finite keys
+// sort last rather than corrupting the order.
+export function orderGroups(groups = [], keyOf) {
+  const key = typeof keyOf === 'function' ? keyOf : () => 0;
+  return (groups || [])
+    .map((g, i) => {
+      const k = Number(key(g, i));
+      return { g, i, k: Number.isFinite(k) ? k : Infinity };
+    })
+    .sort((a, b) => a.k - b.k || a.i - b.i)
+    .map((x) => x.g);
+}
+
+// Rank a group by the EARLIEST position any of its members holds in the
+// caller's original list — the Budget tab's rule, where the list is the
+// envelope walk's order rather than a magnitude. A group with no member in the
+// list (impossible today, but cheap to survive) sorts last.
+export function earliestMemberRank(node, positionOf) {
+  const pos = typeof positionOf === 'function' ? positionOf : () => undefined;
+  let best = Infinity;
+  for (const name of groupMembers(node)) {
+    const p = Number(pos(name));
+    if (Number.isFinite(p) && p < best) best = p;
+  }
+  return best;
+}
+
 // Every label whose money belongs under a group heading: the parent's OWN rows
 // plus its children's. The parent is included deliberately — a user who tagged
 // transactions to "Transportation" before adding "Gas" still has those rows,
