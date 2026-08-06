@@ -882,9 +882,11 @@ export function coverageShortfall(wantedStartMs, nowMs) {
   };
 }
 
-// Account-type inference. SimpleFIN sends no type/subtype, but the whole
-// cash-flow model keys off them (isCheckingAccount / isHouseholdDepository in
-// dataAdapter.js), so a wrong guess quietly distorts Trends. The name is all
+// Account-type inference. SimpleFIN sends no type/subtype, but the spending,
+// income and net-worth models all key off them at READ time (`isSpend` /
+// `isCardPaymentRow` in src/spending.js, `applyAccountRules` in
+// src/categoryMap.js, `displayBalance` in src/accountBalance.js), so a wrong
+// guess quietly distorts three different numbers. The name is all
 // there is to go on, so the guess is INSERT-ONLY: api/sync.js writes it when it
 // first sees an account and never again, and the Accounts tab lets the type be
 // corrected by hand. Order matters — investments and loans first, then the

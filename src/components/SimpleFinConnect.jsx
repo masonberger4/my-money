@@ -14,9 +14,11 @@ import { runSync, pullWasClean } from "../sync.js";
 // Accounts arrive HIDDEN. The original reason (a bank on both Plaid and
 // SimpleFIN would double-count) died with Plaid; the surviving one is that
 // SimpleFIN sends no account type, so it is INFERRED from the account name.
-// `isCheckingAccount` then decides whether that account's outflows are
-// household spending, so a card guessed as checking silently inflates every
-// total. Unhiding is the deliberate act that confirms the guess.
+// That guess then governs three separate numbers (see the account-type
+// Convention in CLAUDE.md): a card guessed as checking turns its refunds into
+// income, lets card-payment wording veto real purchases out of spending, and
+// counts its balance as an asset instead of a debt. Unhiding is the deliberate
+// act that confirms the guess.
 
 const BRIDGE_URL = "https://bridge.simplefin.org/";
 

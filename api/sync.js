@@ -451,9 +451,11 @@ export async function pullOneAccessUrl(supabase, householdId, accessRow, { force
         // both Plaid and SimpleFIN would land its transactions twice — died
         // with Plaid. The surviving reason is sharper: SimpleFIN sends no
         // account type, so it is GUESSED from the account name a few lines up,
-        // and `isCheckingAccount` reads that guess to decide whether an
-        // account's outflows count as household spending. A card mistaken for
-        // a checking account turns every purchase into spending. Hidden
+        // and that guess governs three separate numbers at READ time (see the
+        // account-type Convention in CLAUDE.md): a card mistaken for a
+        // checking account turns its refunds into income, lets card-payment
+        // wording veto real purchases out of spending, and counts its balance
+        // as an asset instead of a debt. Hidden
         // accounts are fully browsable in the Accounts tab but excluded from
         // spending, trends and totals, so unhiding is the deliberate act that
         // CONFIRMS the type — and `hidden` is user-owned, so no later sync
