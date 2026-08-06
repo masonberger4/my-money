@@ -19,6 +19,9 @@ jobs:
   checks:
     name: tests + build
     runs-on: ubuntu-latest
+    # Every step here finishes in seconds; anything past this is a stall, and
+    # GitHub's default would otherwise let it sit for SIX HOURS.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -43,6 +46,10 @@ jobs:
   smoke:
     name: render check
     runs-on: ubuntu-latest
+    # See the install step: apt behind --with-deps has stalled for 10+ minutes
+    # on consecutive runs. The job bound is the backstop; without it a stall
+    # blocks the merge for six hours and looks identical to "still running".
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -52,10 +59,30 @@ jobs:
       - run: npm ci
       # --no-save: the browser driver is CI-only and must not become a
       # dependency of the app (the suite stays zero-dep by design).
+      #
+      # `--with-deps` shells out to apt, and apt is the one genuinely unbounded
+      # thing in this workflow. Observed 2026-08-05: this step took ~10s on
+      # most runs and 10m43s on one, while every other step held steady at a
+      # few seconds — i.e. the mirror, not the repo. Nothing bounded it, and an
+      # unbounded stall is worse than a failure: it reads as "still running"
+      # and silently blocks the merge for up to GitHub's six-hour default. So
+      # each attempt is bounded, and the fallback drops apt entirely — if a
+      # system library really is missing, chromium fails to LAUNCH in the next
+      # step, which is a loud, legible failure instead of a hang.
       - name: install browser driver
+        timeout-minutes: 9
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
           npm install --no-save playwright-core@1 playwright@1
-          npx playwright install --with-deps chromium
+          for attempt in 1 2; do
+            if timeout 240 npx playwright install --with-deps chromium; then
+              exit 0
+            fi
+            echo "browser install attempt $attempt stalled or failed; retrying"
+          done
+          echo "falling back to the browser download without apt"
+          npx playwright install chromium
       - name: boot harness and assert the app renders
         run: |
           npx vite --config test/smoke/vite.config.js --port 5199 > /tmp/vite-smoke.log 2>&1 &
