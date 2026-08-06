@@ -70,13 +70,14 @@ export function isBudgetableCategory(category) {
 // function was never called at READ time, so deleting it changes nothing that
 // is already in the database.
 
-export function isTransferCategory(category) {
-  return category === TRANSFER_CATEGORY;
-}
-
-export function isReturnCategory(category) {
-  return category === RETURN_CATEGORY;
-}
+// `isTransferCategory` / `isReturnCategory` lived here and were deleted
+// (2026-08-06) with zero callers outside their own unit test. They were a
+// SECOND answer to a question the unified linked-boundary model already
+// answers structurally: internal is decided by the pairing in
+// markInternalTransfers, and `isSpend()` (src/spending.js) is the ONE
+// predicate. The constants they wrapped — TRANSFER_CATEGORY / RETURN_CATEGORY
+// — are unchanged and still load-bearing (the card-payment veto reads the
+// first, applyAccountRules synthesises the second).
 
 // A negative amount on a credit-card account is a refund / statement credit /
 // cashback — not income, not spending. Surface it as its own "Return" line.

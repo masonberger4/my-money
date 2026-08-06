@@ -9,8 +9,6 @@ import {
   UNCATEGORIZED,
   FALLBACK_CATEGORY,
   isBudgetableCategory,
-  isTransferCategory,
-  isReturnCategory,
   applyAccountRules,
 } from '../src/categoryMap.js';
 
@@ -67,11 +65,7 @@ test('REGRESSION: the deleted built-in taxonomy never comes back as a seed', () 
   assert.ok(!ERA_CATEGORIES.includes('Income'), 'no Income member');
 });
 
-test('the predicate helpers agree with the constants', () => {
-  assert.equal(isTransferCategory(TRANSFER_CATEGORY), true);
-  assert.equal(isTransferCategory(RETURN_CATEGORY), false);
-  assert.equal(isReturnCategory(RETURN_CATEGORY), true);
-  assert.equal(isReturnCategory(TRANSFER_CATEGORY), false);
+test('the fallback category is the honest unknown', () => {
   // The fallback is the honest unknown (also pinned by value in
   // test/csvImport.test.js — keep both).
   assert.equal(FALLBACK_CATEGORY, UNCATEGORIZED);
