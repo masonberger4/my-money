@@ -4406,9 +4406,10 @@ export default function Dashboard({ refreshTick = 0 }) {
                 MANUAL accounts, whose type is set once at creation and then
                 never written again by anything. Leaving them out meant a
                 statement-imported account typed Savings by mistake could never
-                be corrected, and `isCheckingAccount` in cashFlow.js reads
-                exactly that field to decide whether its outflows are household
-                spending. A field that changes the numbers must be fixable. */}
+                be corrected — and the type field governs whether refunds read
+                as income, whether card-payment wording can veto a purchase out
+                of spending, and whether the balance counts as an asset or a
+                debt. A field that changes the numbers must be fixable. */}
             {(isSimpleFinAccount(selAcct)||isManualAccount(selAcct))&&(
               <div style={{marginTop:12,background:"var(--bg)",borderRadius:8,padding:"10px 12px"}}>
                 <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em",marginBottom:8}}>Account type</div>

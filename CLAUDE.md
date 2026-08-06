@@ -35,7 +35,8 @@ entry once shipped.
     bank on both feeds would double-count) is gone, but the rule stays for the
     surviving one: the account's TYPE is *guessed* from its name, and unhiding
     is the deliberate act that confirms the guess. A card mistyped as checking
-    turns every purchase into household spending.
+    corrupts three separate numbers — see the account-type Convention for
+    which and why.
 - **Auth**: one shared Supabase Auth user for the household.
   `household_members` maps user → household; `current_household_id()` + RLS
   policies scope every table. `api/` routes verify the JWT via `requireUser()`
@@ -216,9 +217,29 @@ playwright-core screenshot (`executablePath:'/opt/pw-browsers/chromium'`,
 - **SimpleFIN sends no account type/subtype/mask/category.** Type is *inferred
   from the account name* at first insert and is **user-owned thereafter** — the
   sync writes it on INSERT only, and the Accounts tab lets it be corrected
-  (that's why the account write splits into insert-new / update-balances). It
-  matters because `isCheckingAccount` decides whether an account's outflows
-  count as household spending. The editor covers MANUAL accounts too: their type
+  (that's why the account write splits into insert-new / update-balances).
+  **Why the type matters, corrected 2026-08-06** — the old wording here ("it
+  decides whether an account's outflows count as household spending") is a
+  survival from the pre-unification two-model design and is WRONG under the
+  linked-boundary model, where `isSpend` needs only `amount > 0` on a non-loan
+  account, so a card's purchases count whether it is typed `credit` or
+  `checking`. It misled a session into telling Mason the opposite of the truth.
+  What a card mistyped as `depository` actually breaks, all three reading
+  `t.accounts.type` at READ time, so every row inherits the mistake:
+  1. **Refunds become income.** `applyAccountRules` only synthesises `Return`
+     for `credit && amount < 0`; without it a refund is an unpaired depository
+     inflow, which is exactly `cashIncome`'s definition of money in.
+  2. **Some purchases vanish from spending.** `isCardPaymentRow` early-returns
+     false for `type === 'credit'` (a positive on a card IS a purchase). Typed
+     `depository`, that exit is gone and any purchase worded like a card
+     payment gets vetoed — the "Capital One Travel" / "Discover Tire and Auto"
+     class.
+  3. **The balance counts as an asset, not a debt.** `displayBalance` negates
+     only `credit`/`loan`, and `normalizeBalance` only flips the sign for
+     those — so the balance lands positive and net worth is overstated by
+     roughly twice it, while the Debt tab never sees the account.
+  Net direction: spending is UNDER-counted, income and net worth OVER-stated.
+  The editor covers MANUAL accounts too: their type
   is written once at creation and never again, so a mistyped import would
   otherwise be uncorrectable forever. (It used to be SimpleFIN-only because a
   Plaid sync rewrote both columns on every pull and an edit would silently
@@ -1195,8 +1216,10 @@ shown as owed. Rare and small.
 
 **Account-type inference is the fragile part, not the balance.** Card *product*
 names carry no card-ish word — a "Venture X" landed as `depository/checking`,
-which would have counted all 348 card purchases as household cash spending the
-moment it was unhidden. `inferAccountType` now also matches product names
+which would have mis-read all 348 of that card's rows the moment it was
+unhidden (the three failure modes are in the account-type Convention; the
+"counted them all as cash spending" phrasing that stood here was pre-unification
+and wrong). `inferAccountType` now also matches product names
 (venture/quicksilver/freedom/sapphire/…), card-only issuers, and falls back to
 `credit` on a negative balance; the deposit rules still run first so
 "Platinum Savings" and "Preferred Checking" stay deposits. **Always eyeball the
