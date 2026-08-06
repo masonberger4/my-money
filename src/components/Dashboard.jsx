@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from "react";
-import { getOverview, getSpending, getBiggestMovers, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES, setCategoryRule, applyCategoryRuleToHistory, listCategoryRules, countCategoryRuleMatches, deleteCategoryRule, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, invalidateEnvelopeSpending, isEnvelopeSchemaMissing, targetNeed, readyToAssign, envelopePace, getEnvPace, setEnvPace as persistEnvPace, getRecIgnore, updateRecIgnore, monthKey, getEntities, createEntity, updateEntity, getTaxYearTransactions, getMileage, addMileage, deleteMileage, getReceiptTxIds, getDebts, getBalanceSnapshots, getNetWorthSeries, addManualTransaction, createManualAccount, updateManualBalance, getDataCoverage, signOut, autoFillMonth, setTargetOverride, effectiveTarget, getExpectedTransactions, addExpected, dismissExpected, matchExpectedManually, getSavedChats, saveChatToApp, deleteSavedChat } from "../dataAdapter.js";
+import { getOverview, getSpending, getBiggestMovers, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES, setCategoryRule, applyCategoryRuleToHistory, listCategoryRules, countCategoryRuleMatches, deleteCategoryRule, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, invalidateEnvelopeSpending, isEnvelopeSchemaMissing, targetNeed, readyToAssign, envelopePace, getEnvPace, setEnvPace as persistEnvPace, getRecIgnore, updateRecIgnore, monthKey, getEntities, createEntity, updateEntity, getTaxYearTransactions, getMileage, addMileage, deleteMileage, getReceiptTxIds, getDebts, getBalanceSnapshots, getNetWorthSeries, addManualTransaction, createManualAccount, updateManualBalance, getDataCoverage, getFeedCoverageGaps, signOut, autoFillMonth, setTargetOverride, effectiveTarget, getExpectedTransactions, addExpected, dismissExpected, matchExpectedManually, getSavedChats, saveChatToApp, deleteSavedChat } from "../dataAdapter.js";
 // Pure cores imported directly (never Supabase — the mock-harness alias rule
 // only covers dataAdapter/sync/db/apiClient; pure modules are safe).
 import { planAutoFill } from "../envelopes.js";
@@ -1436,6 +1436,26 @@ export default function Dashboard({ refreshTick = 0 }) {
       catch(e){ setCovErr(e?.message||"failed to load"); }
     }
   };
+  // --- Feed-reach shortfall (Accounts tab, read-only) ---
+  // Which fed accounts have history SimpleFIN could never fetch. Not a
+  // troubleshooting toy like the coverage panel above and not an error: it is
+  // the expected result of a first pull, so it renders neutral, never amber
+  // (amber = the feed is broken; reusing it here trains it as noise). No
+  // dismiss and no ack key on purpose — an ack needs a device-vs-household
+  // decision Mason hasn't made, and the notice already self-clears when a
+  // statement backfill lands. Fetched on the Accounts tab only; the adapter
+  // never throws, so a failure is simply zero gaps and nothing renders.
+  const [feedGaps,setFeedGaps]=useState(null);   // null = not fetched yet; {gaps,reachDays,truncated}
+  const feedGapSeq=useRef(0);
+  useEffect(()=>{
+    if(tab!=="accounts"||!accounts.length) return;
+    const seq=++feedGapSeq.current;
+    (async()=>{
+      const r=await getFeedCoverageGaps(accounts);
+      if(feedGapSeq.current===seq) setFeedGaps(r);
+    })();
+  },[tab,accounts,refreshTick]);
+
   // --- Debt tab (lazy like recurring) ---
   const [debtData,setDebtData]=useState(null);   // {debts,totalDebt,totalMinimums,hasDebtColumns}
   const [debtLoading,setDebtLoading]=useState(false);
@@ -4239,6 +4259,42 @@ export default function Dashboard({ refreshTick = 0 }) {
             )}
             <div style={{marginTop:14,fontSize:11,color:"var(--muted)",background:"var(--bg)",borderRadius:8,padding:"8px 12px"}}>
               Double-click a name to set a nickname · Click a swatch to change the badge color
+            </div>
+          </div>
+        )}
+
+        {/* FEED REACH — history SimpleFIN can never fetch. Deliberately NEUTRAL
+            (--border/--muted on --bg, no amber, no icon): a shortfall is the
+            known limit of the feed's ~88-day window, not a failure, and the
+            amber feed-health banner must keep meaning "something is broken".
+            Read-only: no dismiss, no ack. Renders NOTHING when there is no
+            shortfall, when the data hasn't loaded, or when the lookup failed. */}
+        {tab==="accounts"&&!selAcct&&feedGaps&&feedGaps.gaps.length>0&&(
+          <div className="card" style={{marginTop:14}}>
+            <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em"}}>Feed reach</div>
+            <div style={{marginTop:8,fontSize:12,color:"var(--text)",lineHeight:1.5}}>
+              SimpleFIN serves about {feedGaps.reachDays} days of history per request, so the first pull
+              on {feedGaps.gaps.length===1?"this account":"these accounts"} could not reach any further back:
+            </div>
+            <div style={{marginTop:8}}>
+              {feedGaps.gaps.map(g=>{
+                const a=accounts.find(x=>x.id===g.account_id);
+                return (
+                  <div key={g.account_id} style={{padding:"6px 0",borderBottom:"1px solid var(--border)"}}>
+                    <div style={{fontSize:12,fontWeight:500,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
+                      {a?acctLabel(a):"Account"}
+                    </div>
+                    <div style={{fontSize:11,color:"var(--muted)",marginTop:2}}>
+                      history before <span style={{fontFamily:"'DM Mono',monospace",color:"var(--text)"}}>{g.served_from}</span> was never fetched
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            <div style={{marginTop:8,fontSize:11,color:"var(--muted)",lineHeight:1.5}}>
+              Nothing is wrong with the connection — older transactions simply aren't available from the feed.
+              Import a CSV or PDF statement into an account to fill its history in.
+              {feedGaps.truncated&&" (Only the first 25 fed accounts were checked.)"}
             </div>
           </div>
         )}

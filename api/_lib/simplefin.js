@@ -26,6 +26,7 @@
 // spec text, no library, and no fixture settles it — see normalizeBalance().
 
 import { lookup as dnsLookup } from 'node:dns/promises';
+import { FEED_REACH_DAYS } from '../../src/coverage.js';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 
@@ -60,7 +61,11 @@ export const OVERLAP_DAYS = envInt('SIMPLEFIN_OVERLAP_DAYS', 30);
 // the caller can report — redefining the constant would erase the only signal
 // that older history was never fetched. Statement import is how that history
 // gets in (see CLAUDE.md).
-export const MAX_LOOKBACK_DAYS = envInt('SIMPLEFIN_MAX_LOOKBACK_DAYS', 88);
+// The default lives in src/coverage.js (FEED_REACH_DAYS) rather than here, so
+// the number the Accounts tab QUOTES to the user and the number the request is
+// clamped to can never drift apart. src/ is the pure side and api/ imports it,
+// the same direction as categoryMap/txClassify/accountBalance.
+export const MAX_LOOKBACK_DAYS = envInt('SIMPLEFIN_MAX_LOOKBACK_DAYS', FEED_REACH_DAYS);
 
 const DAY_MS = 86400000;
 

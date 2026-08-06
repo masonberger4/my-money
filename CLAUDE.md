@@ -95,7 +95,7 @@ entry once shipped.
 | `src/netWorth.js` | Pure `netWorthSeries` (only import `displayBalance`): folds `balance_snapshots` into `[{date,total}]`, carrying each account's LAST value forward (a day where one bank reported must not read the others as zero; no snapshot yet ⇒ contributes 0). Totals arrive SIGNED (debts negated inside the fold) — render directly, NEVER through `displayBalance` again. Hidden accounts EXCLUDED (Mason 2026-08-03): filtered in `getNetWorthSeries` (dataAdapter) so the fold never sees them or their snapshots. Degrades to `[]` pre-snapshots-table. `test/netWorth.test.js`. |
 | `src/savedChats.js` | Pure parse/trim/title/evict for Ask-tab chats: `trimChatMsgs` is the ONE trim discipline shared by the sessionStorage scrollback and saved chats (≤29 user-first messages, under `api/assistant.js`'s server caps — a restored history + the new turn must never trip the server's `slice(-MAX_TURNS)` into an assistant-first history, which the API 400s); `addSavedChat` evicts OLDEST past 10 chats / 300k serialized chars (evict, don't refuse). `test/savedChats.test.js`. |
 | `src/searchFilters.js` | Pure search-filter core, zero imports: `parseAmount` (filters match \|amount\| — a typed 80 hits either direction), `sanitizeDateInput` (complete-date + year floor — the `<input type="date">` gotcha; garbage reads as "no filter yet", never a bound that empties results), `buildSearchFilters` (inverted ranges swap; all-empty → null), `amountOrClause` (PostgREST `.or()` branches, injection-safe by construction). `test/searchFilters.test.js`. |
-| `src/coverage.js` | Pure core of the TEMPORARY data-coverage panel (Accounts tab). `test/coverage.test.js`. |
+| `src/coverage.js` | Two things, one temporary and one not. `aggregateCoverage` is the pure core of the TEMPORARY data-coverage panel (Accounts tab). `FEED_REACH_DAYS` (88) + `FEED_GRACE_DAYS` + `feedCoverageGaps` are the PERMANENT feed-reach tell — `FEED_REACH_DAYS` is **THE ONE COPY** of the feed's reach, imported by `api/_lib/simplefin.js` as `MAX_LOOKBACK_DAYS`'s default (api→src, the categoryMap/txClassify direction) so the number the Accounts tab quotes and the number the request is clamped to can't drift; `test/coverage.test.js` pins the lockstep. |
 | `src/monthMemo.js` | Per-reload range-request memo (`createRangeMemo`), zero imports: promise-keyed entries so parallel `reloadData` callers join one in-flight fetch; a range CONTAINED in another is served by slicing the wider fetch's rows (byte-equivalent to the skipped query). Returns FRESH per-row copies every call because the caller pipelines (`applyAccountRules`/`markInternalTransfers`) mutate rows in place — the purchase model gets un-marked copies, `getCashFlow` marks its own. Evicts on rejection; dataAdapter clears it on every write path. `test/monthMemo.test.js`. |
 | `api/_lib/unlink.js` | Pure remove-bank decisions, zero I/O: the `unlink:<institutionId>` settings-key namespacing, `visibleAtHide` (which account ids to record), tolerant `parseRestoreSet`, `restoreSet` (recorded ∩ still-present — deliberately-hidden and post-remove-arrival accounts never unhidden), and the `permanent:true`+`confirm:'delete'` literal gate. `test/unlink.test.js`. |
 | `src/accountBalance.js` | `isDebtAccount` / `displayBalance` — the stored-positive → displayed-negative rule for credit and loan balances. Pure JS; imported by both Dashboard.jsx and the server-side assistant context. |
@@ -867,6 +867,33 @@ files / Gotchas, plus the few rules noted inline here that live nowhere else.
   throttle is server-side pull throttling — nothing client-side syncs hourly).
   `test/invalidationMatrix.test.js` + `test/sync.test.js`. No migration.
 
+- **Feed-reach shortfall surfaced (2026-08-06)** — the last specced roadmap
+  code item, no migration. `api/sync.js`'s `coverage_shortfall` is still
+  returned and still read by nobody: it is TRANSIENT and **absent on every
+  steady-state pull**, the absence-has-no-alarm shape again. The Accounts tab
+  instead derives the same fact from the **LEDGER**, client-side —
+  `getFeedCoverageGaps(accounts)` (dataAdapter; one indexed `limit 1` per
+  visible fed account, capped at 25) over the pure `feedCoverageGaps`
+  (`src/coverage.js`): an account is flagged when its oldest stored row of ANY
+  source lands inside `[created_at − FEED_REACH_DAYS, created_at +
+  FEED_GRACE_DAYS]`, i.e. the first pull's own floor is why nothing older is
+  here. **The lower bound is the whole invalidation story** — one imported
+  statement row before the wall drops `first` below it and the notice
+  self-clears, so there is no ack key and nothing to invalidate. Persisting on
+  `simplefin_access` was rejected (per-access-URL so it can never name an
+  account, and it becomes a lie once a backfill lands); so was recomputing
+  `coverageShortfall(now − FIRST_PULL_DAYS, now)` server-side (730 > 88
+  always ⇒ a permanent banner unrelated to reality). `accounts.created_at`
+  joined `ACCOUNT_COLUMNS` — it has been there since the init migration.
+  **Renders NEUTRAL, never amber**: a shortfall is the known limit of the
+  ~88-day window, not a failure, and the amber feed-health banner must keep
+  meaning "something is broken". Read-only by decision: no dismiss, no ack —
+  that needs a device-vs-household choice Mason hasn't made. The adapter
+  NEVER throws (any failure ⇒ zero gaps ⇒ nothing renders): a wrong warning
+  here is worse than a missing one. `pullWasClean` still ignores
+  `coverage_shortfall` — a shortfall must never block the statement import
+  that is its remedy.
+
 - **User-owned categories (2026-08-05, Mason's decision — REVERSES the seed
   taxonomy)** — migration `20260805000001_user_owned_categories.sql`, **applied
   to PROD and verified 2026-08-05**. The app ships no categories:
@@ -1088,8 +1115,8 @@ delete-when-spent rule; what survived them — the refuted-don't-re-propose list
 and Mason's recorded decisions — moved into that doc, and their decided rules
 are in this file. Git history holds the rest.
 
-**Worklist status:** one specced code item left (`coverage_shortfall`
-surfacing). Everything else is either shipped, deliberately deferred (the
+**Worklist status:** no specced code items left — `coverage_shortfall`
+surfacing shipped 2026-08-06 (see Merged features). Everything else is either shipped, deliberately deferred (the
 Dashboard.jsx decomposition — keep the single file during active development),
 or gated on Mason. What outranks the code: the **needs-Mason data work in
 Pending** (payroll dupe, Discover twins, statement backfill; the spend cap and
