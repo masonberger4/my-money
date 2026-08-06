@@ -4292,8 +4292,15 @@ export default function Dashboard({ refreshTick = 0 }) {
               })}
             </div>
             <div style={{marginTop:8,fontSize:11,color:"var(--muted)",lineHeight:1.5}}>
-              Nothing is wrong with the connection — older transactions simply aren't available from the feed.
-              Import a CSV or PDF statement into an account to fill its history in.
+              {/* "if the account is older than that" is doing real work: the
+                  feed never sends an account's OPEN date, so a card opened a
+                  month before it was linked lands in the same window as a
+                  decade-old checking account. The dates above are true either
+                  way — nothing before them was fetched — but without this
+                  clause the panel implies history exists and sends someone
+                  hunting a statement that has nothing on it. */}
+              Nothing is wrong with the connection — the feed just doesn't reach further back.
+              If the account is older than that, import a CSV or PDF statement to fill its history in.
               {feedGaps.truncated&&" (Only the first 25 fed accounts were checked.)"}
             </div>
           </div>
