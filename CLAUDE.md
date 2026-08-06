@@ -1000,13 +1000,14 @@ files / Gotchas, plus the few rules noted inline here that live nowhere else.
 
 ## Pending branches
 
-**ONE migration outstanding: `20260805000002_category_rule_amounts.sql`
-(amount-scoped learned rules).** Its deploy order is **INVERTED** — paste it
-only after the deploy is confirmed serving the new build, because it drops the
-PK the old build's `onConflict:'household_id,merchant_key'` upsert depends on.
-Everything degrades gracefully until then (an amount-scoped rule simply can't
-be saved yet); verify with the migration's own SELECT, which returns five
-readable booleans. `20260805000001` was pasted and verified 2026-08-05 (see the
+None in code, and **no migration is outstanding** — `20260805000002`
+(amount-scoped learned rules) was pasted **after** the deploy per its inverted
+deploy order and verified 2026-08-05 with all five booleans true, incl.
+`old_pk_dropped` (its absence would mean the drop matched nothing and an
+amount-scoped insert would fail on the old PK). Confirmed working against live
+data the same day: a $1,800.00 Zelle Transfer scoped to Rent previewed 4
+matching past transactions rather than the whole merchant.
+`20260805000001` was pasted and verified earlier that day (see the
 applied-to-PROD note below).
 
 **Outstanding ops/data tasks from the 2026-08-03 double-count session**
@@ -1059,6 +1060,9 @@ Plaid Items CLOSED (2026-08-01 — Mason deleted the Plaid account, retiring
 every Item; `PLAID_*` env vars already removed).
 
 **Every migration in `supabase/migrations/` is applied to PROD**, through
+`20260805000002_category_rule_amounts.sql` (verified 2026-08-05, all five
+booleans true — it also takes the **inverted** paste-after-deploy order, since
+it drops the PK the old build's rule upsert names).
 `20260805000001_user_owned_categories.sql` — pasted **after** the deploy was
 confirmed serving the new build (its DEPLOY ORDER block says why) and verified
 2026-08-05 by the migration's own verification SELECT, run as a separate
