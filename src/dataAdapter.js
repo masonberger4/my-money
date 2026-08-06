@@ -10,7 +10,7 @@ import { createRangeMemo } from './monthMemo.js';
 import { setSyncCompletionHook } from './sync.js';
 import { amountOrClause, searchIsActive } from './searchFilters.js';
 import { CANDIDATE_WINDOW_MONTHS } from './recurring.js';
-import { aggregateCoverage } from './coverage.js';
+import { aggregateCoverage, feedCoverageGaps, FEED_REACH_DAYS } from './coverage.js';
 import { netWorthSeries, clampSeries } from './netWorth.js';
 import {
   pad2,
@@ -117,7 +117,10 @@ const TX_COLUMNS =
 const TX_TAX_COLUMNS = ', entity_id, is_capital, placed_in_service, useful_life_years';
 
 const ACCOUNT_COLUMNS =
-  'id, institution_id, plaid_account_id, name, official_name, nickname, color, mask, type, subtype, current_balance, available_balance, last_balance_at, hidden, institutions(name, display_name)';
+  // created_at has been on `accounts` since the init migration (it is the day
+  // the account's FIRST pull ran), and getFeedCoverageGaps reads it to tell a
+  // feed-reach gap from an account that is simply new.
+  'id, institution_id, plaid_account_id, name, official_name, nickname, color, mask, type, subtype, current_balance, available_balance, last_balance_at, hidden, created_at, institutions(name, display_name)';
 
 // The RAW range fetch: pagination + the entity-column fallback, NO
 // per-model pipeline (applyAccountRules / markInternalTransfers) — those
@@ -1558,6 +1561,51 @@ export async function getDataCoverage() {
     if (data.length < page) break;
   }
   return aggregateCoverage(rows);
+}
+
+// Feed-reach shortfall, per account (Accounts tab). SimpleFIN serves at most
+// ~90 days per request, so a first pull reaches back FEED_REACH_DAYS and no
+// further — history older than that was NEVER FETCHED and nothing downstream
+// will ever fetch it (statement import is the only path). api/sync.js reports
+// the same fact as `coverage_shortfall` in its response, but that value is
+// transient AND absent on every steady-state pull, so a client listening to
+// sync responses would see it once and never again: the absence-has-no-alarm
+// shape this codebase keeps getting bitten by. Derived from the LEDGER instead
+// — which needs no migration, survives a reload, and self-clears the moment a
+// backfill row lands (see feedCoverageGaps).
+//
+// One indexed `limit 1` per fed account, capped, and takes the already-loaded
+// accounts so it costs no extra account read. Returns
+//   { gaps: [{ account_id, served_from }], reachDays, truncated }
+// and NEVER throws: any failure resolves to zero gaps, because a wrong warning
+// here is worse than a missing one.
+const FEED_GAP_SCAN_CAP = 25;
+
+export async function getFeedCoverageGaps(accounts) {
+  const empty = { gaps: [], reachDays: FEED_REACH_DAYS, truncated: false };
+  try {
+    const fed = (accounts || []).filter(a => a && !a.hidden && isSimpleFinAccount(a));
+    const scan = fed.slice(0, FEED_GAP_SCAN_CAP);
+    const rows = await Promise.all(
+      scan.map(async a => {
+        const { data, error } = await supabase
+          .from('transactions')
+          .select('date')
+          .eq('account_id', a.id)
+          .order('date', { ascending: true })
+          .limit(1);
+        if (error) throw error;
+        return { account_id: a.id, created_at: a.created_at, first: data?.[0]?.date || null };
+      })
+    );
+    return {
+      gaps: feedCoverageGaps(rows),
+      reachDays: FEED_REACH_DAYS,
+      truncated: fed.length > scan.length,
+    };
+  } catch {
+    return empty;
+  }
 }
 
 // Sign out the shared household session on this device. A passthrough so

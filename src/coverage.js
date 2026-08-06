@@ -28,3 +28,74 @@ export function aggregateCoverage(rows) {
   }
   return out;
 }
+
+// ---------------------------------------------------------------------------
+// Feed reach / coverage shortfall — NOT temporary, unlike aggregateCoverage
+// above. This is the tell for history the SimpleFIN feed can never fetch.
+//
+// THE ONE COPY of the feed's reach. api/_lib/simplefin.js imports it as the
+// default for MAX_LOOKBACK_DAYS (the api → src direction is the established
+// one for pure modules — categoryMap/txClassify/accountBalance are all imported
+// by server code). A second hardcoded client copy would drift the moment
+// SIMPLEFIN_MAX_LOOKBACK_DAYS is tuned, and the copy is what the USER-FACING
+// sentence quotes.
+export const FEED_REACH_DAYS = 88;
+
+// Slack on the upper bound. An account whose oldest row is comfortably NEWER
+// than the day we linked it simply has no older history to miss (it was opened
+// after we connected), so it must not nag; a few days of slack absorbs
+// posted-date wobble around the link itself.
+export const FEED_GRACE_DAYS = 7;
+
+const DAY_MS = 86400000;
+
+// Both inputs are compared at UTC-DAY granularity: `created_at` is a timestamp
+// and `first` is a calendar date, so comparing raw milliseconds would put the
+// wall half a day off and make the boundary case flip on the time of day the
+// account happened to be linked.
+function dayMs(v) {
+  if (!v) return null;
+  const t = Date.parse(typeof v === 'string' && v.length === 10 ? `${v}T00:00:00Z` : v);
+  return Number.isFinite(t) ? Math.floor(t / DAY_MS) * DAY_MS : null;
+}
+
+// Which SimpleFIN-fed accounts have history the feed never fetched, derived
+// from the LEDGER — never from the sync's transient `coverage_shortfall`, and
+// never from `FIRST_PULL_DAYS > FEED_REACH_DAYS` (that inequality is always
+// true, so it would be a permanent banner unrelated to reality).
+//
+// rows: [{ account_id, created_at, first }] — `first` is the account's oldest
+// stored transaction date of ANY source, `created_at` the day the account row
+// was first written (i.e. the day its first pull ran).
+//
+// Flagged when `first` lands inside the first pull's reachable window,
+// [created_at − FEED_REACH_DAYS, created_at + FEED_GRACE_DAYS]: the oldest row
+// we hold is one the first pull could have fetched, so the pull's own floor —
+// not the account's age — is why nothing older is here.
+//   • The LOWER bound makes the notice SELF-CLEAR with no invalidation
+//     machinery: the moment a CSV/PDF backfill lands a row before the wall,
+//     `first` drops below it and the row stops being flagged.
+//   • `first` null (never synced, or an account with no rows at all) is NOT
+//     flagged — never assert a gap you cannot see, the Uncategorized rule.
+// Accepted false negatives, deliberately: an account that happened to be quiet
+// for its first weeks, and an account whose very first pull failed outright.
+// Both under-report, which is the safe direction — this must never render a
+// gap that isn't there.
+export function feedCoverageGaps(rows) {
+  const out = [];
+  for (const r of rows || []) {
+    if (!r || r.account_id == null) continue;
+    const created = dayMs(r.created_at);
+    const first = dayMs(r.first);
+    if (created === null || first === null) continue;
+    if (first < created - FEED_REACH_DAYS * DAY_MS) continue;
+    if (first > created + FEED_GRACE_DAYS * DAY_MS) continue;
+    out.push({ account_id: r.account_id, served_from: String(r.first).slice(0, 10) });
+  }
+  out.sort((a, b) =>
+    a.served_from < b.served_from ? -1
+      : a.served_from > b.served_from ? 1
+        : String(a.account_id) < String(b.account_id) ? -1 : 1
+  );
+  return out;
+}

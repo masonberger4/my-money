@@ -10,10 +10,10 @@ export const ACCOUNT_TYPES = ['depository', 'credit', 'loan'];
 export const ACCOUNT_SUBTYPES = ['checking', 'savings'];
 
 const ACCTS = [
-  { id: 'a1', institution_id: 'i1', plaid_account_id: 'sfin:1', name: 'Joint Checking', official_name: null, nickname: null, color: null, mask: '1234', type: 'depository', subtype: 'checking', current_balance: 4821.55, available_balance: 4821.55, last_balance_at: '2026-08-02T12:00:00Z', hidden: false, entity_id: null, institutions: { name: 'BECU', display_name: 'BECU' } },
-  { id: 'a2', institution_id: 'i1', plaid_account_id: 'sfin:2', name: 'Joint Savings', official_name: null, nickname: null, color: null, mask: '5678', type: 'depository', subtype: 'savings', current_balance: 15230.10, available_balance: 15230.10, last_balance_at: '2026-08-02T12:00:00Z', hidden: false, entity_id: null, institutions: { name: 'BECU', display_name: 'BECU' } },
-  { id: 'a3', institution_id: 'i2', plaid_account_id: 'sfin:3', name: 'Venture X', official_name: null, nickname: null, color: null, mask: '9012', type: 'credit', subtype: 'credit card', current_balance: 2148.33, available_balance: 12851.67, last_balance_at: '2026-08-02T12:00:00Z', hidden: false, entity_id: null, institutions: { name: 'Capital One', display_name: 'Capital One' } },
-  { id: 'a4', institution_id: 'i2', plaid_account_id: 'sfin:4', name: 'Quicksilver', official_name: null, nickname: null, color: null, mask: '3456', type: 'credit', subtype: 'credit card', current_balance: 512.09, available_balance: 4487.91, last_balance_at: '2026-08-02T12:00:00Z', hidden: false, entity_id: null, institutions: { name: 'Capital One', display_name: 'Capital One' } },
+  { id: 'a1', institution_id: 'i1', plaid_account_id: 'sfin:1', name: 'Joint Checking', official_name: null, nickname: null, color: null, mask: '1234', type: 'depository', subtype: 'checking', current_balance: 4821.55, available_balance: 4821.55, last_balance_at: '2026-08-02T12:00:00Z', hidden: false, created_at: '2026-05-02T09:00:00Z', entity_id: null, institutions: { name: 'BECU', display_name: 'BECU' } },
+  { id: 'a2', institution_id: 'i1', plaid_account_id: 'sfin:2', name: 'Joint Savings', official_name: null, nickname: null, color: null, mask: '5678', type: 'depository', subtype: 'savings', current_balance: 15230.10, available_balance: 15230.10, last_balance_at: '2026-08-02T12:00:00Z', hidden: false, created_at: '2026-05-02T09:00:00Z', entity_id: null, institutions: { name: 'BECU', display_name: 'BECU' } },
+  { id: 'a3', institution_id: 'i2', plaid_account_id: 'sfin:3', name: 'Venture X', official_name: null, nickname: null, color: null, mask: '9012', type: 'credit', subtype: 'credit card', current_balance: 2148.33, available_balance: 12851.67, last_balance_at: '2026-08-02T12:00:00Z', hidden: false, created_at: '2026-05-02T09:00:00Z', entity_id: null, institutions: { name: 'Capital One', display_name: 'Capital One' } },
+  { id: 'a4', institution_id: 'i2', plaid_account_id: 'sfin:4', name: 'Quicksilver', official_name: null, nickname: null, color: null, mask: '3456', type: 'credit', subtype: 'credit card', current_balance: 512.09, available_balance: 4487.91, last_balance_at: '2026-08-02T12:00:00Z', hidden: false, created_at: '2026-05-02T09:00:00Z', entity_id: null, institutions: { name: 'Capital One', display_name: 'Capital One' } },
 ];
 const acctType = id => ACCTS.find(a => a.id === id)?.type || 'depository';
 
@@ -387,6 +387,20 @@ export async function addManualTransaction() {}
 export async function createManualAccount() { return { id: 'am1' }; }
 export async function getFeedCoverageStart() { return null; }
 export async function getDataCoverage() { return { accounts: [], months: [] }; }
+// Feed-reach shortfall. Realistic default: this household linked SimpleFIN on
+// 2026-05-02 and the first pull reached ~88 days back, so the two BECU accounts
+// start at the wall and have no older history, while the two Capital One cards
+// carry pre-link statement imports and are therefore NOT flagged.
+export async function getFeedCoverageGaps() {
+  return {
+    gaps: [
+      { account_id: 'a1', served_from: '2026-02-04' },
+      { account_id: 'a2', served_from: '2026-02-06' },
+    ],
+    reachDays: 88,
+    truncated: false,
+  };
+}
 export async function signOut() {}
 export async function findOrCreateManualInstitution() { return { id: 'im' }; }
 
