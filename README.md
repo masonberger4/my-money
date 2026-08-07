@@ -2,6 +2,8 @@
 
 A self-hosted, private personal finance dashboard. Connects to your financial accounts — checking, savings, credit cards, loans, mortgages — via SimpleFIN, with CSV/PDF statement import for anything a feed can't reach. All data lives in the household's own Supabase Postgres (cloud-first, no local cache). No subscriptions. Your data stays yours.
 
+**Want to run your own copy?** Follow **[docs/SETUP.md](docs/SETUP.md)** — a verified step-by-step guide covering the Supabase database, Vercel deploy, environment variables, local development, and connecting your banks.
+
 ---
 
 ## Background
