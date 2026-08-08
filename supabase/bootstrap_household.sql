@@ -54,8 +54,9 @@ end $$;
 -- ============ VERIFICATION — every column must read TRUE ============
 -- One boolean per fact, named so a false column identifies its own failure.
 -- Facts chosen for the things a fresh install actually gets wrong: the
--- household link, the four latest migrations (whose absence is invisible until
--- a tab silently degrades), and the two storage objects that the receipts
+-- household link, all six migrations after the setup_all.sql snapshot's
+-- cutoff (whose absence is invisible until a tab silently degrades), and the
+-- two storage objects that the receipts
 -- migration can fail to create WITHOUT raising (the 42501 path — the SQL
 -- Editor's postgres role may not own storage.objects, and the migration turns
 -- that into a NOTICE nobody sees).
@@ -89,6 +90,14 @@ select
   not exists (select 1 from pg_indexes
           where schemaname = 'public'
             and indexname = 'category_rules_pkey')                  as old_pk_dropped,
+
+  -- 20260805000001 — the user-owned-categories wipe. The one migration whose
+  -- absence is otherwise INVISIBLE: it wipes data rather than adding a feature,
+  -- so every other boolean here can read true while it never ran. Its durable
+  -- schema residue is the tell.
+  exists (select 1 from information_schema.columns
+          where table_schema = 'public' and table_name = 'transactions'
+            and column_name = 'legacy_categories_saved')          as category_wipe_applied,
 
   -- 20260731000001 — receipts Storage. The bucket row, and the storage.objects
   -- policy that can fail with 42501 and be downgraded to an unseen NOTICE.

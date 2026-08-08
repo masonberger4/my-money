@@ -1,4 +1,4 @@
-# Supabase CLI config — FRESH INSTALLS ONLY.
+# Supabase CLI config — FRESH INSTALLS ONLY, AND NOT YET REHEARSED.
 #
 # This file exists so that a brand-new Supabase project can be built by
 # replaying `supabase/migrations/` with the CLI:
@@ -7,24 +7,44 @@
 #   supabase db push
 #   # then paste supabase/bootstrap_household.sql in the SQL Editor
 #
+# STATUS: the 18-file replay has never been run end-to-end against an empty
+# database. Until someone does it once on a throwaway project, the verified
+# install path is the SQL Editor paste (docs/SETUP.md Path B). Treat an error
+# during `db push` as the expected outcome of an unrehearsed path, not as
+# evidence your project is broken — fall back to Path B.
+#
 # DO NOT link the LIVE household project. Migrations on prod are pasted by
 # hand into the Supabase SQL Editor, in the order (and sometimes the inverted
 # deploy order) each migration's header specifies — `db push` cannot honour
 # "paste this one AFTER the deploy", and the CLI would want to baseline a
-# history it never ran. Prod is never linked and never baselined.
+# history it never ran. Worse, a push at a database that already has data
+# would replay 20260805000001_user_owned_categories.sql, whose whole job is to
+# WIPE every category, budget and learned rule. Prod is never linked and never
+# baselined.
 #
 # Deliberately minimal: the CLI's config surface changes between releases and
-# this project runs it approximately never. Every key here is one the link +
-# push path actually reads; add nothing speculatively.
+# this project runs it approximately never. Add nothing speculatively.
 
-# Overwritten by `supabase link` with the real project ref. The placeholder is
-# just a name for local scaffolding — it is not a secret and not the live ref.
+# The CLI records the linked project ref in supabase/.temp/ (gitignored), NOT
+# here — this value is local scaffolding only. It is not a secret and not the
+# live project's ref.
 project_id = "my-money"
 
 [db]
-# Local shadow/dev database used to diff and validate migrations before push.
-# Set this to match the REMOTE project's Postgres major version — check it with
-# `supabase projects list` — or the shadow DB can accept SQL the remote rejects.
-# 15 is the version Supabase provisioned for this project's era; new projects
-# are provisioned newer, so verify rather than trusting this number.
-major_version = 15
+# NOTE: `db push` talks straight to the remote and reads neither this key nor
+# project_id. major_version governs the LOCAL stack (`supabase start`) and the
+# shadow database used by `db diff` / `db lint` — none of which the documented
+# install flow runs. It matters only because `supabase link` compares it to the
+# remote and warns on a mismatch.
+#
+# 17 is what Supabase provisions for new projects today. If `link` says your
+# project differs, set this to the number it reports; nothing else depends on
+# it.
+major_version = 17
+
+[db.seed]
+# supabase/seed.sql is a hand-paste artifact: it contains a literal
+# <HOUSEHOLD_USER_UUID> placeholder and its own household insert, so letting
+# the CLI run it automatically (on `db reset`) would error or create a second
+# household. Keep it opt-in and paste it by hand if you ever want sample rows.
+enabled = false

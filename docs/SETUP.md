@@ -28,11 +28,50 @@ If `npm test` reports failures like `Cannot find package '@anthropic-ai/sdk'`, t
 
 ## 2. Create the Supabase project and database
 
-1. Create a new Supabase project (pick a strong database password; region near you).
+> **NEVER point `supabase link` / `supabase db push` at a database that already has data.** The migration set includes `20260805000001_user_owned_categories.sql`, which **wipes every category, budget and learned rule**. On an empty database that is a no-op; replayed against a live one it destroys your categorization. The CLI path below is for **fresh installs only**. Existing databases keep the SQL Editor paste workflow (section 9).
 
-2. **Create the auth user FIRST.** Dashboard → Authentication → Users → Add user. One shared login for the household: an email + password, with **Auto Confirm ON**. There is no signup flow in the app — this manual step is the only way a user gets created, and the next step depends on it existing.
+Steps 1–2 are shared by both paths. Then pick **Path A** (Supabase CLI) or **Path B** (SQL Editor paste).
 
-   While you're there, **disable public signups** (Authentication → Sign In/Up → Email → turn off signups). Nothing in the app uses them, the publishable key in the deployed bundle would otherwise let anyone mint auth users via the API, and the setup script below binds the household to the *first* auth user by creation time — a stray signup could claim that slot on a re-run.
+1. Create a new Supabase project (pick a strong database password; region near you — you'll need that password again for `supabase link`).
+
+2. **Create the auth user FIRST.** Dashboard → Authentication → Users → Add user. One shared login for the household: an email + password, with **Auto Confirm ON**. There is no signup flow in the app — this manual step is the only way a user gets created, and the household-bootstrap step in both paths depends on it existing.
+
+   While you're there, **disable public signups** (Authentication → Sign In/Up → Email → turn off signups). Nothing in the app uses them, the publishable key in the deployed bundle would otherwise let anyone mint auth users via the API, and the bootstrap binds the household to the *first* auth user by creation time — a stray signup could claim that slot on a re-run.
+
+### Path A — Supabase CLI (PENDING REHEARSAL — prefer Path B today)
+
+> **Not yet rehearsed.** Nobody has replayed all 18 migrations end-to-end on an empty database via `db push`. The migration files are append-only history and are CLI-compatible by filename, but until someone has done a clean run, treat this path as unproven. **If you want the path that is known to work, use Path B.** Fall back to it if anything here errors.
+
+This is the direction the project is moving — `supabase/migrations/` is the source of truth, so replaying it is the honest fresh install, and it needs no hand-pasted tail. It becomes the default once someone rehearses it on a throwaway project.
+
+The CLI is **not** a project dependency: `npx supabase` fetches it on demand (or install it yourself per Supabase's docs). Nothing pins its version, so a future release may behave differently from these notes.
+
+3. Log in and link the project (from the repo root, so the CLI finds `supabase/config.toml`):
+
+   ```bash
+   npx supabase login
+   npx supabase link --project-ref <your-project-ref>   # prompts for the DB password
+   ```
+
+   The project ref is the subdomain of your project URL (`https://<ref>.supabase.co`). Re-read the warning at the top of this section before running the next command.
+
+   `supabase/config.toml` is checked in and deliberately tiny. If `link` complains that the Postgres major version doesn't match, edit `[db] major_version` to the number it reports — nothing in this flow depends on that value beyond silencing the warning. The CLI stores the linked ref under `supabase/.temp/` (gitignored), not in `config.toml`.
+
+4. Push the schema:
+
+   ```bash
+   npx supabase db push
+   ```
+
+   This runs every file in `supabase/migrations/` in filename order. The "paste after deploy" ordering notes inside some migrations apply only to a **live** database with old code still deployed — irrelevant on a fresh install.
+
+5. **Bootstrap the household.** Open the SQL Editor, paste the entire contents of `supabase/bootstrap_household.sql`, and run it. It links the first auth user (by `created_at`) to a new `households` row ("My Household") as owner, and is idempotent — a second run changes nothing.
+
+   The script ends with a verification SELECT of booleans. **Read them.** They must all be `true`. The Supabase SQL Editor does **not** display `raise notice`, so a skipped bootstrap looks exactly like a successful one — the booleans are the only visible evidence. If they're false, create the auth user (step 2) and re-run the script.
+
+6. **Verify the receipts storage policy** — see "Storage policy check" below. Required on this path too.
+
+### Path B — SQL Editor paste (currently verified fallback)
 
 3. **Run the fresh-install script.** Open the SQL Editor, paste the entire contents of `supabase/setup_all.sql`, and run it.
 
@@ -54,21 +93,32 @@ If `npm test` reports failures like `Cannot find package '@anthropic-ai/sdk'`, t
    4. `20260805000001_user_owned_categories.sql`
    5. `20260805000002_category_rule_amounts.sql`
 
-   All five run clean on the fresh baseline, but **not all are re-runnable**: `20260801000001` and `20260804000002` contain bare `create table` / `create policy` / `create index` statements, so a second run errors with "already exists". If you hit that, the statement already applied — continue with the next file rather than starting over. (The "paste after deploy" ordering notes inside some of them apply only to migrations run against a **live** database with the old code still deployed — irrelevant on a fresh install.)
+   All five run clean on the fresh baseline. Two of them are **not safe to re-run**, so paste each exactly once:
 
-5. **Verify the receipts storage policy.** `setup_all.sql` creates the private `receipts` bucket and attempts to create the `receipts_objects_all` policy on `storage.objects`. On hosted Supabase that table is owned by `supabase_storage_admin`, so the `create policy` can fail with a permissions error that the script downgrades to an invisible NOTICE. Never trust "Success. No rows returned" — verify:
+   - `20260804000002_expected_transactions.sql` uses bare `create table` / `create policy` / `create index` — a second run errors with "already exists". If you hit that, the statement already applied; move on to the next file rather than starting over.
+   - `20260805000001_user_owned_categories.sql` copies rows into its `legacy_*` archive tables with no conflict target, so a second run **silently duplicates** those archive rows instead of erroring. Harmless on an empty fresh install (it copies nothing), but don't make a habit of it.
 
-   ```sql
-   select * from pg_policies where policyname = 'receipts_objects_all';
-   ```
+   The other three (`20260801000001`, `20260804000001`, `20260805000002`) are fully guarded with `if not exists` / `drop … if exists` and are safe to re-run. (The "paste after deploy" ordering notes inside some of them apply only to migrations run against a **live** database with the old code still deployed — irrelevant on a fresh install.)
 
-   If no row comes back, create the policy by hand in Dashboard → Storage → Policies, on the `receipts` bucket: policy **for ALL operations**, target role **`authenticated`**, and the same expression in **both** the USING and WITH CHECK boxes:
+5. **Verify the install.** Paste `supabase/bootstrap_household.sql` into the SQL Editor and run it. `setup_all.sql` already linked the household, so its bootstrap block correctly does nothing — you're running it for the verification SELECT at the bottom, which is the only check that covers the five migrations you just pasted by hand. **Every boolean must read `true`.** (`setup_all.sql`'s own self-check stops at the receipts migration, so it passes green whether or not you completed step 4.) The file is idempotent and non-destructive.
 
-   ```sql
-   bucket_id = 'receipts' and (storage.foldername(name))[1] = current_household_id()::text
-   ```
+6. **Verify the receipts storage policy** — see "Storage policy check" below.
 
-   Then re-run the `pg_policies` check above. Note the expression depends on `current_household_id()` staying a public, executable function — `setup_all.sql` sets that up; don't revoke it in a later tidy. Until the policy exists, receipt uploads fail with an RLS violation (an availability gap, not a data leak — the bucket is private either way). Once the app is running, round-trip one real receipt upload to confirm.
+### Storage policy check (both paths)
+
+The receipts migration creates the private `receipts` bucket and attempts to create the `receipts_objects_all` policy on `storage.objects`. On hosted Supabase that table is owned by `supabase_storage_admin`, so the `create policy` can fail with a permissions error that the script downgrades to an invisible NOTICE. Never trust "Success. No rows returned" — verify:
+
+```sql
+select * from pg_policies where policyname = 'receipts_objects_all';
+```
+
+If no row comes back, create the policy by hand in Dashboard → Storage → Policies, on the `receipts` bucket: policy **for ALL operations**, target role **`authenticated`**, and the same expression in **both** the USING and WITH CHECK boxes:
+
+```sql
+bucket_id = 'receipts' and (storage.foldername(name))[1] = current_household_id()::text
+```
+
+Then re-run the `pg_policies` check above. Note the expression depends on `current_household_id()` staying a public, executable function — the init migration (and `setup_all.sql`) sets that up; don't revoke it in a later tidy. Until the policy exists, receipt uploads fail with an RLS violation (an availability gap, not a data leak — the bucket is private either way). Once the app is running, round-trip one real receipt upload to confirm.
 
 For a longer walkthrough of this section, see `supabase/README.md` — but where the two documents differ (it still lists the legacy Supabase key names), **this guide's tables are authoritative**; the code accepts both naming generations, as described next.
 
@@ -158,6 +208,6 @@ Open your deployed URL in Safari → Share → **Add to Home Screen**. The app s
 
 ## 9. Ongoing maintenance
 
-- **Schema changes**: apply new files from `supabase/migrations/` in the SQL Editor, in filename order. Additive migrations go in before deploying code that uses them; migrations that DROP go in *after* the new code is live. Verify each with a SELECT you can read — never trust "Success. No rows returned".
+- **Schema changes**: on an **existing database with real data, keep pasting** new files from `supabase/migrations/` into the SQL Editor, in filename order — do **not** `supabase link` / `db push` at it, which would replay the whole history including the category-wipe migration. The CLI is the fresh-install path only. Additive migrations go in before deploying code that uses them; migrations that DROP go in *after* the new code is live. Verify each with a SELECT you can read — never trust "Success. No rows returned".
 - **Tests**: run `npm test` before pushing; `main` auto-deploys.
 - Everything starts **Uncategorized** by design — you create every category and teach merchant rules from the Categories tab's teach queue; nothing is guessed.

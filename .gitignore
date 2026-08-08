@@ -5,4 +5,9 @@ dist/
 .claude/
 .harness/
 
+# Supabase CLI local state — `supabase link` writes the project ref and a
+# pooler connection string here. Never commit it.
+supabase/.temp/
+supabase/.branches/
+
 .vercel
