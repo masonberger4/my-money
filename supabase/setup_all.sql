@@ -1,8 +1,23 @@
+-- ============================================================================
+-- TOMBSTONE (2026-08-08). SUPERSEDED for fresh installs by the Supabase CLI
+-- flow (`supabase db push`, replaying migrations/ in order) — docs/SETUP.md
+-- Path A. This file remains Path B: the currently-VERIFIED fallback, kept
+-- because the CLI path has not yet been rehearsed end-to-end on an empty DB.
+--
+-- IT IS STALE. It replays only through 20260731000001_receipts.sql, and its
+-- final self-check stops at the same point — so it passes GREEN while the five
+-- later migrations are missing. Paste those by hand afterwards (docs/SETUP.md
+-- lists them).
+--
+-- STILL DESTRUCTIVE: it DROPS every my-money table. Never run on live data.
+-- ============================================================================
+
 -- ONE-PASTE SETUP for my-money.
 --
 -- Paste this entire file into the Supabase SQL Editor and click Run.
--- Safe to run repeatedly: it DROPS and recreates all my-money tables
--- (fine before you have real data; after that, use individual migrations).
+-- Repeatable ONLY on a project with no real data: every run DROPS and
+-- recreates all my-money tables. Once real data exists, this file destroys it —
+-- use individual migrations from migrations/ instead.
 --
 -- Recommended order:
 --   1. Authentication → Users → Add user (email + household password,
