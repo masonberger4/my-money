@@ -167,3 +167,78 @@ export function lcg(seed) {
     return s / 2 ** 32;
   };
 }
+
+// ---------------------------------------------------------------------------
+// Sectioned deposit-account layout (the Discover Cashback Debit shape): ONE
+// unsigned Amount column, direction carried by section headings — "Deposits
+// and Credits" first, then withdrawal sections. The deposits heading sits
+// BEFORE the column-header line that serves as the startAnchor, exactly like
+// the real statement, so tests cover that ordering.
+// ---------------------------------------------------------------------------
+export const DEPOSIT = {
+  width: 612,
+  boundaries: [0.2, 0.75],
+  roles: ['date', 'description', 'amount'],
+  x: { date: 40, desc: 165, amountRight: 570 },
+};
+
+export function depositRow(y, date, desc, amount) {
+  return [
+    run(date, DEPOSIT.x.date, y),
+    run(desc, DEPOSIT.x.desc, y),
+    runRight(String(amount), DEPOSIT.x.amountRight, y),
+  ];
+}
+
+export function depositTemplate(overrides = {}) {
+  return {
+    version: 1,
+    boundaries: DEPOSIT.boundaries,
+    roles: DEPOSIT.roles,
+    dateColumn: 'date',
+    amountMode: 'signed',
+    amountSign: 'out_positive',
+    startAnchor: 'Eff. Date Description Amount',
+    stopAnchor: '',
+    pages: null,
+    ...overrides,
+  };
+}
+
+// rows: [date, desc, amount] tuples per section. Sections render in the given
+// order, each as: heading line, column-header (anchor) line, rows. A summary
+// box with digit-carrying deposit/withdrawal lines precedes the table, like
+// the real statement's ACCOUNT SUMMARY — it must NOT read as a heading.
+export function depositStatementPage(sections, {
+  period = 'Jul 01, 2026 - Jul 31, 2026',
+  pageNo = 1,
+} = {}) {
+  const runs = [
+    ...textLine(30, 'SYNTH BANK Cashback Checking'),
+    ...textLine(46, [['Statement Period:', 40], [period, 150]]),
+    ...textLine(62, 'Deposits and Credits.......+$1,000.00'),
+    ...textLine(74, 'Electronic Withdrawals.......-$500.00'),
+    ...textLine(92, 'ACCOUNT ACTIVITY'),
+  ];
+  let y = 110;
+  for (const s of sections) {
+    runs.push(...textLine(y, s.heading));
+    y += 18;
+    runs.push(
+      run('Eff. Date', DEPOSIT.x.date, y),
+      run('Description', DEPOSIT.x.desc, y),
+      run('Amount', 540, y),
+    );
+    y += 18;
+    for (const r of s.rows) {
+      runs.push(...depositRow(y, ...r));
+      y += 16;
+    }
+    if (s.total) {
+      runs.push(...textLine(y, s.total));
+      y += 18;
+    }
+    y += 8;
+  }
+  return page(pageNo, runs);
+}

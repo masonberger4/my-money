@@ -563,6 +563,34 @@ const DESC_CONTINUATION_X_TOL = 12;
 // admits the wraps and excludes both.
 const DESC_CONTINUATION_Y_FACTOR = 1.8;
 
+// ---------------------------------------------------------------------------
+// Sectioned statements. Deposit-account statements (Discover Cashback Debit is
+// the live case) print ONE unsigned Amount column under direction-carrying
+// section headings — "Deposits and Credits", then "ATM and Debit Card
+// Withdrawals" / "Electronic Withdrawals". Read as a flat signed column, every
+// deposit imports as money OUT: July 2026 parsed as $29,039.65 out / $0 in when
+// the statement itself said $15,503.65 out + $13,536.00 in, and the comparison
+// audit then reported every deposit as a "sync gap" (file +600 vs feed −600).
+//
+// classifySectionHeading decides a heading's direction. It only ever sees lines
+// that carry NO digits (a real heading is words only), which is what keeps the
+// ACCOUNT SUMMARY box ("Deposits and Credits...+$13,536.00") and the
+// "TOTAL DEPOSITS AND CREDITS $ 13,536.00" rows from matching. Credit-ish words
+// win when both kinds appear, so a card statement's "Payments and Credits"
+// (both inflows to a card) reads 'in'.
+// ---------------------------------------------------------------------------
+const SECTION_IN_RE = /\b(deposits?|credits?|additions)\b/i;
+const SECTION_OUT_RE = /\b(withdrawals?|debits?|purchases?|checks?|fees?|charges?|payments?)\b/i;
+
+export function classifySectionHeading(text) {
+  const v = String(text ?? '').trim();
+  if (!v || v.length > 80) return null;
+  if (/\d/.test(v)) return null; // headings are words only; totals/summary lines carry digits
+  if (SECTION_IN_RE.test(v)) return 'in';
+  if (SECTION_OUT_RE.test(v)) return 'out';
+  return null;
+}
+
 export function applyTemplate(pages, template) {
   const t = template || {};
   const boundaries = t.boundaries || [];
@@ -589,12 +617,34 @@ export function applyTemplate(pages, template) {
   let lastPage = null;
   let lastDescX = null;
 
+  // Section tracking (see classifySectionHeading above). The current section is
+  // tracked even OUTSIDE the anchored region: on the live Discover layout the
+  // "Deposits and Credits" heading sits immediately BEFORE the column-header
+  // line that is the startAnchor, so gating on `inside` would leave page 1's
+  // deposits unsectioned. rowSections[i] is the section grid[i] was read under
+  // (null before any heading); the flip is applied after the scan, and only
+  // when the gate below says this really is a sectioned statement.
+  let curSection = null;
+  const rowSections = [];
+  let sawIn = false;
+  let sawOut = false;
+
   for (const pg of pages || []) {
     if (wantPages && !wantPages.has(pg.page)) continue;
     const lines = groupIntoLines(pg.runs);
     for (const line of lines) {
       if (startRe && startRe.test(line.text)) { inside = true; anchorFound = true; lastRowIndex = -1; lastDescX = null; continue; }
       if (stopRe && stopRe.test(line.text)) { inside = false; lastRowIndex = -1; lastDescX = null; continue; }
+      const heading = classifySectionHeading(line.text);
+      if (heading) {
+        curSection = heading;
+        if (heading === 'in') sawIn = true; else sawOut = true;
+        // A heading ends any row, so a description continuation can't glue
+        // across a section break.
+        lastRowIndex = -1;
+        lastDescX = null;
+        continue;
+      }
       if (!inside) continue;
 
       const cells = splitLineIntoCells(line, boundaries, pg.width);
@@ -618,7 +668,8 @@ export function applyTemplate(pages, template) {
           row[CANONICAL_COLUMNS.amount] = normalizeMoneyText(amountCol >= 0 ? cells[amountCol] || '' : '');
         }
         grid.push(row);
-        rowMeta.push({ page: pg.page, y: line.y, text: line.text, rawDate });
+        rowSections.push(curSection);
+        rowMeta.push({ page: pg.page, y: line.y, text: line.text, rawDate, section: curSection });
         lastRowIndex = grid.length - 1;
         lastY = line.y;
         lastPage = pg.page;
@@ -670,9 +721,36 @@ export function applyTemplate(pages, template) {
       ? { date: 0, description: 1, debit: 2, credit: 3, amount: -1 }
       : { date: 0, description: 1, debit: -1, credit: -1, amount: 4 };
 
+  // Sectioned-statement sign fix. Gated hard: a single amount column, BOTH
+  // heading kinds actually seen (one stray "Preauthorized Credits" in fine
+  // print can never trip it alone), and not explicitly disabled by the
+  // template (`sectionSigns: false` is the escape hatch if a layout's prose
+  // ever false-matches). Rows read before any heading keep the flat
+  // amountSign reading. The flip is RELATIVE to the printed value, not an
+  // abs(): a negative printed inside "Deposits and Credits" is a reversal and
+  // must land as money out, exactly like normalizeDebitCredit's reasoning.
+  const sectionsApplied =
+    t.amountMode !== 'debitcredit' && t.sectionSigns !== false && sawIn && sawOut;
+  if (sectionsApplied) {
+    const inPositive = (t.amountSign || 'out_positive') === 'in_positive';
+    for (let i = 0; i < grid.length; i++) {
+      const sec = rowSections[i];
+      if (!sec) continue;
+      // amountSign says what a POSITIVE cell means downstream; flip whenever
+      // the section says the opposite of that.
+      const flip = sec === 'in' ? !inPositive : inPositive;
+      if (!flip) continue;
+      const cell = grid[i][CANONICAL_COLUMNS.amount];
+      const v = parseMoney(normalizeMoneyText(cell));
+      if (!Number.isFinite(v) || v === 0) continue;
+      grid[i][CANONICAL_COLUMNS.amount] = (-v).toFixed(2);
+    }
+  }
+
   return {
     grid,
     columns,
+    sections: { in: sawIn, out: sawOut, applied: sectionsApplied },
     // buildRows(): headerIndex -1 makes it read from row 0 (the grid has no
     // header row); dates are already ISO so parseDate passes them through.
     buildOpts: { headerIndex: -1, columns, amountSign: t.amountSign || 'out_positive' },

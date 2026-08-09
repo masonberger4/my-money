@@ -709,3 +709,170 @@ test('one format per account: the same transaction worded CSV-style vs PDF-style
   const sameWording = analyzeCsv('Date,Description,Debit,Credit\n5/27/2026,RIVER GROCERY STORE 1467,45.00,');
   assert.equal(sameWording.rows[0].plaid_tx_id, pdfId);
 });
+
+// ---------------------------------------------------------------------------
+// Sectioned statements (the Discover Cashback Debit shape, 2026-08-09): one
+// unsigned Amount column, direction carried by "Deposits and Credits" /
+// "... Withdrawals" headings. Without the section flip every deposit imported
+// as money OUT and the comparison audit called every deposit a "sync gap".
+// ---------------------------------------------------------------------------
+import {
+  DEPOSIT,
+  depositRow,
+  depositTemplate,
+  depositStatementPage,
+} from './helpers/pdfFixtures.js';
+import { classifySectionHeading } from '../src/pdfImport.js';
+
+const SECTIONED = [
+  {
+    heading: 'Deposits and Credits',
+    rows: [
+      ['Jul 04', 'Zelle Payment From A FRIEND', '600.00'],
+      ['Jul 13', 'ACH Deposit PAYROLL From EMPLOYER', '2,640.00'],
+    ],
+    total: 'TOTAL DEPOSITS AND CREDITS $ 3,240.00',
+  },
+  {
+    heading: 'Electronic Withdrawals',
+    rows: [
+      ['Jul 16', 'ACH Withdrawal CITY UTILITIES', '271.03'],
+      ['Jul 20', 'ACH Withdrawal CABLE SVCS', '71.59'],
+    ],
+    total: 'TOTAL ELECTRONIC WITHDRAWALS $ 342.62',
+  },
+];
+
+test('classifySectionHeading: direction words, digit veto, credit wins', () => {
+  assert.equal(classifySectionHeading('Deposits and Credits'), 'in');
+  assert.equal(classifySectionHeading('ATM and Debit Card Withdrawals'), 'out');
+  assert.equal(classifySectionHeading('Electronic Withdrawals'), 'out');
+  // Card statements: "Payments and Credits" are inflows to the card.
+  assert.equal(classifySectionHeading('Payments and Credits'), 'in');
+  // Totals and summary lines carry digits — never headings.
+  assert.equal(classifySectionHeading('TOTAL DEPOSITS AND CREDITS $ 3,240.00'), null);
+  assert.equal(classifySectionHeading('Deposits and Credits.......+$1,000.00'), null);
+  assert.equal(classifySectionHeading(''), null);
+  assert.equal(classifySectionHeading('ACCOUNT ACTIVITY'), null);
+});
+
+test('applyTemplate: sectioned statement flips deposits to money in', () => {
+  const pages = [depositStatementPage(SECTIONED)];
+  const applied = applyTemplate(pages, depositTemplate());
+  assert.deepEqual(applied.sections, { in: true, out: true, applied: true });
+  const { rows } = buildRows(applied.grid, applied.buildOpts);
+  assert.equal(rows.length, 4);
+  const amounts = rows.map(r => r.amount).sort((a, b) => a - b);
+  assert.deepEqual(amounts, [-2640, -600, 71.59, 271.03]);
+  const totals = rowTotals(rows);
+  assert.deepEqual(totals, { out: 342.62, in: 3240 });
+  // The heading BEFORE the first startAnchor occurrence governs page-1 rows —
+  // the real statement prints "Deposits and Credits" above the column header.
+  assert.equal(applied.rowMeta[0].section, 'in');
+});
+
+test('applyTemplate: auto-detect on the sectioned page also lands the flip', () => {
+  // More rows than SECTIONED: auto-detect needs a real body under the header.
+  const sections = [
+    {
+      heading: 'Deposits and Credits',
+      rows: [
+        ['Jul 04', 'Zelle Payment From A FRIEND', '600.00'],
+        ['Jul 12', 'Zelle Payment From A FRIEND', '150.00'],
+        ['Jul 13', 'ACH Deposit PAYROLL From EMPLOYER', '2,640.00'],
+        ['Jul 24', 'ACH Deposit PAYROLL From EMPLOYER', '450.00'],
+      ],
+    },
+    {
+      heading: 'Electronic Withdrawals',
+      rows: [
+        ['Jul 16', 'ACH Withdrawal CITY UTILITIES', '271.03'],
+        ['Jul 20', 'ACH Withdrawal CABLE SVCS', '71.59'],
+        ['Jul 21', 'ACH Withdrawal CITY UTILITIES', '374.98'],
+        ['Jul 28', 'Transfer To SAVINGS 0001', '3,417.00'],
+      ],
+    },
+  ];
+  const pages = [depositStatementPage(sections)];
+  const det = autoDetectTemplate(pages);
+  assert.ok(det, 'auto-detect finds the table');
+  const applied = applyTemplate(pages, det);
+  assert.equal(applied.sections.applied, true);
+  const { rows } = buildRows(applied.grid, applied.buildOpts);
+  const totals = rowTotals(rows);
+  assert.deepEqual(totals, { out: 4134.6, in: 3840 });
+});
+
+test('applyTemplate: one heading kind alone never trips the flip', () => {
+  const pages = [depositStatementPage([SECTIONED[1]])]; // withdrawals only
+  const applied = applyTemplate(pages, depositTemplate());
+  assert.deepEqual(applied.sections, { in: false, out: true, applied: false });
+  const { rows } = buildRows(applied.grid, applied.buildOpts);
+  assert.deepEqual(rowTotals(rows), { out: 342.62, in: 0 });
+});
+
+test('applyTemplate: sectionSigns:false is the escape hatch', () => {
+  const pages = [depositStatementPage(SECTIONED)];
+  const applied = applyTemplate(pages, depositTemplate({ sectionSigns: false }));
+  assert.equal(applied.sections.applied, false);
+  const { rows } = buildRows(applied.grid, applied.buildOpts);
+  assert.deepEqual(rowTotals(rows), { out: 3582.62, in: 0 }); // old flat reading
+});
+
+test('applyTemplate: a printed negative inside Deposits is a reversal (money out)', () => {
+  const sections = [
+    {
+      heading: 'Deposits and Credits',
+      rows: [
+        ['Jul 04', 'Zelle Payment From A FRIEND', '600.00'],
+        ['Jul 05', 'Zelle Reversal', '-100.00'],
+      ],
+    },
+    SECTIONED[1],
+  ];
+  const pages = [depositStatementPage(sections)];
+  const applied = applyTemplate(pages, depositTemplate());
+  const { rows } = buildRows(applied.grid, applied.buildOpts);
+  const reversal = rows.find(r => /Reversal/.test(r.description));
+  assert.equal(reversal.amount, 100); // flipped relative to print: out
+  const deposit = rows.find(r => /FRIEND/.test(r.description));
+  assert.equal(deposit.amount, -600);
+});
+
+test('applyTemplate: in_positive template flips the withdrawals side instead', () => {
+  const pages = [depositStatementPage(SECTIONED)];
+  const applied = applyTemplate(pages, depositTemplate({ amountSign: 'in_positive' }));
+  const { rows } = buildRows(applied.grid, applied.buildOpts);
+  // buildRows negates in_positive values; sections must land the same app signs.
+  assert.deepEqual(rowTotals(rows), { out: 342.62, in: 3240 });
+});
+
+test('applyTemplate: debit/credit templates ignore section headings', () => {
+  const pre = mortgagePreamble();
+  const runs = [
+    ...pre.map(r => r),
+    ...textLine(100, 'Payments and Credits'),
+    ...textLine(118, 'ACTIVITY SINCE LAST STATEMENT'),
+    ...mortgageHeader(136),
+    ...mortgageRow(154, '06/01/2026', 'PAYMENT RECEIVED', { payment: '2,100.00' }),
+    ...textLine(180, 'Fees and Charges'),
+    ...mortgageRow(198, '06/05/2026', 'LATE FEE', { charge: '35.00' }),
+    ...textLine(230, 'IMPORTANT MESSAGES'),
+  ];
+  const applied = applyTemplate([page(1, runs)], mortgageTemplate());
+  assert.equal(applied.sections.applied, false);
+  const { rows } = buildRows(applied.grid, applied.buildOpts);
+  assert.deepEqual(rowTotals(rows), { out: 35, in: 2100 });
+});
+
+test('applyTemplate: a heading breaks description continuation glue', () => {
+  const sections = [
+    { heading: 'Deposits and Credits', rows: [['Jul 04', 'Zelle Payment From A FRIEND', '600.00']] },
+    { heading: 'Electronic Withdrawals', rows: [['Jul 16', 'ACH Withdrawal CITY UTILITIES', '271.03']] },
+  ];
+  const pages = [depositStatementPage(sections)];
+  const applied = applyTemplate(pages, depositTemplate());
+  const { rows } = buildRows(applied.grid, applied.buildOpts);
+  assert.equal(rows.length, 2);
+  assert.ok(!/Withdrawals/.test(rows[0].description), 'heading text never glued onto a row');
+});
