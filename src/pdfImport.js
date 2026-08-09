@@ -624,28 +624,32 @@ export function applyTemplate(pages, template) {
   // deposits unsectioned. rowSections[i] is the section grid[i] was read under
   // (null before any heading); the flip is applied after the scan, and only
   // when the gate below says this really is a sectioned statement.
+  //
+  // Two containment rules, both from adversarial review of the first cut:
+  // - A "TOTAL …" line ends its section (curSection back to null), so rows
+  //   under a later heading the classifier can't read (digits, odd wording)
+  //   default to the flat reading instead of inheriting the previous
+  //   direction — the safe failure is "not flipped".
+  // - The stopAnchor also resets the section: a re-anchored continuation
+  //   table must not inherit a direction from fine print between regions.
   let curSection = null;
   const rowSections = [];
-  let sawIn = false;
-  let sawOut = false;
+  const TOTAL_LINE_RE = /^total\b/i;
+  const noteSectionLine = text => {
+    if (TOTAL_LINE_RE.test(String(text ?? '').trim())) { curSection = null; return false; }
+    const heading = classifySectionHeading(text);
+    if (!heading) return false;
+    curSection = heading;
+    return true;
+  };
 
   for (const pg of pages || []) {
     if (wantPages && !wantPages.has(pg.page)) continue;
     const lines = groupIntoLines(pg.runs);
     for (const line of lines) {
       if (startRe && startRe.test(line.text)) { inside = true; anchorFound = true; lastRowIndex = -1; lastDescX = null; continue; }
-      if (stopRe && stopRe.test(line.text)) { inside = false; lastRowIndex = -1; lastDescX = null; continue; }
-      const heading = classifySectionHeading(line.text);
-      if (heading) {
-        curSection = heading;
-        if (heading === 'in') sawIn = true; else sawOut = true;
-        // A heading ends any row, so a description continuation can't glue
-        // across a section break.
-        lastRowIndex = -1;
-        lastDescX = null;
-        continue;
-      }
-      if (!inside) continue;
+      if (stopRe && stopRe.test(line.text)) { inside = false; curSection = null; lastRowIndex = -1; lastDescX = null; continue; }
+      if (!inside) { noteSectionLine(line.text); continue; }
 
       const cells = splitLineIntoCells(line, boundaries, pg.width);
       const rawDate = dateCol >= 0 ? cells[dateCol] || '' : '';
@@ -710,6 +714,19 @@ export function applyTemplate(pages, template) {
         continue;
       }
 
+      // Section headings are classified only AFTER the row and continuation
+      // tests fail (review fix): a wrapped description's second line is often
+      // digit-free and can contain direction words ("PREAUTHORIZED PAYMENT",
+      // "PAYMENT THANK YOU") — geometry says it's a continuation, and the glue
+      // must win or the text is silently dropped, which would change the row's
+      // dedup hash and flip the section mid-table.
+      if (noteSectionLine(line.text)) {
+        // A heading ends any row, so a continuation can't glue across it.
+        lastRowIndex = -1;
+        lastDescX = null;
+        continue;
+      }
+
       if (line.text) skipped.push({ page: pg.page, y: Math.round(line.y), text: line.text.slice(0, 90) });
       lastRowIndex = -1;
       lastDescX = null;
@@ -721,18 +738,30 @@ export function applyTemplate(pages, template) {
       ? { date: 0, description: 1, debit: 2, credit: 3, amount: -1 }
       : { date: 0, description: 1, debit: -1, credit: -1, amount: 4 };
 
-  // Sectioned-statement sign fix. Gated hard: a single amount column, BOTH
-  // heading kinds actually seen (one stray "Preauthorized Credits" in fine
-  // print can never trip it alone), and not explicitly disabled by the
-  // template (`sectionSigns: false` is the escape hatch if a layout's prose
-  // ever false-matches). Rows read before any heading keep the flat
+  // Sectioned-statement sign fix. Gates, hardened by adversarial review:
+  // - single amount column only (`debitcredit` templates carry direction in
+  //   their columns already);
+  // - `sectionSigns: false` is the per-template escape hatch, `true` forces
+  //   the flip on for a layout the heuristics reject;
+  // - in auto mode (field absent), BOTH directions must actually GOVERN rows
+  //   (a heading with no transactions under it — fine print, tail-page
+  //   disclosures — counts for nothing), and the flip must be CORRECTIVE:
+  //   if the rows the flip would touch mostly already print the sign their
+  //   section implies, the column is a signed one that happens to sit under
+  //   direction-worded headings (a card statement's "Payments and Credits"
+  //   over negative-printed payments) and flipping would invert correct
+  //   values — so auto mode declines.
+  // Rows read before any heading (or after a TOTAL line) keep the flat
   // amountSign reading. The flip is RELATIVE to the printed value, not an
   // abs(): a negative printed inside "Deposits and Credits" is a reversal and
   // must land as money out, exactly like normalizeDebitCredit's reasoning.
-  const sectionsApplied =
-    t.amountMode !== 'debitcredit' && t.sectionSigns !== false && sawIn && sawOut;
-  if (sectionsApplied) {
+  let sectionsApplied = false;
+  const sawIn = rowSections.includes('in');
+  const sawOut = rowSections.includes('out');
+  if (t.amountMode !== 'debitcredit' && t.sectionSigns !== false) {
     const inPositive = (t.amountSign || 'out_positive') === 'in_positive';
+    const flips = []; // [index, printedValue]
+    let alreadyAgree = 0;
     for (let i = 0; i < grid.length; i++) {
       const sec = rowSections[i];
       if (!sec) continue;
@@ -740,10 +769,24 @@ export function applyTemplate(pages, template) {
       // the section says the opposite of that.
       const flip = sec === 'in' ? !inPositive : inPositive;
       if (!flip) continue;
-      const cell = grid[i][CANONICAL_COLUMNS.amount];
-      const v = parseMoney(normalizeMoneyText(cell));
+      const v = parseMoney(normalizeMoneyText(grid[i][CANONICAL_COLUMNS.amount]));
       if (!Number.isFinite(v) || v === 0) continue;
-      grid[i][CANONICAL_COLUMNS.amount] = (-v).toFixed(2);
+      // Would the UN-flipped reading already land on the section's side?
+      // (Printed negatives under "Deposits and Credits" on an out_positive
+      // template.) A few of these are reversals; a majority means the column
+      // is already signed.
+      const appNoFlip = inPositive ? -v : v;
+      if (sec === 'in' ? appNoFlip < 0 : appNoFlip > 0) alreadyAgree++;
+      flips.push([i, v]);
+    }
+    sectionsApplied =
+      flips.length > 0 &&
+      (t.sectionSigns === true ||
+        (sawIn && sawOut && alreadyAgree / flips.length <= 0.5));
+    if (sectionsApplied) {
+      for (const [i, v] of flips) {
+        grid[i][CANONICAL_COLUMNS.amount] = (-v).toFixed(2);
+      }
     }
   }
 

@@ -876,3 +876,126 @@ test('applyTemplate: a heading breaks description continuation glue', () => {
   assert.equal(rows.length, 2);
   assert.ok(!/Withdrawals/.test(rows[0].description), 'heading text never glued onto a row');
 });
+
+// --- Hardening from the adversarial review of the first cut ------------------
+
+test('applyTemplate: a digit-free wrap with direction words still glues (sectioned)', () => {
+  // "PREAUTHORIZED PAYMENT" as a wrapped second description line: geometry
+  // says continuation, and the glue must beat the heading classifier — the
+  // first cut ate the line (changing the dedup hash) AND flipped the section
+  // to 'out' mid-Deposits.
+  const pg = depositStatementPage([SECTIONED[0], SECTIONED[1]]);
+  // First deposit row is at y146 (30,46,62,74,92 preamble; 110 heading; 128 header; 146 row).
+  pg.runs.push(run('PREAUTHORIZED PAYMENT', DEPOSIT.x.desc, 158));
+  const applied = applyTemplate([pg], depositTemplate());
+  const { rows } = buildRows(applied.grid, applied.buildOpts);
+  const first = rows.find(r => /A FRIEND/.test(r.description));
+  assert.match(first.description, /PREAUTHORIZED PAYMENT/);
+  // Section did NOT flip mid-Deposits: the second deposit is still money in.
+  const payroll = rows.find(r => /EMPLOYER/.test(r.description));
+  assert.equal(payroll.amount, -2640);
+});
+
+test('applyTemplate: a digit-free wrap with direction words still glues (non-sectioned card)', () => {
+  const pg = cardStatementPage([
+    ['May 26', 'May 27', 'MEMBERSHIP', '45.00'],
+    ['May 28', 'May 29', 'GROCERY MART', '52.10'],
+  ]);
+  // Wrap under the first row's description (rows at y120/y140).
+  pg.runs.push(run('PAYMENT THANK YOU', CARD.x.desc, 133));
+  const applied = applyTemplate([pg], cardTemplate());
+  assert.equal(applied.sections.applied, false);
+  const { rows } = buildRows(applied.grid, applied.buildOpts);
+  assert.match(rows[0].description, /MEMBERSHIP PAYMENT THANK YOU/);
+  assert.equal(rows[0].amount, 45);
+});
+
+test('applyTemplate: signed card column under real direction headings is left alone', () => {
+  // A card statement whose Amount column is ALREADY signed prints payments
+  // negative under "Payments and Credits". Auto mode must decline: flipping
+  // would invert correct values. (The agreement gate.)
+  const runs = [
+    ...textLine(40, 'SYNTH BANK Card Services'),
+    ...textLine(58, [['Statement Period:', 40], ['May 25, 2026 - Jun 23, 2026', 150]]),
+    ...textLine(76, 'Payments and Credits'),
+    ...textLine(94, 'TRANSACTION DETAIL'),
+    ...cardHeader(112),
+    ...cardRow(130, 'May 26', 'May 27', 'PAYMENT RECEIVED', '-500.00'),
+    ...cardRow(150, 'May 27', 'May 28', 'STATEMENT CREDIT', '-25.00'),
+  ];
+  runs.push(...textLine(174, 'Purchases'));
+  runs.push(...cardRow(192, 'May 28', 'May 29', 'GROCERY MART', '52.10'));
+  runs.push(...cardRow(212, 'May 29', 'May 30', 'GAS STATION', '30.00'));
+  runs.push(...textLine(240, 'FEES SUMMARY'));
+  const applied = applyTemplate([page(1, runs)], cardTemplate());
+  assert.equal(applied.sections.applied, false);
+  const { rows } = buildRows(applied.grid, applied.buildOpts);
+  assert.deepEqual(rowTotals(rows), { out: 82.1, in: 525 }); // printed signs kept
+});
+
+test('applyTemplate: stray prose headings that govern no rows never trip the gate', () => {
+  const pg = cardStatementPage([
+    ['May 26', 'May 27', 'GROCERY MART', '45.00'],
+    ['May 27', 'May 28', 'GAS STATION', '-2000.00'],
+  ], { finePrint: 'Overdraft and NSF fees may apply' });
+  // Marketing line before the anchor: would tag every row 'in' in the first
+  // cut; the fees line after the stopAnchor governs nothing.
+  pg.runs.push(run('Sign up for direct deposits today', 40, 70));
+  const applied = applyTemplate([pg], cardTemplate());
+  // 'in' governs rows but 'out' never does — and the flip must not fire.
+  assert.equal(applied.sections.applied, false);
+  const { rows } = buildRows(applied.grid, applied.buildOpts);
+  assert.deepEqual(rowTotals(rows), { out: 45, in: 2000 });
+});
+
+test('applyTemplate: a TOTAL line ends its section — later unreadable headings default to flat', () => {
+  // Deposits → TOTAL → a digit-carrying heading the classifier vetoes →
+  // rows. Those rows must stay section-null (flat reading, unflipped) even
+  // while the flip applies to the properly-headed sections. Also pins the
+  // null-section `continue` inside an applied flip.
+  const sections = [
+    { ...SECTIONED[0], total: 'TOTAL DEPOSITS AND CREDITS $ 3,240.00' },
+    SECTIONED[1],
+  ];
+  const pg = depositStatementPage(sections);
+  const lastY = 400;
+  pg.runs.push(...textLine(lastY, 'Checks Paid (Nos. 101-118)'));
+  pg.runs.push(...depositRow(lastY + 18, 'Jul 25', 'CHECK 101', '75.00'));
+  const applied = applyTemplate([pg], depositTemplate());
+  assert.equal(applied.sections.applied, true);
+  const { rows } = buildRows(applied.grid, applied.buildOpts);
+  const check = rows.find(r => /CHECK 101/.test(r.description));
+  assert.equal(check.amount, 75); // flat, NOT inherited from a stale section
+  const meta = applied.rowMeta.find(m => /CHECK 101/.test(m.text));
+  assert.equal(meta.section, null);
+  // The properly-headed rows still flipped.
+  assert.equal(rows.find(r => /EMPLOYER/.test(r.description)).amount, -2640);
+});
+
+test('applyTemplate: a section carries across a page break', () => {
+  // Real Discover statements continue a section onto page 2 with no repeated
+  // heading. curSection must survive the page boundary.
+  // No TOTAL before the break — the real July statement ends page 1 with
+  // "Continued on Page 2" and the section resumes untitled.
+  const pg1 = depositStatementPage([SECTIONED[0], { heading: SECTIONED[1].heading, rows: SECTIONED[1].rows }]);
+  const pg2 = page(2, [
+    ...depositRow(60, 'Jul 30', 'ACH Withdrawal LANDSCAPING CO', '150.00'),
+    ...depositRow(76, 'Jul 31', 'ACH Withdrawal WATER DISTRICT', '88.00'),
+  ]);
+  const applied = applyTemplate([pg1, pg2], depositTemplate());
+  const { rows } = buildRows(applied.grid, applied.buildOpts);
+  const cont = rows.filter(r => /LANDSCAPING|WATER/.test(r.description));
+  assert.deepEqual(cont.map(r => r.amount), [150, 88]); // still money out
+  assert.equal(applied.rowMeta.find(m => /LANDSCAPING/.test(m.text)).section, 'out');
+});
+
+test('applyTemplate: stopAnchor resets the section for a re-anchored table', () => {
+  const pg = depositStatementPage(SECTIONED);
+  const y0 = 400;
+  pg.runs.push(...textLine(y0, 'FEES SUMMARY')); // acts as stopAnchor below
+  pg.runs.push(...textLine(y0 + 20, 'Eff. Date Description Amount')); // re-anchor
+  pg.runs.push(...depositRow(y0 + 40, 'Jul 30', 'MISC ROW AFTER REANCHOR', '10.00'));
+  const applied = applyTemplate([pg], depositTemplate({ stopAnchor: 'FEES SUMMARY' }));
+  const meta = applied.rowMeta.find(m => /MISC ROW/.test(m.text));
+  assert.equal(meta.section, null); // no direction inherited across the stop
+});
