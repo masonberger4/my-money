@@ -1097,15 +1097,13 @@ applied-to-PROD note below).
   Discover's printed TOTAL DEPOSITS AND CREDITS $13,536.00 — the feed was
   right; the household genuinely received it twice. Do NOT exclude either
   copy. (The small same-day Venture X dupes ~$34 Jun+Jul remain unchecked.)
-- **Check whether the May 2026 statement import ran BEFORE the sectioned-sign
-  fix (2026-08-09).** The import modal offered "Import 9 transactions" of
-  pre-2026-05-10 May rows while the parser still read every deposit as money
-  OUT. If Mason pressed it, those rows are in the DB with inverted signs
-  (e.g. "Zelle Payment From DILPREET" +$2,000 spending instead of −$2,000
-  in). Re-importing after the fix will NOT dedup them — the `csv:` hash
-  includes the amount, so the corrected rows would insert BESIDE the wrong
-  ones. Before re-importing May: delete this account's `source='pdf'` rows
-  dated before 2026-05-10 (or verify none exist).
+- ~~Check whether the May 2026 statement import ran BEFORE the sectioned-sign
+  fix~~ **RESOLVED 2026-08-09 — Mason confirmed no statements were imported
+  pre-fix**, so no inverted-sign rows exist; May can import normally. (The
+  hazard the check guarded against stays real for the future: rows imported
+  under a wrong-signed parse can never be deduped away by a re-import — the
+  `csv:` hash includes the amount — so a bad import must be deleted before a
+  corrected one runs.)
 - **Resolve the Discover it (7933) twins before unhiding** — one row is
   mistyped `depository/checking` under the Capital One org, its sibling is
   `credit` under the Discover org. Both hidden today (contributing $0); keep
