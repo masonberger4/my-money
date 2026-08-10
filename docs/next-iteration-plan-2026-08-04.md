@@ -28,6 +28,11 @@ nothing below relitigates a decided item.
      `(account_id, plaid_tx_id)` upsert can't dedup. Verify against the
      Discover statement; `excluded=true` on one copy. July income reads
      ~$2,200 high until then (+ ~$34 of Venture X same-day dupes Jun+Jul).
+   - ~~**Discover it (7933) twins**~~ — **RESOLVED 2026-08-10, Mason
+     confirmed**: the data-holding Capital One-org row is unhidden and retyped
+     Credit card; the empty Discover-org row stays hidden permanently. The
+     acquisition hypothesis below was right; full end-state ruling lives in
+     CLAUDE.md's Pending standing rulings. History follows:
    - **Discover it (7933) twins — UPDATED 2026-08-04 by Mason's inspection.**
      The `credit`-typed row (Discover org) turned out to hold **no
      transactions**, so Mason hid it and kept the sibling — which is the row

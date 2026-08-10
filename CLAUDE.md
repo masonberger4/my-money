@@ -930,24 +930,34 @@ Items retired, `PLAID_*` env vars removed, 2026-08-01).
 
 **Open data tasks (need Mason or his data):**
 
-- **Resolve the Discover it (7933) twins before unhiding** — the same real
-  card surfaced under two orgs. See the plan doc's UPDATED item (Mason's
-  2026-08-04 inspection): the row that holds the data is typed
-  `depository/checking` under the Capital One org and must be retyped Credit
-  card in the account-type editor BEFORE it is ever unhidden; the empty
-  `credit`-typed Discover-org row stays hidden. Eyeball the type on EVERY
-  account at unhide time.
-- **Statement backfill** — pre-May-2026 history for BECU savings, Cashback
-  Debit and the cards via CSV/PDF import (the coverage panel on the Accounts
-  tab shows each account's gap). Note: Checking (2644) rows end 2026-04-03
+- **Statement backfill** is the only remaining pre-May work item; the
+  Discover twins are RESOLVED (see the standing rulings below). Eyeball the
+  type on EVERY account at unhide time — the rule outlives the incident.
+  Backfill scope: pre-May-2026 history for BECU savings, Cashback
+  Debit and the cards via CSV/PDF import (the coverage panel + Feed reach
+  notice on the Accounts tab show each account's gap). Note: Checking (2644) rows end 2026-04-03
   exactly where Checking (5481) begins — likely the SAME real BECU checking
   re-keyed by the feed (no overlap, no double count, but pre-May history
   lives on the old row); confirm before treating 2644 as a separate account.
 - **Venture X same-day dupes (~$34, Jun+Jul)** — still unchecked.
 
-**Standing data ruling (2026-08-09):** the two $2,200 "ACH Deposit PAYROLL
-From POME HOLISTIC PE" rows on 2026-07-24 are BOTH REAL — confirmed against
-the Discover July 2026 statement's printed totals. Do NOT exclude either copy.
+**Standing data rulings:**
+
+- (2026-08-09) The two $2,200 "ACH Deposit PAYROLL From POME HOLISTIC PE"
+  rows on 2026-07-24 are BOTH REAL — confirmed against the Discover July 2026
+  statement's printed totals. Do NOT exclude either copy.
+- (2026-08-10, Mason confirmed) **Discover it (7933) twins RESOLVED**: the
+  same real card surfaces under TWO orgs because Capital One acquired
+  Discover, so the Bridge can pull it via either login. End state: the
+  transaction-holding row (Capital One org, was mistyped depository/checking)
+  is UNHIDDEN and retyped **Credit card**; the empty Discover-org row stays
+  HIDDEN permanently — that hidden row is the guard, since the two orgs' rows
+  carry different `sfin:` ids and can never dedup against each other. If the
+  Discover-org feed ever starts delivering transactions they land on the
+  hidden row, query-excluded — no double count — but if either feed DROPS the
+  card, re-check which row is live before unhiding anything. The retype is
+  read-time (`t.accounts.type`), so historical rows self-corrected with no
+  re-sync.
 
 Resolved for the record: the Anthropic spend cap and service_role key rotation
 are DONE 2026-08-04 (decision in the assistant Convention; rotation
@@ -969,9 +979,9 @@ are in this file. Git history holds the rest.
 surfacing shipped 2026-08-06 (see Merged features). Everything else is either shipped, deliberately deferred (the
 Dashboard.jsx decomposition — keep the single file during active development),
 or gated on Mason. What outranks the code: the **needs-Mason data work in
-Pending** (Discover twins, statement backfill, the Venture X dupes; the
-payroll dupe is RESOLVED — real, keep both rows — and the spend cap, key
-rotation and NEWREZ are done/resolved).
+Pending** (statement backfill, the Venture X dupes; the Discover twins and
+the payroll dupe are RESOLVED — see the standing rulings — and the spend cap,
+key rotation and NEWREZ are done/resolved).
 **Retraining is the live task**: post-wipe every category is created and taught
 by hand, so the Uncategorized teach-queue and the Taught-rules screen are the
 working surfaces.
