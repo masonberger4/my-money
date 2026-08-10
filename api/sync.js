@@ -4,6 +4,7 @@ import {
   normalizeAccountSet,
   inferAccountType,
   normalizeBalance,
+  normalizeAvailableBalance,
   sanitizeFeedMessage,
   SFIN_PREFIX,
   FIRST_PULL_DAYS,
@@ -398,9 +399,11 @@ export async function pullOneAccessUrl(supabase, householdId, accessRow, { force
     // only sees normalized feed accounts, which carry no type.
     typeByExternal.set(externalId, type);
 
-    // available-balance is omitted when it equals the balance, so fall back
-    // rather than nulling it out.
-    const available = acct.availableBalance ?? balance;
+    // ONE convention now: money available to spend, positive-is-good (see
+    // normalizeAvailableBalance — this column previously held the raw feed
+    // value when the feed sent one and the normalized owed-amount when it
+    // didn't, which read as "available" money on a card that was in fact debt).
+    const available = normalizeAvailableBalance(type, acct.availableBalance, acct.balance);
 
     // Append a history row only when there is a balance and it actually moved
     // (a first sight of the account counts as a move). ≤ one row per account
@@ -420,7 +423,15 @@ export async function pullOneAccessUrl(supabase, householdId, accessRow, { force
           // as zero), but writing the null over a known balance would show the
           // account as $0.00 in every view. Keep the last known good instead.
           ...(balance == null ? {} : { current_balance: balance }),
-          ...(available == null ? {} : { available_balance: available }),
+          // The don't-write-null guard is keyed on `balance`, NOT on
+          // `available`. A blank BALANCE is the tell for a degraded read, and
+          // then we keep the last known good for both columns. But on a HEALTHY
+          // read a null `available` is now MEANINGFUL — it is how a card whose
+          // feed sends no available-balance is stored — so it must be written,
+          // or a row carrying a stale value (including one written under the
+          // old two-convention scheme, i.e. the owed amount) would never be
+          // corrected.
+          ...(balance == null ? {} : { available_balance: available }),
           ...(balance == null
             ? {}
             : { last_balance_at: acct.balanceDate || now.toISOString() }),

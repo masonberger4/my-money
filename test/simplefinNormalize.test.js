@@ -7,6 +7,7 @@ import {
   inferAccountType,
   normalizeTransaction,
   normalizeBalance,
+  normalizeAvailableBalance,
   parseMoney,
   epochToIsoDate,
   normalizeAccount,
@@ -124,6 +125,50 @@ test('the overpaid-card case stays positive BY DECISION (shown as owed; rare and
 test('a missing balance stays null — absent must never read as zero', () => {
   assert.equal(normalizeBalance('credit', null), null);
   assert.equal(normalizeBalance('depository', null), null);
+});
+
+// --- normalizeAvailableBalance ----------------------------------------------
+// ONE convention: money available to SPEND, positive-is-good. (The column used
+// to hold the raw feed value OR the normalized owed-amount — see the function.)
+
+test('depository: the feed value when sent, the balance when omitted', () => {
+  assert.equal(normalizeAvailableBalance('depository', 1800.25, 2500.5), 1800.25);
+  assert.equal(normalizeAvailableBalance('depository', null, 2500.5), 2500.5);
+  assert.equal(normalizeAvailableBalance('depository', null, null), null);
+});
+
+test('REGRESSION credit: an omitted available-balance stores NULL, never the owed balance', () => {
+  // The old `?? balance` fallback wrote 5127.97 here for a card that OWED
+  // $5,127.97 — it would read as "$5,127.97 available to spend".
+  assert.equal(normalizeAvailableBalance('credit', null, -5127.97), null);
+});
+
+test('credit: the feed value is available CREDIT and is never sign-flipped', () => {
+  assert.equal(normalizeAvailableBalance('credit', 4872.03, -5127.97), 4872.03);
+  assert.equal(normalizeAvailableBalance('credit', 0, -10000), 0, 'a maxed card is 0, not null');
+});
+
+test('loan follows the credit rule: raw when sent, null when omitted', () => {
+  assert.equal(normalizeAvailableBalance('loan', null, -231550.12), null);
+  assert.equal(normalizeAvailableBalance('loan', 15000, -231550.12), 15000);
+});
+
+test('numeric-STRING wire values flow through parseMoney into the one convention', () => {
+  // The feed really sends "-05.50" / "10.00"; parseMoney runs first in
+  // normalizeAccount, so the function only ever sees numbers or null.
+  assert.equal(
+    normalizeAvailableBalance('depository', parseMoney('10.00'), parseMoney('-05.50')),
+    10
+  );
+  assert.equal(
+    normalizeAvailableBalance('depository', parseMoney(''), parseMoney('-05.50')),
+    -5.5,
+    'a blank available-balance falls back to the (overdrawn) balance'
+  );
+  assert.equal(
+    normalizeAvailableBalance('credit', parseMoney(''), parseMoney('-5127.97')),
+    null
+  );
 });
 
 // --- the small parsers -------------------------------------------------------
