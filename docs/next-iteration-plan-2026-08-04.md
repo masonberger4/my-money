@@ -137,7 +137,17 @@ prior backlog. Both are S/M with no blockers and no migration.*
      transfer/card-payment guards) was not needed — the picker was untouched.
    4 `countAll` tests in `test/categoryRules.test.js`.
 
-8. **Surface `coverage_shortfall`** — size **S/M**, **no migration**.
+8. **Surface `coverage_shortfall`** — ~~size **S/M**, **no migration**~~
+   **SHIPPED 2026-08-06 (PR #62), but NOT the way this item specced it.** The
+   spec below assumed the sync response was the source. It isn't usable as
+   one: the key is absent on every steady-state pull (this item says so itself,
+   two paragraphs down, and then proposes reading it anyway), so a client
+   watching sync responses sees it once and never again. What shipped derives
+   the same fact from the LEDGER instead — `feedCoverageGaps` in
+   `src/coverage.js`, flagging an account whose oldest stored row sits inside
+   the window its first pull could have reached. No migration, survives
+   reload, and self-clears when a backfill lands. `pullWasClean` still ignores
+   `coverage_shortfall`. Kept below as the reasoning that led there.
    **Why:** `api/sync.js:669` returns `coverage_shortfall`
    (`{wanted_from, served_from}`, built by `coverageShortfall` in
    `api/_lib/simplefin.js:871`) and **nothing reads it** — `runSync`

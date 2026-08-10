@@ -92,7 +92,7 @@ export {
   seedFromRecurring,
 } from './expectedTx.js';
 
-// The purchase-based spending model lives pure in src/spending.js (isSpend,
+// THE spending model lives pure in src/spending.js (isSpend,
 // sumSpending, the Categories bucketing, toTxShape, the envelope fold) — same
 // extraction shape as cashFlow.js. Re-exported so harnesses and tests import
 // the helpers from one place.
