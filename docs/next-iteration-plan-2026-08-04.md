@@ -1,5 +1,11 @@
 # Next-iteration plan — 2026-08-04 (findings + feedback guide)
 
+> **Contract for AI sessions:** items here are live specs — the PR that ships
+> (or supersedes) an item marks it shipped/refuted in that same PR, noting what
+> shipped instead when the design diverged; an unmarked shipped item is a bug.
+> When every item is resolved this doc is DELETED per CLAUDE.md's maintenance
+> contract. CLAUDE.md is authoritative wherever the two disagree.
+
 **THE single forward-looking doc.** Both six-dimension audit backlogs
 (2026-08-01 and 2026-08-04) shipped out completely and were deleted 2026-08-05
 per the delete-when-spent rule — their decided rules live in CLAUDE.md, their
