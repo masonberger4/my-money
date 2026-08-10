@@ -957,6 +957,31 @@ export function normalizeBalance(type, balance) {
   return balance < 0 ? -balance : balance;
 }
 
+// `available_balance` means ONE thing: MONEY AVAILABLE TO SPEND, always
+// positive-is-good. Never run it through displayBalance() — for a card it is
+// available CREDIT, not a debt.
+//
+// WHY this function exists: the column used to hold TWO conventions. api/sync.js
+// did `acct.availableBalance ?? balance`, so it stored the RAW feed value when
+// the feed sent `available-balance` and the NORMALIZED (positive = owed) balance
+// when it didn't. For a card that fallback was actively wrong: a $5,127.97
+// balance owed got written here and would read as "$5,127.97 available".
+//
+//   depository — available cash. SimpleFIN omits `available-balance` when it
+//     equals the balance, so falling back to the balance is correct here (and
+//     normalizeBalance is a pass-through for deposits, so either is the same
+//     number).
+//   credit/loan — available credit remaining: the RAW feed value, never
+//     sign-flipped. If the feed omits it we have no way to derive it (that
+//     needs the limit), so store NULL. Null is the honest "unknown"; the old
+//     fallback was the bug.
+export function normalizeAvailableBalance(type, availableBalance, balance) {
+  if (type === 'credit' || type === 'loan') {
+    return availableBalance == null ? null : availableBalance;
+  }
+  return availableBalance ?? normalizeBalance(type, balance);
+}
+
 export function normalizeTransaction(tx) {
   const externalId = String(tx?.id ?? '').trim();
   if (!externalId) return null;
