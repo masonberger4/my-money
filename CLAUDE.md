@@ -184,7 +184,16 @@ lives in git log, GitHub PRs, and the Vercel dashboard — don't duplicate it.
    its own, no per-merge ask. Every piece of work follows the ONE standard
    flow, always: **pull (fetch + absorb `origin/main`) → build (green
    `npm test` + the placeholder-env build; screenshots for UI work) → push the
-   feature branch → open the pull request → merge**. Auto mode doesn't lower
+   feature branch → open the pull request → ARM AUTO-MERGE (squash) the
+   moment the PR opens → confirm the merge landed**. Auto-merge is Mason's
+   ruling (2026-08-11, "keep build flow moving"): the branch ruleset requires
+   `tests + build` + `render check`, so green CI merges itself with no
+   polling gap — but arm it per-PR (`enable_pr_auto_merge`), it is NOT
+   automatic, and a PR left unarmed sits green and unmerged (how PR #73
+   stalled). Two boundaries: a PR meant to accumulate MORE commits before
+   merging stays unarmed until its last push, and if the ruleset's required
+   checks are ever removed, fall back to merging manually AFTER green — never
+   before. Auto mode doesn't lower
    the bar: anything risky, preference-shaped, or migration-sequenced still
    goes past Mason first. Merged head branches auto-delete on PR merge (repo
    setting, confirmed 2026-08-01); unmerged branches are untouched, and a
@@ -1008,7 +1017,9 @@ normally — the permanent wrong-sign hazard lives in the `csvImport.js` key row
 
 **The forward-looking doc is `docs/next-iteration-plan-2026-08-04.md`** — the
 ONLY one. (`docs/next-session-prompt.md` is a session STARTER, a process
-artifact deleted by the session that spends it — not a second roadmap.) Both six-dimension audit backlogs (2026-08-01, 2026-08-04) and the
+artifact deleted by the session that spends it — not a second roadmap.
+Spent + deleted 2026-08-11: its chores and its chosen lane, the RLS-harness
+remainder, both shipped in PR #73.) Both six-dimension audit backlogs (2026-08-01, 2026-08-04) and the
 2026-08-02 session plan shipped out completely and were deleted per the
 delete-when-spent rule; what survived them — the refuted-don't-re-propose list
 and Mason's recorded decisions — moved into that doc, and their decided rules

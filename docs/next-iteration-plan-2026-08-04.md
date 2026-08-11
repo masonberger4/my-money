@@ -107,12 +107,15 @@ nothing below relitigates a decided item.
    temporary and one not"). Delete the CARD and `aggregateCoverage`/
    `getDataCoverage()` only; the file and `test/coverage.test.js` stay.
 
-6. **SQL/RLS tests** — PARTIALLY SHIPPED (the opt-in `test/rls.test.js`
-   harness covers cross-household denial, `simplefin_access` invisibility,
-   `household_id` defaults). STILL OPEN, actionable without Mason: the
-   receipts `storage.objects` policy assertion and the
-   pg_tables-vs-pg_policies DIFF the `test/` key row names as spec. Original
-   item follows. Use the Local-checks recipe in CLAUDE.md
+6. ~~**SQL/RLS tests**~~ — **FULLY SHIPPED 2026-08-11 (PR #73)**: the
+   storage-policy assertions (behavioral + catalog), the honest-allowlisted
+   pg_class-vs-pg_policies coverage diff, and the `current_household_id()`
+   catalog pins joined the earlier cross-household/invisibility/defaults
+   coverage. Executed and mutation-tested on a real Postgres 16 (fourteen
+   sabotages, all caught). Known limit, in the test header: it proves the
+   migration's policy SQL is correct, not that PROD applied it —
+   `bootstrap_household.sql` stays the prod-side check. Original item
+   follows. Use the Local-checks recipe in CLAUDE.md
    (local Postgres 16 stub: `auth` schema + `auth.uid()` reading
    `request.jwt.claims.sub`, three roles, run migrations in order), then
    assert: cross-household SELECT/INSERT denial per table,
