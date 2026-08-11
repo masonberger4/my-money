@@ -982,10 +982,11 @@ Items retired, `PLAID_*` env vars removed, 2026-08-01).
   type on EVERY account at unhide time — the rule outlives the incident.
   Backfill scope: pre-May-2026 history for BECU savings, Cashback
   Debit and the cards via CSV/PDF import (the coverage panel + Feed reach
-  notice on the Accounts tab show each account's gap). Note: Checking (2644) rows end 2026-04-03
-  exactly where Checking (5481) begins — likely the SAME real BECU checking
-  re-keyed by the feed (no overlap, no double count, but pre-May history
-  lives on the old row); confirm before treating 2644 as a separate account.
+  notice on the Accounts tab show each account's gap). The 2644/5481 question
+  is SETTLED — see the standing ruling below: two REAL accounts, each
+  backfills into its OWN row; 5481 (the household's main spending account) is
+  the priority, 2644 (rarely used personal) is optional and its neutral Feed
+  reach notice simply stays until/unless it is backfilled.
 - **Venture X same-day dupes (~$34, Jun+Jul)** — still unchecked.
 
 **Standing data rulings:**
@@ -993,6 +994,16 @@ Items retired, `PLAID_*` env vars removed, 2026-08-01).
 - (2026-08-09) The two $2,200 "ACH Deposit PAYROLL From POME HOLISTIC PE"
   rows on 2026-07-24 are BOTH REAL — confirmed against the Discover July 2026
   statement's printed totals. Do NOT exclude either copy.
+- (2026-08-11, Mason) **Checking 2644/5481 re-key hypothesis REFUTED — they
+  are TWO REAL, SEPARATE accounts**: 2644 is Mason's personal checking
+  (rarely used); 5481 is the shared household checking that most spending and
+  the savings transfers run through. The 2026-04-03 abutment that suggested a
+  feed re-key was coincidence (a rarely-used account going quiet around the
+  time the feed's window opens on the other). Consequence for backfill:
+  statements import into their OWN account's row — putting 5481's history on
+  2644 (the old hypothesis's advice) would file the household's spending
+  under the wrong account. No overlap existed, so nothing double-counted
+  under either reading.
 - (2026-08-10, Mason confirmed) **Discover it (7933) twins RESOLVED**: the
   same real card surfaces under TWO orgs because Capital One acquired
   Discover, so the Bridge can pull it via either login. End state: the
