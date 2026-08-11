@@ -23,11 +23,12 @@ nothing below relitigates a decided item.
      a successful assistant round trip (an answer proves `requireUser` passed
      on the service client). The Anthropic spend cap is DONE too ($25/mo,
      alert at $10).
-   - **$2,200 payroll duplicate** — two distinct `sfin:` ids for the same
-     2026-07-24 deposit on Cashback Debit (3481), so the
-     `(account_id, plaid_tx_id)` upsert can't dedup. Verify against the
-     Discover statement; `excluded=true` on one copy. July income reads
-     ~$2,200 high until then (+ ~$34 of Venture X same-day dupes Jun+Jul).
+   - ~~**$2,200 payroll duplicate**~~ — **RESOLVED 2026-08-09, the OPPOSITE
+     of this item's prescription: the verification happened and BOTH rows are
+     REAL** (confirmed against the Discover July statement's printed totals).
+     Do NOT set `excluded=true` on either copy — the standing ruling lives in
+     CLAUDE.md's Pending and governs. July income was never overstated. Only
+     the ~$34 Venture X same-day dupes (Jun+Jul) remain unchecked.
    - ~~**Discover it (7933) twins**~~ — **RESOLVED 2026-08-10, Mason
      confirmed**: the data-holding Capital One-org row is unhidden and retyped
      Credit card; the empty Discover-org row stays hidden permanently. The
@@ -316,7 +317,8 @@ prior backlog. Both are S/M with no blockers and no migration.*
 
 2. **Deriving RTA income (the income wall)** — CLAUDE.md's envelope section
    says exactly what unlocks it: every income account reliably fed. That's a
-   data-quality gate, i.e. it sits BEHIND low-hanging items 1 (payroll dupe,
+   data-quality gate, i.e. it sits BEHIND low-hanging items 1 (payroll dupe
+   RESOLVED — both rows real,
    backfill) — and it's **Mason's call, not an automatic upgrade**. Deriving
    income (via `cashIncome`, already pure) then unlocks honest RTA and Age
    of Money (Roadmap: "wants real *measured* income").

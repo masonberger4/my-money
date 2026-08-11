@@ -18,7 +18,8 @@ with CI as the merge gate.
 **State when this prompt was written (2026-08-11, session archived at
 PR #71 + the archive-prep PR):** 759 tests green; CI render gate clicks all
 ten tabs; every migration through `20260805000002` applied to PROD and
-verified; no code items outstanding. Mason's live task is retraining
+verified; no code items outstanding except the RLS-harness remainder (plan
+doc item 6). Mason's live task is retraining
 (post-wipe, every category is created and taught by hand). Open Mason-data
 tasks: statement backfill (confirm the Checking 2644→5481 re-key FIRST —
 Pending section), and the ~$34 Venture X same-day dupes. Another session may
