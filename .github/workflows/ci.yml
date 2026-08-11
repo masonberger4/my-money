@@ -27,8 +27,8 @@ jobs:
     # GitHub's default would otherwise let it sit for SIX HOURS.
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -57,8 +57,8 @@ jobs:
     # and looks identical to "still running".
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -75,8 +75,14 @@ jobs:
       # Cached across runs so the usual case never touches the network at all.
       # Keyed on the pinned version below: bump the pin and the key changes,
       # so a stale browser can never be served for a new driver.
+      # Action majors (checkout v7 / setup-node v7 / cache v6, 2026-08-11):
+      # the v4s ran on the deprecated node20 runtime and warned on every job.
+      # Verified before bumping: our bare checkout, explicit `cache: npm`, and
+      # unchanged path/key inputs are untouched by every breaking change in
+      # between (v6 checkout's persist-credentials move, v7's fork-PR refusal
+      # under pull_request_target — we trigger on plain pull_request).
       - name: cache browser
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-1.62.1
