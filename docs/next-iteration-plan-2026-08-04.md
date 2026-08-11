@@ -23,11 +23,12 @@ nothing below relitigates a decided item.
      a successful assistant round trip (an answer proves `requireUser` passed
      on the service client). The Anthropic spend cap is DONE too ($25/mo,
      alert at $10).
-   - **$2,200 payroll duplicate** — two distinct `sfin:` ids for the same
-     2026-07-24 deposit on Cashback Debit (3481), so the
-     `(account_id, plaid_tx_id)` upsert can't dedup. Verify against the
-     Discover statement; `excluded=true` on one copy. July income reads
-     ~$2,200 high until then (+ ~$34 of Venture X same-day dupes Jun+Jul).
+   - ~~**$2,200 payroll duplicate**~~ — **RESOLVED 2026-08-09, the OPPOSITE
+     of this item's prescription: the verification happened and BOTH rows are
+     REAL** (confirmed against the Discover July statement's printed totals).
+     Do NOT set `excluded=true` on either copy — the standing ruling lives in
+     CLAUDE.md's Pending and governs. July income was never overstated. Only
+     the ~$34 Venture X same-day dupes (Jun+Jul) remain unchecked.
    - ~~**Discover it (7933) twins**~~ — **RESOLVED 2026-08-10, Mason
      confirmed**: the data-holding Capital One-org row is unhidden and retyped
      Credit card; the empty Discover-org row stays hidden permanently. The
@@ -63,7 +64,11 @@ nothing below relitigates a decided item.
      gap. First confirm the Checking 2644→5481 re-key theory (rows abut at
      2026-04-03 with no overlap) before treating 2644 as separate.
 
-2. **Receipt OCR v1** — the upgrade path CLAUDE.md already reserved: a new
+2. **Receipt OCR v1** — *recommendation 2026-08-11 (Claude, not a Mason
+   decision): DEFER until retraining settles — it competes for Mason's
+   attention with teaching categories, and adds an LLM write path to an app
+   whose current job is getting categories right.* Spec stays live below.
+   The upgrade path CLAUDE.md already reserved: a new
    `api/receipt-ocr` route on the existing `ANTHROPIC_API_KEY`, reading the
    stored image (signed URL server-side or Storage download under
    service_role), returning merchant/date/amount/category suggestions,
@@ -71,8 +76,10 @@ nothing below relitigates a decided item.
    refusal applied to OCR). Plumbing exists end to end: `receipts` table,
    `ReceiptSection.jsx`, `getReceiptUrl`, `requireUser()`. No migration.
 
-3. **Cash-flow forecast lite** — previously "later (discussed, not
-   committed)", but Session 6 built the hard part: `expected_transactions`
+3. **Cash-flow forecast lite** — *recommendation 2026-08-11 (Claude, not a
+   Mason decision): DEFER until retraining settles — a forward-looking number
+   computed from a category set that is still mostly Uncategorized is wrong
+   on arrival.* Previously "later (discussed, not committed)", but Session 6 built the hard part: `expected_transactions`
    carries cadence + due dates, `projectFutureCycles`/`rollForwardDate`
    (`src/expectedTx.js`) already project forward. Projected end-of-month
    balance = current depository balances − remaining expected outflows
@@ -80,7 +87,11 @@ nothing below relitigates a decided item.
    card; it inherits the DISPLAY-ONLY contract — never touches Available,
    the walk, or any total.
 
-4. **Bundle trimming** — main chunk ~584 kB (pdf.js's ~1.8 MB is already
+4. **Bundle trimming** — *recommendation 2026-08-11 (Claude, not a Mason
+   decision): DROP tab-level `React.lazy` — it overlaps the deliberately
+   deferred Dashboard decomposition and every split module must thread the
+   mock-alias needle, for a bundle win nobody has complained about.* Original
+   item: main chunk ~584 kB (pdf.js's ~1.8 MB is already
    lazy via `pdfExtract.js`, as are the modals). Next lever is tab-level
    `React.lazy` inside Dashboard.jsx (Tax/Debt/Trends render heavy pure
    cores). **Harness caveat:** the mock harness aliases
@@ -89,13 +100,19 @@ nothing below relitigates a decided item.
    (same rule recorded for the decomposition, backlog Section 3).
 
 5. **Retire the Data coverage panel** once backfill (item 1) settles — it was
-   shipped as TEMPORARY (CLAUDE.md Merged features). Delete the card, keep
-   `src/coverage.js` + `getDataCoverage()` only if something else has started
-   reading them; otherwise remove all three plus `test/coverage.test.js`.
+   shipped as TEMPORARY (CLAUDE.md Merged features). **Removal recipe STALE
+   as of 2026-08-06:** `src/coverage.js` now ALSO holds the PERMANENT
+   feed-reach tell (`FEED_REACH_DAYS`/`feedCoverageGaps`, imported by
+   `api/_lib/simplefin.js` — the coverage.js key row's "two things, one
+   temporary and one not"). Delete the CARD and `aggregateCoverage`/
+   `getDataCoverage()` only; the file and `test/coverage.test.js` stay.
 
-6. **SQL/RLS tests** — ~18 `create policy` statements across
-   `supabase/migrations/`, zero tests; the testing-suite entry records this
-   as the worthwhile follow-up. Use the Local-checks recipe in CLAUDE.md
+6. **SQL/RLS tests** — PARTIALLY SHIPPED (the opt-in `test/rls.test.js`
+   harness covers cross-household denial, `simplefin_access` invisibility,
+   `household_id` defaults). STILL OPEN, actionable without Mason: the
+   receipts `storage.objects` policy assertion and the
+   pg_tables-vs-pg_policies DIFF the `test/` key row names as spec. Original
+   item follows. Use the Local-checks recipe in CLAUDE.md
    (local Postgres 16 stub: `auth` schema + `auth.uid()` reading
    `request.jwt.claims.sub`, three roles, run migrations in order), then
    assert: cross-household SELECT/INSERT denial per table,
@@ -300,7 +317,8 @@ prior backlog. Both are S/M with no blockers and no migration.*
 
 2. **Deriving RTA income (the income wall)** — CLAUDE.md's envelope section
    says exactly what unlocks it: every income account reliably fed. That's a
-   data-quality gate, i.e. it sits BEHIND low-hanging items 1 (payroll dupe,
+   data-quality gate, i.e. it sits BEHIND low-hanging items 1 (payroll dupe
+   RESOLVED — both rows real,
    backfill) — and it's **Mason's call, not an automatic upgrade**. Deriving
    income (via `cashIncome`, already pure) then unlocks honest RTA and Age
    of Money (Roadmap: "wants real *measured* income").
