@@ -1579,7 +1579,10 @@ export async function getDataCoverage() {
 //   { gaps: [{ account_id, served_from }], reachDays, truncated }
 // and NEVER throws: any failure resolves to zero gaps, because a wrong warning
 // here is worse than a missing one.
-const FEED_GAP_SCAN_CAP = 25;
+// Exported because the Accounts tab RENDERS this number in its truncation
+// notice — a hardcoded copy there is exactly the drifting-constant hazard the
+// FEED_REACH_DAYS one-copy rule exists for.
+export const FEED_GAP_SCAN_CAP = 25;
 
 export async function getFeedCoverageGaps(accounts) {
   const empty = { gaps: [], reachDays: FEED_REACH_DAYS, truncated: false };

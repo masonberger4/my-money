@@ -228,10 +228,15 @@ export async function deleteSavedChat(id) {
   SAVED_CHATS = SAVED_CHATS.filter(c => c.id !== id);
   return getSavedChats();
 }
+export const FEED_GAP_SCAN_CAP = 25;
 export function isManualAccount(a) { return !!a?.is_manual; }
 export function isSimpleFinAccount(a) { return String(a?.plaid_account_id || '').startsWith('sfin:'); }
 export async function setCategoryRule() {}
-export async function applyCategoryRuleToHistory() { return { matched: 0, updated: 0 }; }
+// Returns a COUNT — the real adapter returns matches.length (a number the
+// learn-confirm renders as "updates N past transactions"). The first version
+// of this mock returned an object, so the render gate exercised a state the
+// real app can never produce.
+export async function applyCategoryRuleToHistory() { return 0; }
 export async function getCategoryRules() { return []; }
 
 // --- taught-rules screen (RulesSheet) ---------------------------------------
@@ -242,6 +247,12 @@ let RULES = [
   { merchant_key: 'SHELL OIL', category: 'Vehicle expenses', source: 'user', updated_at: '2026-07-22T07:55:00Z' },
   { merchant_key: 'NEIGHBORHOOD HVAC CO', category: 'Home maintenance and improvement', source: 'import', updated_at: '2026-07-19T16:30:00Z' },
   { merchant_key: 'PUGET SOUND ENERGY', category: 'Utilities', source: 'user', updated_at: '2026-06-30T11:02:00Z' },
+  // Amount-scoped rule (amount non-null): RulesSheet keys rows on the
+  // (merchant_key, amount) PAIR and renders the amount as part of the rule's
+  // identity — without one in the fixture that whole path never renders in
+  // the gate.
+  { merchant_key: 'ZELLE TRANSFER', category: 'Rent', amount: 1800, source: 'user', updated_at: '2026-08-06T08:00:00Z' },
+  { merchant_key: 'ZELLE TRANSFER', category: 'Gifts', amount: null, source: 'user', updated_at: '2026-08-06T08:01:00Z' },
 ];
 export async function listCategoryRules() {
   await new Promise(r => setTimeout(r, 120));
