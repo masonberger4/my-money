@@ -7,6 +7,8 @@ import {
   transferRawCategory,
   guessCategory,
   importPlan,
+  planFileBatch,
+  fileKindOf,
   CSV_TX_ID_PREFIX,
 } from '../src/csvImport.js';
 import { TRANSFER_CATEGORY, FALLBACK_CATEGORY } from '../src/categoryMap.js';
@@ -308,4 +310,83 @@ test('REGRESSION: a pull carrying only date-range advisories is CLEAN', () => {
 test('a partial failure is unclean even for accounts on a healthy bank', () => {
   const partial = { results: [{ institution: 'SimpleFIN', accounts: 6, transactions: 40, warnings: ['Chase: auth failed'] }], failures: [] };
   assert.equal(pullWasClean(partial), false);
+});
+
+// --- planFileBatch: the multi-file queue's pure planning core ----------------
+// The modal's batch import selects several statements at once for ONE account.
+// planFileBatch decides only two things — refuse a mixed-format batch (the
+// one-format-per-account rule) and fix the processing order — and it must do
+// both without throwing, because the modal renders its answer during input
+// handling.
+
+test('planFileBatch REJECTS a mixed CSV+PDF batch with a shaped error naming both sides', () => {
+  const res = planFileBatch([
+    { name: 'jan.csv', kind: 'csv' },
+    { name: 'feb.pdf', kind: 'pdf' },
+    { name: 'mar.csv', kind: 'csv' },
+  ]);
+  assert.equal(res.ok, false);
+  assert.equal(res.error.code, 'mixed-format');
+  assert.deepEqual(res.error.csvFiles, ['jan.csv', 'mar.csv']);
+  assert.deepEqual(res.error.pdfFiles, ['feb.pdf']);
+  // The message names every file on both sides — "which file is the odd one
+  // out" is exactly what the user needs to fix the selection.
+  for (const name of ['jan.csv', 'feb.pdf', 'mar.csv']) {
+    assert.ok(res.error.message.includes(name), `message should name ${name}`);
+  }
+  // A refused batch offers no processing order.
+  assert.equal(res.order, undefined);
+});
+
+test('planFileBatch preserves the user\'s SELECTION order (date order is unknowable pre-parse)', () => {
+  // This input order differs from BOTH alphabetical sorts (asc: feb,jan,mar;
+  // desc: mar,jan,feb) — the first draft used a desc-coincident order, which
+  // a reverse-name-sort regression would have passed.
+  const files = ['feb.csv', 'mar.csv', 'jan.csv'].map(name => ({ name, kind: 'csv' }));
+  const res = planFileBatch(files);
+  assert.equal(res.ok, true);
+  assert.equal(res.kind, 'csv');
+  assert.deepEqual(res.order.map(f => f.name), ['feb.csv', 'mar.csv', 'jan.csv']);
+});
+
+test('planFileBatch treats an ABSENT kind as csv (the non-pdf default), so mixing it with pdf still rejects', () => {
+  // planFileBatch classifies via kind !== 'pdf' — an unknown kind must land on
+  // the CSV side of the fence, not vanish from both lists (which would let a
+  // genuinely mixed batch through as "uniform").
+  const res = planFileBatch([{ name: 'mystery.txt' }, { name: 'apr.pdf', kind: 'pdf' }]);
+  assert.equal(res.ok, false);
+  assert.equal(res.error.code, 'mixed-format');
+  assert.ok(res.error.message.includes('mystery.txt'));
+  assert.ok(res.error.message.includes('apr.pdf'));
+});
+
+test('planFileBatch passes a single file through unchanged', () => {
+  const one = { name: 'may.pdf', kind: 'pdf', file: { size: 1 } }; // extra fields ride along
+  const res = planFileBatch([one]);
+  assert.equal(res.ok, true);
+  assert.equal(res.kind, 'pdf');
+  assert.equal(res.order.length, 1);
+  assert.equal(res.order[0], one); // the same object, untouched
+});
+
+test('planFileBatch: a uniform PDF batch is accepted', () => {
+  const res = planFileBatch([
+    { name: 'jan.pdf', kind: 'pdf' },
+    { name: 'feb.pdf', kind: 'pdf' },
+  ]);
+  assert.equal(res.ok, true);
+  assert.equal(res.kind, 'pdf');
+  assert.deepEqual(res.order.map(f => f.name), ['jan.pdf', 'feb.pdf']);
+});
+
+test('planFileBatch tolerates an empty or junk selection instead of throwing', () => {
+  assert.deepEqual(planFileBatch([]), { ok: true, kind: null, order: [] });
+  assert.deepEqual(planFileBatch(null), { ok: true, kind: null, order: [] });
+});
+
+test('fileKindOf derives pdf from extension or MIME, csv otherwise (matches onFile)', () => {
+  assert.equal(fileKindOf('Statement.PDF', ''), 'pdf');
+  assert.equal(fileKindOf('download', 'application/pdf'), 'pdf');
+  assert.equal(fileKindOf('history.csv', 'text/csv'), 'csv');
+  assert.equal(fileKindOf('export.txt', 'text/plain'), 'csv');
 });
