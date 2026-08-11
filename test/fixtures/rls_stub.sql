@@ -57,9 +57,14 @@ create table if not exists storage.objects (
 );
 alter table storage.objects enable row level security;
 
+-- Hosted storage.foldername returns every path segment EXCEPT the last (the
+-- filename) — string_to_array minus its final element — so a single-segment
+-- name has NO folder and (foldername(name))[1] is NULL. The receipts policy
+-- scopes on segment [1]; keep these semantics or the harness tests a policy
+-- hosted Supabase doesn't enforce.
 create or replace function storage.foldername(name text) returns text[]
 language sql immutable as $$
-  select string_to_array(name, '/')
+  select (string_to_array(name, '/'))[1 : cardinality(string_to_array(name, '/')) - 1]
 $$;
 
 do $$ begin
@@ -69,6 +74,12 @@ do $$ begin
 end $$;
 
 grant usage on schema public, auth, storage to anon, authenticated, service_role;
+-- Hosted Supabase grants the client roles table privileges on the storage
+-- schema (the storage API queries as the requester's role); RLS on
+-- storage.objects is what actually scopes access. Without this grant an
+-- impersonated INSERT would die at the grant layer and the harness could
+-- never exercise the receipts storage policy.
+grant all on all tables in schema storage to anon, authenticated, service_role;
 alter default privileges in schema public
   grant all on tables to anon, authenticated, service_role;
 alter default privileges in schema public

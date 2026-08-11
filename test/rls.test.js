@@ -12,8 +12,30 @@
 //       transactions, accounts, settings, expected_transactions (+ institutions)
 //     - simplefin_access is invisible to `authenticated` (zero client policies)
 //     - household_id defaults resolve for a client-role insert
+//     - the receipts storage.objects policy is ENFORCED (own-household path
+//       uploads, foreign path denied, foreign objects invisible) AND exists in
+//       pg_policies with the household-path qual — the migration's DO block
+//       can no-op with only a NOTICE, which the SQL Editor never shows
+//     - pg_class vs pg_policies DIFF: every public table is RLS-enabled and
+//       carries >= 1 policy, or sits on rls_assert.sql's explicit
+//       zero-client-policies allowlist (simplefin_access + the legacy_*
+//       archives), which is itself asserted — a future table can't ship
+//       policy-less without turning this red
+//     - current_household_id() stays public + security definer + executable
+//       by authenticated (the addReceipt rpc path)
 //   Any violation raises inside the SQL, psql exits non-zero, the test fails
 //   with the raised message.
+//
+// VERIFICATION CONTRACT
+//   These assertions are only as good as the Postgres they ran on. They were
+//   written against PG16 catalog shapes (pg_policies: schemaname/tablename/
+//   policyname/permissive/roles/cmd/qual/with_check; pg_class.relrowsecurity)
+//   and validated by executing this harness end-to-end on a throwaway PG16
+//   cluster (2026-08-11). Two things only a real run can confirm on OTHER
+//   versions: the deparsed qual text the substring probes read, and the
+//   stub's storage grants matching hosted behavior — which is why the
+//   harness's contract is to run on a real throwaway Postgres, and why the
+//   stub is a stub: it proves the POLICIES, not the hosted storage API.
 //
 // WHEN IT SKIPS (never fails, never hangs)
 //   If psql / initdb / pg_ctl aren't on the machine, or the cluster can't be
