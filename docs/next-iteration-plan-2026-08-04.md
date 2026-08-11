@@ -61,8 +61,10 @@ nothing below relitigates a decided item.
      during retraining.
    - **Pre-May statement backfill** — BECU savings, Cashback Debit, the cards,
      via CSV/PDF import; the Data coverage panel (Accounts tab) shows each
-     gap. First confirm the Checking 2644→5481 re-key theory (rows abut at
-     2026-04-03 with no overlap) before treating 2644 as separate.
+     gap. ~~First confirm the Checking 2644→5481 re-key theory~~ — REFUTED
+     2026-08-11 by Mason: two real, separate accounts (2644 personal/rarely
+     used, 5481 the shared main checking); each backfills into its own row.
+     Standing ruling in CLAUDE.md Pending.
 
 2. **Receipt OCR v1** — *recommendation 2026-08-11 (Claude, not a Mason
    decision): DEFER until retraining settles — it competes for Mason's

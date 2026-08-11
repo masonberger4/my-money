@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { analyzeCsv, toInsertRow, parseCsv, reconcileCsv, csvDateRange, buildRows, importPlan } from "../csvImport.js";
+import { analyzeCsv, toInsertRow, parseCsv, reconcileCsv, csvDateRange, buildRows, importPlan, planFileBatch, fileKindOf } from "../csvImport.js";
 import { applyTemplate, autoDetectTemplate, defaultTemplate, rowTotals, TEMPLATE_VERSION } from "../pdfImport.js";
 import { createManualAccount, importCsvTransactions, getExistingTxIds, getAccountTransactionsInRange, isManualAccount, isSimpleFinAccount, getCategoryRules, getFeedCoverageStart } from "../dataAdapter.js";
 import { getSetting, setSetting } from "../db.js";
@@ -148,6 +148,22 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
   const [pdfBusy, setPdfBusy] = useState(false);
   const [templateSource, setTemplateSource] = useState(null); // 'saved' | 'auto'
   const [showEditor, setShowEditor] = useState(false);
+  // --- Multi-file batch (set ONLY when >1 file is selected, so the single-file
+  // path stays byte-identical to the pre-batch behaviour). Each queue item is
+  // { file, name, kind, status, detail }: status waiting | parsing |
+  // needs-template | imported | skipped | failed.
+  const [queue, setQueue] = useState(null);
+  // True when the batch's CSVs carry ONE signed amount column (no Debit/Credit
+  // split) — the sign toggle then renders pre-run, because a batch has no
+  // per-file preview to catch an inverted sign.
+  const [batchSignRelevant, setBatchSignRelevant] = useState(false);
+  const [batchRunning, setBatchRunning] = useState(false);
+  const [batchSummary, setBatchSummary] = useState(null); // totals after the run
+  // The paused-on-template state: { index, name, pages } while a PDF in the
+  // queue is waiting for the user to confirm its layout in the editor.
+  const [batchPause, setBatchPause] = useState(null);
+  const [batchPauseTemplate, setBatchPauseTemplate] = useState(null);
+  const batchPauseResolveRef = useRef(null);
   const fileRef = useRef(null);
   // The modal panel is --card, so that is the surface the preview amounts and
   // the audit chips are actually read against.
@@ -383,8 +399,56 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
   const MAX_FILE_BYTES = 25 * 1024 * 1024;
 
   async function onFile(e) {
-    const f = e.target.files?.[0];
-    if (!f) return;
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0) return;
+    // Any new selection replaces whatever queue existed — re-picking mid-batch
+    // replaces the batch, exactly as picking a new file replaces the old one.
+    setQueue(null);
+    setBatchSummary(null);
+    setBatchPause(null);
+    setBatchPauseTemplate(null);
+    batchPauseResolveRef.current = null;
+    if (files.length > 1) {
+      // MULTI-FILE: plan the queue with the pure core. A mixed CSV+PDF batch is
+      // refused there (one-format-per-account rule) with both sides named.
+      const plan = planFileBatch(files.map(f => ({ name: f.name, kind: fileKindOf(f.name, f.type), file: f })));
+      // Clear the single-file state so no stale preview renders under the queue.
+      setFileText(null);
+      setPdfPages(null);
+      setPdfTemplate(null);
+      setPdfAutoTemplate(null);
+      setTemplateSource(null);
+      setShowEditor(false);
+      setManualCols(null);
+      setResult(null);
+      setPdfAdvisory(null);
+      setFileName(null);
+      if (!plan.ok) {
+        setError(plan.error.message);
+        return;
+      }
+      setError(null);
+      setFileKind(plan.kind); // drives the mixed-source (csv-vs-pdf) target check
+      setQueue(plan.order.map(d => ({ file: d.file, name: d.name, kind: d.kind, status: "waiting", detail: null })));
+      // Single-file imports get a human preview before confirm; a batch does
+      // not, and the one thing a preview catches that nothing else can is a
+      // WRONG SIGN on a single-amount-column CSV (the permanent hazard in the
+      // csvImport.js key row: wrong-signed rows can never be deduped away).
+      // Probe file 1 (pure, local): if it has one signed Amount column rather
+      // than Debit/Credit, surface the sign toggle before the run.
+      setBatchSignRelevant(false);
+      if (plan.kind === "csv") {
+        try {
+          const text = await plan.order[0].file.text();
+          const probe = analyzeCsv(text, { existingIds: new Set(), manualColumns: null, amountSign, rules: {}, overlapFrom: null });
+          if (!probe.error && !probe.needsManualMapping && probe.columns && probe.columns.amount != null && probe.columns.debit == null) {
+            setBatchSignRelevant(true);
+          }
+        } catch { /* probe is best-effort; the run itself re-parses */ }
+      }
+      return;
+    }
+    const f = files[0];
     if (f.size > MAX_FILE_BYTES) {
       setFileName(f.name);
       setFileText(null);
@@ -595,6 +659,276 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
     }
   }
 
+  // ----------------------------------------------------------------- batch --
+  // Everything below only ever runs with >1 selected file; a single file takes
+  // the exact pre-batch path above.
+  const batchMode = !!queue;
+  // "Compare only" applies BATCH-WIDE, deliberately: it is a safety lever, and
+  // a per-file toggle would be scope creep (and twelve chances to mis-tap the
+  // one file that then double-imports). An unknown target can only compare.
+  const batchAuditOnly = targetIsUnknown || compareOnly;
+  const batchDone = queue
+    ? queue.filter(it => it.status === "imported" || it.status === "skipped" || it.status === "failed").length
+    : 0;
+  const batchCanStart =
+    batchMode && !batchRunning && !batchSummary &&
+    // rules must have loaded: the single-file analysis re-runs when they land,
+    // but the batch snapshots them at start — running early would import every
+    // taught merchant as Uncategorized.
+    rules !== null && !mixedSource &&
+    // BLOCKING-review fix: same !loadingIds clause canConfirm carries, for the
+    // same reason — mixedSource is computed from existingSources, and until the
+    // target's sources have loaded it reflects the PREVIOUS target. Without
+    // this, pick-account-then-tap-fast lands CSV rows in a PDF-history account
+    // during the fetch window, and there is no delete path to undo it.
+    !loadingIds &&
+    // Same boundary gate as canConfirm — unless nothing will be written anyway.
+    (batchAuditOnly || !targetIsSimpleFin || boundaryState === "ok") &&
+    // Batch Compare needs an EXISTING account to compare AGAINST — mirrors the
+    // single-file flow, whose confirm doesn't exist in audit mode at all. An
+    // unknown/new target still compares fine one file at a time.
+    (!batchAuditOnly || targetIsExisting) &&
+    (target !== "new" || newName.trim().length > 0);
+  const batchNeedsSync = batchMode && !batchAuditOnly && needsSyncFirst;
+  const batchPrimaryOn = batchNeedsSync ? syncState !== "running" : batchCanStart;
+
+  // Live parsed-row count for the paused-file template editor (same number the
+  // single-file editor shows), guarded because it runs during render.
+  const pauseRowCount = useMemo(() => {
+    if (!batchPause || !batchPauseTemplate) return 0;
+    try {
+      return applyTemplate(batchPause.pages, batchPauseTemplate).grid.length;
+    } catch {
+      return 0;
+    }
+  }, [batchPause, batchPauseTemplate]);
+
+  // Unmount safety. The overlay/x/Cancel guards can't cover every dismissal:
+  // the phone back-gesture lands in Dashboard's closeAllSheets, which unmounts
+  // this modal regardless of a running batch. Unmount must therefore be SAFE
+  // rather than prevented: the cleanup flips the abort ref (the runner stops at
+  // the next file boundary instead of writing on headless) and resolves a
+  // stranded template pause as a skip so the loop can wind down. Rows already
+  // written stay written — the content-hash dedup makes the re-run they need
+  // idempotent.
+  const batchAbortRef = useRef(false);
+  useEffect(() => () => {
+    batchAbortRef.current = true;
+    const r = batchPauseResolveRef.current;
+    if (r) { batchPauseResolveRef.current = null; r({ action: "skip" }); }
+  }, []);
+
+  // Hand the paused runner its answer: { action: 'save', template } resumes,
+  // { action: 'skip' } skips just that file and the queue continues.
+  function resolveBatchPause(res) {
+    const r = batchPauseResolveRef.current;
+    if (!r) return;
+    batchPauseResolveRef.current = null;
+    r(res);
+  }
+
+  async function runBatch() {
+    if (!queue || batchRunning || batchSummary) return;
+    setBatchRunning(true);
+    setError(null);
+    // Snapshot every batch-wide input ONCE — the controls are disabled while
+    // the run is in flight, and an async loop reading live state is how a
+    // mid-run toggle silently changes file 7's behaviour.
+    const kind = queue[0].kind; // planFileBatch guarantees the batch is uniform
+    const boundary = overlapFrom; // one target account ⇒ one feed boundary
+    const auditOnly = batchAuditOnly;
+    const batchRules = rules || {};
+    const totals = { written: 0, compared: 0, dup: 0, skippedFiles: 0, failedFiles: 0, importedFiles: 0,
+      skippedRows: 0, matched: 0, csvOnly: 0, mismatches: 0 };
+
+    let accountId = target;
+    try {
+      // Defence in depth — the same money-costing invariant confirm() restates.
+      if (!auditOnly && targetIsSimpleFin && !boundary) {
+        throw new Error("internal: no feed boundary — refusing to import into a fed account");
+      }
+      if (target === "new") {
+        // One new account for the whole batch, created before the first file.
+        const acct = await createManualAccount({ name: newName.trim(), subtype: newSubtype });
+        accountId = acct.id;
+      }
+    } catch (e) {
+      console.error("batch setup failed", e);
+      setError(e.message || "Couldn't start the import.");
+      setBatchRunning(false);
+      return;
+    }
+
+    const setItem = (i, patch) => setQueue(q => (q ? q.map((it, j) => (j === i ? { ...it, ...patch } : it)) : q));
+
+    for (let i = 0; i < queue.length; i++) {
+      if (batchAbortRef.current) break; // modal unmounted — stop before the next write
+      const item = queue[i];
+      setItem(i, { status: "parsing", detail: null });
+      try {
+        if (item.file.size > MAX_FILE_BYTES) {
+          throw new Error(`too large (${(item.file.size / 1024 / 1024).toFixed(0)}MB) to read safely on a phone`);
+        }
+        // CORRECTNESS: existing ids are re-fetched BEFORE EACH FILE, never once
+        // for the batch. File N's freshly-inserted rows must be visible as
+        // existing ids to file N+1 — two monthly statements from the same bank
+        // routinely share their boundary day, and without this refetch every
+        // transaction on that shared day would import twice, once per file.
+        // (The feed boundary itself is stable across the batch: imports never
+        // move getFeedCoverageStart, which reads sfin: rows only.) A FAILED
+        // fetch fails the file rather than degrading to an empty set — an
+        // empty set here means "import everything again".
+        const fetched = await getExistingTxIds(accountId);
+        const freshIds =
+          fetched?.ids instanceof Set ? fetched.ids : fetched instanceof Set ? fetched : null;
+        if (!freshIds) {
+          // Matches the comment above: an unrecognized return shape must FAIL
+          // the file, not degrade to an empty set — an empty set means
+          // "import everything again".
+          throw new Error("couldn't read this account's existing transactions — not importing blind");
+        }
+
+        // Each file flows through the SAME pipeline a single file takes:
+        // parse → analyzeCsv / applyTemplate+buildRows → importPlan → import.
+        let builtRows;
+        let skippedRows = 0;
+        let usedTemplate = null;
+        if (kind === "csv") {
+          const text = await item.file.text();
+          const analysis = analyzeCsv(text, {
+            existingIds: freshIds, manualColumns: null, amountSign, rules: batchRules, overlapFrom: boundary,
+          });
+          if (analysis.error) throw new Error(analysis.error);
+          if (analysis.needsManualMapping) {
+            throw new Error("couldn't detect the columns — import this file on its own to map them by hand");
+          }
+          builtRows = analysis.rows;
+          skippedRows = (analysis.skipped || []).length;
+        } else {
+          const { extractPdfPages } = await import("../pdfExtract.js");
+          const buf = await item.file.arrayBuffer();
+          const { pages, hasTextLayer, pageCount, truncated } = await extractPdfPages(buf);
+          if (!hasTextLayer) {
+            throw new Error("no text layer — looks like a scan; use the bank's CSV export instead");
+          }
+          if (truncated) {
+            throw new Error(`has ${pageCount} pages and only the first ${pages.length} could be read — split the file`);
+          }
+          // The template the user already taught for THIS account wins, exactly
+          // as in the single-file flow — re-read per file so a layout taught
+          // earlier in this batch applies to the rest of it. Then auto-detect;
+          // failing both, PAUSE on this file for the editor.
+          let tpl = null;
+          try {
+            const raw = await getSetting(`pdftpl:${accountId}`);
+            const saved = raw ? JSON.parse(raw) : null;
+            if (saved && saved.version === TEMPLATE_VERSION) tpl = saved;
+          } catch { /* fall through to auto-detect */ }
+          if (!tpl) tpl = autoDetectTemplate(pages);
+          let applied = null;
+          if (tpl) {
+            try {
+              applied = applyTemplate(pages, tpl);
+            } catch (err) {
+              console.error("batch applyTemplate failed", err);
+              applied = null;
+            }
+            if (applied && applied.grid.length === 0) applied = null; // reads nothing → re-teach
+          }
+          if (!applied) {
+            // PAUSE the queue on this file: open the editor exactly as the
+            // single-file flow does, resume on save. Cancelling SKIPS this one
+            // file and the batch continues — it never aborts the rest.
+            setItem(i, { status: "needs-template" });
+            const res = await new Promise(resolve => {
+              batchPauseResolveRef.current = resolve;
+              setBatchPauseTemplate(tpl || defaultTemplate());
+              setBatchPause({ index: i, name: item.name, pages });
+            });
+            setBatchPause(null);
+            setBatchPauseTemplate(null);
+            if (res.action !== "save") {
+              setItem(i, { status: "skipped", detail: { message: "layout not confirmed" } });
+              totals.skippedFiles++;
+              continue;
+            }
+            setItem(i, { status: "parsing" });
+            tpl = res.template;
+            applied = applyTemplate(pages, tpl); // a throw here is an honest per-file failure
+          }
+          const pdfBuilt = buildRows(applied.grid, {
+            ...applied.buildOpts, existingIds: freshIds, rules: batchRules, overlapFrom: boundary,
+          });
+          builtRows = pdfBuilt.rows;
+          skippedRows = (pdfBuilt.skipped || []).length;
+          usedTemplate = tpl;
+        }
+
+        // Remember a working PDF layout for this account in COMPARE mode too —
+        // the per-file getSetting read above is what lets a layout taught on
+        // file 1 apply to files 2..N, and a compare run that re-asked for the
+        // template on every file taught the user nothing.
+        if (kind === "pdf" && usedTemplate) {
+          try {
+            await setSetting(`pdftpl:${accountId}`, JSON.stringify({ ...usedTemplate, version: TEMPLATE_VERSION }));
+          } catch (err) {
+            console.warn("could not save the PDF layout template", err);
+          }
+        }
+
+        const plan = importPlan(builtRows, { overlapFrom: boundary });
+        const dup = plan.dupCount;
+        let written = 0;
+        let compared;
+        let audit = null;
+        if (auditOnly) {
+          // A real comparison, not a row count: the same reconcileCsv audit the
+          // single-file Compare renders, per file, against the account's rows
+          // over this file's date range. batchCanStart guarantees the target
+          // EXISTS in audit mode, so there is always something to compare with.
+          compared = builtRows.length;
+          const { min, max } = csvDateRange(builtRows);
+          if (min && max) {
+            const existing = await getAccountTransactionsInRange(accountId, padIso(min, -7), padIso(max, 7));
+            const rec = reconcileCsv(builtRows, existing);
+            audit = rec.counts; // { matched, csvOnly, plaidOnly, amountMismatches }
+          } else {
+            audit = { matched: 0, csvOnly: 0, plaidOnly: 0, amountMismatches: 0 };
+          }
+        } else {
+          compared = plan.overlapCount;
+          const payload = plan.newRows.map(toInsertRow);
+          // Same last-line invariant as the single-file confirm().
+          if (boundary && payload.some(r => r.date >= boundary)) {
+            throw new Error("internal: a row on/after the feed boundary reached the insert payload");
+          }
+          if (payload.length > 0) written = await importCsvTransactions(accountId, payload, kind);
+        }
+        setItem(i, { status: "imported", detail: { written: Number(written) || 0, compared, dup, skippedRows, audit } });
+        totals.written += Number(written) || 0;
+        totals.compared += compared;
+        totals.dup += dup;
+        totals.skippedRows += skippedRows;
+        if (audit) { totals.matched += audit.matched; totals.csvOnly += audit.csvOnly; totals.mismatches += audit.amountMismatches; }
+        totals.importedFiles++;
+      } catch (e) {
+        // One file's failure never aborts the rest of the queue.
+        console.error(`batch import failed on ${item.name}`, e);
+        setItem(i, { status: "failed", detail: { message: e.message || "failed" } });
+        totals.failedFiles++;
+      }
+    }
+    if (batchAbortRef.current) {
+      // Unmounted mid-run: no UI left to show a summary, but rows already
+      // landed — refresh the Dashboard so they appear.
+      if (totals.written > 0 && onImported) onImported();
+      return;
+    }
+    setBatchSummary({ ...totals, files: queue.length });
+    setBatchRunning(false);
+    if (totals.written > 0 && onImported) onImported();
+  }
+
   const panelStyle = {
     background: "var(--card)", borderRadius: 16, border: "1px solid var(--border)",
     width: "92vw", maxWidth: 540, maxHeight: "88vh", display: "flex", flexDirection: "column", overflow: "hidden",
@@ -602,13 +936,108 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
   const sectionLabel = { fontSize: 11, fontWeight: 600, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".05em", marginBottom: 8 };
   const selStyle = { fontSize: 13, fontFamily: "inherit", color: "var(--text)", background: "var(--input-bg)", border: "1px solid var(--border)", borderRadius: 8, padding: "8px 10px", outline: "none", width: "100%" };
 
+  // The target-account section, shared verbatim by the single-file flow and the
+  // batch flow (one selected account for the whole queue). Extracted as JSX,
+  // not a component, so the single-file render tree is unchanged.
+  const targetSection = (
+    <div style={{ marginBottom: 18 }}>
+      <div style={sectionLabel}>2 · Import into</div>
+      <select value={target} onChange={e => setTarget(e.target.value)} style={selStyle} disabled={batchRunning}>
+        <option value="new">➕ New imported account…</option>
+        {manual.length > 0 && (
+          <optgroup label="Imported accounts">
+            {manual.map(a => <option key={a.id} value={a.id}>{a.nickname || a.name}{a.subtype ? ` · ${a.subtype}` : ""}</option>)}
+          </optgroup>
+        )}
+        {simplefin.length > 0 && (
+          <optgroup label="Connected accounts (SimpleFIN)">
+            {/* Hidden accounts ARE offered: getAccounts has no
+                hidden filter and backfilling history before
+                unhiding is a legitimate order of operations. Say
+                so rather than leave it looking like a bug. */}
+            {simplefin.map(a => <option key={a.id} value={a.id}>{a.nickname || a.name}{a.hidden ? " · hidden" : ""}</option>)}
+          </optgroup>
+        )}
+        {other.length > 0 && (
+          <optgroup label="Other accounts — compare only">
+            {other.map(a => <option key={a.id} value={a.id}>{a.nickname || a.name}{a.mask ? ` ··${a.mask}` : ""}</option>)}
+          </optgroup>
+        )}
+      </select>
+
+      {target === "new" && (
+        <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 8 }}>
+          <input value={newName} onChange={e => setNewName(e.target.value)} placeholder="Account name (e.g. Mason Checking)"
+            style={{ ...selStyle, fontSize: 16 }} autoFocus disabled={batchRunning} />
+          <div style={{ display: "flex", gap: 8 }}>
+            {["checking", "savings", "credit"].map(st => (
+              <button key={st} onClick={() => setNewSubtype(st)} disabled={batchRunning}
+                style={{ flex: 1, padding: "8px 0", borderRadius: 8, fontFamily: "inherit", fontSize: 12, fontWeight: 600, cursor: "pointer",
+                  // Accent tint, derived from the token so it re-tints in dark mode. If a browser
+                  // can't do color-mix the fill just drops out — the accent text + border still
+                  // show which subtype is selected.
+                  background: newSubtype === st ? "color-mix(in srgb, var(--accent) 14%, transparent)" : "var(--bg)",
+                  color: newSubtype === st ? "var(--accent)" : "var(--muted)",
+                  border: `1px solid ${newSubtype === st ? "var(--accent)" : "var(--border)"}` }}>
+                {st === "credit" ? "Credit card" : st[0].toUpperCase() + st.slice(1)}
+              </button>
+            ))}
+          </div>
+          <div style={{ fontSize: 11, color: "var(--muted)" }}>
+            {newSubtype === "credit"
+              ? "Card purchases count as spending by category; refunds and payments never count as income."
+              : "Savings outflows never count as spending in Trends; pick Checking for a day-to-day account."}
+          </div>
+          {/* Gated on FED accounts, not on `plaid`. `plaid` is
+              "neither manual nor SimpleFIN", which went
+              permanently empty the moment the last Plaid item was
+              unlinked — so this warning silently stopped
+              rendering at exactly the point it started mattering
+              most. It guards the one double-count the overlap
+              guard structurally cannot see: that guard protects
+              the account you PICKED, while this is about picking
+              the wrong one. Importing a BECU statement onto a new
+              manual account while BECU is SimpleFIN-fed doubles
+              every total in the period, and no dedup id can
+              catch it across two accounts. */}
+          {fedAccounts.length > 0 && (
+            <div style={{ fontSize: 11, color: "var(--warn)", background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 8, padding: "8px 10px", lineHeight: 1.5 }}>
+              Only for an account that <strong>isn't</strong> already connected. If this statement belongs to one of your
+              connected accounts, pick it above instead — importing it here would count every transaction twice.
+            </div>
+          )}
+        </div>
+      )}
+
+      {mixedSource && (
+        <div style={{ marginTop: 10, fontSize: 12, color: "var(--danger)", background: "var(--danger-bg)", border: "1px solid var(--danger-border)", borderRadius: 8, padding: "10px 12px", lineHeight: 1.5 }}>
+          {legacySource
+            ? <>This account already holds imported transactions from before the app started recording which format they
+              came from. If they came from a {incomingSource === "pdf" ? "CSV" : "PDF"}, importing this
+              {incomingSource === "pdf" ? " PDF" : " CSV"} would add every transaction a second time — banks word the same
+              transaction differently in the two formats, so the duplicate check can't see it. Import into a new account instead.</>
+            : <>This account already holds transactions imported from {incomingSource === "pdf" ? "a CSV" : "a PDF"}. Banks word
+              the same transaction differently in the two formats, so importing both would add each transaction twice. Stick to
+              one format per account, or create a separate account for this one.</>}
+        </div>
+      )}
+
+      {targetIsUnknown && (
+        <div style={{ marginTop: 10, fontSize: 12, color: "var(--warn)", background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 8, padding: "10px 12px", lineHeight: 1.5 }}>
+          This account isn't recognised as connected or imported, so nothing can be imported into it — only compared.
+          Its transactions carry ids from a source this importer can't match against, which means a duplicate would go undetected.
+        </div>
+      )}
+    </div>
+  );
+
   return createPortal(
-    <div className="overlay" onClick={busy ? undefined : onClose}>
+    <div className="overlay" onClick={busy || batchRunning ? undefined : onClose}>
       <div onClick={e => e.stopPropagation()} style={panelStyle}>
         {/* Header */}
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "18px 20px", borderBottom: "1px solid var(--border)" }}>
           <div style={{ fontSize: 15, fontWeight: 600 }}>Import transactions</div>
-          <button onClick={onClose} disabled={busy} className="nbtn" title="Close" style={{ opacity: busy ? .4 : 1 }}>×</button>
+          <button onClick={onClose} disabled={busy || batchRunning} className="nbtn" title="Close" style={{ opacity: busy || batchRunning ? .4 : 1 }}>×</button>
         </div>
 
         {/* Body */}
@@ -629,15 +1058,22 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
             </div>
           ) : (
             <>
-              {/* 1 — File */}
+              {/* 1 — File. `multiple` lets a whole backfill (6–12 monthly
+                  statements, one format, one account) come in at once; a
+                  single pick behaves exactly as before. */}
               <div style={{ marginBottom: 18 }}>
-                <div style={sectionLabel}>1 · Choose a statement file</div>
-                <input ref={fileRef} type="file" accept=".csv,.pdf,text/csv,text/plain,application/pdf" onChange={onFile}
+                <div style={sectionLabel}>{batchMode ? "1 · Choose statement files" : "1 · Choose a statement file"}</div>
+                <input ref={fileRef} type="file" multiple accept=".csv,.pdf,text/csv,text/plain,application/pdf" onChange={onFile}
                   style={{ display: "none" }} />
-                <button className="ibtn" onClick={() => fileRef.current?.click()} style={{ fontSize: 13 }} disabled={pdfBusy}>
-                  {pdfBusy ? "Reading PDF…" : fileName ? "Choose a different file" : "Choose CSV or PDF…"}
+                <button className="ibtn" onClick={() => fileRef.current?.click()} style={{ fontSize: 13 }} disabled={pdfBusy || batchRunning}>
+                  {pdfBusy ? "Reading PDF…" : batchMode ? "Choose different files" : fileName ? "Choose a different file" : "Choose CSV or PDF…"}
                 </button>
-                {fileName && (
+                {batchMode && (
+                  <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 8 }}>
+                    <strong style={{ color: "var(--text)" }}>{queue.length}</strong> {fileKind === "pdf" ? "PDF" : "CSV"} files selected — imported one at a time, in this order.
+                  </div>
+                )}
+                {!batchMode && fileName && (
                   <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 8 }}>
                     {fileName}
                     {fileKind === "pdf" && pdfPages && <> · {pdfPages.length} page{pdfPages.length !== 1 ? "s" : ""}</>}
@@ -708,98 +1144,11 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                 </div>
               )}
 
-              {/* 2 — Target account */}
-              {(fileKind === "pdf" ? !!pdfApplied : !!fileText) && analysis && !analysis.needsManualMapping && !analysis.error && (
+              {/* 2 — Target account (single-file flow; the batch flow renders
+                  the same targetSection below with its own queue panel) */}
+              {!batchMode && (fileKind === "pdf" ? !!pdfApplied : !!fileText) && analysis && !analysis.needsManualMapping && !analysis.error && (
                 <>
-                  <div style={{ marginBottom: 18 }}>
-                    <div style={sectionLabel}>2 · Import into</div>
-                    <select value={target} onChange={e => setTarget(e.target.value)} style={selStyle}>
-                      <option value="new">➕ New imported account…</option>
-                      {manual.length > 0 && (
-                        <optgroup label="Imported accounts">
-                          {manual.map(a => <option key={a.id} value={a.id}>{a.nickname || a.name}{a.subtype ? ` · ${a.subtype}` : ""}</option>)}
-                        </optgroup>
-                      )}
-                      {simplefin.length > 0 && (
-                        <optgroup label="Connected accounts (SimpleFIN)">
-                          {/* Hidden accounts ARE offered: getAccounts has no
-                              hidden filter and backfilling history before
-                              unhiding is a legitimate order of operations. Say
-                              so rather than leave it looking like a bug. */}
-                          {simplefin.map(a => <option key={a.id} value={a.id}>{a.nickname || a.name}{a.hidden ? " · hidden" : ""}</option>)}
-                        </optgroup>
-                      )}
-                      {other.length > 0 && (
-                        <optgroup label="Other accounts — compare only">
-                          {other.map(a => <option key={a.id} value={a.id}>{a.nickname || a.name}{a.mask ? ` ··${a.mask}` : ""}</option>)}
-                        </optgroup>
-                      )}
-                    </select>
-
-                    {target === "new" && (
-                      <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 8 }}>
-                        <input value={newName} onChange={e => setNewName(e.target.value)} placeholder="Account name (e.g. Mason Checking)"
-                          style={{ ...selStyle, fontSize: 16 }} autoFocus />
-                        <div style={{ display: "flex", gap: 8 }}>
-                          {["checking", "savings", "credit"].map(st => (
-                            <button key={st} onClick={() => setNewSubtype(st)}
-                              style={{ flex: 1, padding: "8px 0", borderRadius: 8, fontFamily: "inherit", fontSize: 12, fontWeight: 600, cursor: "pointer",
-                                // Accent tint, derived from the token so it re-tints in dark mode. If a browser
-                                // can't do color-mix the fill just drops out — the accent text + border still
-                                // show which subtype is selected.
-                                background: newSubtype === st ? "color-mix(in srgb, var(--accent) 14%, transparent)" : "var(--bg)",
-                                color: newSubtype === st ? "var(--accent)" : "var(--muted)",
-                                border: `1px solid ${newSubtype === st ? "var(--accent)" : "var(--border)"}` }}>
-                              {st === "credit" ? "Credit card" : st[0].toUpperCase() + st.slice(1)}
-                            </button>
-                          ))}
-                        </div>
-                        <div style={{ fontSize: 11, color: "var(--muted)" }}>
-                          {newSubtype === "credit"
-                            ? "Card purchases count as spending by category; refunds and payments never count as income."
-                            : "Savings outflows never count as spending in Trends; pick Checking for a day-to-day account."}
-                        </div>
-                        {/* Gated on FED accounts, not on `plaid`. `plaid` is
-                            "neither manual nor SimpleFIN", which went
-                            permanently empty the moment the last Plaid item was
-                            unlinked — so this warning silently stopped
-                            rendering at exactly the point it started mattering
-                            most. It guards the one double-count the overlap
-                            guard structurally cannot see: that guard protects
-                            the account you PICKED, while this is about picking
-                            the wrong one. Importing a BECU statement onto a new
-                            manual account while BECU is SimpleFIN-fed doubles
-                            every total in the period, and no dedup id can
-                            catch it across two accounts. */}
-                        {fedAccounts.length > 0 && (
-                          <div style={{ fontSize: 11, color: "var(--warn)", background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 8, padding: "8px 10px", lineHeight: 1.5 }}>
-                            Only for an account that <strong>isn't</strong> already connected. If this statement belongs to one of your
-                            connected accounts, pick it above instead — importing it here would count every transaction twice.
-                          </div>
-                        )}
-                      </div>
-                    )}
-
-                    {mixedSource && (
-                      <div style={{ marginTop: 10, fontSize: 12, color: "var(--danger)", background: "var(--danger-bg)", border: "1px solid var(--danger-border)", borderRadius: 8, padding: "10px 12px", lineHeight: 1.5 }}>
-                        {legacySource
-                          ? <>This account already holds imported transactions from before the app started recording which format they
-                            came from. If they came from a {incomingSource === "pdf" ? "CSV" : "PDF"}, importing this
-                            {incomingSource === "pdf" ? " PDF" : " CSV"} would add every transaction a second time — banks word the same
-                            transaction differently in the two formats, so the duplicate check can't see it. Import into a new account instead.</>
-                          : <>This account already holds transactions imported from {incomingSource === "pdf" ? "a CSV" : "a PDF"}. Banks word
-                            the same transaction differently in the two formats, so importing both would add each transaction twice. Stick to
-                            one format per account, or create a separate account for this one.</>}
-                      </div>
-                    )}
-
-                    {targetIsUnknown && (
-                      <div style={{ marginTop: 10, fontSize: 12, color: "var(--warn)", background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 8, padding: "10px 12px", lineHeight: 1.5 }}>
-                        This account isn't recognised as connected or imported, so nothing can be imported into it — only compared.
-                        Its transactions carry ids from a source this importer can't match against, which means a duplicate would go undetected.
-                      </div>
-                    )}
-                  </div>
+                  {targetSection}
 
                   {/* The verdict: one sentence saying what this file will do.
                       Replaces the old coverage paragraph, which said "no synced
@@ -907,6 +1256,90 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                 </>
               )}
 
+              {/* Batch flow: one target account, a queue of files, per-file
+                  status, one summary. Compact rows; the list scrolls inside
+                  the modal so a 12-file backfill stays usable at 390px. */}
+              {batchMode && (
+                <>
+                  {targetSection}
+
+                  {/* Boundary status for a fed target — same states and colours
+                      as the single-file verdict box, worded for a queue (the
+                      per-file import/compare split is only known per file). */}
+                  {targetIsSimpleFin && (
+                    <div style={{
+                      fontSize: 11, lineHeight: 1.6, marginBottom: 12, borderRadius: 8, padding: "10px 12px",
+                      color: boundaryState === "error" ? "var(--danger)" : boundaryState === "unsynced" ? "var(--warn)" : "var(--muted)",
+                      background: boundaryState === "error" ? "var(--danger-bg)" : boundaryState === "unsynced" ? "var(--warn-bg)" : "var(--bg)",
+                      border: `1px solid ${boundaryState === "error" ? "var(--danger-border)" : boundaryState === "unsynced" ? "var(--warn-border)" : "transparent"}`,
+                    }}>
+                      {boundaryState === "loading" ? "Checking what the feed already has…"
+                        : boundaryState === "error" ? <>Couldn't check where this account's feed starts, so importing isn't safe — a statement covering dates the feed already has would count every transaction twice. Close and retry.</>
+                        : boundaryState === "unsynced" ? <>This account hasn't synced yet, so there's no boundary to import against — the first pull reaches back about three months and would land on top of anything imported now.</>
+                        : !coverageStart ? <>The feed has no transactions for this account. Rows from the last {FEED_LOOKBACK_DAYS} days are still excluded — every pull re-reads that window.</>
+                        : <>The feed covers this account from <strong>{overlapFrom}</strong>. In each file, rows before that import; rows on or after it are counted but never inserted.</>}
+                    </div>
+                  )}
+
+                  {/* The one override, batch-wide. Per-file toggling is
+                      deliberately not offered — it is a safety lever, and the
+                      whole queue should answer one question the same way. */}
+                  {targetIsExisting && !targetIsUnknown && !batchSummary && (
+                    <div style={{ marginBottom: 12 }}>
+                      {compareOnly ? (
+                        <button className="ibtn" style={{ width: "100%", justifyContent: "center", minHeight: 44 }} disabled={batchRunning} onClick={() => setCompareOnly(false)}>
+                          ← Back to import
+                        </button>
+                      ) : (
+                        <button className="ibtn" style={{ width: "100%", justifyContent: "center", minHeight: 44 }} disabled={batchRunning} onClick={() => setCompareOnly(true)}>
+                          Compare only — don't import (all {queue.length} files)
+                        </button>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Paused on a PDF that needs its layout taught: the same
+                      editor the single-file flow opens, with resume/skip. */}
+                  {batchPause && (
+                    <div style={{ marginBottom: 18 }}>
+                      <div style={sectionLabel}>Statement layout — {batchPause.name}</div>
+                      <div style={{ fontSize: 12, color: "var(--muted)", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8, padding: "10px 12px", lineHeight: 1.5, marginBottom: 8 }}>
+                        This file's layout couldn't be read automatically. Set the columns below and resume, or skip
+                        just this file — the rest of the batch continues either way.
+                      </div>
+                      <PdfTemplateEditor pages={batchPause.pages} template={batchPauseTemplate} onChange={setBatchPauseTemplate} rowCount={pauseRowCount} />
+                      <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                        <button className="ibtn" style={{ flex: 1, justifyContent: "center", minHeight: 44 }}
+                          onClick={() => resolveBatchPause({ action: "skip" })}>
+                          Skip this file
+                        </button>
+                        <button
+                          onClick={() => resolveBatchPause({ action: "save", template: batchPauseTemplate })}
+                          disabled={pauseRowCount === 0}
+                          style={{ flex: 2, minHeight: 44, borderRadius: 8, border: "none", background: "var(--accent)", color: "var(--accent-text)", fontFamily: "inherit", fontSize: 13, fontWeight: 500, cursor: pauseRowCount === 0 ? "default" : "pointer", opacity: pauseRowCount === 0 ? .5 : 1 }}>
+                          Use these columns ({pauseRowCount} row{pauseRowCount !== 1 ? "s" : ""})
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {batchSignRelevant && !batchRunning && !batchSummary && (
+                    <div style={{ marginBottom: 10, fontSize: 12, color: "var(--warn)", background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 8, padding: "10px 12px", lineHeight: 1.5 }}>
+                      These CSVs have a single signed Amount column. Check the sign before importing —
+                      wrong-signed rows can never be deduped away later.
+                      <div style={{ marginTop: 6 }}>
+                        <select value={amountSign} onChange={e => setAmountSign(e.target.value)}
+                          style={{ ...selStyle, width: "auto", fontSize: 12 }}>
+                          <option value="in_positive">Positive numbers are money IN (deposits)</option>
+                          <option value="out_positive">Positive numbers are money OUT (spending)</option>
+                        </select>
+                      </div>
+                    </div>
+                  )}
+                  <BatchQueue queue={queue} summary={batchSummary} sectionLabel={sectionLabel} />
+                </>
+              )}
+
               {error && (
                 <div style={{ fontSize: 12, color: "var(--danger)", background: "var(--danger-bg)", border: "1px solid var(--danger-border)", borderRadius: 8, padding: "10px 12px", marginTop: 8 }}>{error}</div>
               )}
@@ -919,6 +1352,22 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
         <div style={{ display: "flex", gap: 8, padding: "14px 20px", borderTop: "1px solid var(--border)" }}>
           {result ? (
             <button onClick={onClose} style={{ flex: 1, padding: "10px 0", borderRadius: 8, border: "none", background: "var(--accent)", color: "var(--accent-text)", fontFamily: "inherit", fontSize: 14, fontWeight: 500, cursor: "pointer" }}>Done</button>
+          ) : batchMode ? (
+            batchSummary ? (
+              <button onClick={onClose} style={{ flex: 1, padding: "10px 0", borderRadius: 8, border: "none", background: "var(--accent)", color: "var(--accent-text)", fontFamily: "inherit", fontSize: 14, fontWeight: 500, cursor: "pointer" }}>Done</button>
+            ) : (
+              <>
+                <button onClick={onClose} disabled={batchRunning || syncState === "running"} className="ibtn" style={{ flex: 1, justifyContent: "center", opacity: batchRunning ? .5 : 1 }}>Cancel</button>
+                <button onClick={batchNeedsSync ? syncNow : runBatch} disabled={!batchPrimaryOn}
+                  style={{ flex: 2, padding: "10px 0", borderRadius: 8, border: "none", background: "var(--accent)", color: "var(--accent-text)", fontFamily: "inherit", fontSize: 14, fontWeight: 500, cursor: batchPrimaryOn ? "pointer" : "default", opacity: batchPrimaryOn ? 1 : .5 }}>
+                  {batchRunning ? `Importing… ${Math.min(batchDone + 1, queue.length)} of ${queue.length}`
+                    : syncState === "running" ? "Syncing…"
+                    : batchNeedsSync ? "Sync this account first"
+                    : batchAuditOnly ? `Compare ${queue.length} files`
+                    : `Import ${queue.length} files`}
+                </button>
+              </>
+            )
           ) : auditOnly ? (
             // Nothing to insert — the only action is to close.
             <button onClick={onClose} style={{ flex: 1, padding: "10px 0", borderRadius: 8, border: "none", background: "var(--accent)", color: "var(--accent-text)", fontFamily: "inherit", fontSize: 14, fontWeight: 500, cursor: "pointer" }}>Close (nothing imported)</button>
@@ -1140,6 +1589,78 @@ function Reconciliation({ recon, loading, sectionLabel, step = 3 }) {
       <div style={{ fontSize: 11, color: "var(--muted)", background: "var(--bg)", borderRadius: 8, padding: "8px 10px", lineHeight: 1.5 }}>
         {cleanMatched} of {c.csvTotal} statement rows matched cleanly. Nothing was imported.
       </div>
+    </div>
+  );
+}
+
+// The multi-file queue panel: one compact row per file (name + live status),
+// scrolling inside its own box so a 12-file backfill stays usable at 390px,
+// plus the one batch summary line once the run finishes. Statuses:
+// waiting / reading… / needs columns / imported (N · M compare-only) /
+// skipped / failed (message).
+function BatchQueue({ queue, summary, sectionLabel }) {
+  const statusText = it => {
+    if (it.status === "waiting") return "waiting";
+    if (it.status === "parsing") return "reading…";
+    if (it.status === "needs-template") return "needs columns";
+    if (it.status === "skipped") return `skipped${it.detail?.message ? ` — ${it.detail.message}` : ""}`;
+    if (it.status === "failed") return it.detail?.message || "failed";
+    if (it.status === "imported") {
+      const d = it.detail || {};
+      // Compare mode carries a REAL per-file reconcile, so say what it found —
+      // "12 compare-only" alone reads as an import that quietly did nothing.
+      const bits = d.audit
+        ? [`${d.audit.matched} matched`,
+           ...(d.audit.csvOnly ? [`${d.audit.csvOnly} not in app`] : []),
+           ...(d.audit.plaidOnly ? [`${d.audit.plaidOnly} app-only`] : []),
+           ...(d.audit.amountMismatches ? [`${d.audit.amountMismatches} amount differ`] : [])]
+        : [`${d.written ?? 0} imported`,
+           ...(d.compared ? [`${d.compared} compare-only`] : []),
+           ...(d.dup ? [`${d.dup} duplicate`] : [])];
+      // Rows the parser could not read are money missing from a backfill —
+      // never fold them into silence.
+      if (d.skippedRows) bits.push(`${d.skippedRows} row${d.skippedRows !== 1 ? "s" : ""} unreadable`);
+      return bits.join(" · ");
+    }
+    return it.status;
+  };
+  const statusColor = it =>
+    it.status === "failed" ? "var(--danger)"
+    : it.status === "imported" ? "var(--text)"
+    : it.status === "needs-template" ? "var(--warn)"
+    : "var(--muted)";
+  return (
+    <div style={{ marginBottom: 10 }}>
+      <div style={sectionLabel}>3 · Files</div>
+      <div style={{ border: "1px solid var(--border)", borderRadius: 10, maxHeight: 240, overflowY: "auto" }}>
+        {queue.map((it, i) => (
+          <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 12px", borderTop: i > 0 ? "1px solid var(--border)" : "none" }}>
+            <div style={{ flex: 1, minWidth: 0, fontSize: 12, fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+              {it.name}
+            </div>
+            <div style={{ flexShrink: 0, maxWidth: "55%", fontSize: 11, textAlign: "right", color: statusColor(it), whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+              {statusText(it)}
+            </div>
+          </div>
+        ))}
+      </div>
+      {summary && (
+        <div style={{ fontSize: 11, color: "var(--muted)", background: "var(--bg)", borderRadius: 8, padding: "8px 10px", marginTop: 8, lineHeight: 1.5 }}>
+          {summary.matched > 0 || summary.csvOnly > 0 ? (
+            <>Compared: <strong style={{ color: "var(--text)" }}>{summary.matched}</strong> matched
+              {summary.csvOnly > 0 && <> · {summary.csvOnly} not in the app</>}
+              {summary.mismatches > 0 && <> · {summary.mismatches} amounts differ</>}</>
+          ) : (
+            <>Done: <strong style={{ color: "var(--text)" }}>{summary.written}</strong> transaction{summary.written !== 1 ? "s" : ""} imported</>
+          )}
+          {summary.compared > 0 && summary.matched === 0 && summary.csvOnly === 0 && <> · {summary.compared} compare-only</>}
+          {summary.dup > 0 && <> · {summary.dup} duplicate</>}
+          {summary.skippedRows > 0 && <> · <span style={{ color: "var(--warn)" }}>{summary.skippedRows} row{summary.skippedRows !== 1 ? "s" : ""} unreadable</span></>}
+          {summary.skippedFiles > 0 && <> · {summary.skippedFiles} file{summary.skippedFiles !== 1 ? "s" : ""} skipped</>}
+          {summary.failedFiles > 0 && <> · <span style={{ color: "var(--danger)" }}>{summary.failedFiles} file{summary.failedFiles !== 1 ? "s" : ""} failed</span></>}
+          {" "}across {summary.files} files.
+        </div>
+      )}
     </div>
   );
 }
