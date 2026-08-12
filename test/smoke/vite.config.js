@@ -35,6 +35,11 @@ export default defineConfig({
       { find: /^.*\/sync\.js$/, replacement: `${M}/sync.js` },
       { find: /^\.\.?\/db\.js$/, replacement: `${M}/db.js` },
       { find: /^.*\/apiClient\.js$/, replacement: `${M}/apiClient.js` },
+      // Fifth alias (2026-08-12): App.jsx sits ABOVE the dataAdapter façade
+      // and imports supabaseClient directly — mocking it lets the gate mount
+      // the REAL App (auth → count → Dashboard), closing the recorded
+      // harness gap. Dashboard's own four-module import rule is unchanged.
+      { find: /^.*\/supabaseClient\.js$/, replacement: `${M}/supabaseClient.js` },
     ],
   },
   server: { fs: { allow: [repo] }, port: 5199, strictPort: true },
