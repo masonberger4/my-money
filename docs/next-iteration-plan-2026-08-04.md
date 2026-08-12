@@ -214,8 +214,9 @@ prior backlog. Both are S/M with no blockers and no migration.*
      `api/_lib/unlink.js` decisions-pure pattern) + `feedReachWindow()` beside
      `coverageShortfall`, so copy renders from the **server's** constants —
      `FIRST_PULL_DAYS`/`MAX_LOOKBACK_DAYS` are env-overridable and must never
-     get a fourth hardcoded client copy (`CsvImport.jsx:193`'s
-     `FEED_LOOKBACK_DAYS` is already one drifting copy of `OVERLAP_DAYS`).
+     get a fourth hardcoded client copy (`CsvImport.jsx`'s `FEED_LOOKBACK_DAYS`
+     was one drifting copy of `OVERLAP_DAYS` — closed 2026-08-12:
+     `FEED_OVERLAP_DAYS` in `src/coverage.js` is now the one copy).
      Cap the per-account scan at 25 + `truncated`; wrap the whole block in
      try/catch that **omits the `coverage` key** on any error (missing key =
      no notice — never render a gap you aren't sure of, and never 500 the
@@ -244,7 +245,8 @@ prior backlog. Both are S/M with no blockers and no migration.*
    (`src/categoryMap.js`); the descriptor→category keyword table deleted from
    `src/txClassify.js` while every transfer/card-payment guard stayed
    (`guessCategory` is now transfer guards → learned rule → Uncategorized);
-   `DEFAULT_SCHEDULE_E_MAP` removed so tax mapping is fully user-driven through
+   `DEFAULT_SCHEDULE_E_MAP` emptied to `{}` (the export survives as the
+   callers' fallback) so tax mapping is fully user-driven through
    `tax:maps`; `dash:cats` became THE category system, surfaced through the new
    pure `src/categoryList.js` so the Categories tab, the Budget tab, the
    Transactions chips and every picker read ONE list (which also retired the
@@ -262,9 +264,12 @@ prior backlog. Both are S/M with no blockers and no migration.*
    every `mapped_category` is `Uncategorized` except the mechanism labels,
    `user_category` is null except those, and `budgets` / `budget_months` /
    `category_rules` are empty (archived to `legacy_*`). **Retraining is now the
-   live task.** The one piece of this item still OPEN: the teach-queue
-   re-sizing named below was NOT done — the queue is unchanged and is now the
-   primary onboarding surface. Original spec kept below as the record.
+   live task.** The teach-queue remainder is RESOLVED in two parts: the queue
+   POPULATION was rebuilt 2026-08-05 (counted-split, `src/teachQueue.js`) and
+   the row-height re-sizing shipped 2026-08-12 (PR #76, `TEACH_ROW`
+   minHeight:32). Any larger "promote the queue as an onboarding surface"
+   redesign is a separate Mason decision, deliberately unclaimed. Original
+   spec kept below as the record.
 
    **Mason's decision 2026-08-04. This REVERSES recorded decisions.** The app ships no
    categories at all: the user creates every category, teaches which
