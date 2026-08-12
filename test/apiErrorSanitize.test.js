@@ -75,6 +75,33 @@ test('the four named routes return stable codes from their catch-alls', () => {
   }
 });
 
+// sync.js returns per-result errors inside a 200 — outside the 500 scan above —
+// and SimpleFinConnect renders results[].error verbatim in the connect modal,
+// the same surface as last_error (sanitized a few lines earlier for exactly
+// that reason). Deliberately a narrow literal pin on the two sites: widening
+// the general scan to every `error:` property would false-positive on
+// legitimate internal shapes.
+test('sync.js sanitizes the client-visible per-result error strings', () => {
+  const src = readFileSync(join(apiDir, 'sync.js'), 'utf8');
+  // The fallback goes AFTER the sanitize, not before: sanitizeFeedMessage can
+  // strip a real message to '', and a falsy results[].error reads as a CLEAN
+  // pull to pullWasClean — silently unlocking the statement-import gate on a
+  // failed pull (adversarial-review catch, 2026-08-12).
+  assert.ok(
+    src.includes("error: sanitizeFeedMessage(message) || 'Unknown error'"),
+    'the per-access-row failure must sanitize results[].error, falling back AFTER so .error stays truthy'
+  );
+  assert.ok(
+    src.includes("error: sanitizeFeedMessage(err?.message) || 'Unknown error'"),
+    'the pass-level failure must sanitize results[].error, falling back AFTER so .error stays truthy'
+  );
+  assert.doesNotMatch(
+    src,
+    /error:\s*(?:message\b|err\?\.message)/,
+    'no results[].error site may carry a raw err.message'
+  );
+});
+
 // --- Client display sites of the sanitized bodies ------------------------------
 // The sanitized 500 shape is {error: stableCode, message: humanText}. Every
 // client site that renders one must prefer detail.message — showing the code

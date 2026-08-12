@@ -26,7 +26,7 @@
 // spec text, no library, and no fixture settles it — see normalizeBalance().
 
 import { lookup as dnsLookup } from 'node:dns/promises';
-import { FEED_REACH_DAYS } from '../../src/coverage.js';
+import { FEED_OVERLAP_DAYS, FEED_REACH_DAYS } from '../../src/coverage.js';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 
@@ -47,8 +47,12 @@ function envInt(name, fallback) {
 // How far back the very first pull reaches, and how much overlap each
 // incremental pull re-requests (a bank can amend or late-post a transaction
 // after we've already pulled its date — the upsert makes re-seeing it free).
+// OVERLAP_DAYS's default lives in src/coverage.js (FEED_OVERLAP_DAYS), the
+// same one-copy pattern as MAX_LOOKBACK_DAYS below: CsvImport.jsx's import
+// boundary and its user-facing sentences quote the same number this pull
+// re-reads, so they can't drift apart.
 export const FIRST_PULL_DAYS = envInt('SIMPLEFIN_FIRST_PULL_DAYS', 730);
-export const OVERLAP_DAYS = envInt('SIMPLEFIN_OVERLAP_DAYS', 30);
+export const OVERLAP_DAYS = envInt('SIMPLEFIN_OVERLAP_DAYS', FEED_OVERLAP_DAYS);
 
 // SimpleFIN serves at most 90 days per request, and says so in the response
 // BODY when you ask for more ("Requested date range exceeds limit of 90 days and

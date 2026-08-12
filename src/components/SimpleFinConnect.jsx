@@ -72,6 +72,18 @@ export default function SimpleFinConnect({ onClose, onConnected }) {
     load();
   }, [load]);
 
+  // Escape closes the modal, gated exactly like the backdrop click below — a
+  // claim or first sync in flight must not be dismissed out from under itself.
+  useEffect(() => {
+    const h = e => {
+      if (e.key !== "Escape" || busy) return;
+      e.stopImmediatePropagation();
+      onClose();
+    };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, [busy, onClose]);
+
   async function connect() {
     const value = token.trim();
     if (!value) return;
@@ -197,7 +209,7 @@ export default function SimpleFinConnect({ onClose, onConnected }) {
 
   return createPortal(
     <div className="overlay" onClick={busy ? undefined : onClose}>
-      <div onClick={e => e.stopPropagation()} style={panelStyle}>
+      <div role="dialog" aria-modal="true" aria-label="Connect banks with SimpleFIN" onClick={e => e.stopPropagation()} style={panelStyle}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "18px 20px", borderBottom: "1px solid var(--border)" }}>
           <div style={{ fontSize: 15, fontWeight: 600 }}>Connect banks with SimpleFIN</div>
           <button onClick={onClose} disabled={busy} className="nbtn" title="Close" style={{ opacity: busy ? .4 : 1 }}>×</button>

@@ -165,10 +165,14 @@ export async function setBudgetIncome({ year, month }, amount, { scope = 'month'
 // budgets column would need a migration and this is a pure display preference.
 // Default OFF for every category (absent key ⇒ {}), so a fixed bill that spends
 // 100% on day 1 never false-alarms; opting in is a deliberate per-envelope act.
-const ENV_PACE_KEY = 'env:pace';
+// Key + parse exported for the startup batch read (getStartupSettings in
+// dataAdapter.js) — the parse rule lives beside its writer, never inline in a
+// component.
+export const ENV_PACE_KEY = 'env:pace';
 
-export async function getEnvPace() {
-  const value = await getSetting(ENV_PACE_KEY);
+// Tolerant parse (the parseIgnoreList idiom): a corrupt or absent row reads
+// as {} — every category defaults to opted-out.
+export function parseEnvPace(value) {
   if (value == null || String(value).trim() === '') return {};
   try {
     const parsed = JSON.parse(value);
@@ -176,6 +180,10 @@ export async function getEnvPace() {
   } catch {
     return {};
   }
+}
+
+export async function getEnvPace() {
+  return parseEnvPace(await getSetting(ENV_PACE_KEY));
 }
 
 export async function setEnvPace(map) {

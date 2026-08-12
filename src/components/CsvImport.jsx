@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { analyzeCsv, toInsertRow, parseCsv, reconcileCsv, csvDateRange, buildRows, importPlan, planFileBatch, fileKindOf } from "../csvImport.js";
 import { applyTemplate, autoDetectTemplate, defaultTemplate, rowTotals, TEMPLATE_VERSION } from "../pdfImport.js";
 import { createManualAccount, importCsvTransactions, getExistingTxIds, getAccountTransactionsInRange, isManualAccount, isSimpleFinAccount, getCategoryRules, getFeedCoverageStart } from "../dataAdapter.js";
+import { FEED_OVERLAP_DAYS } from "../coverage.js";
 import { getSetting, setSetting } from "../db.js";
 import { runSync, pullWasClean } from "../sync.js";
 import { chipStyle, markColor, readableInk } from "../paletteContrast.js";
@@ -194,6 +195,18 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
   const targetIsManual = !!targetAcct && isManualAccount(targetAcct);
   const targetIsUnknown = targetIsExisting && !targetIsManual && !targetIsSimpleFin;
 
+  // Escape closes the modal, gated exactly like the backdrop click below — a
+  // parse or batch run in flight must not be dismissed out from under itself.
+  useEffect(() => {
+    const h = e => {
+      if (e.key !== "Escape" || busy || batchRunning) return;
+      e.stopImmediatePropagation();
+      onClose();
+    };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, [busy, batchRunning, onClose]);
+
   // Switching target resets the override. Carrying an INSERTING state across
   // accounts is the mis-tap that permanently doubles money; carrying a
   // non-inserting one is harmless, but one rule is easier to reason about than
@@ -204,9 +217,9 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
     setSyncState("idle");
   }, [target]);
 
-  // Mirrors OVERLAP_DAYS in api/_lib/simplefin.js: every pull after the first
-  // starts at last_pulled_at minus this, so that tail can still arrive.
-  const FEED_LOOKBACK_DAYS = 30;
+  // FEED_OVERLAP_DAYS (src/coverage.js) is OVERLAP_DAYS's default in
+  // api/_lib/simplefin.js: every pull after the first starts at last_pulled_at
+  // minus this, so that tail can still arrive.
 
   // Which of the five states the feed boundary is in. Only 'ok' permits an
   // import into a fed account.
@@ -233,7 +246,7 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
   const overlapFrom =
     !targetIsSimpleFin ? null
     : coverageStart ? coverageStart
-    : boundaryState === "ok" ? padIso(todayIso(), -FEED_LOOKBACK_DAYS)
+    : boundaryState === "ok" ? padIso(todayIso(), -FEED_OVERLAP_DAYS)
     : null;
 
   // Apply the PDF template → the same cell grid a CSV yields. Guarded like the
@@ -1033,7 +1046,7 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
 
   return createPortal(
     <div className="overlay" onClick={busy || batchRunning ? undefined : onClose}>
-      <div onClick={e => e.stopPropagation()} style={panelStyle}>
+      <div role="dialog" aria-modal="true" aria-label="Import transactions" onClick={e => e.stopPropagation()} style={panelStyle}>
         {/* Header */}
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "18px 20px", borderBottom: "1px solid var(--border)" }}>
           <div style={{ fontSize: 15, fontWeight: 600 }}>Import transactions</div>
@@ -1166,7 +1179,7 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                       {boundaryState === "loading" ? "Checking what the feed already has…"
                         : boundaryState === "error" ? <>Couldn't check where this account's feed starts, so importing isn't safe — a statement covering dates the feed already has would count every transaction twice. Close and retry.</>
                         : boundaryState === "unsynced" ? <>This account hasn't synced yet, so there's no boundary to import against — the first pull reaches back about three months and would land on top of anything imported now.</>
-                        : !coverageStart ? <>The feed has no transactions for this account. Rows from the last {FEED_LOOKBACK_DAYS} days are still excluded — every pull re-reads that window.</>
+                        : !coverageStart ? <>The feed has no transactions for this account. Rows from the last {FEED_OVERLAP_DAYS} days are still excluded — every pull re-reads that window.</>
                         : verdict === "audit" ? <>The feed covers this account from <strong>{overlapFrom}</strong> and every row here is inside that. Nothing will be imported — here's how your statement compares.</>
                         : verdict === "both" ? <>The feed starts <strong>{overlapFrom}</strong>. The <strong>{newRows.length}</strong> row{newRows.length !== 1 ? "s" : ""} before it will import; the <strong>{overlapCount}</strong> on or after it {overlapCount !== 1 ? "are" : "is"} compared against the feed instead.</>
                         : <>The feed starts <strong>{overlapFrom}</strong>. Every row in this file predates it, so there's nothing to exclude.</>}
@@ -1276,7 +1289,7 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                       {boundaryState === "loading" ? "Checking what the feed already has…"
                         : boundaryState === "error" ? <>Couldn't check where this account's feed starts, so importing isn't safe — a statement covering dates the feed already has would count every transaction twice. Close and retry.</>
                         : boundaryState === "unsynced" ? <>This account hasn't synced yet, so there's no boundary to import against — the first pull reaches back about three months and would land on top of anything imported now.</>
-                        : !coverageStart ? <>The feed has no transactions for this account. Rows from the last {FEED_LOOKBACK_DAYS} days are still excluded — every pull re-reads that window.</>
+                        : !coverageStart ? <>The feed has no transactions for this account. Rows from the last {FEED_OVERLAP_DAYS} days are still excluded — every pull re-reads that window.</>
                         : <>The feed covers this account from <strong>{overlapFrom}</strong>. In each file, rows before that import; rows on or after it are counted but never inserted.</>}
                     </div>
                   )}

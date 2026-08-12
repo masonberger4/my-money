@@ -426,6 +426,14 @@ set; the dataAdapter split got **its own quiet session** (shipped).
 
 ## Next backlog (synthesized 2026-08-11; every item adversarially verified against current main)
 
+> **ALL 16 ITEMS BELOW SHIPPED 2026-08-12, in the same PR that wrote this
+> section** (three build waves + adversarial review; two review catches — the
+> sanitize-order truthiness bug and the Refresh-button staleness regression —
+> fixed before merge). Retained as the ship record; the killed list below
+> still governs. Identifiers named in the item texts (e.g. the retired
+> `FEED_LOOKBACK_DAYS`) are historical description of the fixed hazards, not
+> live references.
+
 Ranked for a two-user household app in its retraining/backfill phase: correctness risk removed > dev-loop reliability > user-visible polish > cleanliness. Each item records why it needs nothing from Mason — no migration, no env change, no preference call, no data only he holds.
 
 ### Do next

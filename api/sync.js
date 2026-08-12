@@ -732,7 +732,12 @@ async function syncSimpleFin(supabase, householdId, { force }) {
       }
       results.push({
         institution: 'SimpleFIN',
-        error: message,
+        // Same sanitization as last_error above: results[].error is rendered
+        // verbatim in the connect modal too.
+        // Fallback AFTER sanitizing: sanitizeFeedMessage can strip a real
+        // message to '', and a falsy error here reads as a CLEAN pull to
+        // pullWasClean — unlocking the statement-import gate on a failure.
+        error: sanitizeFeedMessage(message) || 'Unknown error',
         needs_reauth: err?.code === 'auth_failed',
       });
     }
@@ -770,7 +775,12 @@ export default async function handler(req, res) {
       results.push(...(await syncSimpleFin(supabase, user.householdId, { force })));
     } catch (err) {
       console.error('[sync:simplefin] pass failed', err);
-      results.push({ institution: 'SimpleFIN', error: err?.message || 'Unknown error' });
+      // Fallback before sanitizing so .error stays truthy; sanitized because
+      // the connect modal renders it (the last_error discipline).
+      results.push({
+        institution: 'SimpleFIN',
+        error: sanitizeFeedMessage(err?.message) || 'Unknown error',
+      });
     }
 
     return res.status(200).json({ results });

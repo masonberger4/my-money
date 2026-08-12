@@ -186,7 +186,7 @@
    This is the same trap as the dark-mode incident, where .card/.tab/.ibtn were
    trapped in that same block. Anything a pre-Dashboard screen can render
    belongs here. */
-.nbtn { background: var(--card); border: 1px solid var(--border); border-radius: 8px; width: 30px; height: 30px; display: flex; align-items: center; justify-content: center; cursor: pointer; font-size: 16px; transition: all .15s; line-height: 1; }
+.nbtn { background: var(--card); border: 1px solid var(--border); border-radius: 8px; width: 32px; height: 32px; display: flex; align-items: center; justify-content: center; cursor: pointer; font-size: 16px; transition: all .15s; line-height: 1; } /* 32px = the hit-area floor */
 .nbtn:hover:not(:disabled) { border-color: var(--text); }
 .nbtn:disabled { opacity: .3; cursor: default; }
 

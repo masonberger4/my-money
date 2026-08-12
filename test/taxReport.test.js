@@ -302,6 +302,27 @@ test('csvCell quotes carriage returns', () => {
   assert.ok(csv.includes('"BAD\rVENDOR"'));
 });
 
+test('csvCell neutralizes formula triggers, never the minus sign', () => {
+  const r = scheduleEReport(
+    [
+      tx({ amount: 500, category: 'X', is_capital: true, merchant_name: '=HYPERLINK("http://evil")' }),
+      tx({ amount: 300, category: 'X', is_capital: true, merchant_name: '+SUM(A1:A9)' }),
+      tx({ amount: 200, category: 'X', is_capital: true, merchant_name: '@cmd' }),
+      tx({ amount: 100, category: 'X', is_capital: true, merchant_name: '\tpayload' }),
+      tx({ amount: 40, category: 'Utilities' }),
+      tx({ amount: -100, category: 'Utilities' }),
+    ],
+    { Utilities: 17 },
+  );
+  const csv = scheduleECsv(r, {});
+  assert.ok(csv.includes('"\'=HYPERLINK(""http://evil"")"'), 'apostrophe-prefixed BEFORE quoting');
+  assert.ok(csv.includes("'+SUM(A1:A9)"));
+  assert.ok(csv.includes("'@cmd"));
+  assert.ok(csv.includes("'\tpayload"));
+  assert.ok(csv.includes('17,Utilities,-60.00'), 'negative amount cells stay byte-identical');
+  assert.ok(!csv.includes("'-"), 'a leading minus is never neutralized');
+});
+
 test('scheduleECsv receipt column: only with receiptTxIds, yes/MISSING per row', () => {
   const r = scheduleEReport(
     [
