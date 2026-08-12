@@ -341,7 +341,13 @@ export function mileageDeduction(logRows) {
 // the column name is documentation for the human, not import safety.
 
 function csvCell(v) {
-  const s = String(v ?? '');
+  let s = String(v ?? '');
+  // Formula-injection guard: this file is handed to a preparer and opened in
+  // Excel, where a cell starting `=`/`+`/`@`/tab executes. Bank text flows in
+  // here verbatim, so those get a leading apostrophe. `-` is deliberately NOT
+  // neutralized — toFixed amount cells must stay byte-identical (the pinned
+  // positive=out sign rule), and `-60.00` is a number to Excel, not a formula.
+  if (/^[=+@\t]/.test(s)) s = `'${s}`;
   return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 

@@ -9,7 +9,8 @@ import { isSpend, sumSpending, spendingGroups, biggestMovers, toTxShape, aggrega
 import { createRangeMemo } from './monthMemo.js';
 import { setSyncCompletionHook } from './sync.js';
 import { amountOrClause, searchIsActive } from './searchFilters.js';
-import { CANDIDATE_WINDOW_MONTHS } from './recurring.js';
+import { CANDIDATE_WINDOW_MONTHS, parseIgnoreList } from './recurring.js';
+import { getSettings } from './db.js';
 import { aggregateCoverage, feedCoverageGaps, FEED_REACH_DAYS } from './coverage.js';
 import { netWorthSeries, clampSeries } from './netWorth.js';
 import {
@@ -24,7 +25,10 @@ import {
   hasOverrideColumn,
   markOverrideColumnMissing,
   isMissingOverrideColumnError,
+  ENV_PACE_KEY,
+  parseEnvPace,
 } from './adapters/envelopeIO.js';
+import { REC_IGNORE_KEY } from './adapters/settingsIO.js';
 import { receiptsInstalled, markReceiptsMissing } from './adapters/receiptIO.js';
 
 // --- The façade contract (mock-harness boundary) ------------------------------
@@ -58,6 +62,11 @@ export {
   getSavedChats,
   saveChatToApp,
   deleteSavedChat,
+  addRegistryEntry,
+  updateRegistryParent,
+  removeRegistryEntry,
+  updateCategoryColor,
+  updateCategoryAlias,
 } from './adapters/settingsIO.js';
 export {
   getEntities,
@@ -73,6 +82,24 @@ export {
   deleteReceipt,
   getReceiptUrl,
 } from './adapters/receiptIO.js';
+
+// ONE .in() read for the Dashboard mount effect, replacing seven single-key
+// settings queries. Honest sizing: the seven ran in parallel over one
+// connection, so the win is request count and radio jitter, not a full RTT.
+// `keys` are the Dashboard-owned raw rows, returned untouched in `values`
+// (absent ⇒ null, matching getSetting); the two ADAPTER-owned rows ride along
+// PARSED — their parse rules live beside their writers (envelopeIO /
+// recurring.js), never inline in a component.
+export async function getStartupSettings(keys) {
+  const byKey = await getSettings([...keys, ENV_PACE_KEY, REC_IGNORE_KEY]);
+  const values = {};
+  for (const k of keys) values[k] = byKey[k] ?? null;
+  return {
+    values,
+    envPace: parseEnvPace(byKey[ENV_PACE_KEY]),
+    recIgnore: parseIgnoreList(byKey[REC_IGNORE_KEY]),
+  };
+}
 
 // Re-export the pure cash-flow model (src/cashFlow.js) so existing importers
 // and the CSV-import dry-run harness keep working.
@@ -198,7 +225,8 @@ export async function pagedRows(fetchPage, page = 1000) {
 
 // `columns` exists for the envelope walk, which can span years: it needs only
 // the spending predicate's inputs, so it skips the wide column list (and the
-// range memo — its aggregation is memoised separately as spendCache).
+// range memo — its aggregation is memoised separately in the range-keyed
+// spendCache).
 // EVERY caller gets markInternalTransfers: under the unified linked-boundary
 // model isSpend() reads `_internal`, so the pairing is part of establishing
 // the row shape, not a Trends-only step. It stays cheap because matching runs
@@ -830,17 +858,23 @@ async function getAssignmentsThrough(monthStart, { client = supabase } = {}) {
 }
 export { getAssignmentsThrough }; // exported for test/envelopeIO.test.js only
 
-// Per-(category, month) spend sums for the walk's range, memoised. The walk's
-// range grows by a month every month and is re-read after every envelope edit,
-// but an envelope edit CANNOT change a transaction — so assigning, moving money
-// or toggling rollover reuses this instead of re-downloading the household's
-// whole budgeting history. Month navigation REUSES this cache (Mason,
-// 2026-08-04) — invalidateEnvelopeSpending() runs only at the four moments
-// transactions can actually have moved: a client write (every adapter write
-// path that touches transactions/accounts calls it), a completed sync (the
-// setSyncCompletionHook registration below), a CSV/PDF import, and the
-// dashboard's explicit Refresh (which syncs, so the hook covers it).
-let spendCache = null;
+// Per-(category, month) spend sums for the walk's range, memoised per EXACT
+// range in a small bounded Map. The walk's `end` moves with the viewed month,
+// so a single slot here made every month tap refetch the household's ENTIRE
+// budgeting history — range-keying is what makes month navigation actually
+// reuse the cache (Mason's 2026-08-04 ruling): envelope edits re-read the
+// same range (an envelope edit CANNOT change a transaction), and returning to
+// a month finds its whole-window sums still warm. Exact-key reuse ONLY —
+// never slice a narrower month out of a wider entry: markInternalTransfers
+// pairs over the whole window on purpose, so a subset's rows can pair
+// differently than the same rows fetched alone. invalidateEnvelopeSpending()
+// clears it at the four moments transactions can actually have moved: a
+// client write (every adapter write path that touches transactions/accounts
+// calls it), a completed sync (the setSyncCompletionHook registration below),
+// a CSV/PDF import, and the dashboard's explicit Refresh (which syncs, so the
+// hook covers it).
+const SPEND_CACHE_MAX = 12; // ranges — a year of month taps between invalidations
+const spendCache = new Map(); // `${start}|${end}` → per-(category, month) sums
 // Generation counter: a fetch that was already in flight when the cache was
 // invalidated must not write its (pre-invalidation) result back in — network
 // reordering would otherwise re-poison the cache with pre-edit sums right
@@ -848,7 +882,7 @@ let spendCache = null;
 let spendGen = 0;
 
 export function invalidateEnvelopeSpending() {
-  spendCache = null;
+  spendCache.clear();
   spendGen++;
   // The raw range memo lives and dies by the same moments — one invalidation
   // covers both, so a write site can never clear one and strand the other.
@@ -862,7 +896,7 @@ setSyncCompletionHook(invalidateEnvelopeSpending);
 
 async function getEnvelopeSpending(start, end) {
   const cacheKey = `${start}|${end}`;
-  if (spendCache && spendCache.key === cacheKey) return spendCache.spending;
+  if (spendCache.has(cacheKey)) return spendCache.get(cacheKey);
 
   const gen = spendGen;
   // Narrow columns, but the FULL pipeline: the unified isSpend() reads
@@ -874,7 +908,12 @@ async function getEnvelopeSpending(start, end) {
   // Spent can never disagree with the bar rendered beside it — the fold itself
   // is pure in src/spending.js.
   const spending = aggregateEnvelopeSpending(txs);
-  if (gen === spendGen) spendCache = { key: cacheKey, spending };
+  if (gen === spendGen) {
+    spendCache.set(cacheKey, spending);
+    // Bounded FIFO (Map iterates in insertion order) — plain month taps
+    // insert one entry each; recency tracking isn't worth the machinery.
+    if (spendCache.size > SPEND_CACHE_MAX) spendCache.delete(spendCache.keys().next().value);
+  }
   return spending;
 }
 

@@ -41,6 +41,15 @@ export function aggregateCoverage(rows) {
 // sentence quotes.
 export const FEED_REACH_DAYS = 88;
 
+// THE ONE COPY of the incremental pull's re-read overlap, same pattern as
+// FEED_REACH_DAYS above: api/_lib/simplefin.js imports it as the default for
+// OVERLAP_DAYS, and CsvImport.jsx quotes it in the import-boundary math and the
+// user-facing "last N days are still excluded" sentences. A hardcoded client
+// mirror sat in CsvImport.jsx until 2026-08-11 and would have silently diverged
+// the moment SIMPLEFIN_OVERLAP_DAYS was set (same accepted residual: the env
+// override still desyncs the client, but now only via a deliberate env change).
+export const FEED_OVERLAP_DAYS = 30;
+
 // Slack on the upper bound. An account whose oldest row is comfortably NEWER
 // than the day we linked it simply has no older history to miss (it was opened
 // after we connected), so it must not nag; a few days of slack absorbs

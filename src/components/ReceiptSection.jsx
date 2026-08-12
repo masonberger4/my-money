@@ -48,6 +48,25 @@ export default function ReceiptSection({ txId, onChanged }) {
       });
   }, [txId]);
 
+  // Escape closes the full-size viewer. CAPTURE phase, because this overlay
+  // stacks over the tx detail sheet whose Dashboard-level capture handler
+  // registered earlier and therefore fires first — that handler yields when
+  // [data-mm-topmost] is in the DOM (the marker on the viewer div below), and
+  // this listener then runs next in capture order, ahead of every bubble-phase
+  // useEscClose listener whatever the render order. stopImmediatePropagation
+  // here would be useless without the yield: an earlier capture listener can't
+  // be stopped by a later one.
+  useEffect(() => {
+    if (!viewing) return;
+    const h = e => {
+      if (e.key !== "Escape") return;
+      e.stopImmediatePropagation();
+      setViewing(null);
+    };
+    window.addEventListener("keydown", h, true);
+    return () => window.removeEventListener("keydown", h, true);
+  }, [viewing]);
+
   async function onPick(ev) {
     const file = ev.target.files?.[0];
     ev.target.value = ""; // same file re-pickable after a failure
@@ -122,7 +141,7 @@ export default function ReceiptSection({ txId, onChanged }) {
       {err && <div style={{ marginTop: 6, fontSize: 11, color: "var(--danger)" }}>{err}</div>}
 
       {viewing && (
-        <div onClick={() => setViewing(null)}
+        <div data-mm-topmost="" role="dialog" aria-modal="true" aria-label="Receipt photo" onClick={() => setViewing(null)}
           style={{ position: "fixed", inset: 0, background: "var(--overlay)", zIndex: 60,
             display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: 16 }}>
           <img src={urls[viewing.id]} alt="Receipt"
