@@ -1718,6 +1718,13 @@ export default function Dashboard({ refreshTick = 0 }) {
   // the old swallowed catch{} lost a just-created category while its taught
   // rules persisted. Success adopts the merged stored value, which may carry
   // entries the other phone added since mount.
+  // Known, accepted display race: the rollback base is render-closure state,
+  // so two same-render edits where the SECOND fails roll the display back
+  // past the FIRST's committed write. Server state stays correct (the chains
+  // serialize) and a reload heals the screen; the window needs two edits to
+  // land before a re-render, which these blur/tap-commit controls make
+  // near-impossible. A proper fix needs per-key functional rollback or a
+  // failure-path re-read — not worth it until the race is ever observed.
   async function saveColor(cat,hex){
     const prev=customColors;
     setCustomColors({...prev,[cat]:hex});
@@ -3043,7 +3050,7 @@ export default function Dashboard({ refreshTick = 0 }) {
       <div style={{display:"flex",alignItems:"center",gap:8}}>
         <div className="bar-bg"><div className="bar-fill" style={{width:barW+"%",background:barColor}}/></div>
         <span style={{fontSize:11,color:hasB&&ratio>=1?inkOn("#D85A30",surf.card):"var(--muted)",width:38,textAlign:"right",flexShrink:0}}>
-          {hasB?(lim>0?Math.round(ratio*100)+"%":"—"):`${c.percent_of_total?.toFixed(0)}%`}
+          {hasB?(lim>0?(ratio>9.99?">999%":Math.round(ratio*100)+"%"):"—"):`${c.percent_of_total?.toFixed(0)}%`}
         </span>
       </div>
       {c.label===UNCATEGORIZED&&(
@@ -3138,7 +3145,11 @@ export default function Dashboard({ refreshTick = 0 }) {
                     <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:5}}>
                       <div className="bar-bg"><div className="bar-fill" style={{width:barW+"%",background:barColor}}/></div>
                       <span style={{fontSize:11,width:38,textAlign:"right",flexShrink:0,color:over?overCard:"var(--muted)"}}>
-                        {pot>0?Math.round(ratio*100)+"%":"—"}
+                        {/* Label clamped, bar already is: $129 spent against a
+                            $1 pot is honestly 12900%, but five digits overflow
+                            the 38px span and read as a glitch — the real
+                            amounts sit in the adjacent assigned/spent text. */}
+                        {pot>0?(ratio>9.99?">999%":Math.round(ratio*100)+"%"):"—"}
                       </span>
                     </div>
 
