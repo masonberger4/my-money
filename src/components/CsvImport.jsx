@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import { analyzeCsv, toInsertRow, parseCsv, reconcileCsv, csvDateRange, buildRows, importPlan, planFileBatch, fileKindOf } from "../csvImport.js";
 import { applyTemplate, autoDetectTemplate, defaultTemplate, rowTotals, TEMPLATE_VERSION } from "../pdfImport.js";
 import { createManualAccount, importCsvTransactions, getExistingTxIds, getAccountTransactionsInRange, isManualAccount, isSimpleFinAccount, getCategoryRules, getFeedCoverageStart } from "../dataAdapter.js";
-import { FEED_OVERLAP_DAYS } from "../coverage.js";
+import { FEED_OVERLAP_DAYS, FEED_REACH_DAYS } from "../coverage.js";
 import { getSetting, setSetting } from "../db.js";
 import { runSync, pullWasClean } from "../sync.js";
 import { chipStyle, markColor, readableInk } from "../paletteContrast.js";
@@ -221,6 +221,20 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
   // api/_lib/simplefin.js: every pull after the first starts at last_pulled_at
   // minus this, so that tail can still arrive.
 
+  // A fed account with ZERO feed rows is not the same as a never-synced one:
+  // the account ROW only exists because a successful pull created it, and that
+  // first pull provably covered everything from ~FEED_REACH_DAYS before the
+  // row's created_at (the same wall feedCoverageGaps reasons with). So the
+  // feed's claim on a rows-less account starts at that wall — no fresh sync
+  // needed, and no dead end for a rarely-used account whose whole feed window
+  // was genuinely empty (the Checking ··2644 case: "sync first" re-delivered
+  // zero rows forever). Statement rows BEFORE the wall import; on/after stay
+  // the feed's territory, which also covers its live re-read tail.
+  const createdWall =
+    targetIsSimpleFin && !coverageStart && targetAcct?.created_at
+      ? padIso(String(targetAcct.created_at).slice(0, 10), -FEED_REACH_DAYS)
+      : null;
+
   // Which of the five states the feed boundary is in. Only 'ok' permits an
   // import into a fed account.
   const boundaryState =
@@ -228,6 +242,7 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
     : coverageLoading ? "loading"
     : coverageError ? "error"
     : coverageStart ? "ok"
+    : createdWall ? "ok"               // empty feed, boundary at the coverage wall
     : syncState === "running" ? "loading"
     : syncState === "done" ? "ok"      // pulled just now and the feed really is empty here
     : "unsynced";
@@ -246,6 +261,7 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
   const overlapFrom =
     !targetIsSimpleFin ? null
     : coverageStart ? coverageStart
+    : createdWall ? createdWall
     : boundaryState === "ok" ? padIso(todayIso(), -FEED_OVERLAP_DAYS)
     : null;
 
@@ -1179,7 +1195,7 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                       {boundaryState === "loading" ? "Checking what the feed already has…"
                         : boundaryState === "error" ? <>Couldn't check where this account's feed starts, so importing isn't safe — a statement covering dates the feed already has would count every transaction twice. Close and retry.</>
                         : boundaryState === "unsynced" ? <>This account hasn't synced yet, so there's no boundary to import against — the first pull reaches back about three months and would land on top of anything imported now.</>
-                        : !coverageStart ? <>The feed has no transactions for this account. Rows from the last {FEED_OVERLAP_DAYS} days are still excluded — every pull re-reads that window.</>
+                        : !coverageStart ? <>The feed has no transactions for this account{createdWall ? <>, so rows on/after <strong>{createdWall}</strong> (the feed's reach window) are excluded and everything earlier imports</> : <>. Rows from the last {FEED_OVERLAP_DAYS} days are still excluded — every pull re-reads that window</>}.</>
                         : verdict === "audit" ? <>The feed covers this account from <strong>{overlapFrom}</strong> and every row here is inside that. Nothing will be imported — here's how your statement compares.</>
                         : verdict === "both" ? <>The feed starts <strong>{overlapFrom}</strong>. The <strong>{newRows.length}</strong> row{newRows.length !== 1 ? "s" : ""} before it will import; the <strong>{overlapCount}</strong> on or after it {overlapCount !== 1 ? "are" : "is"} compared against the feed instead.</>
                         : <>The feed starts <strong>{overlapFrom}</strong>. Every row in this file predates it, so there's nothing to exclude.</>}
@@ -1289,7 +1305,7 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                       {boundaryState === "loading" ? "Checking what the feed already has…"
                         : boundaryState === "error" ? <>Couldn't check where this account's feed starts, so importing isn't safe — a statement covering dates the feed already has would count every transaction twice. Close and retry.</>
                         : boundaryState === "unsynced" ? <>This account hasn't synced yet, so there's no boundary to import against — the first pull reaches back about three months and would land on top of anything imported now.</>
-                        : !coverageStart ? <>The feed has no transactions for this account. Rows from the last {FEED_OVERLAP_DAYS} days are still excluded — every pull re-reads that window.</>
+                        : !coverageStart ? <>The feed has no transactions for this account{createdWall ? <>, so rows on/after <strong>{createdWall}</strong> (the feed's reach window) are excluded and everything earlier imports</> : <>. Rows from the last {FEED_OVERLAP_DAYS} days are still excluded — every pull re-reads that window</>}.</>
                         : <>The feed covers this account from <strong>{overlapFrom}</strong>. In each file, rows before that import; rows on or after it are counted but never inserted.</>}
                     </div>
                   )}
