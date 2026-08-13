@@ -59,9 +59,12 @@ nothing below relitigates a decided item.
      deleted both the table and the taxonomy, and the applied wipe left those
      rows reading `Uncategorized`. Nothing to fix — it is one merchant to teach
      during retraining.
-   - **Pre-May statement backfill** — BECU savings, Cashback Debit, the cards,
-     via CSV/PDF import; the Data coverage panel (Accounts tab) shows each
-     gap. ~~First confirm the Checking 2644→5481 re-key theory~~ — REFUTED
+   - ~~**Pre-May statement backfill**~~ — **COMPLETE 2026-08-12, all four
+     accounts** (5481 + savings CSVs, Venture X Jan–Jul PDFs reconciled to
+     the penny, 2644 against the coverage wall after PR #79's
+     empty-fed-account fix). Full record in CLAUDE.md's standing rulings.
+     Consequence: item 5 (coverage-panel retirement) is now UNGATED — it
+     awaits only Mason's keep-or-remove call. ~~First confirm the Checking 2644→5481 re-key theory~~ — REFUTED
      2026-08-11 by Mason: two real, separate accounts (2644 personal/rarely
      used, 5481 the shared main checking); each backfills into its own row.
      Standing ruling in CLAUDE.md Pending.
@@ -101,7 +104,8 @@ nothing below relitigates a decided item.
    must keep importing through `dataAdapter.js` or it escapes the mocks
    (same rule recorded for the decomposition, backlog Section 3).
 
-5. **Retire the Data coverage panel** once backfill (item 1) settles — it was
+5. **Retire the Data coverage panel** — backfill settled 2026-08-12, so this
+   is now LIVE and waits only on Mason's keep-or-remove call. It was
    shipped as TEMPORARY (CLAUDE.md Merged features). **Removal recipe STALE
    as of 2026-08-06:** `src/coverage.js` now ALSO holds the PERMANENT
    feed-reach tell (`FEED_REACH_DAYS`/`feedCoverageGaps`, imported by
