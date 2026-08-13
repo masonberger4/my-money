@@ -168,6 +168,7 @@ lives in git log, GitHub PRs, and the Vercel dashboard — don't duplicate it.
 | `supabase/setup_all.sql` | **TOMBSTONED (2026-08-08)** — fresh installs now go through the Supabase CLI (`supabase db push` replays `migrations/` in order; `docs/SETUP.md` Path A). This file stays as the verified fallback (Path B) and carries a tombstone header saying so. **DESTRUCTIVE, wipes all tables. Never run on live data. Never re-generate to include new migrations without that warning.** Convenience snapshot only — `migrations/` is the source of truth. It ends with a column-level self-check, but **that check stops at the same place the snapshot does, so it cannot raise on the drift that actually exists** — it passes green while five migrations are missing (**known drift, 2026-08-07: both stop at `20260731000001_receipts.sql`**). Never quote it as evidence the schema is complete; `bootstrap_household.sql` is the check that covers the tail. `docs/SETUP.md` Path B lists the five. |
 | `supabase/bootstrap_household.sql` | The LAST step of either install path, and the only assertion that the five post-snapshot migrations landed. Two parts: the household auto-link DO block (lifted from `setup_all.sql` — first `auth.users` row by `created_at` → `households` 'My Household' + `household_members` owner) and a **visible per-fact booleans SELECT** (household link, the three later tables, `budget_months.target_override`, `category_rules.amount` + both partial indexes + `category_rules_pkey` ABSENT, the `legacy_categories_saved` column proving the category wipe ran, the receipts bucket and its `storage.objects` policy). Idempotent and NON-destructive — safe as a health check on live data, unlike `setup_all.sql`. Every boolean is named so a false column identifies itself; the SQL Editor hides `raise notice`, so this SELECT is the only readable output. |
 | `supabase/config.toml` | Supabase CLI config for the fresh-install `link` + `db push` path (`docs/SETUP.md` Path A). **PARTIALLY REHEARSED (2026-08-12)**: the real `supabase db push --db-url` replayed all 18 migrations cleanly on a throwaway local PG16 cluster carrying the `test/fixtures/rls_stub.sql` prerequisites (`schema_migrations` = 18) — the migrations and the CLI runner are proven. Still unrehearsed: `supabase link` + hosted PG17 with the real auth/storage schemas, so Path B stays the verified path until that runs once on a throwaway hosted project. Deliberately two keys plus `[db.seed] enabled = false` (`seed.sql` is a hand-paste artifact with a `<HOUSEHOLD_USER_UUID>` placeholder — automatic seeding would error or double the household). **Never link the live project**: `db push` can't honour the inverted paste-after-deploy orders, and a push at a database with data would replay the category wipe. |
+| `.gitattributes` | `* text=auto eol=lf` — every checkout is LF on every platform, plus `binary` for the png/ico/woff2/pdf assets. NOT a style preference: `test/securityHeaders.test.js` sha256s index.html's raw bytes against the hash pinned in `vercel.json`, and CRLF changes them (the Gotcha carries the failure shape). |
 | `vercel.json` | Build/rewrite config **plus the security headers** (CSP, HSTS, nosniff, Referrer-Policy, Permissions-Policy, frame-ancestors/X-Frame-Options DENY) applied at a catch-all `/(.*)`. Each CSP directive is derived from real code usage; the derivation lives in `docs/csp-derivation.md` (**never as a key in `vercel.json` — Vercel REJECTS unknown top-level keys and the deploy fails schema validation before it builds**). **Nothing local exercises these headers — a too-strict edit breaks prod silently; `test/securityHeaders.test.js` is the guard** (see Gotchas). |
 | `test/` | `npm test` — Node's built-in `node --test`, zero deps; plain-module helpers live in `test/helpers/` (the `*.test.js` glob skips them). Covers the pure cores: cashFlow (incl. brute-force max-matching parity), csvImport parsing/dedup-id idempotency + overlap guard, **pdfImport** (the whole template pipeline: shape tests, year inference incl. the Dec→Jan wrap, geometry, applyTemplate anchor/continuation REGRESSIONs, debit/credit netting, the buildRows round-trip), **reconcile** (the comparison audit, with its own brute-force parity), **spending** (the extracted purchase-based model against the synthetic ledger: 11 scenarios + seeded property tests), **categoryRules** (the ruleHistory core against a fake PostgREST incl. the exact-page-multiple REGRESSION; write-time precedence; the teach→apply→re-import sequence), txClassify (learned-rule matching + the over-specific-key limit), envelopes (both walk regressions + by-date targets + `effectiveTarget`/`planAutoFill`), **expectedTx** (matching, lifecycle, dup gates incl. the null-key roll-forward REGRESSION, the display-only walk-byte-identity REGRESSION), **envelopeIO** (Session 6 adapter I/O against a recording fake — the 42703 target_override retry, the conditional setAssigned(0) delete, roll-forward gating; its degrade tests run LAST, order matters), taxReport (conservation, capital exclusion, the 2026 mileage-rate boundary), **recurring** (thresholds pinned as documentation), **accountBalance** (incl. the −0 REGRESSION), **categoryMap** + **categoryList** + **userOwnedCategories** (the mechanism three, the ONE user-owned list, and the no-taxonomy/no-keyword-table pins), **teachQueue** (the counted/non-counted split + the two Dashboard source pins), simplefin classifier/clamp + **simplefinNormalize** (type-inference ordering REGRESSION, wire parsing) + **simplefinToken** (SSRF/claim flow against a stubbed fetch), **assistantModels** (+ a server source scan), **spendingContext** byte-determinism, **syncDecisions** (watermark advance/hold/reset + missing-table vs missing-column), **lockstep** (index.html↔ui.css `--bg`, sw.js guards, fonts precache, pdf.js legacy build), **sync** (pullWasClean + runSync single-flight via injected transport), **syncOrchestration** (`pullOneAccessUrl` against the fake Supabase client in `test/helpers/fakeSupabase.js`), **manualTx** (quick-add row building + gating), **unlink** (remove-bank soft-hide decisions), **monthMemo** (range memo + per-model copies), **debtPayoff**, **serializedUpdater** (the read-merge-write chain's four invariants) + **settingsChains** (every real serialized-updater call site — rec:ignore, saved chats, the three category-registry rows incl. the wipe-prevention REGRESSION — against a fake settings table), **securityHeaders** (the vercel.json CSP lockstep — script-hash recompute + per-directive pins), noPlaid, paletteContrast, apiLoads, **smokeMocks** (the CI render gate's honesty: every export src/ imports through the five aliased modules must exist in `test/smoke/mocks/`, named LOUDLY when missing — the automated form of workflow rule 4's check-the-mocks step — plus a no-machine-absolute-imports pin), **pagedGuards** (the paged-loop 416/PGRST103 guards), **pdfPolyfills** (the natives deleted per-process, then the installed shims: ReadableStream async iteration incl. early-break cancel + lock release and preventCancel, structuredClone cycles + DataView byteOffset, `.at`), **claudeMdLockstep** (CLAUDE.md key-row anchors resolve to real files/exports — the phantom-reference guard), plus `recurringColumns` and the opt-in `rls` harness (skips cleanly with no local Postgres; its spec includes asserting `current_household_id()` stays public + executable AND a pg_tables-vs-pg_policies DIFF so a future table can't ship policy-less). Run before pushing. |
 
@@ -899,7 +900,8 @@ Conventions / Gotchas. An entry here is a pointer, not a home for rules.
   (`teachQueue.js` key row), startup skeleton + month jump picker
   (`Dashboard.jsx` key row).
 - **Unified linked-boundary spending model (2026-08-03, Mason)** — replaced
-  the two-model design after the F1/F2 double-count diagnosis (PR #32); all
+  the two-model design after the F1/F2 double-count diagnosis (PR #32, written
+  up in `docs/double-count-diagnosis-2026-08-03.md`); all
   rules in the linked-boundary Conventions.
 - **Manual debts (2026-08-03)** — `buildManualAccountRow`; rules in the
   debt-balances Convention (updateManualBalance, snapshots) + Architecture
@@ -978,10 +980,16 @@ Conventions / Gotchas. An entry here is a pointer, not a home for rules.
   `isTransferCategory`/`isReturnCategory`; a category-based second answer to
   what `isSpend()` answers structurally (the two-models hazard). Tombstone in
   `categoryMap.js`.
-- **Self-hosting setup path (2026-08-08, PRs #64/#65, other session)** —
+- **Self-hosting setup path (2026-08-08, PRs #64/#65; Windows install fixed
+  2026-08-13, PR #83)** —
   `docs/SETUP.md` Path A (CLI `db push`, partially rehearsed — see the `config.toml` key row) / Path B
   (`setup_all.sql`, TOMBSTONED); rules in the `setup_all.sql` /
-  `bootstrap_household.sql` / `config.toml` key rows.
+  `bootstrap_household.sql` / `config.toml` key rows. #83 added
+  `.gitattributes` (LF enforcement — its own key row + Gotcha) and the Windows
+  forms `docs/SETUP.md` was missing: `copy` for `cp`, `set`/`$env:` for the
+  POSIX `VAR=value` build prefix, and `curl.exe` for the 401 probe (in
+  PowerShell, bare `curl` aliases Invoke-WebRequest, which throws on the very
+  401 the step asks you to confirm).
 - **PDF sectioned-statement signs (2026-08-09, PRs #66/#67, other session)** —
   no migration; the Discover Cashback Debit shape; all rules in the
   `pdfImport.js` key row; May imports normally (standing ruling in Pending).
@@ -1018,6 +1026,11 @@ returned"; both 20260805 files took the inverted paste-AFTER-deploy order
 their headers record). Receipts storage policy settled + verified end-to-end
 incl. cross-tenant denial (2026-07-31); Plaid fully closed (account deleted,
 Items retired, `PLAID_*` env vars removed, 2026-08-01).
+
+**One open verification, not code:** the fresh-install CLI path is only
+half-rehearsed — the `config.toml` key row has the current status and what
+would retire it. Nothing depends on it (Path B stays the verified install),
+so it is a Mason-when-convenient item, not a blocker.
 
 **Open data tasks: NONE (backfill COMPLETE 2026-08-12).** Retraining is the
 only live task. Eyeball the type on EVERY account at unhide time — the rule
@@ -1350,6 +1363,18 @@ surgically, never the foundation.
   new hash. The per-directive derivation lives in `docs/csp-derivation.md` —
   read it before adding or removing an origin, and never widen a directive to
   make a symptom go away.
+- **Line endings are load-bearing; `.gitattributes` forces LF.** The CSP guard
+  above sha256s the RAW BYTES of index.html's inline theme script, so CRLF
+  changes the digest. A clone under Git's default `core.autocrlf=true` — i.e.
+  every stock Windows clone — therefore fails `test/securityHeaders.test.js`
+  with a hash mismatch that reads like a broken CSP and sends the diagnosis to
+  entirely the wrong file. `* text=auto eol=lf` in `.gitattributes` is what
+  prevents it (every tracked file was already LF when that landed, so it
+  changed no content). **Never "fix" a hash mismatch by re-deriving the hash
+  from a CRLF working tree** — that bakes a wrong hash into the production
+  policy, and the test is right to hash raw bytes because that is what Vite
+  ships. A clone made before that file existed keeps its CRLF tree: re-clone,
+  or `git add --renormalize .`.
 - **`vercel.json` REJECTS unknown top-level keys** — schema validation fails
   the deployment *before it builds*, so the site keeps serving the previous
   deploy while every new push dies with "should NOT have additional property".

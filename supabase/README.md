@@ -19,7 +19,7 @@ it.
 | **`setup_all.sql`** | **TOMBSTONED — see the banner above.** One paste: wipes partial state, recreates the schema **only through `20260731000001_receipts.sql`**, auto-creates the household. Five later migrations must be pasted after it by hand (docs/SETUP.md Path B lists them). A convenience snapshot — `migrations/` is the source of truth. **Destructive: never run on a project with real data.** |
 | `migrations/` | The source of truth for the schema. On an existing database, run every file in filename order (each is additive-safe on live data unless its header says otherwise). |
 | `bootstrap_household.sql` | Links the household to the auth user, then prints a per-fact booleans SELECT verifying the install. Idempotent and **non-destructive** — run it as the last step of either install path, or any time as a health check. |
-| `config.toml` | Supabase CLI config for the fresh-install `link` + `db push` path (docs/SETUP.md Path A, not yet rehearsed). Never link the live project. |
+| `config.toml` | Supabase CLI config for the fresh-install `link` + `db push` path (docs/SETUP.md Path A). Its own header carries the current rehearsal status — read that rather than trusting a summary here. Never link the live project. |
 | `seed.sql` | Optional sample data, **hand-paste only** — it carries a literal `<HOUSEHOLD_USER_UUID>` placeholder and its own household insert. `config.toml` disables the CLI's automatic seeding for exactly that reason. Real data arrives from the SimpleFIN feed on first sync, or from a CSV/PDF import. |
 | `reset.sql` | Drops everything the migrations create. Dev resets only — **destructive, never run on live data.** |
 

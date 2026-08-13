@@ -7,7 +7,7 @@
 #   supabase db push
 #   # then paste supabase/bootstrap_household.sql in the SQL Editor
 #
-# STATUS: partially rehearsed (2026-08-11). The 18-file replay was run with
+# STATUS: partially rehearsed (2026-08-11; doc rows written 08-12). The 18-file replay was run with
 # the real CLI (`supabase db push --db-url …`, v2.113.0) against a throwaway
 # empty local PG16 cluster carrying the platform stub the RLS harness uses
 # (test/fixtures/rls_stub.sql — roles, auth schema, minimal storage): all 18
