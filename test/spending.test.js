@@ -629,3 +629,14 @@ test('spendingToDate falls back to the full sum when the day is unusable', () =>
   assert.equal(spendingToDate(rows, undefined), 40);
   assert.equal(spendingToDate(rows, NaN), 40);
 });
+
+test('REGRESSION: both Overview tiles quote the SAME last-month base', () => {
+  // The "vs last month" tile switched to the day-sliced base while the
+  // "Total spent" sub-line still printed the full month, so the two disagreed
+  // in the same grid: "vs $1,125 last month" beside "+$89 ↑ more so far".
+  const dash = readFileSync(new URL('../src/components/Dashboard.jsx', import.meta.url), 'utf8');
+  const grid = dash.slice(dash.indexOf('{label:"Total spent"'), dash.indexOf('{label:"vs last month"'));
+  assert.ok(grid.includes('fmt(cmpBase)'), 'the Total-spent sub must quote the comparison base the delta used');
+  assert.ok(!grid.includes('fmt(lastSpent)'), 'and must not print the full-month figure beside a to-date delta');
+  assert.ok(grid.includes('by this day'), 'the wording names which basis is being quoted');
+});

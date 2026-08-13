@@ -3,6 +3,11 @@
 // Dashboard.jsx plus the assistant context); this is the shared primitive.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
+
+const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 import { isDebtAccount, displayBalance, balanceAsOf, BALANCE_STALE_DAYS } from '../src/accountBalance.js';
 
 test('isDebtAccount: credit and loan only', () => {
@@ -73,4 +78,35 @@ test('BALANCE_STALE_DAYS is the documented threshold', () => {
   // shows an age only past this, and it is chosen against SimpleFIN's ~daily
   // refresh — two weeks quiet is well outside normal.
   assert.equal(BALANCE_STALE_DAYS, 14);
+});
+
+// --- Review catches, pinned -------------------------------------------------
+
+test('REGRESSION: the as-of label renders the LOCAL date, not the UTC calendar day', () => {
+  // shortDate(d.toISOString().slice(0,10)) took the UTC day and re-read it as
+  // a local one, so a balance typed at 5:30pm PDT (stored 00:30Z the NEXT
+  // day) rendered "as of" tomorrow — a date that hasn't happened where the
+  // reader is standing. Dashboard formats the Date's own local parts instead.
+  const dash = readFileSync(join(root, 'src/components/Dashboard.jsx'), 'utf8');
+  assert.ok(dash.includes('function localShortDate(d)'), 'the local-instant formatter must exist');
+  assert.doesNotMatch(
+    dash,
+    /shortDate\(\s*asOf\.date\.toISOString\(\)/,
+    'no as-of site may round-trip the instant through a UTC date string'
+  );
+  assert.equal((dash.match(/localShortDate\(asOf\.date\)/g) || []).length, 2,
+    'both as-of sites (account sheet + accounts list) use it');
+});
+
+test('REGRESSION: a hand-typed balance patches its as-of stamp too', () => {
+  // Without this the row shows the NEW balance under a weeks-old "as of"
+  // until an unrelated reload refetches the account — the exact stale-label
+  // failure the as-of was added to prevent.
+  const dash = readFileSync(join(root, 'src/components/Dashboard.jsx'), 'utf8');
+  const at = dash.indexOf('function saveManualBalance(');
+  const fn = dash.slice(at, dash.indexOf('async function addManualDebt(', at));
+  assert.match(fn, /const patchBal=\(bal,at\)=>/, 'the patch takes the stamp');
+  assert.equal((fn.match(/last_balance_at:at/g) || []).length, 3,
+    'all three lists it patches carry the stamp (debtData, accounts, overview)');
+  assert.ok(fn.includes('patchBal(prevBal,prevAt)'), 'the rollback restores the old stamp with the old balance');
 });

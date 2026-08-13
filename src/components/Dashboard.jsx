@@ -142,6 +142,13 @@ function useSurfaces(resolved){
 
 function monthLabel(y, m) { return new Date(y,m-1,1).toLocaleString("default",{month:"long",year:"numeric"}); }
 function shortDate(iso) { const [y,m,d]=iso.split("-").map(Number); return new Date(y,m-1,d).toLocaleDateString("default",{month:"short",day:"numeric"}); }
+// A Date INSTANT rendered in the reader's own timezone. Deliberately not
+// shortDate(d.toISOString().slice(0,10)): that takes the UTC calendar day and
+// re-reads it as a local one, so a balance typed at 5:30pm PDT (stored
+// 00:30Z the next day) rendered as "as of" TOMORROW — a date that has not
+// happened yet where the reader is standing. shortDate stays as it is: its
+// callers pass stored 'YYYY-MM-DD' dates, which have no time and no zone.
+function localShortDate(d) { return d.toLocaleDateString("default",{month:"short",day:"numeric"}); }
 // Negatives render as −$1,234.56, not $-1,234.56 (matches money() in
 // CsvImport.jsx). Debts now always display negative, and money-in transactions
 // already did, so this is the common case rather than an edge one.
@@ -2214,16 +2221,22 @@ export default function Dashboard({ refreshTick = 0 }) {
   function saveManualBalance(a,v){
     if(v==null)return; // a balance can be corrected, not cleared
     const prevBal=a.current_balance;
-    const patchBal=bal=>{
+    const prevAt=a.last_balance_at??null;
+    // The patch must carry the as-of too, or the row renders a just-typed
+    // figure under a weeks-old "as of" until some unrelated reload refetches
+    // the account — exactly the stale-label failure the as-of exists to
+    // prevent (the patchAllTxLists "recompute every derived field" rule,
+    // review catch). The rollback restores the old stamp with the old balance.
+    const patchBal=(bal,at)=>{
       setDebtData(prev=>{
         if(!prev)return prev;
-        const debts=prev.debts.map(d=>d.id===a.id?{...d,current_balance:bal}:d);
+        const debts=prev.debts.map(d=>d.id===a.id?{...d,current_balance:bal,last_balance_at:at}:d);
         return {...prev,debts,totalDebt:debts.reduce((s,d)=>s+(Number(d.current_balance)||0),0)};
       });
-      setAccounts(prev=>prev.map(x=>x.id===a.id?{...x,current_balance:bal}:x));
-      setOverview(prev=>prev?{...prev,accounts:prev.accounts.map(x=>x.id===a.id?{...x,balance:{current:bal}}:x)}:prev);
+      setAccounts(prev=>prev.map(x=>x.id===a.id?{...x,current_balance:bal,last_balance_at:at}:x));
+      setOverview(prev=>prev?{...prev,accounts:prev.accounts.map(x=>x.id===a.id?{...x,balance:{current:bal},last_balance_at:at}:x)}:prev);
     };
-    patchBal(v);
+    patchBal(v,new Date().toISOString());
     updateManualBalance(a,v).then(async()=>{
       // History refresh, best-effort: the write appended a snapshot row.
       const since=new Date(Date.now()-365*86400000).toISOString().slice(0,10);
@@ -2235,7 +2248,7 @@ export default function Dashboard({ refreshTick = 0 }) {
       }catch(err){console.error("balance snapshots refresh failed",err);}
     }).catch(err=>{
       console.error("manual balance save failed",err);
-      patchBal(prevBal);
+      patchBal(prevBal,prevAt);
       window.alert(`Couldn't save that balance: ${err.message||err}`);
     });
   }
@@ -2394,9 +2407,10 @@ export default function Dashboard({ refreshTick = 0 }) {
   }
 
   const [unlinking,setUnlinking]=useState(false);
-  // Removed-and-restorable imported accounts: the ids Restore would unhide, or
-  // null for "nothing to offer" (not removed, no record, or the read failed).
-  const [restorable,setRestorable]=useState(null);
+  // The raw removed-record (the ids visible at hide time), or null for "no
+  // record, or the read failed". What is actually restorable is derived from
+  // it in render — see the `restorable` memo.
+  const [restoreIds,setRestoreIds]=useState(null);
   const [restoreEpoch,setRestoreEpoch]=useState(0);
   const [restoring,setRestoring]=useState(false);
   const [togglingHide,setTogglingHide]=useState(false);
@@ -2850,32 +2864,51 @@ export default function Dashboard({ refreshTick = 0 }) {
     }
   }
 
-  // The Restore strip's state. An EPOCH, not a null sentinel (the recorded
+  // The Restore strip. An EPOCH, not a null sentinel (the recorded
   // setState(null) gotcha): a remove or a restore bumps it, so a new sequence
-  // is always minted and an in-flight read can't paint a stale answer. A
-  // failed read leaves `restorable` null — the strip simply doesn't render,
-  // and the next Accounts visit retries (a failed load must not latch
-  // absence, the expected-transactions rule).
+  // is always minted and an in-flight read can't paint a stale answer.
+  //
+  // The settings READ is deliberately separate from the render-time
+  // intersection below. Keying the read on `accounts` re-queried the row on
+  // every optimistic account edit (a new array identity each time) — and
+  // `tab` IS a dep, so a read that failed and returned null genuinely retries
+  // on the next Accounts visit, which is what the old comment claimed and the
+  // deps did not deliver (review catch; the expected-transactions rule).
   const restoreSeq=useRef(0);
   const bumpRestore=useCallback(()=>setRestoreEpoch(e=>e+1),[]);
-  // The one manual institution ("Imported"): derived from the accounts already
+  // The one manual institution ("Imported"), derived from the accounts already
   // loaded, hidden ones included — after a removal they are ALL hidden, which
   // is exactly the state the strip exists for.
   const manualInstId=useMemo(()=>accounts.find(a=>isManualAccount(a))?.institution_id||null,[accounts]);
   useEffect(()=>{
-    if(!manualInstId){setRestorable(null);return;}
+    if(!manualInstId){setRestoreIds(null);return;}
     const seq=++restoreSeq.current;
     getRestoreRecord(manualInstId).then(ids=>{
       if(restoreSeq.current!==seq)return;
-      // Only ids that are still present AND still hidden are honestly
-      // restorable: an account already unhidden by hand needs no restoring,
-      // and the count on the button must equal what the tap will do.
-      const hiddenIds=accounts.filter(a=>a.hidden).map(a=>a.id);
-      const ready=ids?restorableIds(ids,hiddenIds):[];
-      setRestorable(ready.length?ready:null);
+      setRestoreIds(ids);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  },[manualInstId,accounts,restoreEpoch]);
+  },[manualInstId,restoreEpoch,tab]);
+
+  // What Restore would actually bring back. Two conditions, both load-bearing:
+  //
+  //  1. EVERY account of the institution is still hidden. The record is the
+  //     manual removed-marker and nothing but Restore consumes it, so after a
+  //     user undoes a removal BY HAND the row is stranded — and without this
+  //     check a later, deliberate "Hide from dashboard" on one of those
+  //     accounts would make the strip reappear and offer to "restore" a hide
+  //     the user had just asked for (review catch). A real removal hides them
+  //     all, so this costs nothing and is read-only.
+  //  2. Only ids still present AND still hidden count, so the number on the
+  //     button equals what the tap will change — the server now filters the
+  //     same way.
+  const restorable=useMemo(()=>{
+    if(!restoreIds||!manualInstId)return null;
+    const mine=accounts.filter(a=>a.institution_id===manualInstId);
+    if(!mine.length||!mine.every(a=>a.hidden))return null;
+    const ready=restorableIds(restoreIds,mine.filter(a=>a.hidden).map(a=>a.id));
+    return ready.length?ready:null;
+  },[restoreIds,manualInstId,accounts]);
 
   async function handleRestoreImported(){
     if(!manualInstId)return;
@@ -2956,7 +2989,11 @@ export default function Dashboard({ refreshTick = 0 }) {
   // key row) — and only for a SimpleFIN-fed row, because a never-re-pulled
   // account can still hold an old two-convention value that must not be
   // trusted. Null means the bank didn't send it: say nothing.
-  const tileAvail=tileAcct&&isSimpleFinAccount(tileAcct)&&typeof tileAcct.available==="number"
+  // getOverview already filters hidden=false, so a removed bank's rows can't
+  // reach this tile — but the gate is written out anyway so both display
+  // sites read the same, and so a future change to that query can't quietly
+  // start trusting a value no pull will ever restate.
+  const tileAvail=tileAcct&&isSimpleFinAccount(tileAcct)&&!tileAcct.hidden&&typeof tileAcct.available==="number"
     ?tileAcct.available:null;
   // Donut slices are non-text marks on the card -> 3:1.
   const donutData=cats.slice(0,7).map(c=>({label:getName(c.label),value:c.amount,color:markOn(getColor(c.label),surf.card)}));
@@ -3654,7 +3691,12 @@ export default function Dashboard({ refreshTick = 0 }) {
         {/* Summary */}
         <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10,marginBottom:14}}>
           {[
-            {label:"Total spent",val:loading?null:fmt(totalSpent),sub:isCurrent&&lastSpent!=null?`vs ${fmt(lastSpent)} last month`:monthLabel(year,month)},
+            // The comparison figure must be the one the tile beside it computed
+            // its delta from, or the two disagree in the same grid: "vs $1,125
+            // last month" next to "+$89 ↑ more so far" reads as a $400
+            // contradiction (review catch). Both now quote cmpBase, and the
+            // wording says which basis it is.
+            {label:"Total spent",val:loading?null:fmt(totalSpent),sub:isCurrent&&cmpBase!=null?(lastToDate!=null?`vs ${fmt(cmpBase)} by this day`:`vs ${fmt(cmpBase)} last month`):monthLabel(year,month)},
             // Whole dollars like its neighbours: a negative card balance with
             // cents is too wide for a third of a 390px screen and wrapped the
             // minus sign onto its own line.
@@ -4585,7 +4627,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                       const asOf=balanceAsOf(a,now);
                       if(!asOf||asOf.staleDays<BALANCE_STALE_DAYS)
                         return <div style={{fontSize:10,color:"var(--muted)",marginTop:2}}>tap to view →</div>;
-                      return <div style={{fontSize:10,color:"var(--muted)",marginTop:2}}>as of {shortDate(asOf.date.toISOString().slice(0,10))} →</div>;
+                      return <div style={{fontSize:10,color:"var(--muted)",marginTop:2}}>as of {localShortDate(asOf.date)} →</div>;
                     })()}
                   </div>
                 </div>
@@ -4717,7 +4759,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                     re-pulled account can predate the one-convention fix — and
                     NEVER through displayBalance: for a card this is available
                     CREDIT, not a debt (the normalizeAvailableBalance rule). */}
-                {isSimpleFinAccount(selAcct)&&typeof selAcct.available_balance==="number"&&(
+                {isSimpleFinAccount(selAcct)&&!selAcct.hidden&&typeof selAcct.available_balance==="number"&&(
                   <div style={{fontSize:10,color:"var(--muted)",marginTop:2,whiteSpace:"nowrap"}}>
                     {fmtX(selAcct.available_balance)} {selAcct.type==="credit"?"available credit":"available"}
                   </div>
@@ -4727,7 +4769,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                   if(!asOf)return null;
                   return (
                     <div style={{fontSize:10,color:"var(--muted)",marginTop:2,whiteSpace:"nowrap"}}>
-                      as of {shortDate(asOf.date.toISOString().slice(0,10))}
+                      as of {localShortDate(asOf.date)}
                     </div>
                   );
                 })()}
@@ -5020,7 +5062,12 @@ export default function Dashboard({ refreshTick = 0 }) {
                             <div className="bar-fill" style={{width:pct+"%",background:markOn(TYPE_CHIP,surf.track)}}/>
                           </div>
                           <div style={{fontSize:10,color:"var(--muted)",marginTop:3}}>
-                            {Math.round(pct)}% paid off · {fmt(Math.max(0,a.original_balance-a.current_balance))} of {fmt(a.original_balance)}
+                            {/* Cap at 99 while anything is still owed — the
+                                categorizedShare precedent. Math.round alone
+                                turned $2,000 left on a $400k mortgage into
+                                "100% paid off", printed directly under a
+                                −$2,000.00 balance (review catch). */}
+                            {a.current_balance>0?Math.min(99,Math.round(pct)):Math.round(pct)}% paid off · {fmt(Math.max(0,a.original_balance-a.current_balance))} of {fmt(a.original_balance)}
                           </div>
                         </>);
                       })()}

@@ -173,3 +173,44 @@ test('restorableIds is what the Restore button may promise: recorded ∩ still-h
   assert.deepEqual(restorableIds(['a1', 'a2', 'a3'], ['a1', 'a3']), ['a1', 'a3']);
   assert.deepEqual(restorableIds(['a1'], []), []);
 });
+
+// --- Review catches, pinned so they can't come back -------------------------
+
+test('REGRESSION: a second remove must NOT overwrite the restore record', () => {
+  // On a repeat remove every account is already hidden, so a fresh snapshot
+  // would be [] — and an empty record reads exactly like NO record
+  // (getRestoreRecord returns null for both), so the Restore offer would
+  // vanish permanently while the accounts stayed hidden.
+  const route = readFileSync(fileURLToPath(new URL('../api/unlink-institution.js', import.meta.url)), 'utf8');
+  const fn = route.slice(route.indexOf('async function softHideInstitution'), route.indexOf('export default'));
+  const guardAt = fn.indexOf('if (!existing) {');
+  const upsertAt = fn.indexOf(".from('settings').upsert(");
+  assert.ok(fn.includes('.maybeSingle()'), 'the helper must look for an existing record first');
+  assert.ok(guardAt > 0 && upsertAt > guardAt, 'the record write must sit behind the not-exists guard');
+});
+
+test('REGRESSION: restore counts rows CHANGED, not rows matched', () => {
+  // Without the hidden filter an account the user already unhid by hand is
+  // counted as restored, so the alert overstates what happened and
+  // contradicts the count the strip offered.
+  const route = readFileSync(fileURLToPath(new URL('../api/unlink-institution.js', import.meta.url)), 'utf8');
+  const upd = route.slice(route.indexOf(".update({ hidden: false })"), route.indexOf('unhidden = updated'));
+  assert.ok(upd.includes(".eq('hidden', true)"), 'the unhide must only touch still-hidden rows');
+  assert.ok(route.includes('unhidden = updated?.length ?? 0'),
+    'a null response must count as 0 restored, never as the optimistic set size');
+});
+
+test('REGRESSION: the Restore strip requires EVERY account of the institution to be hidden', () => {
+  // Nothing but Restore consumes the record, so after a hand-undo the row is
+  // stranded — and without this check a later deliberate "Hide from
+  // dashboard" would make the strip reappear and offer to undo that hide.
+  const dash = readFileSync(fileURLToPath(new URL('../src/components/Dashboard.jsx', import.meta.url)), 'utf8');
+  const memo = dash.slice(dash.indexOf('const restorable=useMemo('), dash.indexOf('async function handleRestoreImported'));
+  assert.ok(memo.includes('mine.every(a=>a.hidden)'), 'the strip must require an all-hidden institution');
+  assert.ok(memo.includes('a.institution_id===manualInstId'), 'and scope that to the manual institution');
+  // The settings read must NOT key on `accounts` (a new identity per edit);
+  // `tab` must be a dep so a failed read really does retry on the next visit.
+  const eff = dash.slice(dash.indexOf('getRestoreRecord(manualInstId)'), dash.indexOf('const restorable=useMemo('));
+  assert.match(eff, /\},\[manualInstId,restoreEpoch,tab\]\);/,
+    'the record read keys on the institution, the epoch and the tab — not the accounts array');
+});

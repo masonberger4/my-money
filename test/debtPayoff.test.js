@@ -5,6 +5,11 @@
 // the numbers in the assertions are the spec, not echoes of the code.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
+
+const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 import {
   MAX_MONTHS,
   debtMonthlyRate,
@@ -281,4 +286,17 @@ test('payoffProgress: null wherever the number would be a claim, not a fact', ()
 
 test('payoffProgress: an overpaid loan clamps at 100 rather than exceeding it', () => {
   assert.equal(payoffProgress(9000, -250), 100);
+});
+
+test('REGRESSION: the payoff bar never rounds UP to "100% paid off" while money is owed', () => {
+  // payoffProgress(400000, 2000) is 99.5, and Math.round alone printed
+  // "100% paid off" directly under a −$2,000.00 balance. The renderer caps at
+  // 99 while current_balance > 0 — the categorizedShare precedent.
+  assert.equal(payoffProgress(400000, 2000), 99.5);
+  const dash = readFileSync(join(root, 'src/components/Dashboard.jsx'), 'utf8');
+  assert.match(
+    dash,
+    /a\.current_balance>0\?Math\.min\(99,Math\.round\(pct\)\):Math\.round\(pct\)/,
+    'the bar caps at 99 while anything is still owed, reserving 100 for a zero balance'
+  );
 });

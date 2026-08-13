@@ -23,16 +23,34 @@ async function softHideInstitution(supabase, householdId, institutionId) {
     .eq('institution_id', institutionId);
   if (readErr) throw readErr;
 
-  const { error: recordErr } = await supabase.from('settings').upsert(
-    {
-      household_id: householdId,
-      key: unlinkSettingsKey(institutionId),
-      value: JSON.stringify(visibleAccountIds(acctRows)),
-      updated_at: new Date().toISOString(),
-    },
-    { onConflict: 'household_id,key' }
-  );
-  if (recordErr) throw recordErr;
+  // NEVER overwrite an existing record. A second remove of an
+  // already-removed institution sees every account hidden, so a fresh
+  // snapshot would be `[]` — and an empty record reads exactly like NO
+  // record, so the Restore offer would vanish permanently while the accounts
+  // stayed hidden (review catch). The first removal's snapshot is the truth
+  // about what was visible; a repeat remove is a no-op for the record.
+  // Re-running the hide below is still correct and idempotent.
+  const key = unlinkSettingsKey(institutionId);
+  const { data: existing, error: existErr } = await supabase
+    .from('settings')
+    .select('key')
+    .eq('household_id', householdId)
+    .eq('key', key)
+    .maybeSingle();
+  if (existErr) throw existErr;
+
+  if (!existing) {
+    const { error: recordErr } = await supabase.from('settings').upsert(
+      {
+        household_id: householdId,
+        key,
+        value: JSON.stringify(visibleAccountIds(acctRows)),
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: 'household_id,key' }
+    );
+    if (recordErr) throw recordErr;
+  }
 
   const { error: hideErr } = await supabase
     .from('accounts')
@@ -94,10 +112,15 @@ export default async function handler(req, res) {
           const { data: updated, error: unhideErr } = await supabase
             .from('accounts')
             .update({ hidden: false })
+            // .eq('hidden', true) so the count is rows CHANGED, not rows
+            // matched: an account the user already unhid by hand must not be
+            // counted as restored, or the alert overstates what happened and
+            // contradicts the count the strip offered (review catch).
+            .eq('hidden', true)
             .in('id', toUnhide)
             .select('id');
           if (unhideErr) throw unhideErr;
-          unhidden = updated?.length ?? toUnhide.length;
+          unhidden = updated?.length ?? 0;
         }
       }
 
