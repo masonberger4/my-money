@@ -1,9 +1,9 @@
 -- ============================================================================
 -- TOMBSTONE (2026-08-08). SUPERSEDED for fresh installs by the Supabase CLI
 -- flow (`supabase db push`, replaying migrations/ in order) — docs/SETUP.md
--- Path A. This file remains Path B: the currently-VERIFIED fallback, kept
--- because the CLI path is only half-rehearsed — the migration replay itself is
--- proven, the HOSTED half (link, PG17, the real auth/storage schemas) is not.
+-- Path A. This file remains Path B: the fallback, kept for installs where the
+-- CLI is unavailable or errors. The CLI path is rehearsed end-to-end (hosted
+-- rehearsal 2026-08-13).
 -- config.toml's header holds the authoritative status; don't restate it here.
 --
 -- IT IS STALE. It replays only through 20260731000001_receipts.sql, and its

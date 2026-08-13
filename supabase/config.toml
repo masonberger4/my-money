@@ -7,18 +7,19 @@
 #   supabase db push
 #   # then paste supabase/bootstrap_household.sql in the SQL Editor
 #
-# STATUS: partially rehearsed (2026-08-11; doc rows written 08-12). The 18-file replay was run with
-# the real CLI (`supabase db push --db-url …`, v2.113.0) against a throwaway
-# empty local PG16 cluster carrying the platform stub the RLS harness uses
-# (test/fixtures/rls_stub.sql — roles, auth schema, minimal storage): all 18
-# applied cleanly and supabase_migrations.schema_migrations held all 18 rows.
-# So the migrations themselves and the CLI's ordering/runner are proven.
-# STILL UNREHEARSED: `supabase link` + push against a HOSTED project — real
-# PG17, the real auth/storage schemas (the stub is not GoTrue/storage-api),
-# platform grants. Until someone runs that once on a throwaway hosted project,
-# the verified install path remains the SQL Editor paste (docs/SETUP.md
-# Path B) — an error in the hosted half is the expected outcome of the
-# unrehearsed remainder, not evidence your project is broken.
+# STATUS: REHEARSED END-TO-END (2026-08-13). Hosted half: `supabase login` +
+# `link` + `db push` (CLI v2.114.0 via npx, from Windows) against a throwaway
+# fresh-provisioned HOSTED project — real PG17, real auth/storage schemas,
+# platform grants — applied all 18 migrations cleanly with no version-mismatch
+# warning; bootstrap_household.sql's verification booleans all read true, and
+# the receipts storage.objects policy was created by the migration itself (the
+# 42501 guard did not fire there — still verify per install; grants can differ
+# between projects). Local half (2026-08-12): the same replay via `db push
+# --db-url` (v2.113.0) on an empty local PG16 cluster carrying the platform
+# stub the RLS harness uses (test/fixtures/rls_stub.sql); all 18 applied and
+# supabase_migrations.schema_migrations held all 18 rows. Path A is now the
+# default install path (docs/SETUP.md); setup_all.sql stays as the Path B
+# fallback. Nothing pins the CLI version — a future release may drift.
 #
 # DO NOT link the LIVE household project. Migrations on prod are pasted by
 # hand into the Supabase SQL Editor, in the order (and sometimes the inverted

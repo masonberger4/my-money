@@ -35,7 +35,7 @@ If `npm test` reports failures like `Cannot find package '@anthropic-ai/sdk'`, t
 
 > **NEVER point `supabase link` / `supabase db push` at a database that already has data.** The migration set includes `20260805000001_user_owned_categories.sql`, which **wipes every category, budget and learned rule**. On an empty database that is a no-op; replayed against a live one it destroys your categorization. The CLI path below is for **fresh installs only**. Existing databases keep the SQL Editor paste workflow (section 9).
 
-Steps 1–2 are shared by both paths. Then pick **Path A** (Supabase CLI) or **Path B** (SQL Editor paste).
+Steps 1–2 are shared by both paths. Then use **Path A** (Supabase CLI — the verified default) or **Path B** (SQL Editor paste — the fallback).
 
 1. Create a new Supabase project (pick a strong database password; region near you — you'll need that password again for `supabase link`).
 
@@ -43,11 +43,11 @@ Steps 1–2 are shared by both paths. Then pick **Path A** (Supabase CLI) or **P
 
    While you're there, **disable public signups** (Authentication → Sign In/Up → Email → turn off signups). Nothing in the app uses them, the publishable key in the deployed bundle would otherwise let anyone mint auth users via the API, and the bootstrap binds the household to the *first* auth user by creation time — a stray signup could claim that slot on a re-run.
 
-### Path A — Supabase CLI (PARTIALLY REHEARSED — Path B stays the verified path)
+### Path A — Supabase CLI (verified end-to-end 2026-08-13 — the default)
 
-> **Partially rehearsed (2026-08-12).** The real `supabase db push --db-url` has replayed all 18 migrations cleanly on a throwaway LOCAL Postgres 16 cluster (with the `test/fixtures/rls_stub.sql` prerequisites in place) — the migration files and the CLI runner are proven. What has NOT been rehearsed: `supabase link` against a hosted project, and hosted Postgres 17 with the real auth/storage schemas. **If you want the path that is known to work end-to-end, use Path B.** Fall back to it if anything here errors.
+> **Rehearsed end-to-end (2026-08-13).** On a fresh-provisioned HOSTED project (Postgres 17, real auth/storage schemas), CLI v2.114.0 via `npx`: `login` → `link` (no version-mismatch warning) → `db push` applied all 18 migrations cleanly, `bootstrap_household.sql`'s verification booleans all read true, and the receipts storage policy was created by the migration itself (the hand-creation fallback below wasn't needed on that run — still check it; grants can differ between projects). An earlier local rehearsal (2026-08-12, `db push --db-url`, v2.113.0) proved the same replay on a local PG16 cluster. Fall back to Path B if anything here errors.
 
-This is the direction the project is moving — `supabase/migrations/` is the source of truth, so replaying it is the honest fresh install, and it needs no hand-pasted tail. It becomes the default once someone rehearses it on a throwaway project.
+This is the default because `supabase/migrations/` is the source of truth — replaying it is the honest fresh install, and it needs no hand-pasted tail.
 
 The CLI is **not** a project dependency: `npx supabase` fetches it on demand (or install it yourself per Supabase's docs). Nothing pins its version, so a future release may behave differently from these notes.
 
@@ -76,7 +76,7 @@ The CLI is **not** a project dependency: `npx supabase` fetches it on demand (or
 
 6. **Verify the receipts storage policy** — see "Storage policy check" below. Required on this path too.
 
-### Path B — SQL Editor paste (currently verified fallback)
+### Path B — SQL Editor paste (fallback)
 
 3. **Run the fresh-install script.** Open the SQL Editor, paste the entire contents of `supabase/setup_all.sql`, and run it.
 
