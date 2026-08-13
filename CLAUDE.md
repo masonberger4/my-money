@@ -995,21 +995,34 @@ their headers record). Receipts storage policy settled + verified end-to-end
 incl. cross-tenant denial (2026-07-31); Plaid fully closed (account deleted,
 Items retired, `PLAID_*` env vars removed, 2026-08-01).
 
-**Open data tasks (need Mason or his data):**
-
-- **Statement backfill** is the only remaining pre-May work item; the
-  Discover twins are RESOLVED (see the standing rulings below). Eyeball the
-  type on EVERY account at unhide time — the rule outlives the incident.
-  Backfill scope: pre-May-2026 history for BECU savings, Cashback
-  Debit and the cards via CSV/PDF import (the coverage panel + Feed reach
-  notice on the Accounts tab show each account's gap). The 2644/5481 question
-  is SETTLED — see the standing ruling below: two REAL accounts, each
-  backfills into its OWN row; 5481 (the household's main spending account) is
-  the priority, 2644 (rarely used personal) is optional and its neutral Feed
-  reach notice simply stays until/unless it is backfilled.
-- **Venture X same-day dupes (~$34, Jun+Jul)** — still unchecked.
+**Open data tasks: NONE (backfill COMPLETE 2026-08-12).** Retraining is the
+only live task. Eyeball the type on EVERY account at unhide time — the rule
+outlives the incidents that minted it. What un-gates now that backfill is
+done: the TEMPORARY Data coverage panel's keep-or-remove call (Mason's;
+`src/coverage.js` key row — the panel half is removable, the Feed-reach half
+is permanent), and the income-wall re-evaluation (deriving RTA income —
+still Mason's decision, not automatic).
 
 **Standing data rulings:**
+
+- (2026-08-12) **Statement backfill COMPLETE, all four accounts.** Checking
+  5481 + BECU savings imported from their Feb-2026 CSV exports (both transfer
+  legs present, so checking↔savings moves wash); Venture X from seven
+  Capital One PDF statements (Jan 9 – Jul 24; every statement auto-detected,
+  zero unreadable rows, parsed purchase totals reconciled to the penny
+  against the printed totals — January's $395 delta is the ANNUAL FEE,
+  printed outside Capital One's "Transactions" total but correctly imported
+  as spending); 2644 imported against the coverage wall after the
+  empty-fed-account fix (PR #79). Residual, accepted: history before the
+  exports' start (~Feb 2026, Jan 9 for the card) is simply absent — import
+  older statements any time; nothing depends on it.
+- (2026-08-12) **Venture X same-day "dupes" RESOLVED — REAL, do NOT
+  exclude.** Audited against the Jan–Jul statements: every same-day
+  equal-amount group is distinguishable at the source (Alaska Air trios carry
+  distinct ticket numbers, ORCA taps distinct ref codes, the two $51.95
+  Amazons distinct order ids) or genuinely printed in multiple (four $3 Suds
+  City car washes on 2026-07-24). Same failure shape as the payroll twins:
+  real charges that merely look duplicated.
 
 - (2026-08-09) The two $2,200 "ACH Deposit PAYROLL From POME HOLISTIC PE"
   rows on 2026-07-24 are BOTH REAL — confirmed against the Discover July 2026
@@ -1059,10 +1072,9 @@ are in this file. Git history holds the rest.
 **Worklist status:** no specced code items left — `coverage_shortfall`
 surfacing shipped 2026-08-06 (see Merged features). Everything else is either shipped, deliberately deferred (the
 Dashboard.jsx decomposition — keep the single file during active development),
-or gated on Mason. What outranks the code: the **needs-Mason data work in
-Pending** (statement backfill, the Venture X dupes; the Discover twins and
-the payroll dupe are RESOLVED — see the standing rulings — and the spend cap,
-key rotation and NEWREZ are done/resolved).
+or gated on Mason. The needs-Mason DATA work is ALL RESOLVED (backfill
+complete + every dupe question ruled — see the standing rulings; spend cap,
+key rotation and NEWREZ done earlier).
 **Retraining is the live task**: post-wipe every category is created and taught
 by hand, so the Uncategorized teach-queue and the Taught-rules screen are the
 working surfaces.
