@@ -26,6 +26,35 @@ export function ilikeCandidatePattern(key) {
   return `%${firstToken.replace(/([\\%_])/g, '\\$1')}%`;
 }
 
+// Cent-precision slot identity, the setCategoryRule delete-then-insert rule:
+// two null amounts are the same any-amount slot; two numbers are the same
+// slot when they agree at cent precision.
+function sameSlot(a, b) {
+  if (a == null && b == null) return true;
+  if (a == null || b == null) return false;
+  return Math.round(Number(a) * 100) === Math.round(Number(b) * 100);
+}
+
+// The household's rules bag AS IT WILL BE once `key → category` (at `amount`,
+// null = any) is saved: the taught slot replaces its own previous occupant
+// (mirroring setCategoryRule's slot-scoped delete-then-insert) and every
+// other rule survives untouched. Built so the history apply can re-match rows
+// against the SAME precedence write-time classification uses — an existing
+// amount-scoped or longer-key rule must keep its rows (see applyRuleToHistory).
+export function bagWithRule(rules, key, category, amount = null) {
+  const amt = amount == null ? null : Number(amount);
+  const bag = {};
+  for (const [k, v] of Object.entries(rules || {})) {
+    const entries = (typeof v === 'string' ? [{ amount: null, category: v }] : Array.isArray(v) ? v : [])
+      .filter(e => e && e.category)
+      .map(e => ({ amount: e.amount == null ? null : Number(e.amount), category: e.category }));
+    const kept = k === key ? entries.filter(e => !sameSlot(e.amount, amt)) : entries;
+    if (kept.length) bag[k] = kept;
+  }
+  (bag[key] ||= []).push({ amount: amt, category });
+  return bag;
+}
+
 // Apply `descriptor → category` to historical rows.
 //
 //   fetchPage(pattern, from, to) → { data, error } — a page of candidate rows
@@ -61,12 +90,26 @@ export function ilikeCandidatePattern(key) {
 // which is how the Taught-rules list would talk a human into deleting a rule
 // that is working perfectly. countAll therefore drops the
 // `mapped_category !== category` clause and never writes.
+//
+// `rules` (optional): the household's FULL rules bag. When present, the
+// rewrite paths (dryRun and the wet apply) re-match each row against the
+// whole bag with the taught slot merged in (`bagWithRule`) and rewrite ONLY
+// rows the taught rule would WIN under write-time precedence — an existing
+// amount-scoped or longer-key rule keeps its rows, so the apply can never
+// undo the Convention's "narrow rule survives beside the generic rule"
+// invariant (the trim-the-key editor made overlapping prefix keys the
+// mainline flow, which is what promoted this from corner case to
+// load-bearing). Without `rules` the old single-rule re-match applies.
+// countAll DELIBERATELY stays single-rule either way: "how many rows does
+// this rule match at all" is a statement about the rule's reach, not about
+// which rule wins each row.
 export async function applyRuleToHistory({
   descriptor,
   category,
   amount = null,
   dryRun = false,
   countAll = false,
+  rules = null,
   fetchPage,
   updateBatch,
   pageSize = 1000,
@@ -80,6 +123,14 @@ export async function applyRuleToHistory({
   // exact rule applied here.
   const pat = ilikeCandidatePattern(key);
 
+  // The rules bag carries the entry shape txClassify understands. Rewrite
+  // paths get the full-precedence bag when the caller supplied one; countAll
+  // keeps the single-rule bag by design (see above).
+  const taughtEntry = { amount: amount == null ? null : Number(amount), category };
+  const bag = countAll || rules == null
+    ? { [key]: [taughtEntry] }
+    : bagWithRule(rules, key, category, amount);
+
   const matches = [];
   for (let from = 0; ; from += pageSize) {
     const { data, error } = await fetchPage(pat, from, from + pageSize - 1);
@@ -89,13 +140,13 @@ export async function applyRuleToHistory({
     if (error && isRangeExhaustedError(error)) break;
     if (error) throw error;
     for (const t of data) {
-      // Classify on the same string the write path uses.
+      // Classify on the same string the write path uses; the ROW's amount is
+      // what a scoped rule is tested against. With the full bag a different
+      // rule may win the row — then the winner is not `category` and the row
+      // is left alone, exactly as the next sync would leave it.
       const descriptors = [t.merchant_name, t.description].filter(Boolean);
-      // The rules bag carries the entry shape txClassify understands, and the
-      // ROW's amount is what the scoped rule is tested against.
-      const bag = { [key]: [{ amount: amount == null ? null : Number(amount), category }] };
       const rowAmount = typeof t.amount === 'number' ? t.amount : Number(t.amount);
-      const hit = descriptors.some(d => matchLearnedRule(d, bag, rowAmount));
+      const hit = descriptors.some(d => matchLearnedRule(d, bag, rowAmount) === category);
       if (hit && (countAll || t.mapped_category !== category)) matches.push(t.id);
     }
     if (data.length < pageSize) break;

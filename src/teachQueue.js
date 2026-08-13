@@ -55,8 +55,10 @@ function newer(a, b) {
 //        A falsy key means "no descriptor to teach from" — those rows are
 //        skipped, exactly as before.
 //
-// Returns { spending, other }, both fully sorted — the caller slices, so the
-// "N more behind these" counts come off the full lists.
+// Returns { spending, other }, both fully sorted and NEVER capped here — the
+// caller slices (the Show-more paging raises its slice bound over these full
+// lists, so capping them in this module would silently break it; the old
+// "N more behind these" remainder sentence read its counts off them too).
 //   spending: at least one counted row. { spendCount, spent } are that row set;
 //             `otherCount` records how many of the group's rows sat outside the
 //             total, so a mixed merchant is not silently trimmed.

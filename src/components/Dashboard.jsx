@@ -2490,7 +2490,7 @@ export default function Dashboard({ refreshTick = 0 }) {
 
   // Learned merchant rules: after a manual recategorization, offer to remember
   // the merchant so the correction survives the next sync/import.
-  const [learnPrompt,setLearnPrompt]=useState(null); // {descriptor,key,category,count}
+  const [learnPrompt,setLearnPrompt]=useState(null); // {descriptor (the string a teach saves — the trimmed key when trimmed),key,fullKey,category,amount,scope,count,previewError,counting}
   const [learnedNote,setLearnedNote]=useState(null);
   const [learning,setLearning]=useState(false);
   // Clear the prompt when a different transaction is opened.
@@ -3792,9 +3792,13 @@ export default function Dashboard({ refreshTick = 0 }) {
                 </div>
                 {/* The retraining progress meter. Lives ON this card so it
                     disappears with the queue when retraining finishes. The
-                    display never rounds a partial month up to 100% — while
-                    anything is untaught, "100%" would contradict the list
-                    under it (the confidently-wrong shape, in miniature). */}
+                    display never rounds a partial share up to 100% — while
+                    any counted SPENDING is untaught, "100%" would contradict
+                    the merchant list under it (the confidently-wrong shape,
+                    in miniature). Scope note: the meter measures counted
+                    spending ONLY (its own text says "spending"), so a true
+                    100% can legitimately render above the other-list — an
+                    untaught paycheck or transfer leg is not spending. */}
                 {taughtShare!==null&&(()=>{
                   const pct=taughtShare>=1?100:Math.min(99,Math.round(taughtShare*100));
                   return (
@@ -5965,7 +5969,15 @@ export default function Dashboard({ refreshTick = 0 }) {
                     tap re-runs the dry-run count above, so generalizing the
                     key is an EXPLICIT choice with an honest live preview,
                     never automatic stemming (the never-guess rule). Tapping a
-                    struck word brings it (and the words before it) back. */}
+                    struck word brings it (and the words before it) back.
+                    The FIRST token is not tappable: dropping a leading token
+                    is structurally impossible (prefix-only matching), and the
+                    obvious misread — tap "TST" to strip processor noise —
+                    would otherwise invert into "match ONLY TST", teaching
+                    every Toast-processed merchant at once. Review catch.
+                    Everything here disables while `learning`: a trim tapped
+                    mid-save would visibly register and then be discarded when
+                    the in-flight save (captured pre-trim) closes the confirm. */}
                 {(()=>{
                   const toks=learnPrompt.fullKey.split(" ");
                   if(toks.length<2)return null;
@@ -5979,21 +5991,23 @@ export default function Dashboard({ refreshTick = 0 }) {
                       <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
                         {toks.map((tok,i)=>{
                           const on=i<kept;
+                          const chipStyle={fontSize:10,fontWeight:600,minHeight:32,padding:"0 8px",borderRadius:16,
+                            fontFamily:"inherit",display:"inline-flex",alignItems:"center",transition:"all .15s",
+                            background:"var(--card)",
+                            color:on?"var(--text)":"var(--muted)",
+                            textDecoration:on?"none":"line-through",
+                            opacity:on?1:.55,
+                            border:`1px solid ${on?"var(--border)":"transparent"}`};
+                          if(i===0)return <span key={i} style={chipStyle}>{tok}</span>;
                           return (
-                            <button key={i}
+                            <button key={i} disabled={learning}
                               onClick={()=>{
-                                const cut=on?Math.max(1,i):i+1;
+                                const cut=on?i:i+1;
                                 if(cut===kept)return;
                                 offerToLearn(learnPrompt.category,learnPrompt.scope,toks.slice(0,cut).join(" "));
                               }}
                               aria-pressed={on}
-                              style={{fontSize:10,fontWeight:600,minHeight:32,padding:"0 8px",borderRadius:16,
-                                fontFamily:"inherit",cursor:"pointer",transition:"all .15s",
-                                background:"var(--card)",
-                                color:on?"var(--text)":"var(--muted)",
-                                textDecoration:on?"none":"line-through",
-                                opacity:on?1:.55,
-                                border:`1px solid ${on?"var(--border)":"transparent"}`}}>
+                              style={{...chipStyle,cursor:learning?"default":"pointer"}}>
                               {tok}
                             </button>
                           );
@@ -6016,8 +6030,11 @@ export default function Dashboard({ refreshTick = 0 }) {
                         // Passing the current key keeps a trim through a scope
                         // toggle — without it the re-offer would silently
                         // restore the full key under the user's thumb.
-                        <button key={s} onClick={()=>offerToLearn(learnPrompt.category,s,learnPrompt.key)}
-                          style={{flex:1,fontSize:10,fontWeight:600,padding:"5px 8px",borderRadius:20,fontFamily:"inherit",cursor:"pointer",
+                        // Disabled while saving, like the trim chips: a toggle
+                        // mid-save registers on screen and then loses to the
+                        // in-flight save captured from the older prompt.
+                        <button key={s} disabled={learning} onClick={()=>offerToLearn(learnPrompt.category,s,learnPrompt.key)}
+                          style={{flex:1,fontSize:10,fontWeight:600,padding:"5px 8px",borderRadius:20,fontFamily:"inherit",cursor:learning?"default":"pointer",
                             background:on?"var(--accent)":"var(--card)",color:on?"var(--accent-text)":"var(--muted)",
                             border:`1px solid ${on?"var(--accent)":"var(--border)"}`,transition:"all .15s"}}>
                           {label}
