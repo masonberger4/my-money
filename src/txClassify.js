@@ -106,6 +106,21 @@ export function merchantKey(descriptor) {
     .join(' ');
 }
 
+// The trim-the-key editor's guard (the recorded honest fix for the
+// over-specific-key limit — see CLAUDE.md's amount-scoped Convention): the
+// learn confirm lets the user SHORTEN the key they are about to teach, but
+// only to a leading whole-token prefix. Matching runs rule→row on
+// `key.startsWith(rk + ' ')` below, so a mid-key subset ("COSTCO SEATTLE")
+// would never fire on anything, a partial token ("COSTCO G") would fire on
+// nothing either, and an empty key is unteachable — every shape this guard
+// rejects is a rule that LOOKS taught and matches nothing, the
+// confidently-wrong failure in its quietest form.
+export function isKeyPrefix(shortKey, fullKey) {
+  if (typeof shortKey !== 'string' || typeof fullKey !== 'string') return false;
+  if (!shortKey) return false;
+  return shortKey === fullKey || fullKey.startsWith(shortKey + ' ');
+}
+
 // Amounts are compared at CENT precision — the stored rule amount came off a
 // real transaction and the row being classified is another real transaction,
 // so anything looser would start merging neighbouring payments.

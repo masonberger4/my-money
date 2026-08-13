@@ -12,6 +12,7 @@ import {
   restoreSet,
   isPermanentDeleteRequest,
   permanentDeleteAllowed,
+  manualDeleteAllowed,
   PERMANENT_CONFIRM,
   disconnectAllowed,
   DISCONNECT_CONFIRM,
@@ -99,4 +100,38 @@ test('isPermanentDeleteRequest is literal-true only', () => {
   assert.equal(isPermanentDeleteRequest({ permanent: 'true' }), false);
   assert.equal(isPermanentDeleteRequest({}), false);
   assert.equal(isPermanentDeleteRequest(undefined), false);
+});
+
+test('manual-institution delete requires the literal confirm (parity with the other destructive gates)', () => {
+  // Same PERMANENT_CONFIRM literal — one spelling of 'delete' across both
+  // destructive gates.
+  assert.equal(manualDeleteAllowed({ confirm: PERMANENT_CONFIRM }), true);
+  assert.equal(manualDeleteAllowed({ confirm: 'delete' }), true);
+  // Every near-miss rejected: this branch cascades away the entire CSV/PDF
+  // statement backfill, and a bare { institution_id } POST used to reach it.
+  assert.equal(manualDeleteAllowed({}), false);
+  assert.equal(manualDeleteAllowed(null), false);
+  assert.equal(manualDeleteAllowed(undefined), false);
+  assert.equal(manualDeleteAllowed({ confirm: 'DELETE' }), false);
+  assert.equal(manualDeleteAllowed({ confirm: true }), false);
+  assert.equal(manualDeleteAllowed({ confirm: 'disconnect' }), false);
+});
+
+test('unlink-institution wires the manual gate ahead of the delete, and the client sends the confirm', () => {
+  // Source scan (the simplefin-status precedent above): the guard only guards
+  // if the route calls it before the institutions delete, and the UI only
+  // works if apiClient sends the literal the server now demands.
+  const route = readFileSync(fileURLToPath(new URL('../api/unlink-institution.js', import.meta.url)), 'utf8');
+  const gateAt = route.indexOf('manualDeleteAllowed(req.body)');
+  const deleteAt = route.indexOf(".from('institutions')\n      .delete()");
+  assert.ok(gateAt > 0, 'route must call manualDeleteAllowed(req.body)');
+  assert.ok(deleteAt > gateAt, 'the gate must run before the institutions delete');
+  const client = readFileSync(fileURLToPath(new URL('../src/apiClient.js', import.meta.url)), 'utf8');
+  assert.ok(client.includes("confirmDelete ? { confirm: 'delete' }"),
+    'unlinkInstitution must send the literal confirm for the manual path');
+  // The Dashboard call site must assert the manual case — a SimpleFIN remove
+  // stays a bare soft-hide request.
+  const dash = readFileSync(fileURLToPath(new URL('../src/components/Dashboard.jsx', import.meta.url)), 'utf8');
+  assert.ok(dash.includes('isSimpleFinAccount(selAcct)?{}:{confirmDelete:true}'),
+    'Dashboard must pass confirmDelete only for non-SimpleFIN institutions');
 });

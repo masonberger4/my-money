@@ -13,7 +13,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
-import { teachQueueGroups, nonSpendLabel } from '../src/teachQueue.js';
+import { teachQueueGroups, nonSpendLabel, categorizedShare } from '../src/teachQueue.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const read = (p) => readFileSync(join(root, p), 'utf8');
@@ -247,4 +247,50 @@ test('REGRESSION: the Schedule E category picker filters out mechanism labels', 
     /rep\.unmapped\.filter\(/,
     'the amber bucket must stay unfiltered — unmapped money stays visible and sized'
   );
+});
+
+// --- 10. The retraining progress meter (categorizedShare) ---------------------
+// Input is the spendingGroups output — the isSpend() fold — so the denominator
+// is counted spending by construction; the Uncategorized label is injected to
+// keep the module zero-import. The two honesty pins: no denominator renders
+// NOTHING (null, never a fake 100%), and degenerate group shapes clamp instead
+// of leaking a share outside [0,1].
+test('categorizedShare: fraction of counted spending with a real category', () => {
+  const groups = [
+    { label: 'Groceries', amount: 300 },
+    { label: 'Gas', amount: 100 },
+    { label: 'Uncategorized', amount: 100 },
+  ];
+  assert.equal(categorizedShare(groups, 'Uncategorized'), 0.8);
+  // Nothing untaught: a clean 1, not 1-and-a-bit.
+  assert.equal(categorizedShare(groups.slice(0, 2), 'Uncategorized'), 1);
+  // Everything untaught: 0.
+  assert.equal(categorizedShare([{ label: 'Uncategorized', amount: 50 }], 'Uncategorized'), 0);
+});
+
+test('categorizedShare: no positive spending means NO meter, never a fake 100%', () => {
+  assert.equal(categorizedShare([], 'Uncategorized'), null);
+  assert.equal(categorizedShare(null, 'Uncategorized'), null);
+  assert.equal(categorizedShare([{ label: 'Groceries', amount: 0 }], 'Uncategorized'), null);
+  // A refund-dominated month can net negative — still no denominator.
+  assert.equal(categorizedShare([{ label: 'Groceries', amount: -20 }], 'Uncategorized'), null);
+});
+
+test('categorizedShare: degenerate shapes clamp to [0,1] and the label is honored', () => {
+  // A negative-net named group beside a larger Uncategorized: raw ratio would
+  // fall below 0 — the meter stays a fraction.
+  const upsideDown = [
+    { label: 'Groceries', amount: -50 },
+    { label: 'Uncategorized', amount: 100 },
+  ];
+  assert.equal(categorizedShare(upsideDown, 'Uncategorized'), 0);
+  // Injected label: a different uncategorized label changes the verdict.
+  const groups = [
+    { label: 'Groceries', amount: 60 },
+    { label: 'Mystery', amount: 40 },
+  ];
+  assert.equal(categorizedShare(groups, 'Mystery'), 0.6);
+  assert.equal(categorizedShare(groups, 'Uncategorized'), 1);
+  // Junk rows are skipped, non-numeric amounts read as 0.
+  assert.equal(categorizedShare([null, { label: 'Groceries', amount: '25' }, { label: 'Uncategorized' }], 'Uncategorized'), 1);
 });

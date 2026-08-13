@@ -130,6 +130,28 @@ export function teachQueueGroups(rows, keyOf) {
   return { spending, other };
 }
 
+// The retraining progress meter's core: what fraction of the month's COUNTED
+// spending already carries a real category. `groups` is the spendingGroups
+// output ({ label, amount } rows — the isSpend() fold, so transfer legs, card
+// payments and Returns can never dilute the share); the Uncategorized label is
+// INJECTED to keep this module zero-import (the keyOf pattern above). Returns
+// a 0..1 fraction, or null when the month has no positive counted spending —
+// a meter with no denominator must render NOTHING, never a fake 100%.
+export function categorizedShare(groups, uncategorizedLabel) {
+  let total = 0;
+  let uncat = 0;
+  for (const g of Array.isArray(groups) ? groups : []) {
+    if (!g) continue;
+    const amount = Number(g.amount) || 0;
+    total += amount;
+    if (g.label === uncategorizedLabel) uncat += amount;
+  }
+  if (!(total > 0)) return null;
+  // Clamp: a negative-net group (refunds exceeding spend under one label) can
+  // push the raw ratio outside [0,1]; the meter stays a fraction.
+  return Math.min(1, Math.max(0, 1 - uncat / total));
+}
+
 // The label a non-spending group renders INSTEAD of a dollar total — the fix
 // for "· $0". `fmt` is the caller's money formatter (Dashboard's fmt), injected
 // so this stays pure. A group with rows but no amounts (a $0 posting) says so
