@@ -915,8 +915,9 @@ Conventions / Gotchas. An entry here is a pointer, not a home for rules.
   (`teachQueue.js` key row), startup skeleton + month jump picker
   (`Dashboard.jsx` key row).
 - **Unified linked-boundary spending model (2026-08-03, Mason)** — replaced
-  the two-model design after the F1/F2 double-count diagnosis (PR #32, written
-  up in `docs/double-count-diagnosis-2026-08-03.md`); all
+  the two-model design after the F1/F2 double-count diagnosis (PR #32 carries
+  the write-up and the verified per-month before/after totals; its findings
+  doc was spent and deleted 2026-08-13 once every row read RESOLVED); all
   rules in the linked-boundary Conventions.
 - **Manual debts (2026-08-03)** — `buildManualAccountRow`; rules in the
   debt-balances Convention (updateManualBalance, snapshots) + Architecture
@@ -1032,6 +1033,14 @@ Conventions / Gotchas. An entry here is a pointer, not a home for rules.
   (`envelopes.js` key row) + `getActualIncome` (dataAdapter); all rules in the
   hybrid-income Convention. No migration (the typed figure keeps its settings
   keys). The coverage-panel KEEP ruling rode along (same-day decision).
+- **Retraining ergonomics (2026-08-13, PR #86)** — the trim-the-key editor
+  (the amount-scoped Convention's recorded honest fix, now shipped), the
+  retraining progress meter + Show-more paging (`categorizedShare`,
+  `teachQueue.js` key row), and the manual-delete confirm gate that PR #88
+  then superseded with the soft-hide. Review catch worth keeping: the
+  history-apply re-matched against a single-rule bag, so a trimmed prefix rule
+  clobbered rows an amount-scoped rule owned and the next sync re-diverged
+  them — fixed by `bagWithRule` (the `ruleHistory.js` key row).
 - **Imported-institution remove is a soft-hide (2026-08-13, Mason)** —
   removing the "Imported" institution used to cascade away the whole statement
   backfill; both kinds now soft-hide, with the cascade behind the same
@@ -1137,10 +1146,18 @@ delete-when-spent rule; what survived them — the refuted-don't-re-propose list
 and Mason's recorded decisions — moved into that doc, and their decided rules
 are in this file. Git history holds the rest.
 
-**Worklist status:** no specced code items left — `coverage_shortfall`
-surfacing shipped 2026-08-06 (see Merged features). Everything else is either shipped, deliberately deferred (the
-Dashboard.jsx decomposition — keep the single file during active development),
-or gated on Mason. The needs-Mason DATA work is ALL RESOLVED (backfill
+**Worklist status (2026-08-13):** the plan doc's **Improvement backlog
+(2026-08-13)** section is the live list — EIGHTEEN unbuilt items, ranked,
+each adversarially vetted against main at synthesis time (re-verify the
+premise before building; main moves). Seven of that survey's ideas shipped
+the same day in PRs #86/#88. Ranked first, and the reason the section leads
+with them: the household's ledger, its hand-taught rules and its category
+registry exist ONLY in prod Supabase, with no export and no journal — so the
+data-export floor, the scheduled health probes and the settings-history
+journal are the three that protect what is already built. Everything from the
+OLDER lists is shipped, deliberately deferred (the Dashboard.jsx
+decomposition — keep the single file during active development), or gated on
+Mason. The needs-Mason DATA work is ALL RESOLVED (backfill
 complete + every dupe question ruled — see the standing rulings; spend cap,
 key rotation and NEWREZ done earlier).
 **Retraining is the live task**: post-wipe every category is created and taught
@@ -1224,6 +1241,20 @@ and wrong). `inferAccountType` now also matches product names
 `credit` on a negative balance; the deposit rules still run first so
 "Platinum Savings" and "Preferred Checking" stay deposits. **Always eyeball the
 type on a new SimpleFIN account** — the sync logs a warning when it guessed.
+
+**Statements via SimpleFIN: NOT POSSIBLE (investigated 2026-08-03, don't
+re-propose).** The protocol has no statement concept — four endpoints, no
+documents anywhere in the spec, changelog, Bridge docs or issue tracker; the
+"can provide statements" wording on the link consent screen is MX's, whose
+statement product the Bridge does not pass through. Manual CSV/PDF import
+remains the mechanism and the only way to reach history older than the ~88-day
+window. Re-check only if the Bridge changelog ever announces statements.
+
+**No total depends on institution wording** (the open-source posture, settled
+with the unification): the issuer/keyword lists in `txClassify.js`, the
+type-inference product names in `simplefin.js` and the BECU CSV preset affect
+display categorization and first-run defaults only — a miss degrades to a
+visible `Uncategorized`, never a wrong total.
 
 OUT (not now): **email-alert cron** (Vercel Cron → `api/` route polling Gmail,
 parsing alerts, inserting service-role for minutes-fresh top-ups, reconciled
