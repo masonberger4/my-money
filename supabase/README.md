@@ -8,7 +8,7 @@ it.
 
 > **`docs/SETUP.md` is the authoritative install guide.** Fresh installs go
 > through the Supabase CLI (`supabase db push`, replaying `migrations/` in
-> order); `setup_all.sql` is the verified fallback. This README's env-var table
+> order, verified end-to-end 2026-08-13); `setup_all.sql` is the fallback. This README's env-var table
 > below still uses the LEGACY Supabase key names — see CLAUDE.md's Gotchas for
 > the current Publishable/Secret naming.
 
