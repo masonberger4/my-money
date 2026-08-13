@@ -4801,9 +4801,7 @@ export default function Dashboard({ refreshTick = 0 }) {
             </div>
 
             {/* Account type — editable everywhere now.
-                SimpleFIN sends no type at all, so it's guessed from the account
-                name on first sync; the checking/savings split drives the Trends
-                cash-flow model, so a wrong guess has to be fixable.
+                SimpleFIN sends no type at all, so it's guessed from the account name on first sync, and a wrong guess has to be fixable — it corrupts three separate numbers (refunds become income, card-payment-worded purchases get vetoed out of spending, and the balance lands positive as an asset). The old wording here claimed the checking/savings split drives the Trends cash-flow model; it does not — cashFlow.js reads `type === 'depository'` and never the subtype.
 
                 This used to be SimpleFIN-only, because a Plaid sync re-wrote
                 type and subtype on every pull and an edit there would silently

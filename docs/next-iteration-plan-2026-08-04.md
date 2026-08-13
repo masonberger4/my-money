@@ -6,6 +6,12 @@
 > When every item is resolved this doc is DELETED per CLAUDE.md's maintenance
 > contract. CLAUDE.md is authoritative wherever the two disagree.
 
+**Where the live work is:** the **Improvement backlog (2026-08-13)** section
+is the current unbuilt list — adversarially-vetted items, ranked. The
+"Shipped backlog (2026-08-11)" section near the bottom is a RECORD, fully
+shipped; do not mine it for work. Items 2/3/4 under Low-hanging fruit and 1/3/4/5
+under Harder are the older live specs.
+
 **THE single forward-looking doc.** Both six-dimension audit backlogs
 (2026-08-01 and 2026-08-04) shipped out completely and were deleted 2026-08-05
 per the delete-when-spent rule — their decided rules live in CLAUDE.md, their
@@ -44,9 +50,14 @@ nothing below relitigates a decided item.
      the earlier "keep the credit one" advice: the question is no longer
      which row to keep but **the TYPE on the row that holds the data**. A
      "Discover it" is a credit card, so that row must be retyped **Credit
-     card** in the account-type editor before it is ever unhidden — while it
-     is typed checking, every purchase on it counts as household CASH
-     spending (the F2 failure the hidden-by-default rule exists for).
+     card** in the account-type editor before it is ever unhidden — **that sentence's original
+     justification — "while it is typed checking, every purchase counts as
+     household CASH spending" — is PRE-UNIFICATION and WRONG** (CLAUDE.md's
+     account-type Convention refutes it in as many words: `isSpend` needs only
+     `amount > 0` on a non-loan account, so a card's purchases count either
+     way). The retype still mattered, for the three reasons that Convention
+     enumerates: refunds become income, card-payment-worded purchases get
+     vetoed, and the balance lands positive as an asset.
      **Mason's hypothesis, plausible and worth confirming: Capital One
      acquired Discover, so SimpleFIN pulling both the Capital One and
      Discover logins can surface the SAME card under two orgs.** Each row
@@ -285,8 +296,12 @@ prior backlog. Both are S/M with no blockers and no migration.*
    live task.** The teach-queue remainder is RESOLVED in two parts: the queue
    POPULATION was rebuilt 2026-08-05 (counted-split, `src/teachQueue.js`) and
    the row-height re-sizing shipped 2026-08-12 (PR #76, `TEACH_ROW`
-   minHeight:32). Any larger "promote the queue as an onboarding surface"
-   redesign is a separate Mason decision, deliberately unclaimed. Original
+   minHeight:32); the retraining PROGRESS METER (`categorizedShare`) and
+   Show-more paging shipped 2026-08-13 (PR #86), retiring the dead-end
+   "N more behind these" sentence that hid merchants 11+. Any larger
+   "promote the queue as an onboarding surface" redesign — the flashcard
+   TeachSheet specced in the 2026-08-13 backlog below — remains a separate
+   Mason decision, deliberately unclaimed. Original
    spec kept below as the record.
 
    **Mason's decision 2026-08-04. This REVERSES recorded decisions.** The app ships no
@@ -337,7 +352,9 @@ prior backlog. Both are S/M with no blockers and no migration.*
    this. **Migration: yes, additive + a data step; paste before merge.**
 
 1. **Dashboard.jsx decomposition** — deferred by Mason 2026-08-01 and STILL
-   deferred; the file is now **4,983 lines** (`wc -l`, 2026-08-04). The
+   deferred; the file keeps growing (`wc -l src/components/Dashboard.jsx` —
+   deliberately not frozen here; a pinned count goes stale the day the next
+   feature merges). The
    staged plan (carried out of the deleted 2026-08-01 backlog): sheets and
    formatters first → a shared TxRow → the read-only tabs, every new module
    importing through dataAdapter.js so it stays inside the harness aliases.
@@ -402,6 +419,256 @@ What field reports are actually useful, now that both phones run everything:
 - **Feed health**: the amber banner appearing, or any account >1 day stale —
   with the bank name (per-bank failures arrive inside an HTTP 200).
 
+## Improvement backlog (synthesized 2026-08-13; five lenses, adversarially vetted against main)
+
+> **Provenance and status.** Mason asked for "new ideas on how we can make this
+> app better". Five lens agents (budgeting, insights, phone-UX, tax/rental,
+> reliability) generated 36 ideas against a survey of the real code; curation
+> cut them to 25 and an adversarial pass verified each against main plus this
+> doc's refuted list. **Seven shipped the same day** (PRs #86 and #88 — the
+> trim-the-key editor, the retraining progress meter + queue paging, the
+> manual-delete confirm gate that became the imported soft-hide + Restore, the
+> honest month pace, available credit, balance staleness, loan payoff
+> progress). **Everything below is the unbuilt remainder**, ranked (deliberately
+> not counted here — the first item to ship would falsify the number). Every
+> one was verified to be a real gap at synthesis time — but main has moved
+> since, so re-verify the premise before building, and mark the item shipped
+> in the SAME PR per this doc's contract.
+
+Sizes are S/M/L. "Needs Mason" means a preference, a metaphor, or a migration
+paste — never a technical unknown.
+
+### Protect what exists (do these first)
+
+- **Household data export — the disaster-recovery floor** — M. Every byte of
+  the ledger, the hand-taught `category_rules` the whole retraining effort is
+  producing, the `dash:cats` registry, budgets and envelope history exist ONLY
+  in prod Supabase. The app's only exports are the Ask-chat markdown and the
+  per-property Schedule E CSV (`grep -n 'downloadCsv(' src/components/Dashboard.jsx`
+  — a count frozen here would break the day this very item ships). A
+  lost account or a bad write class is total, permanent loss; statement
+  re-import rebuilds transactions only if the source files were kept. Build: a
+  "Download household data" action on the Accounts tab (the established ops
+  surface) over a new pure `src/exportBundle.js` (versioned JSON, node --test),
+  fed by **new whole-table reads behind the façade** — the existing adapter
+  reads are per-transaction/per-year and `getExpectedTransactions` RUNS AND
+  PERSISTS the auto-match, so an export calling it would write. Include
+  `balance_snapshots` (net-worth history is real recovery data) and a full
+  settings read added to `db.js` (preserving the no-direct-`from('settings')`
+  rule). Receipt IMAGES excluded in v1, stated in the bundle with a count (the
+  honest-absence rule). Pin `simplefin_access` out of the table allowlist by
+  test. Needs Mason only for the optional automated tier (a Vercel Cron writing
+  the same bundle to a private bucket — needs a bucket migration).
+
+- **Scheduled health workflow: daily prod probes + weekly bit-rot CI** — S.
+  Several documented failure shapes have no alarm but a human noticing: a
+  deploy whose `api/sync.js` dies at module load (the Gotcha's own remedy —
+  probe `POST /api/sync`, require **401** — is a manual discipline), the
+  `vercel.json` schema-rejection class where the site keeps serving the old
+  deploy while every push dies, CSP served only by Vercel, and the in-app feed
+  banner that stays silent for three days and only evaluates when someone opens
+  the app. `.github/workflows/ci.yml` triggers only on pull_request and push to
+  main — between sessions nothing runs anywhere. Build: `health.yml` with a
+  daily unauthenticated curl probe (200 + a `content-security-policy` header on
+  `/`; exactly 401 on `POST /api/sync` and `GET /api/simplefin-status`) and a
+  weekly `npm ci` + test + placeholder build + `npm audit --omit=dev
+  --audit-level=high` on main. The failure email IS the alarm. Note in the
+  workflow header that GitHub disables cron workflows after 60 days of repo
+  inactivity — the dead-man's switch can itself die quietly.
+
+- **Settings-history journal: an undo for the wipe-shaped failure class** — S,
+  **migration**. `dash:cats` / `dash:colors` / `dash:names` / `tax:maps` /
+  `rec:ignore` are each ONE JSON row overwritten in place. A wipe-shaped bug
+  already happened once (now guarded by `serializedUpdater` +
+  `test/settingsChains.test.js`), but guards prevent KNOWN bugs and nothing
+  provides recovery from the next unknown one — and the registry is exactly
+  what retraining is hand-building. Build: additive `settings_history` +
+  an AFTER UPDATE OR DELETE trigger capturing OLD for an allowlisted key set
+  (EXCLUDING `asst:chats`, which runs to 300k chars per save), trimmed to ~20
+  versions per key. Zero client code; recovery is a documented SQL-Editor
+  SELECT. **The trigger MUST be SECURITY DEFINER with a pinned search_path**
+  (the `current_household_id` pattern) — a plain trigger runs with the
+  invoker's rights, so an authenticated phone's settings UPDATE would be denied
+  by RLS on the zero-client-policy history table and ABORT the settings write
+  itself, i.e. the guard would cause the catastrophe class it exists to
+  recover from. Add the table to `rls_assert.sql`'s zero-client-policies
+  allowlist like the `legacy_*` archives.
+
+### Budgeting ergonomics (the YNAB muscle-memory gaps)
+
+- **Cover overspending — start the move from the red envelope** — S. An
+  overspent envelope renders red (`envRowNode`'s `over`), but its only money
+  affordance is ⇄, which moves money OUT of the envelope already negative.
+  Covering it means knowing which envelope has room, finding that donor row,
+  and picking the red one out of its destination chips. Add a "Cover" next to
+  the red available on leaf rows only: opens the existing `MoveSheet` in
+  reverse — `to` pinned, amount pre-filled with the shortfall, and a chip grid
+  picking the SOURCE. Note two things the first draft of this item got wrong:
+  MoveSheet's `rows` prop (`assignableRows`) drives the DESTINATION list only
+  (`rows.filter(r=>r.category!==from)`), while the source is `from`/`srcRow`
+  and is not filtered — so reversing the sheet means adding a source pool, not
+  reusing that binding. And a parent must stay ELIGIBLE as a source: the
+  Category-nesting Convention keeps it a legal move SOURCE precisely so a
+  pre-nesting balance can get out; it is DESTINATIONS that exclude parents.
+  Filter the source pool on available > 0, not on parenthood. No new write
+  path, no model change.
+
+- **Hand-add an expected bill from the Budget tab** — M. Expected transactions
+  are managed on Budget but can only be BORN on Recurring — the code says so
+  itself — and a genuinely new bill has never hit the ledger, so
+  `detectRecurring` can never offer it. The pure core was explicitly built for
+  this: `addExpected` inserts `recurring_key`-null rows and
+  `isDuplicateRollForward` exists solely to protect hand-typed bills. Add
+  "+ Add a bill" to the Upcoming-bills card over a small sheet (description,
+  amount, due date **committed on blur with a year floor** — the
+  `<input type="date">` gotcha, cadence chips, a picker filtered by
+  `isBudgetableCategory`). Copy `QuickAddSheet`; ship the full overlay
+  contract (`useEscClose` + role/aria + both sheet registries). Display-only
+  contract untouched.
+
+- **Cross-month Mark-paid picker** — S. The picker filters the viewed month's
+  in-memory rows, so a bill due the 31st and paid the 1st is invisible while
+  viewing the due month: the picker says "no similar transaction", the bill
+  goes red "missed?", and trust erodes on exactly the month-boundary bills
+  (rent, mortgage) the feature exists for. Fetch by the BILL's window instead:
+  `searchTransactions` in filter-only mode with amount ±`EXPECTED_AMOUNT_TOL_PCT`
+  and date ±`EXPECTED_WINDOW_DAYS[cadence]`, both imported from
+  `src/expectedTx.js`. Not the refuted cross-month category browse — no `.or()`
+  over synthesised rows, and the results are ephemeral picker state.
+
+- **Ready to Assign as a first-class move endpoint** — M. **Needs Mason (a
+  metaphor call).** Money flows into envelopes ergonomically but pulling it
+  back means mentally computing `assigned − n`; and when RTA goes negative
+  there is no guided path at all, because `planMove` keeps total assigned
+  constant — no sequence of moves can fix it. Add an RTA chip to `MoveSheet`
+  as both source and destination, committing as a single `setAssigned` (the
+  conditional-delete path already handles landing on 0 with a live
+  `target_override`). Presenting a derived number as a place money lives is
+  the decision; also whether a pull-back may drive `assigned` negative.
+
+- **Target-setting context: recent actual spend inside TargetSheet** — S.
+  **Needs Mason.** Post-wipe every target is typed into a blank sheet with no
+  memory of what the household actually spends, and the per-(category, month)
+  history is already computed for the envelope walk and thrown away. Render an
+  info line ("Jun $412 · Jul $388 · Aug so far $190") plus an optional
+  tap-to-fill chip — never auto-written. Label the current month "so far" (the
+  partial-month rule) and say "based on categorized spending", since figures
+  run LOW while merchants are untaught. Honest scoping note: the walk range
+  may not cover four months, so either widen the fetch (a real query/cache-key
+  change — name it in the spec) or scope v1 to history within the walk range
+  and say so in the sheet.
+
+- **Rapid teach mode — a flashcard sheet that walks the whole queue** — M.
+  **Needs Mason: this IS the "promote the queue as an onboarding surface"
+  decision item 0 leaves deliberately unclaimed.** Teaching costs ~4 taps
+  through the general-purpose tx sheet per merchant. A `TeachSheet` iterating
+  the FULL `teachQueue.spending` list (merchant key → its rows → the raw
+  descriptor → chips + ＋New → the existing dry-run count and scope toggle →
+  Always/Skip → auto-advance), with one `reloadData` at close and a local
+  `taughtKeys` set meanwhile. Per-merchant seq guard on the dry run (the
+  movers month-tagging lesson). Queue rows keep opening the full sheet as the
+  secondary path (rename/entity/receipts live there).
+
+### Insights the backfill made possible
+
+- **Month in review — an Overview summary for completed months** — M. **Needs
+  Mason (placement and tone).** *Premise corrected 2026-08-13 by audit: the
+  Budget half of the original idea is ALREADY SHIPPED — Dashboard branches on
+  `incomeResolved.source==="actual"`, suppresses the editor with a
+  "would be a trap" comment, and already renders "actual · planned $X" and
+  "spent $X of $Y targeted". Do not re-propose it.* What is genuinely missing
+  is the OVERVIEW side: paging back to a finished month shows the same donut
+  and recent-6 layout with no "so what". Build one display-only card, rendered
+  only when viewed < current month, off a pure `src/monthReview.js`: total vs
+  prior, biggest mover, largest purchase (max `isSpend` row, tapping opens the
+  existing tx sheet), and net saved — `netSaved` OMITTED when `coverageStart`
+  says the month isn't ledger-covered (the `resolveBudgetIncome` fallback
+  discipline). Every input is already fetched or one memo-ride away. Keep the
+  two spend SCOPES verbally distinct (budgeted-envelope spent vs household
+  spent) or the card contradicts Categories at a glance.
+
+- **Year view: 12-month Trends + per-category year card** — M. Backfill is
+  complete to ~Feb 2026 but every trend surface is hard-capped at 6 months
+  (`getCashFlow({num_periods:6})`), so a year of clean data has no surface.
+  Add a 6mo/12mo chip (the parameter already exists) and a "Year by category"
+  card. **The category card must pair per CALENDAR MONTH** — call
+  `getTransactionsBetween` once per month, each served by slicing the wider
+  memoized fetch — so each month's marks match the Categories tab by
+  construction; the cash-flow toggle may keep `getCashFlow`'s whole-window
+  pairing, which is Trends' existing documented behavior. Months before the
+  household's earliest visible row render "no data", never $0 (reuse
+  `getActualIncome`'s earliest-row probe). Lazy-load on the toggle.
+
+- **Merchant insights: top-merchants card + "history at this merchant"** — M.
+  The app has no merchant-level view anywhere — `merchantKey` is used for
+  teaching and (in `expectedTx.js`) as a bill-matching signal, never for
+  aggregation — so "how much do we spend at Costco?" is unanswerable. New pure
+  `src/merchantStats.js` folding `isSpend()` rows by display name collapsed
+  through `merchantKey`, a `getMerchantStats({months:6})` riding the same range
+  memo as `getCashFlow`, a Trends card, and one line in the tx sheet. Tap
+  through to the existing search with the name pre-filled (reusing search, not
+  the refuted cross-month category browse). Label it "grouped by name" — the
+  deliberate no-stemming rule keeps "COSTCO GAS" and "COSTCO WHSE" separate.
+
+### Tax, rental, and record-keeping
+
+- **One-tap preparer package export** — S. January handoff is N separate taps
+  (one worksheet CSV per property), and the personal-deduction buckets and the
+  mileage log export NOWHERE — `scheduleECsv` is the only CSV builder in
+  `src/taxReport.js`. Add a pure `taxYearPackageCsv` reusing `csvCell` (the
+  formula-injection guard) and the sectioned pattern: every property worksheet,
+  each deduction bucket WITH its backing rows, and the mileage rows plus the
+  per-rate breakdown. Everything it needs is already loaded by the tab's lazy
+  effect. Needs Mason only for one-file vs per-section preference.
+
+- **Rent roll: render the per-month strip `entityMonthly` already computes** —
+  S. `entityMonthly` is called per property and reduced to year totals only;
+  the month-by-month P&L it returns is never shown, so "did rent land every
+  month?" needs a manual count. Render a 12-slot strip (390px-safe grid),
+  zero-income months visually distinct but NEUTRAL — vacancy is legitimate and
+  amber must keep meaning "needs fixing". Zero new computation, zero I/O.
+  Needs Mason only on whether zero-income months get any emphasis at all.
+
+- **Repeat-drive chips — one-tap mileage logging** — S. Rental drives repeat but
+  every entry retypes miles and purpose with no frequency memory (the date
+  already defaults to today and the entity to the first active property), and
+  a thin log is a real lost deduction at 76¢/mi. Derive the 3–4 most frequent (purpose, entity,
+  miles) combos from the already-loaded `mileage` state (pure
+  `frequentDrives`, ≥2 occurrences or render nothing) and render them as
+  chips. **The chip PREFILLS the form with Save as the confirming second tap
+  — never an immediate write**: the date is the one field the chip's label
+  doesn't assert, and the rate is date-dependent (2026 splits mid-year
+  72.5¢→76¢), so a wrong-dated drive is a wrong entry on a preparer-facing
+  deduction log.
+
+### Polish
+
+- **Touch-first rename and color affordances** — S. The two edits retraining
+  leans on are desktop-shaped on a phone-first app: `EditName` commits via
+  `onDoubleClick` with a title tooltip (invisible on touch), both hint footers
+  say "Double-click a name", and `Swatch` is a 14px target adjacent to
+  `DrillNum` taps. Wrap the swatch in a padded hit area (the visual stays
+  truthful — it must show the stored hex), give `EditName` a coarse-pointer
+  path via `matchMedia('(pointer: coarse)')`, and swap the hint wording per
+  pointer type. Re-screenshot at 390px: category rows are dense.
+
+- **Load-more past the account sheet's 500-row wall** — S.
+  `getAccountTransactions` caps at 500 and the sheet renders a dead end
+  ("Showing the most recent 500 transactions") with `acctHasMore` true and
+  nothing to tap — and post-backfill the shared checking carries the whole
+  history. Give it offset paging on the `searchTransactions` pattern:
+  ordered `.range` with **date desc + id desc tiebreak** (the current query
+  orders by date ONLY, so a page boundary inside a same-dated run drops or
+  repeats a row) and the exact-page-multiple 416 read as end-of-data.
+
+- **Persist the Debt tab's payoff plan** — S. **Needs Mason (household vs
+  device storage — the same open choice family as the coverage-gap ack).**
+  `debtStrategy`/`debtExtra`/`debtInclude` are plain `useState`, so every
+  launch re-opts loans into the payoff, retypes the extra, and re-picks the
+  strategy. One settings key through `makeSerializedUpdater` (never a third
+  hand-rolled copy), tolerant parse, loaded via `getStartupSettings`; stale
+  account ids ignored harmlessly (the `mm:cardTile` precedent).
+
 ## Refuted / decided — do NOT re-propose
 
 Carried out of the deleted 2026-08-04 audit backlog. Six of its 39 findings
@@ -449,7 +716,7 @@ set; the dataAdapter split got **its own quiet session** (shipped).
     list. Groups are re-ranked after grouping (`orderGroups`). Any future
     grouped list has the same trap: **sort by the number the row displays.**
 
-## Next backlog (synthesized 2026-08-11; every item adversarially verified against current main)
+## Shipped backlog — synthesized 2026-08-11, ALL 16 SHIPPED 2026-08-12 (ship record, not live work)
 
 > **ALL 16 ITEMS BELOW SHIPPED 2026-08-12, in the same PR that wrote this
 > section** (three build waves + adversarial review; two review catches — the
