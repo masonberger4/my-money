@@ -100,6 +100,41 @@ export function sumSpending(txs) {
   return total;
 }
 
+// Spending up to and including a DAY OF THE MONTH — the honest half of the
+// Overview's "vs last month" tile.
+//
+// That tile compared this month SO FAR against last month in FULL, so it read
+// "less spending" on almost every day of almost every month: true, and
+// useless, and the flavour of confidently-wrong this codebase refuses
+// elsewhere. Slicing the comparison month at the same day makes the two sides
+// answerable by the same question ("by the 12th, had we spent more or less?").
+//
+// `day` is a day-of-month (1–31). Rows are the month's already-marked rows, so
+// the isSpend lineage is unchanged — this only narrows WHICH rows are summed.
+// A month with fewer days than `day` simply contributes all of its rows, which
+// is the honest reading of "the whole month so far" on the 31st.
+export function spendingToDate(txs, day) {
+  const cutoff = Number(day);
+  if (!Number.isFinite(cutoff)) return sumSpending(txs);
+  let total = 0;
+  for (const t of txs) {
+    if (!isSpend(t)) continue;
+    if (dayOfMonth(t) > cutoff) continue;
+    total += t.amount;
+  }
+  return total;
+}
+
+// The day-of-month off a row's stored date, read from the STRING rather than
+// through `new Date()`: 'YYYY-MM-DD' parsed as a Date is UTC midnight, which
+// in any western timezone renders as the previous day — the classic off-by-one
+// that would put the 1st of the month in the previous month's slice.
+function dayOfMonth(t) {
+  const d = String((t && (t.transaction_date || t.date)) || '');
+  const n = Number(d.slice(8, 10));
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
 // The Categories-tab bucketing: per-category amounts/counts over isSpend()
 // rows, largest first. Exactly what getSpending() returns as `groups`.
 export function spendingGroups(txs) {

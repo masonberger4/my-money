@@ -235,3 +235,32 @@ export function debtFreeMonth(startMonth, plan) {
   if (!plan || plan.stalled || !plan.months) return null;
   return addMonths(startMonth, plan.months);
 }
+
+// How much of a loan is paid off — the number that explains why the payoff
+// schedule beside it is worth looking at. `accounts.original_balance` shipped
+// with the debt-tracker migration and had no editor and no renderer; this is
+// the pure half of both.
+//
+// Both balances are the STORED convention (positive = owed). Returns null
+// whenever the fraction would be a claim rather than a fact:
+//   - no original recorded (the null-is-unknown discipline — nothing renders),
+//   - a non-positive original (nothing to be a fraction of),
+//   - current > original, which is a real state (an extra draw on a
+//     HELOC-shaped loan, or an original typed too low) and must hide the bar
+//     rather than render negative progress.
+// A fully-paid loan returns 100, and a current balance below zero (overpaid)
+// clamps there rather than exceeding it.
+export function payoffProgress(original, current) {
+  // null/'' must not coerce: Number(null) is 0, which would read a MISSING
+  // balance as "100% paid off" — the confidently-wrong answer, on the one
+  // number a person would celebrate. Unknown in, nothing out.
+  if (original == null || original === '') return null;
+  if (current == null || current === '') return null;
+  const orig = Number(original);
+  const cur = Number(current);
+  if (!Number.isFinite(orig) || orig <= 0) return null;
+  if (!Number.isFinite(cur)) return null;
+  if (cur > orig) return null;
+  const paid = orig - Math.max(0, cur);
+  return Math.min(100, Math.max(0, (paid / orig) * 100));
+}

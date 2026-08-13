@@ -13,6 +13,7 @@ import { readFileSync } from 'node:fs';
 import {
   isSpend,
   sumSpending,
+  spendingToDate,
   spendingGroups,
   biggestMovers,
   toTxShape,
@@ -583,4 +584,48 @@ test('property: retyping a row’s account to loan removes exactly its prior con
       t.accounts.type = savedType;
     }
   }
+});
+
+// --- spendingToDate: the honest half of the "vs last month" tile ------------
+// The tile compared this month SO FAR against last month IN FULL, so it read
+// "less spending" nearly every day of every month. Slicing the comparison
+// month at the same day makes both sides answer the same question.
+test('spendingToDate sums only rows on or before the given day of month', () => {
+  const rows = [
+    { amount: 100, date: '2026-07-01', accounts: { type: 'depository' } },
+    { amount: 50, date: '2026-07-12', accounts: { type: 'depository' } },
+    { amount: 999, date: '2026-07-13', accounts: { type: 'depository' } },
+    { amount: 400, date: '2026-07-28', accounts: { type: 'depository' } },
+  ];
+  assert.equal(spendingToDate(rows, 12), 150);
+  assert.equal(spendingToDate(rows, 1), 100);
+  assert.equal(spendingToDate(rows, 31), 1549);
+  assert.equal(spendingToDate(rows, 31), sumSpending(rows), 'a full slice equals the full sum');
+});
+
+test('spendingToDate keeps the isSpend lineage — it only narrows WHICH rows', () => {
+  const rows = [
+    { amount: 100, date: '2026-07-02', accounts: { type: 'depository' } },
+    { amount: 60, date: '2026-07-03', excluded: true, accounts: { type: 'depository' } },
+    { amount: 70, date: '2026-07-04', _internal: true, accounts: { type: 'depository' } },
+    { amount: -80, date: '2026-07-05', accounts: { type: 'depository' } },
+    { amount: 90, date: '2026-07-06', accounts: { type: 'loan' } },
+  ];
+  assert.equal(spendingToDate(rows, 30), 100, 'excluded, washed, income and loan rows stay out');
+});
+
+test('spendingToDate reads the day off the STRING — no UTC off-by-one', () => {
+  // 'YYYY-MM-DD' through new Date() is UTC midnight, which renders as the
+  // previous day in every western timezone — that would push the 1st of the
+  // month out of a day-1 slice.
+  const first = [{ amount: 25, date: '2026-07-01', accounts: { type: 'depository' } }];
+  assert.equal(spendingToDate(first, 1), 25);
+  // Rows carrying toTxShape's transaction_date work the same way.
+  assert.equal(spendingToDate([{ amount: 25, transaction_date: '2026-07-01', accounts: { type: 'depository' } }], 1), 25);
+});
+
+test('spendingToDate falls back to the full sum when the day is unusable', () => {
+  const rows = [{ amount: 40, date: '2026-07-20', accounts: { type: 'depository' } }];
+  assert.equal(spendingToDate(rows, undefined), 40);
+  assert.equal(spendingToDate(rows, NaN), 40);
 });

@@ -5,7 +5,7 @@ import { applyRuleToHistory, isRangeExhaustedError } from './ruleHistory.js';
 import { markInternalTransfers, cashIncome, cashSpending } from './cashFlow.js';
 import { walkEnvelopes, monthKey } from './envelopes.js';
 import { matchExpected, rollForwardDate, isDuplicateExpected, isDuplicateRollForward } from './expectedTx.js';
-import { isSpend, sumSpending, spendingGroups, biggestMovers, toTxShape, aggregateEnvelopeSpending } from './spending.js';
+import { isSpend, sumSpending, spendingToDate, spendingGroups, biggestMovers, toTxShape, aggregateEnvelopeSpending } from './spending.js';
 import { createRangeMemo } from './monthMemo.js';
 import { setSyncCompletionHook } from './sync.js';
 import { amountOrClause, searchIsActive } from './searchFilters.js';
@@ -269,7 +269,13 @@ function getMonthTransactions(year, month) {
 export async function getOverview() {
   const { data: accounts, error } = await supabase
     .from('accounts')
-    .select('id, name, mask, type, current_balance')
+    // available_balance is additive (the `id` precedent) and means money
+    // AVAILABLE TO SPEND — for a card that is available CREDIT, never the owed
+    // balance, and it must never go through displayBalance (the
+    // normalizeAvailableBalance key row). plaid_account_id rides along so the
+    // tile can tell a SimpleFIN-fed row (whose value this pull restated) from
+    // a never-re-pulled one that may still hold an old two-convention value.
+    .select('id, name, mask, type, current_balance, available_balance, plaid_account_id, last_balance_at')
     .eq('hidden', false);
   if (error) throw error;
 
@@ -286,12 +292,20 @@ export async function getOverview() {
       // Additive: the Overview card tile keys its remembered selection on it.
       id: a.id,
       balance: { current: a.current_balance ?? 0 },
+      available: a.available_balance ?? null,
+      plaid_account_id: a.plaid_account_id,
+      last_balance_at: a.last_balance_at ?? null,
       name: a.name,
       mask: a.mask,
       type: a.type,
     })),
     last_month: {
       spending: { amount: sumSpending(lastTxs) },
+      // The same month sliced at TODAY's day-of-month, so the tile can compare
+      // like with like instead of this month-so-far against last month in
+      // full. Additive; the full-month figure above is untouched and stays the
+      // sub-line.
+      spending_to_date: { amount: spendingToDate(lastTxs, now.getDate()) },
     },
   };
 }
@@ -1341,7 +1355,12 @@ export async function updateManualBalance(account, balance) {
   const { balance: bal, snapshot } = manualBalanceUpdate(account, balance);
   const { error } = await supabase
     .from('accounts')
-    .update({ current_balance: bal })
+    // Stamp the as-of too: a hand-typed balance is current as of NOW, and
+    // without this a figure typed in June renders forever beside a
+    // freshly-pulled one with nothing to tell them apart (balanceAsOf). Safe
+    // on a manual account by construction — no pull ever restates it, so
+    // there is nothing for this to fight.
+    .update({ current_balance: bal, last_balance_at: new Date().toISOString() })
     .eq('id', account.id);
   if (error) throw error;
   if (snapshot) await appendClientSnapshot(account.id, bal);

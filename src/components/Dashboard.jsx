@@ -5,7 +5,7 @@ import { getOverview, getSpending, getBiggestMovers, getTransactions, getCashFlo
 import { planAutoFill } from "../envelopes.js";
 import { buildSearchFilters, searchIsActive } from "../searchFilters.js";
 import { expectedByCategory, expectedStatus, isMissedExpected, seedFromRecurring, projectFutureCycles } from "../expectedTx.js";
-import { payoffWhatIf, debtFreeMonth, isMortgage, amortizationSchedule, addMonths, MAX_MONTHS } from "../debtPayoff.js";
+import { payoffWhatIf, debtFreeMonth, isMortgage, amortizationSchedule, addMonths, MAX_MONTHS, payoffProgress } from "../debtPayoff.js";
 import { SCHEDULE_E_LINES, RENTS_KEY, DEFAULT_SCHEDULE_E_MAP, scheduleEReport, entityMonthly, entityLedger, personalDeductionReport, DEDUCTION_BUCKETS, DEFAULT_DEDUCTION_MAP, mileageDeduction, scheduleECsv } from "../taxReport.js";
 import { merchantKey, matchLearnedRule, isKeyPrefix } from "../txClassify.js";
 import { trimChatMsgs, buildSavedChat } from "../savedChats.js";
@@ -19,7 +19,7 @@ import { parentIndex, parentOf, hasChildren, eligibleParents, canSetParent,
   setRegistryParent, groupCategories, groupMembers, rollupFields,
   orderGroups, earliestMemberRank } from "../categoryTree.js";
 import { teachQueueGroups, nonSpendLabel, categorizedShare } from "../teachQueue.js";
-import { displayBalance, isDebtAccount as isDebtType } from "../accountBalance.js";
+import { displayBalance, isDebtAccount as isDebtType, balanceAsOf, BALANCE_STALE_DAYS } from "../accountBalance.js";
 import { unhideConfirmMessage } from "../unhideConfirm.js";
 import { createSheetHistory } from "../sheetHistory.js";
 import { runSync } from "../sync.js";
@@ -2942,7 +2942,22 @@ export default function Dashboard({ refreshTick = 0 }) {
     try{localStorage.setItem("mm:cardTile",next.id);}catch{/* private mode: session-only */}
   };
   const lastSpent=overview?.last_month?.spending?.amount;
-  const delta=lastSpent!=null?totalSpent-lastSpent:null;
+  // The "vs last month" comparison. For the month IN PROGRESS it runs against
+  // last month SLICED AT TODAY'S DAY (spending_to_date) — comparing a partial
+  // month against a full one made the tile read "↓ less spending" almost every
+  // day of almost every month, which is true and useless. A past month is
+  // already complete, so it keeps the full-month comparison.
+  // Degrades to the old behaviour if the adapter predates the additive field.
+  const lastToDate=overview?.last_month?.spending_to_date?.amount;
+  const cmpBase=isCurrent&&lastToDate!=null?lastToDate:lastSpent;
+  const delta=cmpBase!=null?totalSpent-cmpBase:null;
+  // Available credit on the card tile. NEVER through displayBalance — for a
+  // card this is available CREDIT, not a debt (the normalizeAvailableBalance
+  // key row) — and only for a SimpleFIN-fed row, because a never-re-pulled
+  // account can still hold an old two-convention value that must not be
+  // trusted. Null means the bank didn't send it: say nothing.
+  const tileAvail=tileAcct&&isSimpleFinAccount(tileAcct)&&typeof tileAcct.available==="number"
+    ?tileAcct.available:null;
   // Donut slices are non-text marks on the card -> 3:1.
   const donutData=cats.slice(0,7).map(c=>({label:getName(c.label),value:c.amount,color:markOn(getColor(c.label),surf.card)}));
 
@@ -3646,8 +3661,14 @@ export default function Dashboard({ refreshTick = 0 }) {
             // Cycles through unhidden credit accounts: click/tap advances,
             // horizontal swipe goes either way (with an intent threshold so it
             // never claims a vertical page scroll). Selection is a device pref.
-            {label:"Card balance",val:loading?null:fmt(balance),sub:tileAcct?.name||"Linked account",cycle:!loading&&creditAccts.length>1},
-            {label:"vs last month",val:loading||delta==null?null:`${delta>=0?"+":""}${fmt(delta)}`,sub:delta==null?"—":delta>=0?"↑ more spending":"↓ less spending",clr:delta==null?"var(--muted)":inkOn(delta>=0?"#D85A30":"#1D9E75",surf.card)},
+            // The sub names the account, or — when the feed sent it — the room
+            // left on the card, which is the question actually being asked at
+            // a checkout ("can this go on this card?"). The name is still one
+            // tap away in the Accounts tab; the number isn't anywhere else.
+            {label:"Card balance",val:loading?null:fmt(balance),sub:loading?tileAcct?.name||"Linked account":tileAvail!=null?`${fmt(tileAvail)} left`:tileAcct?.name||"Linked account",cycle:!loading&&creditAccts.length>1},
+            // Same-point comparison while the month is in progress (see cmpBase)
+            // — the sub says which, so the number is never ambiguous.
+            {label:"vs last month",val:loading||delta==null?null:`${delta>=0?"+":""}${fmt(delta)}`,sub:delta==null?"—":`${delta>=0?"↑ more":"↓ less"}${isCurrent&&lastToDate!=null?" so far":" spending"}`,clr:delta==null?"var(--muted)":inkOn(delta>=0?"#D85A30":"#1D9E75",surf.card)},
           ].map((c,i)=>(
             /* minWidth:0 — grid items default to min-width:auto, so the nowrap
                sub lines inflate the 1fr tracks past the viewport (the page
@@ -4554,7 +4575,18 @@ export default function Dashboard({ refreshTick = 0 }) {
                   </div>
                   <div style={{textAlign:"right",flexShrink:0}}>
                     <div style={{fontSize:13,fontFamily:"'DM Mono',monospace",fontWeight:500}}>{fmtX(displayBalance(a.current_balance,a.type))}</div>
-                    <div style={{fontSize:10,color:"var(--muted)",marginTop:2}}>tap to view →</div>
+                    {/* An age only once it is worth knowing (BALANCE_STALE_DAYS),
+                        and MUTED, never amber: a stale balance is a known limit
+                        — a quiet feed, or a manual figure nobody has retyped —
+                        not a fault, and amber has to keep meaning broken. Below
+                        the threshold, and when nothing was ever stamped, this
+                        says nothing at all. */}
+                    {(()=>{
+                      const asOf=balanceAsOf(a,now);
+                      if(!asOf||asOf.staleDays<BALANCE_STALE_DAYS)
+                        return <div style={{fontSize:10,color:"var(--muted)",marginTop:2}}>tap to view →</div>;
+                      return <div style={{fontSize:10,color:"var(--muted)",marginTop:2}}>as of {shortDate(asOf.date.toISOString().slice(0,10))} →</div>;
+                    })()}
                   </div>
                 </div>
               ))}
@@ -4675,7 +4707,31 @@ export default function Dashboard({ refreshTick = 0 }) {
                   {[acctInst(selAcct),`${selAcct.name}${selAcct.mask?` ··${selAcct.mask}`:""}`,selAcct.subtype||selAcct.type].filter(Boolean).join(" · ")}
                 </div>
               </div>
-              <div style={{fontSize:15,fontFamily:"'DM Mono',monospace",fontWeight:600,flexShrink:0}}>{fmtX(displayBalance(selAcct.current_balance,selAcct.type))}</div>
+              <div style={{textAlign:"right",flexShrink:0}}>
+                <div style={{fontSize:15,fontFamily:"'DM Mono',monospace",fontWeight:600}}>{fmtX(displayBalance(selAcct.current_balance,selAcct.type))}</div>
+                {/* What the balance is worth knowing beside it. Both lines are
+                    honest-absence by default: available_balance is null when
+                    the bank didn't send it, and last_balance_at is null on a
+                    manual row typed before it was stamped. Available is read
+                    ONLY for a SimpleFIN-fed row — the value on a never-
+                    re-pulled account can predate the one-convention fix — and
+                    NEVER through displayBalance: for a card this is available
+                    CREDIT, not a debt (the normalizeAvailableBalance rule). */}
+                {isSimpleFinAccount(selAcct)&&typeof selAcct.available_balance==="number"&&(
+                  <div style={{fontSize:10,color:"var(--muted)",marginTop:2,whiteSpace:"nowrap"}}>
+                    {fmtX(selAcct.available_balance)} {selAcct.type==="credit"?"available credit":"available"}
+                  </div>
+                )}
+                {(()=>{
+                  const asOf=balanceAsOf(selAcct,now);
+                  if(!asOf)return null;
+                  return (
+                    <div style={{fontSize:10,color:"var(--muted)",marginTop:2,whiteSpace:"nowrap"}}>
+                      as of {shortDate(asOf.date.toISOString().slice(0,10))}
+                    </div>
+                  );
+                })()}
+              </div>
             </div>
             <div style={{display:"flex",gap:8,marginTop:12}}>
               <button onClick={handleToggleHide} disabled={togglingHide}
@@ -4945,6 +5001,29 @@ export default function Dashboard({ refreshTick = 0 }) {
                           <div className="bar-fill" style={{width:(util*100)+"%",background:markOn(utilColor,surf.track)}}/>
                         </div>
                       )}
+                      {/* How far a LOAN has come. The Debt tab could say when a
+                          loan ends but never how much of it was already paid,
+                          though `original_balance` shipped with the debt
+                          migration — it just had no editor and no renderer.
+                          Loans only: `original_balance` is meaningless for a
+                          revolving card, which has utilization above instead.
+                          payoffProgress returns null for every shape that
+                          would be a claim rather than a fact (no original, a
+                          balance ABOVE it — an extra draw, or an original
+                          typed too low), and then nothing renders. */}
+                      {(()=>{
+                        if(a.type!=="loan")return null;
+                        const pct=payoffProgress(a.original_balance,a.current_balance);
+                        if(pct==null)return null;
+                        return (<>
+                          <div className="bar-bg" style={{marginTop:7}}>
+                            <div className="bar-fill" style={{width:pct+"%",background:markOn(TYPE_CHIP,surf.track)}}/>
+                          </div>
+                          <div style={{fontSize:10,color:"var(--muted)",marginTop:3}}>
+                            {Math.round(pct)}% paid off · {fmt(Math.max(0,a.original_balance-a.current_balance))} of {fmt(a.original_balance)}
+                          </div>
+                        </>);
+                      })()}
                       {(hasCols||isManualAccount(a))&&(
                         <div style={{display:"flex",flexWrap:"wrap",alignItems:"center",gap:10,marginTop:8}}>
                           {/* A manual debt's balance is hand-typed (no feed restates
@@ -4962,6 +5041,15 @@ export default function Dashboard({ refreshTick = 0 }) {
                           {a.type==="credit"&&(
                             <DebtNum id={a.id+":lim"} value={a.credit_limit} placeholder="limit" prefix="$" width={70}
                               onSave={v=>saveDebt(a.id,{credit_limit:v})}/>
+                          )}
+                          {/* "starting", not "original": a refinanced loan has
+                              two defensible originals (the first principal and
+                              the refi amount), and the label shouldn't pretend
+                              the app knows which one is meant. Hand-typed like
+                              every other debt column — no feed sends it. */}
+                          {a.type==="loan"&&(
+                            <DebtNum id={a.id+":orig"} value={a.original_balance} placeholder="starting" prefix="$" width={80}
+                              onSave={v=>saveDebt(a.id,{original_balance:v})}/>
                           )}
                           {/* Commit on BLUR only — a date input emits COMPLETE
                               garbage values while the year is typed (see the

@@ -15,8 +15,7 @@ import {
   simulatePayoff,
   payoffWhatIf,
   addMonths,
-  debtFreeMonth,
-} from '../src/debtPayoff.js';
+  debtFreeMonth, payoffProgress } from '../src/debtPayoff.js';
 
 const debt = (over = {}) => ({
   id: over.id ?? 'd1',
@@ -254,4 +253,32 @@ test('amortizationSchedule: stall states are honest, never a fake schedule', () 
   assert.equal(cap.stalled, true);
   assert.equal(cap.rows.length, MAX_MONTHS);
   assert.equal(cap.rows[MAX_MONTHS - 1].balance, 100000 - MAX_MONTHS);
+});
+
+// --- payoffProgress: how far a loan has come -------------------------------
+// `original_balance` shipped with the debt migration and had no editor and no
+// renderer. The fraction is only shown when it is a FACT — every shape that
+// would make it a claim returns null and renders nothing.
+test('payoffProgress: plain fraction paid, on the stored positive convention', () => {
+  assert.equal(payoffProgress(9000, 6500).toFixed(2), '27.78');
+  assert.equal(payoffProgress(10000, 2500), 75);
+  assert.equal(payoffProgress(9000, 9000), 0);
+  assert.equal(payoffProgress(9000, 0), 100);
+});
+
+test('payoffProgress: null wherever the number would be a claim, not a fact', () => {
+  assert.equal(payoffProgress(null, 5000), null, 'no starting balance recorded');
+  assert.equal(payoffProgress(undefined, 5000), null);
+  assert.equal(payoffProgress(0, 0), null, 'nothing to be a fraction of');
+  assert.equal(payoffProgress(-100, 50), null);
+  assert.equal(payoffProgress(9000, null), null, 'no current balance');
+  // A balance ABOVE the original is a real state (an extra draw on a
+  // HELOC-shaped loan, or a starting figure typed too low). Hiding the bar is
+  // the honest answer; negative progress would not be.
+  assert.equal(payoffProgress(9000, 9500), null);
+  assert.equal(payoffProgress('abc', 100), null);
+});
+
+test('payoffProgress: an overpaid loan clamps at 100 rather than exceeding it', () => {
+  assert.equal(payoffProgress(9000, -250), 100);
 });

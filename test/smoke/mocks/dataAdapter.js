@@ -110,8 +110,17 @@ export async function getOverview() {
   const visible = ACCTS.filter(a => !a.hidden);
   const ordered = [...visible.filter(a => a.type === 'credit'), ...visible.filter(a => a.type === 'depository')];
   return {
-    accounts: ordered.map(a => ({ id: a.id, balance: { current: a.current_balance }, name: a.name, mask: a.mask, type: a.type })),
-    last_month: { spending: { amount: 1125.22 } },
+    accounts: ordered.map(a => ({
+      id: a.id, balance: { current: a.current_balance }, name: a.name, mask: a.mask, type: a.type,
+      // Additive fields the Overview tile reads: available credit (never
+      // through displayBalance) and the as-of stamp.
+      available: a.available_balance ?? null,
+      plaid_account_id: a.plaid_account_id,
+      last_balance_at: a.last_balance_at ?? null,
+    })),
+    // Last month in full, and last month sliced at today's day-of-month — the
+    // honest comparison for a month still in progress.
+    last_month: { spending: { amount: 1125.22 }, spending_to_date: { amount: 611.40 } },
   };
 }
 export async function getSpending({ year, month }) {
