@@ -1,24 +1,25 @@
 import { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from "react";
-import { getOverview, getSpending, getBiggestMovers, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES, ACCOUNT_SUBTYPES, setCategoryRule, applyCategoryRuleToHistory, listCategoryRules, countCategoryRuleMatches, deleteCategoryRule, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, getActualIncome, resolveBudgetIncome, invalidateEnvelopeSpending, isEnvelopeSchemaMissing, targetNeed, readyToAssign, envelopePace, setEnvPace as persistEnvPace, updateRecIgnore, getStartupSettings, monthKey, getEntities, createEntity, updateEntity, getTaxYearTransactions, getMileage, addMileage, deleteMileage, getReceiptTxIds, getDebts, getBalanceSnapshots, getNetWorthSeries, addManualTransaction, createManualAccount, updateManualBalance, getDataCoverage, getFeedCoverageGaps, FEED_GAP_SCAN_CAP, signOut, autoFillMonth, setTargetOverride, effectiveTarget, getExpectedTransactions, addExpected, dismissExpected, matchExpectedManually, getSavedChats, saveChatToApp, deleteSavedChat, addRegistryEntry, updateRegistryParent, removeRegistryEntry, updateCategoryColor, updateCategoryAlias } from "../dataAdapter.js";
+import { getOverview, getSpending, getBiggestMovers, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES, ACCOUNT_SUBTYPES, setCategoryRule, applyCategoryRuleToHistory, listCategoryRules, countCategoryRuleMatches, deleteCategoryRule, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, getActualIncome, resolveBudgetIncome, invalidateEnvelopeSpending, isEnvelopeSchemaMissing, targetNeed, readyToAssign, envelopePace, setEnvPace as persistEnvPace, updateRecIgnore, getStartupSettings, monthKey, getEntities, createEntity, updateEntity, getTaxYearTransactions, getMileage, addMileage, deleteMileage, getReceiptTxIds, getDebts, getBalanceSnapshots, getNetWorthSeries, addManualTransaction, createManualAccount, updateManualBalance, getDataCoverage, getFeedCoverageGaps, FEED_GAP_SCAN_CAP, getRestoreRecord, signOut, autoFillMonth, setTargetOverride, effectiveTarget, getExpectedTransactions, addExpected, dismissExpected, matchExpectedManually, getSavedChats, saveChatToApp, deleteSavedChat, addRegistryEntry, updateRegistryParent, removeRegistryEntry, updateCategoryColor, updateCategoryAlias } from "../dataAdapter.js";
 // Pure cores imported directly (never Supabase — the mock-harness alias rule
 // only covers dataAdapter/sync/db/apiClient; pure modules are safe).
 import { planAutoFill } from "../envelopes.js";
 import { buildSearchFilters, searchIsActive } from "../searchFilters.js";
 import { expectedByCategory, expectedStatus, isMissedExpected, seedFromRecurring, projectFutureCycles } from "../expectedTx.js";
-import { payoffWhatIf, debtFreeMonth, isMortgage, amortizationSchedule, addMonths, MAX_MONTHS } from "../debtPayoff.js";
+import { payoffWhatIf, debtFreeMonth, isMortgage, amortizationSchedule, addMonths, MAX_MONTHS, payoffProgress } from "../debtPayoff.js";
 import { SCHEDULE_E_LINES, RENTS_KEY, DEFAULT_SCHEDULE_E_MAP, scheduleEReport, entityMonthly, entityLedger, personalDeductionReport, DEDUCTION_BUCKETS, DEFAULT_DEDUCTION_MAP, mileageDeduction, scheduleECsv } from "../taxReport.js";
 import { merchantKey, matchLearnedRule, isKeyPrefix } from "../txClassify.js";
 import { trimChatMsgs, buildSavedChat } from "../savedChats.js";
 import { patchTxShape } from "../spending.js";
 import { detectRecurring } from "../recurring.js";
-import { unlinkInstitution, askAssistant, getSimpleFinStatus } from "../apiClient.js";
+import { unlinkInstitution, restoreImportedInstitution, askAssistant, getSimpleFinStatus } from "../apiClient.js";
+import { restorableIds } from "../unlinkRestore.js";
 import { UNCATEGORIZED, isBudgetableCategory } from "../categoryMap.js";
 import { userCategoryList, missingCategories, isDuplicateCategoryName } from "../categoryList.js";
 import { parentIndex, parentOf, hasChildren, eligibleParents, canSetParent,
   setRegistryParent, groupCategories, groupMembers, rollupFields,
   orderGroups, earliestMemberRank } from "../categoryTree.js";
 import { teachQueueGroups, nonSpendLabel, categorizedShare } from "../teachQueue.js";
-import { displayBalance, isDebtAccount as isDebtType } from "../accountBalance.js";
+import { displayBalance, isDebtAccount as isDebtType, balanceAsOf, BALANCE_STALE_DAYS } from "../accountBalance.js";
 import { unhideConfirmMessage } from "../unhideConfirm.js";
 import { createSheetHistory } from "../sheetHistory.js";
 import { runSync } from "../sync.js";
@@ -141,6 +142,13 @@ function useSurfaces(resolved){
 
 function monthLabel(y, m) { return new Date(y,m-1,1).toLocaleString("default",{month:"long",year:"numeric"}); }
 function shortDate(iso) { const [y,m,d]=iso.split("-").map(Number); return new Date(y,m-1,d).toLocaleDateString("default",{month:"short",day:"numeric"}); }
+// A Date INSTANT rendered in the reader's own timezone. Deliberately not
+// shortDate(d.toISOString().slice(0,10)): that takes the UTC calendar day and
+// re-reads it as a local one, so a balance typed at 5:30pm PDT (stored
+// 00:30Z the next day) rendered as "as of" TOMORROW — a date that has not
+// happened yet where the reader is standing. shortDate stays as it is: its
+// callers pass stored 'YYYY-MM-DD' dates, which have no time and no zone.
+function localShortDate(d) { return d.toLocaleDateString("default",{month:"short",day:"numeric"}); }
 // Negatives render as −$1,234.56, not $-1,234.56 (matches money() in
 // CsvImport.jsx). Debts now always display negative, and money-in transactions
 // already did, so this is the common case rather than an edge one.
@@ -2213,16 +2221,22 @@ export default function Dashboard({ refreshTick = 0 }) {
   function saveManualBalance(a,v){
     if(v==null)return; // a balance can be corrected, not cleared
     const prevBal=a.current_balance;
-    const patchBal=bal=>{
+    const prevAt=a.last_balance_at??null;
+    // The patch must carry the as-of too, or the row renders a just-typed
+    // figure under a weeks-old "as of" until some unrelated reload refetches
+    // the account — exactly the stale-label failure the as-of exists to
+    // prevent (the patchAllTxLists "recompute every derived field" rule,
+    // review catch). The rollback restores the old stamp with the old balance.
+    const patchBal=(bal,at)=>{
       setDebtData(prev=>{
         if(!prev)return prev;
-        const debts=prev.debts.map(d=>d.id===a.id?{...d,current_balance:bal}:d);
+        const debts=prev.debts.map(d=>d.id===a.id?{...d,current_balance:bal,last_balance_at:at}:d);
         return {...prev,debts,totalDebt:debts.reduce((s,d)=>s+(Number(d.current_balance)||0),0)};
       });
-      setAccounts(prev=>prev.map(x=>x.id===a.id?{...x,current_balance:bal}:x));
-      setOverview(prev=>prev?{...prev,accounts:prev.accounts.map(x=>x.id===a.id?{...x,balance:{current:bal}}:x)}:prev);
+      setAccounts(prev=>prev.map(x=>x.id===a.id?{...x,current_balance:bal,last_balance_at:at}:x));
+      setOverview(prev=>prev?{...prev,accounts:prev.accounts.map(x=>x.id===a.id?{...x,balance:{current:bal},last_balance_at:at}:x)}:prev);
     };
-    patchBal(v);
+    patchBal(v,new Date().toISOString());
     updateManualBalance(a,v).then(async()=>{
       // History refresh, best-effort: the write appended a snapshot row.
       const since=new Date(Date.now()-365*86400000).toISOString().slice(0,10);
@@ -2234,7 +2248,7 @@ export default function Dashboard({ refreshTick = 0 }) {
       }catch(err){console.error("balance snapshots refresh failed",err);}
     }).catch(err=>{
       console.error("manual balance save failed",err);
-      patchBal(prevBal);
+      patchBal(prevBal,prevAt);
       window.alert(`Couldn't save that balance: ${err.message||err}`);
     });
   }
@@ -2393,6 +2407,12 @@ export default function Dashboard({ refreshTick = 0 }) {
   }
 
   const [unlinking,setUnlinking]=useState(false);
+  // The raw removed-record (the ids visible at hide time), or null for "no
+  // record, or the read failed". What is actually restorable is derived from
+  // it in render — see the `restorable` memo.
+  const [restoreIds,setRestoreIds]=useState(null);
+  const [restoreEpoch,setRestoreEpoch]=useState(0);
+  const [restoring,setRestoring]=useState(false);
   const [togglingHide,setTogglingHide]=useState(false);
   const [selTx,setSelTx]=useState(null);
   const [importing,setImporting]=useState(false);
@@ -2801,42 +2821,114 @@ export default function Dashboard({ refreshTick = 0 }) {
     const siblings=accounts.filter(a=>a.institution_id===selAcct.institution_id);
     const instName=acctInst(selAcct)||"this bank";
     const list=siblings.map(a=>`  • ${acctLabel(a)}`).join("\n");
-    // SimpleFIN removal is a SOFT-HIDE: the server marks the accounts hidden
-    // and disables the institution (the tombstone that keeps the next pull from
-    // recreating it). Nothing is deleted — Restore in the SimpleFIN modal
-    // brings the visible accounts back. The buried permanent delete lives in
-    // that modal too, next to Restore, never here.
+    // BOTH kinds are a SOFT-HIDE (manual joined SimpleFIN 2026-08-13, Mason):
+    // the server marks the accounts hidden and records the set that was
+    // visible, so Restore brings back exactly those. Nothing is deleted. The
+    // two sentences differ only in where Restore lives — the SimpleFIN modal
+    // for a bank, this tab for the imported accounts — and in the fact that a
+    // SimpleFIN org stays connected at the Bridge. The buried permanent
+    // delete is never reachable from here.
     const ok=isSimpleFinAccount(selAcct)
       ?window.confirm(
         `Remove ${instName} from view?\n\nThis hides ${siblings.length} account${siblings.length!==1?"s":""} and stops them counting in any total:\n${list}\n\nNothing is deleted — all transactions (including any CSV/PDF backfill) are kept, and Restore in the SimpleFIN modal brings the bank back exactly as it was. It stays connected at SimpleFIN Bridge.`
       )
       :window.confirm(
-        `Unlink ${instName}?\n\nThis removes ${siblings.length} account${siblings.length!==1?"s":""} and all their transactions from the app:\n${list}\n\nThis cannot be undone.`
+        `Remove ${instName} from view?\n\nThis hides ${siblings.length} imported account${siblings.length!==1?"s":""} and stops them counting in any total:\n${list}\n\nNothing is deleted — every imported transaction is kept, and Restore on the Accounts tab brings them back exactly as they were.`
       );
     if(!ok)return;
     setUnlinking(true);
     try{
-      // A manual "Imported" institution hard-deletes server-side, and the
-      // server demands the literal confirm — sent only after the "cannot be
-      // undone" window.confirm above. The SimpleFIN soft-hide needs none.
-      await unlinkInstitution(selAcct.institution_id,
-        isSimpleFinAccount(selAcct)?{}:{confirmDelete:true});
+      // Plain remove = soft-hide for either kind; the permanent cascade needs
+      // { permanent: true } plus the server's literal confirm, and no caller
+      // here sends it.
+      await unlinkInstitution(selAcct.institution_id);
       // The server just hid (or deleted) the bank's rows — a write reloadData
       // no longer invalidates for, so drop the memoised ranges here.
       invalidateEnvelopeSpending();
       setSelAcct(null);
       setTxAcctFilter(null);
-      // The removed bank's rows no longer appear (hidden for SimpleFIN, deleted
-      // for manual), so a category filter set from them may now describe nothing.
+      // The removed bank's rows no longer appear (both kinds hide them), so a
+      // category filter set from them may now describe nothing.
       setTxCatFilter(null);
+      // A manual removal just wrote a restore record — the Accounts tab's
+      // Restore strip reads it, so re-check rather than waiting for a remount.
+      bumpRestore();
       await reloadData(year,month);
     }catch(err){
       console.error("unlink failed",err);
       // Prefer the human message the sanitized 500 body carries (the Ask tab
       // pattern) — detail.error is the stable machine code, not display text.
-      window.alert(`Unlink failed: ${err.detail?.message||err.detail?.error||err.message}`);
+      window.alert(`Removing that bank failed: ${err.detail?.message||err.detail?.error||err.message}`);
     }finally{
       setUnlinking(false);
+    }
+  }
+
+  // The Restore strip. An EPOCH, not a null sentinel (the recorded
+  // setState(null) gotcha): a remove or a restore bumps it, so a new sequence
+  // is always minted and an in-flight read can't paint a stale answer.
+  //
+  // The settings READ is deliberately separate from the render-time
+  // intersection below. Keying the read on `accounts` re-queried the row on
+  // every optimistic account edit (a new array identity each time) — and
+  // `tab` IS a dep, so a read that failed and returned null genuinely retries
+  // on the next Accounts visit, which is what the old comment claimed and the
+  // deps did not deliver (review catch; the expected-transactions rule).
+  const restoreSeq=useRef(0);
+  const bumpRestore=useCallback(()=>setRestoreEpoch(e=>e+1),[]);
+  // The one manual institution ("Imported"), derived from the accounts already
+  // loaded, hidden ones included — after a removal they are ALL hidden, which
+  // is exactly the state the strip exists for.
+  const manualInstId=useMemo(()=>accounts.find(a=>isManualAccount(a))?.institution_id||null,[accounts]);
+  useEffect(()=>{
+    if(!manualInstId){setRestoreIds(null);return;}
+    const seq=++restoreSeq.current;
+    getRestoreRecord(manualInstId).then(ids=>{
+      if(restoreSeq.current!==seq)return;
+      setRestoreIds(ids);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[manualInstId,restoreEpoch,tab]);
+
+  // What Restore would actually bring back. Two conditions, both load-bearing:
+  //
+  //  1. EVERY account of the institution is still hidden. The record is the
+  //     manual removed-marker and nothing but Restore consumes it, so after a
+  //     user undoes a removal BY HAND the row is stranded — and without this
+  //     check a later, deliberate "Hide from dashboard" on one of those
+  //     accounts would make the strip reappear and offer to "restore" a hide
+  //     the user had just asked for (review catch). A real removal hides them
+  //     all, so this costs nothing and is read-only.
+  //  2. Only ids still present AND still hidden count, so the number on the
+  //     button equals what the tap will change — the server now filters the
+  //     same way.
+  const restorable=useMemo(()=>{
+    if(!restoreIds||!manualInstId)return null;
+    const mine=accounts.filter(a=>a.institution_id===manualInstId);
+    if(!mine.length||!mine.every(a=>a.hidden))return null;
+    const ready=restorableIds(restoreIds,mine.filter(a=>a.hidden).map(a=>a.id));
+    return ready.length?ready:null;
+  },[restoreIds,manualInstId,accounts]);
+
+  async function handleRestoreImported(){
+    if(!manualInstId)return;
+    setRestoring(true);
+    try{
+      const res=await restoreImportedInstitution(manualInstId);
+      invalidateEnvelopeSpending();
+      bumpRestore();
+      await reloadData(year,month);
+      // Say what actually came back. A record whose accounts were unhidden by
+      // hand in the meantime restores 0 — reporting "restored" then would be
+      // a claim the screen contradicts.
+      window.alert(res?.unhidden>0
+        ? `Restored ${res.unhidden} imported account${res.unhidden!==1?"s":""}.`
+        : "Nothing to restore — those accounts are already visible.");
+    }catch(err){
+      console.error("restore imported failed",err);
+      window.alert(`Restore failed: ${err.detail?.message||err.detail?.error||err.message}`);
+    }finally{
+      setRestoring(false);
     }
   }
 
@@ -2883,7 +2975,26 @@ export default function Dashboard({ refreshTick = 0 }) {
     try{localStorage.setItem("mm:cardTile",next.id);}catch{/* private mode: session-only */}
   };
   const lastSpent=overview?.last_month?.spending?.amount;
-  const delta=lastSpent!=null?totalSpent-lastSpent:null;
+  // The "vs last month" comparison. For the month IN PROGRESS it runs against
+  // last month SLICED AT TODAY'S DAY (spending_to_date) — comparing a partial
+  // month against a full one made the tile read "↓ less spending" almost every
+  // day of almost every month, which is true and useless. A past month is
+  // already complete, so it keeps the full-month comparison.
+  // Degrades to the old behaviour if the adapter predates the additive field.
+  const lastToDate=overview?.last_month?.spending_to_date?.amount;
+  const cmpBase=isCurrent&&lastToDate!=null?lastToDate:lastSpent;
+  const delta=cmpBase!=null?totalSpent-cmpBase:null;
+  // Available credit on the card tile. NEVER through displayBalance — for a
+  // card this is available CREDIT, not a debt (the normalizeAvailableBalance
+  // key row) — and only for a SimpleFIN-fed row, because a never-re-pulled
+  // account can still hold an old two-convention value that must not be
+  // trusted. Null means the bank didn't send it: say nothing.
+  // getOverview already filters hidden=false, so a removed bank's rows can't
+  // reach this tile — but the gate is written out anyway so both display
+  // sites read the same, and so a future change to that query can't quietly
+  // start trusting a value no pull will ever restate.
+  const tileAvail=tileAcct&&isSimpleFinAccount(tileAcct)&&!tileAcct.hidden&&typeof tileAcct.available==="number"
+    ?tileAcct.available:null;
   // Donut slices are non-text marks on the card -> 3:1.
   const donutData=cats.slice(0,7).map(c=>({label:getName(c.label),value:c.amount,color:markOn(getColor(c.label),surf.card)}));
 
@@ -3580,15 +3691,26 @@ export default function Dashboard({ refreshTick = 0 }) {
         {/* Summary */}
         <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10,marginBottom:14}}>
           {[
-            {label:"Total spent",val:loading?null:fmt(totalSpent),sub:isCurrent&&lastSpent!=null?`vs ${fmt(lastSpent)} last month`:monthLabel(year,month)},
+            // The comparison figure must be the one the tile beside it computed
+            // its delta from, or the two disagree in the same grid: "vs $1,125
+            // last month" next to "+$89 ↑ more so far" reads as a $400
+            // contradiction (review catch). Both now quote cmpBase, and the
+            // wording says which basis it is.
+            {label:"Total spent",val:loading?null:fmt(totalSpent),sub:isCurrent&&cmpBase!=null?(lastToDate!=null?`vs ${fmt(cmpBase)} by this day`:`vs ${fmt(cmpBase)} last month`):monthLabel(year,month)},
             // Whole dollars like its neighbours: a negative card balance with
             // cents is too wide for a third of a 390px screen and wrapped the
             // minus sign onto its own line.
             // Cycles through unhidden credit accounts: click/tap advances,
             // horizontal swipe goes either way (with an intent threshold so it
             // never claims a vertical page scroll). Selection is a device pref.
-            {label:"Card balance",val:loading?null:fmt(balance),sub:tileAcct?.name||"Linked account",cycle:!loading&&creditAccts.length>1},
-            {label:"vs last month",val:loading||delta==null?null:`${delta>=0?"+":""}${fmt(delta)}`,sub:delta==null?"—":delta>=0?"↑ more spending":"↓ less spending",clr:delta==null?"var(--muted)":inkOn(delta>=0?"#D85A30":"#1D9E75",surf.card)},
+            // The sub names the account, or — when the feed sent it — the room
+            // left on the card, which is the question actually being asked at
+            // a checkout ("can this go on this card?"). The name is still one
+            // tap away in the Accounts tab; the number isn't anywhere else.
+            {label:"Card balance",val:loading?null:fmt(balance),sub:loading?tileAcct?.name||"Linked account":tileAvail!=null?`${fmt(tileAvail)} left`:tileAcct?.name||"Linked account",cycle:!loading&&creditAccts.length>1},
+            // Same-point comparison while the month is in progress (see cmpBase)
+            // — the sub says which, so the number is never ambiguous.
+            {label:"vs last month",val:loading||delta==null?null:`${delta>=0?"+":""}${fmt(delta)}`,sub:delta==null?"—":`${delta>=0?"↑ more":"↓ less"}${isCurrent&&lastToDate!=null?" so far":" spending"}`,clr:delta==null?"var(--muted)":inkOn(delta>=0?"#D85A30":"#1D9E75",surf.card)},
           ].map((c,i)=>(
             /* minWidth:0 — grid items default to min-width:auto, so the nowrap
                sub lines inflate the 1fr tracks past the viewport (the page
@@ -4446,6 +4568,29 @@ export default function Dashboard({ refreshTick = 0 }) {
               Connect banks through SimpleFIN, or import a statement (CSV or PDF) for history a
               feed doesn't reach.
             </div>
+            {/* Removing the "Imported" institution soft-hides it (Mason,
+                2026-08-13) — this is its Restore, the counterpart of the one
+                in the SimpleFIN modal. It can't key on a disabled status the
+                way that one does: a manual institution is permanently
+                disabled by design, so the `unlink:<id>` settings record IS
+                the removed marker (getRestoreRecord). NEUTRAL, never amber —
+                a removal the user asked for is not a fault, and amber has to
+                keep meaning "something is broken" (the coverage-notice rule).
+                The count is what the tap will actually unhide: ids still
+                present AND still hidden, so it can never over-promise. */}
+            {restorable&&(
+              <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",marginBottom:14,
+                background:"var(--bg)",borderRadius:8,padding:"10px 12px"}}>
+                <div style={{fontSize:11,color:"var(--muted)",flex:"1 1 160px",minWidth:0,lineHeight:1.5}}>
+                  {restorable.length} imported account{restorable.length!==1?"s":""} removed from view.
+                  Nothing was deleted — the transactions are still here.
+                </div>
+                <button className="ibtn" onClick={handleRestoreImported} disabled={restoring}
+                  style={{fontSize:11,minHeight:32,opacity:restoring?.6:1,cursor:restoring?"default":"pointer"}}>
+                  {restoring?"Restoring…":"Restore"}
+                </button>
+              </div>
+            )}
             {loading&&accounts.length===0?[1,2,3].map(i=><div key={i} style={{marginBottom:12}}><Sk h={40}/></div>):
               [...accounts].sort((a,b)=>(a.hidden?1:0)-(b.hidden?1:0)).map((a,i)=>(
                 <div key={a.id} className="tx" style={{cursor:"pointer",animationDelay:i*.03+"s",opacity:a.hidden?.5:1}}
@@ -4472,7 +4617,18 @@ export default function Dashboard({ refreshTick = 0 }) {
                   </div>
                   <div style={{textAlign:"right",flexShrink:0}}>
                     <div style={{fontSize:13,fontFamily:"'DM Mono',monospace",fontWeight:500}}>{fmtX(displayBalance(a.current_balance,a.type))}</div>
-                    <div style={{fontSize:10,color:"var(--muted)",marginTop:2}}>tap to view →</div>
+                    {/* An age only once it is worth knowing (BALANCE_STALE_DAYS),
+                        and MUTED, never amber: a stale balance is a known limit
+                        — a quiet feed, or a manual figure nobody has retyped —
+                        not a fault, and amber has to keep meaning broken. Below
+                        the threshold, and when nothing was ever stamped, this
+                        says nothing at all. */}
+                    {(()=>{
+                      const asOf=balanceAsOf(a,now);
+                      if(!asOf||asOf.staleDays<BALANCE_STALE_DAYS)
+                        return <div style={{fontSize:10,color:"var(--muted)",marginTop:2}}>tap to view →</div>;
+                      return <div style={{fontSize:10,color:"var(--muted)",marginTop:2}}>as of {localShortDate(asOf.date)} →</div>;
+                    })()}
                   </div>
                 </div>
               ))}
@@ -4593,7 +4749,31 @@ export default function Dashboard({ refreshTick = 0 }) {
                   {[acctInst(selAcct),`${selAcct.name}${selAcct.mask?` ··${selAcct.mask}`:""}`,selAcct.subtype||selAcct.type].filter(Boolean).join(" · ")}
                 </div>
               </div>
-              <div style={{fontSize:15,fontFamily:"'DM Mono',monospace",fontWeight:600,flexShrink:0}}>{fmtX(displayBalance(selAcct.current_balance,selAcct.type))}</div>
+              <div style={{textAlign:"right",flexShrink:0}}>
+                <div style={{fontSize:15,fontFamily:"'DM Mono',monospace",fontWeight:600}}>{fmtX(displayBalance(selAcct.current_balance,selAcct.type))}</div>
+                {/* What the balance is worth knowing beside it. Both lines are
+                    honest-absence by default: available_balance is null when
+                    the bank didn't send it, and last_balance_at is null on a
+                    manual row typed before it was stamped. Available is read
+                    ONLY for a SimpleFIN-fed row — the value on a never-
+                    re-pulled account can predate the one-convention fix — and
+                    NEVER through displayBalance: for a card this is available
+                    CREDIT, not a debt (the normalizeAvailableBalance rule). */}
+                {isSimpleFinAccount(selAcct)&&!selAcct.hidden&&typeof selAcct.available_balance==="number"&&(
+                  <div style={{fontSize:10,color:"var(--muted)",marginTop:2,whiteSpace:"nowrap"}}>
+                    {fmtX(selAcct.available_balance)} {selAcct.type==="credit"?"available credit":"available"}
+                  </div>
+                )}
+                {(()=>{
+                  const asOf=balanceAsOf(selAcct,now);
+                  if(!asOf)return null;
+                  return (
+                    <div style={{fontSize:10,color:"var(--muted)",marginTop:2,whiteSpace:"nowrap"}}>
+                      as of {localShortDate(asOf.date)}
+                    </div>
+                  );
+                })()}
+              </div>
             </div>
             <div style={{display:"flex",gap:8,marginTop:12}}>
               <button onClick={handleToggleHide} disabled={togglingHide}
@@ -4601,20 +4781,23 @@ export default function Dashboard({ refreshTick = 0 }) {
                   color:"var(--text)",fontFamily:"inherit",fontSize:12,fontWeight:500,cursor:togglingHide?"default":"pointer",opacity:togglingHide?.6:1}}>
                 {togglingHide?"Saving…":selAcct.hidden?"Unhide":"Hide from dashboard"}
               </button>
-              {!isManualAccount(selAcct)&&(
-                <button onClick={handleUnlink} disabled={unlinking}
-                  style={{flex:1,padding:"8px 0",borderRadius:8,border:"1px solid var(--danger-border)",background:"none",
-                    color:"var(--danger)",fontFamily:"inherit",fontSize:12,fontWeight:500,cursor:unlinking?"default":"pointer",opacity:unlinking?.6:1}}>
-                  {unlinking?"Removing…":`${isSimpleFinAccount(selAcct)?"Remove":"Unlink"} ${acctInst(selAcct)||"bank"}…`}
-                </button>
-              )}
+              {/* Offered for IMPORTED accounts too since 2026-08-13: it was
+                  withheld from them while this route hard-deleted (there was
+                  no undo to offer), and it is exactly that delete which
+                  became a soft-hide. Same reversible operation for every
+                  kind now, so the same button. */}
+              <button onClick={handleUnlink} disabled={unlinking}
+                style={{flex:1,padding:"8px 0",borderRadius:8,border:"1px solid var(--danger-border)",background:"none",
+                  color:"var(--danger)",fontFamily:"inherit",fontSize:12,fontWeight:500,cursor:unlinking?"default":"pointer",opacity:unlinking?.6:1}}>
+                {unlinking?"Removing…":`Remove ${acctInst(selAcct)||"bank"}…`}
+              </button>
             </div>
             <div style={{marginTop:6,fontSize:10,color:"var(--muted)",textAlign:"center"}}>
               {isManualAccount(selAcct)
-                ?"Imported account · re-import a CSV to add or correct transactions (duplicates are skipped automatically)"
+                ?"Imported account · re-import a CSV to add or correct transactions (duplicates are skipped automatically) · Remove hides every imported account, deletes nothing, and Restore on this tab brings them back"
                 :isSimpleFinAccount(selAcct)
-                ?"Hide keeps syncing but drops it from totals · Remove deletes its data here and stops syncing this bank (it stays linked at SimpleFIN Bridge)"
-                :"Hide keeps syncing but drops it from totals · Unlink removes the connection and its data"}
+                ?"Hide keeps syncing but drops it from totals · Remove hides this bank's accounts and stops syncing it, deleting nothing (it stays linked at SimpleFIN Bridge)"
+                :"Hide keeps syncing but drops it from totals · Remove hides this bank's accounts and deletes nothing"}
             </div>
 
             {/* Account type — editable everywhere now.
@@ -4860,6 +5043,34 @@ export default function Dashboard({ refreshTick = 0 }) {
                           <div className="bar-fill" style={{width:(util*100)+"%",background:markOn(utilColor,surf.track)}}/>
                         </div>
                       )}
+                      {/* How far a LOAN has come. The Debt tab could say when a
+                          loan ends but never how much of it was already paid,
+                          though `original_balance` shipped with the debt
+                          migration — it just had no editor and no renderer.
+                          Loans only: `original_balance` is meaningless for a
+                          revolving card, which has utilization above instead.
+                          payoffProgress returns null for every shape that
+                          would be a claim rather than a fact (no original, a
+                          balance ABOVE it — an extra draw, or an original
+                          typed too low), and then nothing renders. */}
+                      {(()=>{
+                        if(a.type!=="loan")return null;
+                        const pct=payoffProgress(a.original_balance,a.current_balance);
+                        if(pct==null)return null;
+                        return (<>
+                          <div className="bar-bg" style={{marginTop:7}}>
+                            <div className="bar-fill" style={{width:pct+"%",background:markOn(TYPE_CHIP,surf.track)}}/>
+                          </div>
+                          <div style={{fontSize:10,color:"var(--muted)",marginTop:3}}>
+                            {/* Cap at 99 while anything is still owed — the
+                                categorizedShare precedent. Math.round alone
+                                turned $2,000 left on a $400k mortgage into
+                                "100% paid off", printed directly under a
+                                −$2,000.00 balance (review catch). */}
+                            {a.current_balance>0?Math.min(99,Math.round(pct)):Math.round(pct)}% paid off · {fmt(Math.max(0,a.original_balance-a.current_balance))} of {fmt(a.original_balance)}
+                          </div>
+                        </>);
+                      })()}
                       {(hasCols||isManualAccount(a))&&(
                         <div style={{display:"flex",flexWrap:"wrap",alignItems:"center",gap:10,marginTop:8}}>
                           {/* A manual debt's balance is hand-typed (no feed restates
@@ -4877,6 +5088,15 @@ export default function Dashboard({ refreshTick = 0 }) {
                           {a.type==="credit"&&(
                             <DebtNum id={a.id+":lim"} value={a.credit_limit} placeholder="limit" prefix="$" width={70}
                               onSave={v=>saveDebt(a.id,{credit_limit:v})}/>
+                          )}
+                          {/* "starting", not "original": a refinanced loan has
+                              two defensible originals (the first principal and
+                              the refi amount), and the label shouldn't pretend
+                              the app knows which one is meant. Hand-typed like
+                              every other debt column — no feed sends it. */}
+                          {a.type==="loan"&&(
+                            <DebtNum id={a.id+":orig"} value={a.original_balance} placeholder="starting" prefix="$" width={80}
+                              onSave={v=>saveDebt(a.id,{original_balance:v})}/>
                           )}
                           {/* Commit on BLUR only — a date input emits COMPLETE
                               garbage values while the year is typed (see the

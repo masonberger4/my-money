@@ -34,3 +34,36 @@ export function displayBalance(balance, type) {
   // the raw value would show "-$0.00". Normalize at the source.
   return out === 0 ? 0 : out;
 }
+
+// How old the balance on screen actually is.
+//
+// `accounts.last_balance_at` is stamped by every sync from the feed's own
+// balance-date, and (since 2026-08-13) by a hand-typed manual balance — but
+// nothing rendered it, so a figure typed in June and a figure pulled this
+// morning looked identical, in the Debt tab and net worth alike. This is the
+// unknowns-stay-visible rule applied to balances: the row already carried the
+// answer.
+//
+// Returns null when there is nothing honest to say — no timestamp (a manual
+// row typed before the stamp shipped, the getReceiptTxIds absence rule) or an
+// unparseable one. Otherwise { date, staleDays }, where staleDays counts whole
+// days back from `now` and is floored at 0 (a clock skew must never render a
+// balance as being from the future).
+export function balanceAsOf(account, now = new Date()) {
+  const raw = account?.last_balance_at;
+  if (!raw) return null;
+  const at = new Date(raw);
+  if (Number.isNaN(at.getTime())) return null;
+  const ref = now instanceof Date ? now : new Date(now);
+  if (Number.isNaN(ref.getTime())) return null;
+  const DAY = 86400000;
+  return { date: at, staleDays: Math.max(0, Math.floor((ref.getTime() - at.getTime()) / DAY)) };
+}
+
+// Past this many days a balance gets a visible age. Chosen against the feed's
+// own cadence: SimpleFIN refreshes about daily, so a fed account crossing two
+// weeks means the feed has been quiet far longer than normal, and a manual
+// balance that old is genuinely worth re-checking. Rendered MUTED, never amber
+// — amber has to keep meaning "something is broken" (the coverage-notice
+// rule), and an old balance is a known limit, not a fault.
+export const BALANCE_STALE_DAYS = 14;

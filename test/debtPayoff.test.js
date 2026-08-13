@@ -5,6 +5,11 @@
 // the numbers in the assertions are the spec, not echoes of the code.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
+
+const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 import {
   MAX_MONTHS,
   debtMonthlyRate,
@@ -15,8 +20,7 @@ import {
   simulatePayoff,
   payoffWhatIf,
   addMonths,
-  debtFreeMonth,
-} from '../src/debtPayoff.js';
+  debtFreeMonth, payoffProgress } from '../src/debtPayoff.js';
 
 const debt = (over = {}) => ({
   id: over.id ?? 'd1',
@@ -254,4 +258,45 @@ test('amortizationSchedule: stall states are honest, never a fake schedule', () 
   assert.equal(cap.stalled, true);
   assert.equal(cap.rows.length, MAX_MONTHS);
   assert.equal(cap.rows[MAX_MONTHS - 1].balance, 100000 - MAX_MONTHS);
+});
+
+// --- payoffProgress: how far a loan has come -------------------------------
+// `original_balance` shipped with the debt migration and had no editor and no
+// renderer. The fraction is only shown when it is a FACT — every shape that
+// would make it a claim returns null and renders nothing.
+test('payoffProgress: plain fraction paid, on the stored positive convention', () => {
+  assert.equal(payoffProgress(9000, 6500).toFixed(2), '27.78');
+  assert.equal(payoffProgress(10000, 2500), 75);
+  assert.equal(payoffProgress(9000, 9000), 0);
+  assert.equal(payoffProgress(9000, 0), 100);
+});
+
+test('payoffProgress: null wherever the number would be a claim, not a fact', () => {
+  assert.equal(payoffProgress(null, 5000), null, 'no starting balance recorded');
+  assert.equal(payoffProgress(undefined, 5000), null);
+  assert.equal(payoffProgress(0, 0), null, 'nothing to be a fraction of');
+  assert.equal(payoffProgress(-100, 50), null);
+  assert.equal(payoffProgress(9000, null), null, 'no current balance');
+  // A balance ABOVE the original is a real state (an extra draw on a
+  // HELOC-shaped loan, or a starting figure typed too low). Hiding the bar is
+  // the honest answer; negative progress would not be.
+  assert.equal(payoffProgress(9000, 9500), null);
+  assert.equal(payoffProgress('abc', 100), null);
+});
+
+test('payoffProgress: an overpaid loan clamps at 100 rather than exceeding it', () => {
+  assert.equal(payoffProgress(9000, -250), 100);
+});
+
+test('REGRESSION: the payoff bar never rounds UP to "100% paid off" while money is owed', () => {
+  // payoffProgress(400000, 2000) is 99.5, and Math.round alone printed
+  // "100% paid off" directly under a −$2,000.00 balance. The renderer caps at
+  // 99 while current_balance > 0 — the categorizedShare precedent.
+  assert.equal(payoffProgress(400000, 2000), 99.5);
+  const dash = readFileSync(join(root, 'src/components/Dashboard.jsx'), 'utf8');
+  assert.match(
+    dash,
+    /a\.current_balance>0\?Math\.min\(99,Math\.round\(pct\)\):Math\.round\(pct\)/,
+    'the bar caps at 99 while anything is still owed, reserving 100 for a zero balance'
+  );
 });

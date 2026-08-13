@@ -13,44 +13,39 @@
 //   - "Delete permanently" is a separate explicit mode requiring BOTH
 //     { permanent: true, confirm: 'delete' } — impossible to hit by accident.
 //
+// Since 2026-08-13 (Mason) the MANUAL "Imported" institution takes the same
+// shape: remove soft-hides and records, and the cascade delete lives behind
+// the same permanent+confirm literals. It cannot reuse the SimpleFIN
+// tombstone, though — a manual institution is permanently `status='disabled'`
+// by design (that status is what keeps it out of every sync path), so the
+// RECORD ITSELF is the marker: a manual institution with an `unlink:<id>` row
+// is removed, and restoring consumes the row. That is also why the key and
+// the value parse moved to `src/unlinkRestore.js` — the client reads them to
+// decide whether to offer Restore, and the two sides must agree exactly.
+//
 // The visible-at-hide-time set rides in the household-scoped `settings` table
 // (no migration needed) under one key per institution.
 
-export const UNLINK_SETTINGS_PREFIX = 'unlink:';
+import {
+  UNLINK_SETTINGS_PREFIX,
+  unlinkSettingsKey,
+  parseRestoreIds,
+  restorableIds,
+} from '../../src/unlinkRestore.js';
+
 export const PERMANENT_CONFIRM = 'delete';
 
-export function unlinkSettingsKey(institutionId) {
-  return `${UNLINK_SETTINGS_PREFIX}${institutionId}`;
-}
+// Re-exported under the names this route and test/unlink.test.js already use.
+// One definition, two callers (api→src, the FEED_REACH_DAYS pattern).
+export { UNLINK_SETTINGS_PREFIX, unlinkSettingsKey };
+export const parseRestoreSet = parseRestoreIds;
+export const restoreSet = restorableIds;
 
 // Which account ids the soft-hide should record for a later Restore: exactly
 // the ones VISIBLE at hide time. Hidden ones were hidden by the user (or are
 // unconfirmed arrivals) and must stay that way through a remove/restore cycle.
 export function visibleAccountIds(accounts) {
   return (accounts || []).filter(a => !a.hidden).map(a => a.id);
-}
-
-// Parse the stored settings value back into the set of ids to unhide.
-// Tolerant: a missing/garbled value means "unhide none" — Restore still
-// re-enables the institution; the user can unhide by hand in Accounts. Never
-// throws (a corrupt settings row must not make Restore 500).
-export function parseRestoreSet(value) {
-  if (!value) return [];
-  try {
-    const parsed = JSON.parse(value);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter(v => typeof v === 'string' || typeof v === 'number');
-  } catch {
-    return [];
-  }
-}
-
-// Restore only unhides ids that (a) were recorded at hide time AND (b) still
-// exist under the institution — the disabled tombstone kept the sync away, but
-// defend anyway: never unhide an id the record doesn't name.
-export function restoreSet(recordedIds, currentAccountIds) {
-  const current = new Set(currentAccountIds || []);
-  return (recordedIds || []).filter(id => current.has(id));
 }
 
 // The permanent-delete gate. `permanent` must be literal true and `confirm`
@@ -64,19 +59,17 @@ export function permanentDeleteAllowed(body) {
   return body?.permanent === true && body?.confirm === PERMANENT_CONFIRM;
 }
 
-// The manual-institution gate (parity fix, 2026-08-13). That branch
-// HARD-DELETES: it cascades away every account and transaction under the
-// "Imported" institution — i.e. the entire CSV/PDF statement backfill — yet it
-// was the one destructive path a bare `{ institution_id }` POST could reach
-// while both of its siblings above demanded a literal. Same discipline:
-// `confirm` must be exactly 'delete' (the PERMANENT_CONFIRM literal — one
-// spelling of the word across both destructive gates), not truthy, not
-// case-insensitive. A stale PWA client that predates this gate fails CLOSED
-// with a 400 until its service worker refreshes — the right direction for a
-// destructive action.
-export function manualDeleteAllowed(body) {
-  return body?.confirm === PERMANENT_CONFIRM;
-}
+// TOMBSTONE (2026-08-13): `manualDeleteAllowed` lived here for one PR. It
+// gated the manual branch's hard delete behind a bare `confirm: 'delete'`
+// while that branch still deleted by default. Now that removing a manual
+// institution SOFT-HIDES like its SimpleFIN sibling, the only destructive
+// manual path is the permanent one — already gated by
+// `permanentDeleteAllowed` above, with the identical literal. A second
+// predicate meaning the same thing is the duplication hazard PR #61 removed
+// zero-caller predicates for, so it is gone rather than left as a synonym.
+// Consequence, deliberate: a stale PWA client still sending the bare
+// `{ institution_id, confirm: 'delete' }` body now gets a SOFT-HIDE — the
+// safe direction, since `isPermanentDeleteRequest` needs `permanent: true`.
 
 // The simplefin-status DELETE gate (forget the stored access URL). Same
 // literal-string discipline as permanentDeleteAllowed: `confirm` must be

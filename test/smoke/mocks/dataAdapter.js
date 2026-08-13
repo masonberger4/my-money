@@ -19,12 +19,18 @@ const ACCTS = [
   { id: 'a2', institution_id: 'i1', plaid_account_id: 'sfin:2', name: 'Joint Savings', official_name: null, nickname: null, color: null, mask: '5678', type: 'depository', subtype: 'savings', current_balance: 15230.10, available_balance: 15230.10, last_balance_at: '2026-08-02T12:00:00Z', hidden: false, created_at: '2026-05-02T09:00:00Z', entity_id: null, institutions: { name: 'BECU', display_name: 'BECU' } },
   { id: 'a3', institution_id: 'i2', plaid_account_id: 'sfin:3', name: 'Venture X', official_name: null, nickname: null, color: null, mask: '9012', type: 'credit', subtype: 'credit card', current_balance: 2148.33, available_balance: 12851.67, last_balance_at: '2026-08-02T12:00:00Z', hidden: false, created_at: '2026-05-02T09:00:00Z', entity_id: null, institutions: { name: 'Capital One', display_name: 'Capital One' } },
   { id: 'a4', institution_id: 'i2', plaid_account_id: 'sfin:4', name: 'Quicksilver', official_name: null, nickname: null, color: null, mask: '3456', type: 'credit', subtype: 'credit card', current_balance: 512.09, available_balance: 4487.91, last_balance_at: '2026-08-02T12:00:00Z', hidden: false, created_at: '2026-05-02T09:00:00Z', entity_id: null, institutions: { name: 'Capital One', display_name: 'Capital One' } },
+  { id: 'am1', institution_id: 'im', plaid_account_id: 'manual:am1', name: 'Old Checking', official_name: null, nickname: null, color: null, mask: '2644', type: 'depository', subtype: 'checking', current_balance: 310.22, available_balance: 310.22, last_balance_at: '2026-06-30T12:00:00Z', hidden: false, created_at: '2026-06-30T12:00:00Z', entity_id: null, is_manual: true, institutions: { name: 'Imported', display_name: 'Imported' } },
 ];
 const acctType = id => ACCTS.find(a => a.id === id)?.type || 'depository';
 
 // Session B harness knobs (query-string driven, so one server serves all shots)
 const Q = typeof location !== 'undefined' ? new URLSearchParams(location.search) : new URLSearchParams();
 if (Q.has('hiddenCard')) { const a = ACCTS.find(x => x.id === 'a3'); if (a) a.hidden = true; }
+// ?removedImport — the "Imported" institution soft-hidden (its accounts hidden
+// with a restore record on file), the one state the Accounts tab's Restore
+// strip renders in.
+const REMOVED_IMPORT = Q.has('removedImport');
+if (REMOVED_IMPORT) { const a = ACCTS.find(x => x.id === 'am1'); if (a) a.hidden = true; }
 
 
 let seq = 0;
@@ -104,8 +110,17 @@ export async function getOverview() {
   const visible = ACCTS.filter(a => !a.hidden);
   const ordered = [...visible.filter(a => a.type === 'credit'), ...visible.filter(a => a.type === 'depository')];
   return {
-    accounts: ordered.map(a => ({ id: a.id, balance: { current: a.current_balance }, name: a.name, mask: a.mask, type: a.type })),
-    last_month: { spending: { amount: 1125.22 } },
+    accounts: ordered.map(a => ({
+      id: a.id, balance: { current: a.current_balance }, name: a.name, mask: a.mask, type: a.type,
+      // Additive fields the Overview tile reads: available credit (never
+      // through displayBalance) and the as-of stamp.
+      available: a.available_balance ?? null,
+      plaid_account_id: a.plaid_account_id,
+      last_balance_at: a.last_balance_at ?? null,
+    })),
+    // Last month in full, and last month sliced at today's day-of-month — the
+    // honest comparison for a month still in progress.
+    last_month: { spending: { amount: 1125.22 }, spending_to_date: { amount: 611.40 } },
   };
 }
 export async function getSpending({ year, month }) {
@@ -437,6 +452,10 @@ export async function addManualTransaction() {}
 export async function createManualAccount() { return { id: 'am1' }; }
 export async function getFeedCoverageStart() { return null; }
 export async function getDataCoverage() { return { accounts: [], months: [] }; }
+// The removed-imported marker. Null = nothing removed, which is the harness's
+// steady state — the Restore strip is an exception surface and the render gate
+// asserts the ORDINARY Accounts tab. (Flip to an id array to eyeball it.)
+export async function getRestoreRecord() { return REMOVED_IMPORT ? ['am1'] : null; }
 // Feed-reach shortfall. Realistic default: this household linked SimpleFIN on
 // 2026-05-02 and the first pull reached ~88 days back, so the two BECU accounts
 // start at the wall and have no older history, while the two Capital One cards
