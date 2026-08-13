@@ -7,7 +7,7 @@
 > contract. CLAUDE.md is authoritative wherever the two disagree.
 
 **Where the live work is:** the **Improvement backlog (2026-08-13)** section
-is the current unbuilt list — eighteen adversarially-vetted items, ranked. The
+is the current unbuilt list — adversarially-vetted items, ranked. The
 "Shipped backlog (2026-08-11)" section near the bottom is a RECORD, fully
 shipped; do not mine it for work. Items 2/3/4 under Low-hanging fruit and 1/3/4/5
 under Harder are the older live specs.
@@ -50,9 +50,14 @@ nothing below relitigates a decided item.
      the earlier "keep the credit one" advice: the question is no longer
      which row to keep but **the TYPE on the row that holds the data**. A
      "Discover it" is a credit card, so that row must be retyped **Credit
-     card** in the account-type editor before it is ever unhidden — while it
-     is typed checking, every purchase on it counts as household CASH
-     spending (the F2 failure the hidden-by-default rule exists for).
+     card** in the account-type editor before it is ever unhidden — **that sentence's original
+     justification — "while it is typed checking, every purchase counts as
+     household CASH spending" — is PRE-UNIFICATION and WRONG** (CLAUDE.md's
+     account-type Convention refutes it in as many words: `isSpend` needs only
+     `amount > 0` on a non-loan account, so a card's purchases count either
+     way). The retype still mattered, for the three reasons that Convention
+     enumerates: refunds become income, card-payment-worded purchases get
+     vetoed, and the balance lands positive as an asset.
      **Mason's hypothesis, plausible and worth confirming: Capital One
      acquired Discover, so SimpleFIN pulling both the Capital One and
      Discover logins can surface the SAME card under two orgs.** Each row
@@ -424,7 +429,8 @@ What field reports are actually useful, now that both phones run everything:
 > trim-the-key editor, the retraining progress meter + queue paging, the
 > manual-delete confirm gate that became the imported soft-hide + Restore, the
 > honest month pace, available credit, balance staleness, loan payoff
-> progress). The **eighteen below are the unbuilt remainder**, ranked. Every
+> progress). **Everything below is the unbuilt remainder**, ranked (deliberately
+> not counted here — the first item to ship would falsify the number). Every
 > one was verified to be a real gap at synthesis time — but main has moved
 > since, so re-verify the premise before building, and mark the item shipped
 > in the SAME PR per this doc's contract.
@@ -438,7 +444,8 @@ paste — never a technical unknown.
   the ledger, the hand-taught `category_rules` the whole retraining effort is
   producing, the `dash:cats` registry, budgets and envelope history exist ONLY
   in prod Supabase. The app's only exports are the Ask-chat markdown and the
-  per-property Schedule E CSV (`downloadCsv` has exactly two call sites). A
+  per-property Schedule E CSV (`grep -n 'downloadCsv(' src/components/Dashboard.jsx`
+  — a count frozen here would break the day this very item ships). A
   lost account or a bad write class is total, permanent loss; statement
   re-import rebuilds transactions only if the source files were kept. Build: a
   "Download household data" action on the Accounts tab (the established ops
@@ -495,10 +502,16 @@ paste — never a technical unknown.
   Covering it means knowing which envelope has room, finding that donor row,
   and picking the red one out of its destination chips. Add a "Cover" next to
   the red available on leaf rows only: opens the existing `MoveSheet` in
-  reverse — `to` pinned, amount pre-filled with the shortfall, chips picking
-  the SOURCE from `assignableRows` with available > 0 (parents already
-  excluded, so the one-owner-per-dollar rule holds). No new write path, no
-  model change.
+  reverse — `to` pinned, amount pre-filled with the shortfall, and a chip grid
+  picking the SOURCE. Note two things the first draft of this item got wrong:
+  MoveSheet's `rows` prop (`assignableRows`) drives the DESTINATION list only
+  (`rows.filter(r=>r.category!==from)`), while the source is `from`/`srcRow`
+  and is not filtered — so reversing the sheet means adding a source pool, not
+  reusing that binding. And a parent must stay ELIGIBLE as a source: the
+  Category-nesting Convention keeps it a legal move SOURCE precisely so a
+  pre-nesting balance can get out; it is DESTINATIONS that exclude parents.
+  Filter the source pool on available > 0, not on parenthood. No new write
+  path, no model change.
 
 - **Hand-add an expected bill from the Budget tab** — M. Expected transactions
   are managed on Budget but can only be BORN on Recurring — the code says so
@@ -558,18 +571,21 @@ paste — never a technical unknown.
 
 ### Insights the backfill made possible
 
-- **Month in review — a summary for completed months** — M. **Needs Mason
-  (placement and tone).** Hybrid income means a completed month now knows both
-  its plan and its reality, but Budget renders it identically to a live one —
-  an RTA figure that is meaningless in retrospect. Two display-only surfaces
-  off pure cores: a Budget strip on the RTA card when
-  `incomeResolved.source === 'actual'` (actual vs planned income, money never
-  given a job, overspent envelopes, targets funded vs missed — all already in
-  hand), and an Overview card for viewed < current month (total vs prior,
-  biggest mover, largest purchase, net saved — `netSaved` omitted when
-  `coverageStart` says the month isn't covered). Keep the two spend SCOPES
-  verbally distinct (budgeted-envelope spent vs household spent) or the card
-  contradicts Categories at a glance.
+- **Month in review — an Overview summary for completed months** — M. **Needs
+  Mason (placement and tone).** *Premise corrected 2026-08-13 by audit: the
+  Budget half of the original idea is ALREADY SHIPPED — Dashboard branches on
+  `incomeResolved.source==="actual"`, suppresses the editor with a
+  "would be a trap" comment, and already renders "actual · planned $X" and
+  "spent $X of $Y targeted". Do not re-propose it.* What is genuinely missing
+  is the OVERVIEW side: paging back to a finished month shows the same donut
+  and recent-6 layout with no "so what". Build one display-only card, rendered
+  only when viewed < current month, off a pure `src/monthReview.js`: total vs
+  prior, biggest mover, largest purchase (max `isSpend` row, tapping opens the
+  existing tx sheet), and net saved — `netSaved` OMITTED when `coverageStart`
+  says the month isn't ledger-covered (the `resolveBudgetIncome` fallback
+  discipline). Every input is already fetched or one memo-ride away. Keep the
+  two spend SCOPES verbally distinct (budgeted-envelope spent vs household
+  spent) or the card contradicts Categories at a glance.
 
 - **Year view: 12-month Trends + per-category year card** — M. Backfill is
   complete to ~Feb 2026 but every trend surface is hard-capped at 6 months
@@ -584,8 +600,9 @@ paste — never a technical unknown.
   `getActualIncome`'s earliest-row probe). Lazy-load on the toggle.
 
 - **Merchant insights: top-merchants card + "history at this merchant"** — M.
-  The app has no merchant-level view anywhere — `merchantKey` exists solely for
-  teaching — so "how much do we spend at Costco?" is unanswerable. New pure
+  The app has no merchant-level view anywhere — `merchantKey` is used for
+  teaching and (in `expectedTx.js`) as a bill-matching signal, never for
+  aggregation — so "how much do we spend at Costco?" is unanswerable. New pure
   `src/merchantStats.js` folding `isSpend()` rows by display name collapsed
   through `merchantKey`, a `getMerchantStats({months:6})` riding the same range
   memo as `getCashFlow`, a Trends card, and one line in the tx sheet. Tap
@@ -612,9 +629,10 @@ paste — never a technical unknown.
   amber must keep meaning "needs fixing". Zero new computation, zero I/O.
   Needs Mason only on whether zero-income months get any emphasis at all.
 
-- **Repeat-drive chips — one-tap mileage logging** — S. Rental drives repeat
-  but every entry retypes date/miles/purpose/entity, and a thin log is a real
-  lost deduction at 76¢/mi. Derive the 3–4 most frequent (purpose, entity,
+- **Repeat-drive chips — one-tap mileage logging** — S. Rental drives repeat but
+  every entry retypes miles and purpose with no frequency memory (the date
+  already defaults to today and the entity to the first active property), and
+  a thin log is a real lost deduction at 76¢/mi. Derive the 3–4 most frequent (purpose, entity,
   miles) combos from the already-loaded `mileage` state (pure
   `frequentDrives`, ≥2 occurrences or render nothing) and render them as
   chips. **The chip PREFILLS the form with Save as the confirming second tap
