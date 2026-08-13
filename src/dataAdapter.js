@@ -107,7 +107,7 @@ export { markInternalTransfers, cashIncome, cashSpending } from './cashFlow.js';
 
 // Same deal for the pure envelope model (src/envelopes.js) — Dashboard and any
 // harness import the helpers from one place.
-export { targetNeed, readyToAssign, envelopePace, monthKey, shiftMonthKey, effectiveTarget } from './envelopes.js';
+export { targetNeed, readyToAssign, envelopePace, monthKey, shiftMonthKey, effectiveTarget, resolveBudgetIncome } from './envelopes.js';
 
 // Same for the pure expected-transaction model (src/expectedTx.js) — the I/O
 // lives below; Dashboard imports the display helpers from one place.
@@ -1047,6 +1047,33 @@ export async function searchTransactions(query, { limit = 200, offset = 0, filte
   }
   const hasMore = data.length > limit;
   return { transactions: data.slice(0, limit).map(toTxShape), hasMore };
+}
+
+// Actual income for one month, for the Budget tab's hybrid income rule
+// (resolveBudgetIncome in src/envelopes.js — a COMPLETED month reads this
+// instead of the typed figure). The measurement is the shared cashIncome model
+// over the month's marked rows, so it rides the same range memo the other
+// month reads share. Pairing window is the CALENDAR MONTH (getMonthTransactions
+// lineage — the Overview/Categories precedent), so it can differ from Trends'
+// income for the same month only on a transfer pair straddling the window edge
+// (getCashFlow pairs across its whole 6-month fetch, which washes MORE) — the
+// same documented honest edge as biggestMovers and the assistant context.
+// coverageStart is the household's earliest visible DEPOSITORY row (income
+// only reads depository inflows): the resolver derives nothing for months the
+// ledger doesn't reach, because missing history would read as $0 income.
+export async function getActualIncome({ year, month }) {
+  const [rows, coverage] = await Promise.all([
+    getMonthTransactions(year, month),
+    supabase
+      .from('transactions')
+      .select('date, accounts!inner(hidden, type)')
+      .eq('accounts.hidden', false)
+      .eq('accounts.type', 'depository')
+      .order('date', { ascending: true })
+      .limit(1),
+  ]);
+  if (coverage.error) throw coverage.error;
+  return { amount: cashIncome(rows), coverageStart: coverage.data?.[0]?.date || null };
 }
 
 export async function getCashFlow({ num_periods = 6 } = {}) {
