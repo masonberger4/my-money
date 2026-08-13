@@ -513,6 +513,61 @@ export function analyzeCsv(text, { existingIds = new Set(), manualColumns = null
   };
 }
 
+// ---------------------------------------------------------------------------
+// Multi-file batch planning (the queue the import modal processes).
+// ---------------------------------------------------------------------------
+
+// 'pdf' when the extension or MIME type says so — the same test the modal's
+// onFile handler has always applied to a single file; everything else is read
+// as CSV text (matching the picker's .csv/text/* accept list).
+export function fileKindOf(name, mime) {
+  return /\.pdf$/i.test(String(name ?? '')) || String(mime ?? '') === 'application/pdf'
+    ? 'pdf'
+    : 'csv';
+}
+
+// Plan a multi-file selection into a processing queue. Takes [{ name, kind }]
+// (kind from fileKindOf above; extra fields pass through untouched) and either
+// refuses the batch or returns the order to process it in.
+//
+// A mixed CSV+PDF batch is REJECTED with a shaped error naming the files on
+// each side — never thrown, so the modal can render it like any other input
+// problem. The reason is the one-format-per-account rule: a bank words the
+// same transaction differently in its CSV and its PDF, so the two formats'
+// dedup hashes can never see each other and importing both double-inserts.
+// One batch targets ONE account, so one batch is one format.
+//
+// ORDER is the user's SELECTION order, deliberately unaltered. Date order
+// cannot be known here — dates only exist after parsing, and parsing happens
+// per-file downstream in the queue. Nor is date order needed for correctness:
+// dedup ids are content hashes and the queue re-fetches existing ids before
+// each file, so the insert result is order-independent; selection order is
+// simply the order the user can predict.
+//
+// A single file passes through unchanged (ok, order = [that file]) so the
+// caller needs no special case.
+export function planFileBatch(files = []) {
+  const list = Array.isArray(files) ? files : [];
+  const csvFiles = list.filter(f => f?.kind !== 'pdf').map(f => f?.name ?? '');
+  const pdfFiles = list.filter(f => f?.kind === 'pdf').map(f => f?.name ?? '');
+  if (csvFiles.length > 0 && pdfFiles.length > 0) {
+    return {
+      ok: false,
+      error: {
+        code: 'mixed-format',
+        csvFiles,
+        pdfFiles,
+        message:
+          `Can't import CSV and PDF files in one batch — one format per account ` +
+          `(banks word the same transaction differently in each, so mixing them double-counts). ` +
+          `CSV: ${csvFiles.join(', ')}. PDF: ${pdfFiles.join(', ')}. ` +
+          `Select one format at a time.`,
+      },
+    };
+  }
+  return { ok: true, kind: list[0]?.kind ?? null, order: list.slice() };
+}
+
 // ===========================================================================
 // Reconciliation (Comparison mode — Phase 2). When the import target is a
 // Plaid-LINKED account, we insert NOTHING (that's the double-count trap).

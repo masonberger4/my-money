@@ -1,4 +1,6 @@
-// The purchase-based spending model, extracted pure (no Supabase/React) so it
+// THE spending model — one model since the 2026-08-03 unification, so the old
+// "purchase-based" name (which distinguished it from a second, cash-flow model
+// that no longer exists) is gone. Extracted pure (no Supabase/React) so it
 // is importable from plain Node — the same move that produced cashFlow.js,
 // envelopes.js and taxReport.js. dataAdapter.js does the I/O and delegates
 // here; it re-exports these helpers so existing importers keep working.

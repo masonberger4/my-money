@@ -25,6 +25,7 @@ import {
   MAX_WALK_MONTHS,
   envelopePace,
   PACE_MARGIN,
+  resolveBudgetIncome,
 } from '../src/envelopes.js';
 
 const a = (category, month, assigned) => ({ category, month, assigned });
@@ -667,4 +668,86 @@ test('rows without overrides carry targetOverride null (shape is stable)', () =>
     month: 6,
   });
   assert.equal(row(result, 'Fun').targetOverride, null);
+});
+
+// --- resolveBudgetIncome — the hybrid income rule (Mason, 2026-08-13) --------
+// A completed month reads ACTUAL measured income; the month in progress (and
+// future months) stays MANUAL; every unusable-actual case falls back to manual
+// rather than blanking RTA. These pin the boundary conditions.
+
+const RBI = { year: 2026, month: 7, todayKey: '2026-08-13', coverageStart: '2026-01-09' };
+
+test('hybrid income: a completed, covered month reads actual', () => {
+  const r = resolveBudgetIncome({ ...RBI, manual: 6200, actual: 5891.42 });
+  assert.equal(r.source, 'actual');
+  assert.equal(r.amount, 5891.42);
+  assert.equal(r.manual, 6200); // the plan survives beside the measurement
+});
+
+test('hybrid income: the month in progress stays manual even with an actual present', () => {
+  const r = resolveBudgetIncome({ ...RBI, month: 8, manual: 6200, actual: 3100 });
+  assert.equal(r.source, 'manual');
+  assert.equal(r.amount, 6200);
+});
+
+test('hybrid income: a future month stays manual', () => {
+  const r = resolveBudgetIncome({ ...RBI, month: 9, manual: 6200, actual: 0 });
+  assert.equal(r.source, 'manual');
+  assert.equal(r.amount, 6200);
+});
+
+test('hybrid income: an actual of ZERO is a real measurement, not a missing one', () => {
+  const r = resolveBudgetIncome({ ...RBI, manual: 6200, actual: 0 });
+  assert.equal(r.source, 'actual');
+  assert.equal(r.amount, 0);
+});
+
+test('hybrid income: a null actual (failed read) falls back to manual, never blanks', () => {
+  const r = resolveBudgetIncome({ ...RBI, manual: 6200, actual: null });
+  assert.equal(r.source, 'manual');
+  assert.equal(r.amount, 6200);
+});
+
+test('hybrid income: a month the ledger does not cover falls back to manual', () => {
+  // Coverage starts Jan 9, so January is PARTIAL: deriving would read the
+  // missing first week as $0 income. February is the first covered month.
+  const jan = resolveBudgetIncome({ ...RBI, month: 1, manual: 6200, actual: 1200 });
+  assert.equal(jan.source, 'manual');
+  const feb = resolveBudgetIncome({ ...RBI, month: 2, manual: 6200, actual: 1200 });
+  assert.equal(feb.source, 'actual');
+});
+
+test('hybrid income: coverage landing exactly on the 1st covers the month', () => {
+  const r = resolveBudgetIncome({ ...RBI, coverageStart: '2026-07-01', manual: 6200, actual: 1200 });
+  assert.equal(r.source, 'actual');
+});
+
+test('hybrid income: no coverage at all (empty ledger) stays manual', () => {
+  const r = resolveBudgetIncome({ ...RBI, coverageStart: null, manual: 6200, actual: 0 });
+  assert.equal(r.source, 'manual');
+});
+
+test('hybrid income: no usable clock never switches to actual', () => {
+  const r = resolveBudgetIncome({ ...RBI, todayKey: null, manual: 6200, actual: 1200 });
+  assert.equal(r.source, 'manual');
+});
+
+test('hybrid income: manual null on a covered past month still reads actual', () => {
+  const r = resolveBudgetIncome({ ...RBI, manual: null, actual: 1200 });
+  assert.equal(r.source, 'actual');
+  assert.equal(r.amount, 1200);
+  assert.equal(r.manual, null);
+});
+
+test('hybrid income: both figures missing resolves to a null amount (RTA hidden)', () => {
+  const r = resolveBudgetIncome({ ...RBI, manual: null, actual: null });
+  assert.equal(r.amount, null);
+  assert.equal(r.source, 'manual');
+});
+
+test('hybrid income: December→January year boundary compares as months, not strings gone wrong', () => {
+  // Viewing Dec 2025 from Jan 2026: completed month, covered → actual.
+  const r = resolveBudgetIncome({ year: 2025, month: 12, todayKey: '2026-01-05',
+    coverageStart: '2025-01-01', manual: 6200, actual: 4000 });
+  assert.equal(r.source, 'actual');
 });

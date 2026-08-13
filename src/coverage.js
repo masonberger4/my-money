@@ -1,7 +1,8 @@
-// TEMPORARY TROUBLESHOOTING AID — powers the Accounts tab's "Data coverage"
-// panel so we can see, per account, what history the app actually holds
-// (first/last tx date, row count, per-source breakdown). May be hidden or
-// removed once the coverage questions are settled. Pure, zero imports.
+// TROUBLESHOOTING AID — powers the Accounts tab's "Data coverage" panel so we
+// can see, per account, what history the app actually holds (first/last tx
+// date, row count, per-source breakdown). Shipped TEMPORARY; ruled KEEP by
+// Mason 2026-08-13 ("i kinda like it") — revisit only if he asks (removal
+// recipe: the plan doc's item 5). Pure, zero imports.
 //
 // aggregateCoverage(rows): rows are [{account_id, date, source}] in any order.
 // Returns a plain object keyed by account_id:
@@ -30,8 +31,9 @@ export function aggregateCoverage(rows) {
 }
 
 // ---------------------------------------------------------------------------
-// Feed reach / coverage shortfall — NOT temporary, unlike aggregateCoverage
-// above. This is the tell for history the SimpleFIN feed can never fetch.
+// Feed reach / coverage shortfall — permanent from the day it shipped (and
+// since 2026-08-13 the panel above is kept too). This is the tell for history
+// the SimpleFIN feed can never fetch.
 //
 // THE ONE COPY of the feed's reach. api/_lib/simplefin.js imports it as the
 // default for MAX_LOOKBACK_DAYS (the api → src direction is the established
@@ -40,6 +42,15 @@ export function aggregateCoverage(rows) {
 // SIMPLEFIN_MAX_LOOKBACK_DAYS is tuned, and the copy is what the USER-FACING
 // sentence quotes.
 export const FEED_REACH_DAYS = 88;
+
+// THE ONE COPY of the incremental pull's re-read overlap, same pattern as
+// FEED_REACH_DAYS above: api/_lib/simplefin.js imports it as the default for
+// OVERLAP_DAYS, and CsvImport.jsx quotes it in the import-boundary math and the
+// user-facing "last N days are still excluded" sentences. A hardcoded client
+// mirror sat in CsvImport.jsx until 2026-08-11 and would have silently diverged
+// the moment SIMPLEFIN_OVERLAP_DAYS was set (same accepted residual: the env
+// override still desyncs the client, but now only via a deliberate env change).
+export const FEED_OVERLAP_DAYS = 30;
 
 // Slack on the upper bound. An account whose oldest row is comfortably NEWER
 // than the day we linked it simply has no older history to miss (it was opened

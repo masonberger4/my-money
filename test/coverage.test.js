@@ -5,8 +5,9 @@ import {
   feedCoverageGaps,
   FEED_REACH_DAYS,
   FEED_GRACE_DAYS,
+  FEED_OVERLAP_DAYS,
 } from '../src/coverage.js';
-import { MAX_LOOKBACK_DAYS } from '../api/_lib/simplefin.js';
+import { MAX_LOOKBACK_DAYS, OVERLAP_DAYS } from '../api/_lib/simplefin.js';
 
 test('empty input returns an empty object', () => {
   assert.deepEqual(aggregateCoverage([]), {});
@@ -69,6 +70,13 @@ test('LOCKSTEP: the reach the UI quotes is the reach the request is clamped to',
   // A second hardcoded copy would let the sentence on the Accounts tab drift
   // away from the window api/sync.js actually asks for.
   assert.equal(MAX_LOOKBACK_DAYS, FEED_REACH_DAYS);
+});
+
+test('LOCKSTEP: the overlap the import boundary quotes is the overlap the pull re-reads', () => {
+  // CsvImport.jsx's boundary math and its "last N days are still excluded"
+  // sentences read FEED_OVERLAP_DAYS; a second hardcoded copy sat there until
+  // 2026-08-11 and would have drifted the moment SIMPLEFIN_OVERLAP_DAYS was set.
+  assert.equal(OVERLAP_DAYS, FEED_OVERLAP_DAYS);
 });
 
 test('an account cut off at the feed wall is flagged with its served-from date', () => {

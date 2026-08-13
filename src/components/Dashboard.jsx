@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from "react";
-import { getOverview, getSpending, getBiggestMovers, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES, setCategoryRule, applyCategoryRuleToHistory, listCategoryRules, countCategoryRuleMatches, deleteCategoryRule, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, invalidateEnvelopeSpending, isEnvelopeSchemaMissing, targetNeed, readyToAssign, envelopePace, getEnvPace, setEnvPace as persistEnvPace, getRecIgnore, updateRecIgnore, monthKey, getEntities, createEntity, updateEntity, getTaxYearTransactions, getMileage, addMileage, deleteMileage, getReceiptTxIds, getDebts, getBalanceSnapshots, getNetWorthSeries, addManualTransaction, createManualAccount, updateManualBalance, getDataCoverage, getFeedCoverageGaps, signOut, autoFillMonth, setTargetOverride, effectiveTarget, getExpectedTransactions, addExpected, dismissExpected, matchExpectedManually, getSavedChats, saveChatToApp, deleteSavedChat } from "../dataAdapter.js";
+import { getOverview, getSpending, getBiggestMovers, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES, ACCOUNT_SUBTYPES, setCategoryRule, applyCategoryRuleToHistory, listCategoryRules, countCategoryRuleMatches, deleteCategoryRule, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, getActualIncome, resolveBudgetIncome, invalidateEnvelopeSpending, isEnvelopeSchemaMissing, targetNeed, readyToAssign, envelopePace, setEnvPace as persistEnvPace, updateRecIgnore, getStartupSettings, monthKey, getEntities, createEntity, updateEntity, getTaxYearTransactions, getMileage, addMileage, deleteMileage, getReceiptTxIds, getDebts, getBalanceSnapshots, getNetWorthSeries, addManualTransaction, createManualAccount, updateManualBalance, getDataCoverage, getFeedCoverageGaps, FEED_GAP_SCAN_CAP, signOut, autoFillMonth, setTargetOverride, effectiveTarget, getExpectedTransactions, addExpected, dismissExpected, matchExpectedManually, getSavedChats, saveChatToApp, deleteSavedChat, addRegistryEntry, updateRegistryParent, removeRegistryEntry, updateCategoryColor, updateCategoryAlias } from "../dataAdapter.js";
 // Pure cores imported directly (never Supabase — the mock-harness alias rule
 // only covers dataAdapter/sync/db/apiClient; pure modules are safe).
 import { planAutoFill } from "../envelopes.js";
@@ -503,11 +503,12 @@ function AssignEdit({value,onSave}) {
   );
 }
 
-// The household's money for the month, typed in by hand. The feed can't answer
-// this trustworthily — a missed paycheck would silently read as less to
-// budget — so Ready to Assign runs on a number the household states (see
-// CLAUDE.md, "the income wall"). Saving offers both scopes because most months
-// repeat and some don't.
+// The TYPED income for the month — what the month in progress (and any future
+// month) budgets against, since its paychecks haven't all landed yet. Once the
+// month is over, RTA switches to actual measured income and this figure
+// survives as the plan (the hybrid income rule — resolveBudgetIncome, CLAUDE.md
+// envelope Conventions). Saving offers both scopes because most months repeat
+// and some don't.
 function IncomeEdit({value,isDefault,onSave}) {
   const [ed,setEd]=useState(false);
   const [val,setVal]=useState(value!=null?String(value):"");
@@ -887,8 +888,11 @@ function DrillNum({onClick,title,style,children}) {
 // that got most rows right and is now the main onboarding surface, so it has to
 // be worth working down rather than a sample of it.
 const TEACH_LIMIT=10;
+// minHeight 32 is the Session B hit-area floor — a mis-tapped row opens the
+// WRONG merchant's sheet and invites a wrong learned rule. Rows stack flush,
+// so the boxes abut with no negative margins needed.
 const TEACH_ROW={display:"flex",alignItems:"center",gap:8,width:"100%",background:"none",border:"none",
-  padding:"4px 0",cursor:"pointer",fontFamily:"inherit",textAlign:"left"};
+  padding:"4px 0",minHeight:32,cursor:"pointer",fontFamily:"inherit",textAlign:"left"};
 const TEACH_KEY={fontSize:11,fontWeight:500,color:"var(--text)",flex:1,minWidth:0,
   whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"};
 
@@ -1369,6 +1373,13 @@ export default function Dashboard({ refreshTick = 0 }) {
   // --- Envelope budgeting (Budget tab) ---
   const [envelopes,setEnvelopes]=useState(null);
   const [income,setIncome]=useState(null);
+  // Measured income for the viewed month (the hybrid income rule). MONTH-TAGGED
+  // ({y,m,amount,coverageStart}) — the movers month-tagging lesson: a transient
+  // load failure keeps the previous state, and without the tag a month switch
+  // would render the old month's actual under the new month's header. A tag
+  // mismatch reads as "no actual yet", which resolveBudgetIncome falls back
+  // from (to manual) instead of blanking RTA.
+  const [actualInc,setActualInc]=useState(null);
   const [targetEdit,setTargetEdit]=useState(null);   // category name
   const [moveFrom,setMoveFrom]=useState(null);       // category name
   const [envBusy,setEnvBusy]=useState(false);
@@ -1423,7 +1434,7 @@ export default function Dashboard({ refreshTick = 0 }) {
   const [expDismissId,setExpDismissId]=useState(null); // expectation id whose skip/stop confirm is open (recurring cadences only)
   // "Fill from ⟨prev month⟩" inline confirm: null (idle) | "loading" | {plan}.
   const [fillPlan,setFillPlan]=useState(null);
-  // --- Data coverage panel (TEMPORARY troubleshooting aid; Accounts tab) ---
+  // --- Data coverage panel (troubleshooting aid, ruled KEEP by Mason 2026-08-13; Accounts tab) ---
   // Lazy: the query pages the whole transactions table, so nothing is fetched
   // until the card is first expanded.
   const [covOpen,setCovOpen]=useState(false);
@@ -1660,15 +1671,12 @@ export default function Dashboard({ refreshTick = 0 }) {
   useEffect(()=>{
     async function load(){
       try {
-        const [c,n,cc,am,ae,ep,ri]=await Promise.all([
-          getSetting("dash:colors").catch(()=>null),
-          getSetting("dash:names").catch(()=>null),
-          getSetting("dash:cats").catch(()=>null),
-          getSetting("asst:model").catch(()=>null),
-          getSetting("asst:effort").catch(()=>null),
-          getEnvPace().catch(()=>({})),
-          getRecIgnore().catch(()=>[]),
-        ]);
+        // ONE batched settings read (getStartupSettings) replacing seven
+        // single-key queries — env:pace / rec:ignore arrive parsed by the
+        // adapters that own them, never inline here.
+        const {values:v,envPace:ep,recIgnore:ri}=await getStartupSettings(
+          ["dash:colors","dash:names","dash:cats","asst:model","asst:effort"]);
+        const c=v["dash:colors"],n=v["dash:names"],cc=v["dash:cats"],am=v["asst:model"],ae=v["asst:effort"];
         if(c)setCustomColors(JSON.parse(c));
         if(n)setCustomNames(JSON.parse(n));
         if(cc)setCustomCats(JSON.parse(cc));
@@ -1710,9 +1718,41 @@ export default function Dashboard({ refreshTick = 0 }) {
   const getColor=useCallback((cat)=>customColors[cat]||DEFAULT_COLORS[cat]||customCatColors[cat]||"#888780",[customColors,customCatColors]);
   const getName=useCallback((cat)=>customNames[cat]||cat,[customNames]);
 
-  async function saveColors(next){setCustomColors(next);try{await setSetting("dash:colors",JSON.stringify(next));}catch{}}
-  async function saveNames(next){setCustomNames(next);try{await setSetting("dash:names",JSON.stringify(next));}catch{}}
-  async function saveCats(next){setCustomCats(next);try{await setSetting("dash:cats",JSON.stringify(next));}catch{}}
+  // dash:colors / dash:names / dash:cats writes are serialized read-merge-
+  // writes in dataAdapter (the updateRecIgnore discipline): the merge runs
+  // against the STORED row, so the mount read degrading to []/{} above can
+  // never let a rebuilt-from-state value wipe the other phone's categories on
+  // the first edit. Optimistic with rollback + alert (the saveTaxMaps shape) —
+  // the old swallowed catch{} lost a just-created category while its taught
+  // rules persisted. Success adopts the merged stored value, which may carry
+  // entries the other phone added since mount.
+  // Known, accepted display race: the rollback base is render-closure state,
+  // so two same-render edits where the SECOND fails roll the display back
+  // past the FIRST's committed write. Server state stays correct (the chains
+  // serialize) and a reload heals the screen; the window needs two edits to
+  // land before a re-render, which these blur/tap-commit controls make
+  // near-impossible. A proper fix needs per-key functional rollback or a
+  // failure-path re-read — not worth it until the race is ever observed.
+  async function saveColor(cat,hex){
+    const prev=customColors;
+    setCustomColors({...prev,[cat]:hex});
+    try{setCustomColors(await updateCategoryColor(cat,hex));}
+    catch(err){
+      console.error("saving the category color failed",err);
+      setCustomColors(prev);
+      window.alert(`Couldn't save that color: ${err.message||err}`);
+    }
+  }
+  async function saveName(cat,alias){
+    const prev=customNames;
+    setCustomNames({...prev,[cat]:alias});
+    try{setCustomNames(await updateCategoryAlias(cat,alias));}
+    catch(err){
+      console.error("saving the category name failed",err);
+      setCustomNames(prev);
+      window.alert(`Couldn't save that name: ${err.message||err}`);
+    }
+  }
 
   // Adding a custom category seeds dash:colors too, so from creation onward one
   // store answers "what colour is this category" for built-in and custom alike
@@ -1726,24 +1766,52 @@ export default function Dashboard({ refreshTick = 0 }) {
     const p=(parent||"").trim();
     const entry={id:Date.now().toString(),name:n,color};
     if(p&&canSetParent(catIndex,n,p).ok)entry.parent=p;
-    await Promise.all([
-      customCatNames.includes(n)?Promise.resolve():saveCats([...customCats,entry]),
-      saveColors({...customColors,[n]:color}),
-    ]);
+    const prevCats=customCats,prevColors=customColors;
+    if(!customCatNames.includes(n))setCustomCats([...prevCats,entry]);
+    setCustomColors({...prevColors,[n]:color});
+    try{
+      // Two independent rows, each its own read-merge-write (addRegistryEntry
+      // dedups by name against the STORED registry, not this render's state).
+      const [cats,colors]=await Promise.all([
+        addRegistryEntry(entry),
+        updateCategoryColor(n,color),
+      ]);
+      setCustomCats(cats);setCustomColors(colors);
+    }catch(err){
+      console.error("adding the category failed",err);
+      setCustomCats(prevCats);setCustomColors(prevColors);
+      window.alert(`Couldn't save the new category: ${err.message||err}`);
+    }
   }
   // Change or remove a category's parent. Registry-only: no transaction, budget,
   // envelope, learned rule or tax mapping references the link, so removing one
   // re-flattens the display and moves not a single dollar. Guarded by the pure
   // canSetParent so the one-level rule can't be bypassed by a stale render.
-  function saveCatParent(name,parent){
+  async function saveCatParent(name,parent){
     if(!canSetParent(catIndex,name,parent||null).ok)return;
-    saveCats(setRegistryParent(customCats,name,parent||null));
+    const prev=customCats;
+    setCustomCats(setRegistryParent(prev,name,parent||null));
+    try{setCustomCats(await updateRegistryParent(name,parent||null));}
+    catch(err){
+      console.error("saving the category parent failed",err);
+      setCustomCats(prev);
+      window.alert(`Couldn't save that change: ${err.message||err}`);
+    }
   }
   // Retiring one only takes the name out of the pickers. Its colour, its target
   // and any transactions already filed under it are keyed by the NAME and stay
   // exactly where they are — re-adding the same name restores all of it, which
   // is why this needs no confirmation.
-  function removeCustomCat(id){saveCats(customCats.filter(c=>c.id!==id));}
+  async function removeCustomCat(id){
+    const prev=customCats;
+    setCustomCats(prev.filter(c=>c.id!==id));
+    try{setCustomCats(await removeRegistryEntry(id));}
+    catch(err){
+      console.error("retiring the category failed",err);
+      setCustomCats(prev);
+      window.alert(`Couldn't retire the category: ${err.message||err}`);
+    }
+  }
   function saveAsstModel(m){setAsstModel(m);setSetting("asst:model",m).catch(()=>{});}
   function saveAsstEffort(e){setAsstEffort(e);setSetting("asst:effort",e).catch(()=>{});}
 
@@ -1877,7 +1945,7 @@ export default function Dashboard({ refreshTick = 0 }) {
     // the one path that catches ANOTHER device's writes.
     const eseq=++envSeq.current;
     try{
-      const[ov,sp,tx,ac,bu,en,inc,ents]=await Promise.all([
+      const[ov,sp,tx,ac,bu,en,inc,ai,ents]=await Promise.all([
         cur?getOverview():Promise.resolve(null),
         getSpending({year:y,month:m}),
         getTransactions({year:y,month:m}),
@@ -1889,6 +1957,11 @@ export default function Dashboard({ refreshTick = 0 }) {
         // otherwise one flaky request would claim the migration never ran.
         getEnvelopes({year:y,month:m}).catch(e=>isEnvelopeSchemaMissing(e)?null:undefined),
         getBudgetIncome({year:y,month:m}).catch(()=>undefined),
+        // Measured income for the hybrid rule. A failure degrades to undefined
+        // (keep state — the month tag rejects a stale month, and the resolver
+        // falls back to manual), never an error: RTA must not blank on a
+        // hiccup in a read that only completed months even use.
+        getActualIncome({year:y,month:m}).catch(()=>undefined),
         // Eager because the transaction sheet and account sheet both offer the
         // entity picker; degrades to [] until the rental-tax migration lands
         // (inside getEntities) — undefined = transient failure, keep state.
@@ -1912,6 +1985,9 @@ export default function Dashboard({ refreshTick = 0 }) {
         if(en!==undefined)setEnvelopes(en);
         if(inc!==undefined)setIncome(inc);
       }
+      // Outside the eseq guard: envelope writes never move transactions, so a
+      // write completing mid-reload can't have made this snapshot stale.
+      if(ai!==undefined)setActualInc({y,m,amount:ai.amount,coverageStart:ai.coverageStart});
       setRecurring(null); // recompute lazily on next Recurring-tab visit
       setDebtData(null);  // same: refetch balances/liability fields on next Debt-tab visit
       setLastUpd(new Date());
@@ -1925,14 +2001,39 @@ export default function Dashboard({ refreshTick = 0 }) {
 
   const fetchData=useCallback(async(y,m,{sync=false}={})=>{
     setLoading(true);
-    if(sync){
-      try{ await runSync(); }
-      catch(err){ console.error("sync failed",err); setError("Bank sync failed. Showing cached data."); }
-    }
+    // First paint never waits for the feed: painting DB state immediately is
+    // already what happens on every sync failure and every other-device sync,
+    // and blocking the startup skeleton on the serverless round trip (hourly,
+    // the whole Bridge pull) bought nothing. The sync runs concurrently and
+    // ONE follow-up reload chains off its promise HERE — never a second
+    // setSyncCompletionHook: that slot is single and dataAdapter already
+    // holds it (cache invalidation).
+    const syncP=sync?runSync().catch(err=>{
+      console.error("sync failed",err);
+      setError("Bank sync failed. Showing cached data.");
+      return null;
+    }):null;
     const live=await reloadData(y,m);
     // Don't clear the spinner on behalf of a load that has been superseded —
     // the newer one is still running.
     if(live!==false)setLoading(false);
+    if(!syncP)return;
+    const res=await syncP;
+    // A failed pull painted its error above; a throttled pull (server ran
+    // within the hour) wrote nothing — vacuously, so did an empty results
+    // array (no access URL). Only a real pull earns the follow-up reload —
+    // EXCEPT on the explicit Refresh button (sync:"refresh"): its contract is
+    // a genuinely fresh read (the completion hook just dropped the caches),
+    // and skipping the follow-up there made a throttled Refresh serve the
+    // warm memo read from before the invalidation — stale exactly when the
+    // user asked for fresh. The follow-up reloads whatever month is on
+    // screen NOW (monthRef, not this call's y/m): the user can navigate
+    // while the pull runs, and a stale-month reload would mint the newest
+    // loadSeq and win.
+    const allThrottled=!res||(res.results||[]).every(r=>r?.skipped==="throttled");
+    if(allThrottled&&sync!=="refresh")return;
+    const[cy,cm]=monthRef.current.split("-").map(Number);
+    await reloadData(cy,cm);
   },[reloadData]);
 
   useEffect(()=>{
@@ -2307,6 +2408,13 @@ export default function Dashboard({ refreshTick = 0 }) {
     if(!(selTx||addingCat))return;
     const h=e=>{
       if(e.key!=="Escape")return;
+      // The receipt full-size viewer stacks over the tx sheet, and its own
+      // capture listener registered LATER — an earlier capture listener can't
+      // be stopped by a later one, so this handler must YIELD or one press
+      // closes the whole tx sheet under the viewer. The viewer marks itself
+      // with [data-mm-topmost] (ReceiptSection.jsx); the marker in the DOM
+      // means a topmost overlay owns this press.
+      if(document.querySelector("[data-mm-topmost]"))return;
       e.stopImmediatePropagation();
       if(addingCat)setAddingCat(false);
       else setSelTx(null);
@@ -2931,8 +3039,8 @@ export default function Dashboard({ refreshTick = 0 }) {
       ...(indent?{marginLeft:14,paddingLeft:10,borderLeft:"1px solid var(--border)"}:null)}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:5}}>
         <div style={{display:"flex",alignItems:"center",gap:8,flex:1,minWidth:0}}>
-          <Swatch color={getColor(c.label)} onChange={hex=>saveColors({...customColors,[c.label]:hex})}/>
-          <EditName name={getName(c.label)} onSave={v=>saveNames({...customNames,[c.label]:v})}/>
+          <Swatch color={getColor(c.label)} onChange={hex=>saveColor(c.label,hex)}/>
+          <EditName name={getName(c.label)} onSave={v=>saveName(c.label,v)}/>
           {note&&<span style={{fontSize:10,color:"var(--muted)",flexShrink:0}}>{note}</span>}
           <DrillNum onClick={openDrill(c.label)} title={`See the ${getName(c.label)} transactions`}
             style={{fontSize:11,color:"var(--muted)",flexShrink:0,marginLeft:4}}>
@@ -2958,7 +3066,7 @@ export default function Dashboard({ refreshTick = 0 }) {
       <div style={{display:"flex",alignItems:"center",gap:8}}>
         <div className="bar-bg"><div className="bar-fill" style={{width:barW+"%",background:barColor}}/></div>
         <span style={{fontSize:11,color:hasB&&ratio>=1?inkOn("#D85A30",surf.card):"var(--muted)",width:38,textAlign:"right",flexShrink:0}}>
-          {hasB?(lim>0?Math.round(ratio*100)+"%":"—"):`${c.percent_of_total?.toFixed(0)}%`}
+          {hasB?(lim>0?(ratio>9.99?">999%":Math.round(ratio*100)+"%"):"—"):`${c.percent_of_total?.toFixed(0)}%`}
         </span>
       </div>
       {c.label===UNCATEGORIZED&&(
@@ -3037,7 +3145,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                   <div key={r.category} style={{marginBottom:16,
                     ...(indent?{marginLeft:14,paddingLeft:10,borderLeft:"1px solid var(--border)"}:null)}}>
                     <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:5}}>
-                      <Swatch color={getColor(r.category)} onChange={hex=>saveColors({...customColors,[r.category]:hex})}/>
+                      <Swatch color={getColor(r.category)} onChange={hex=>saveColor(r.category,hex)}/>
                       <span style={{fontSize:13,fontWeight:500,color:"var(--text)",minWidth:0,overflow:"hidden",
                         textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{getName(r.category)}</span>
                       {note&&<span style={{fontSize:10,color:"var(--muted)",flexShrink:0}}>{note}</span>}
@@ -3053,7 +3161,11 @@ export default function Dashboard({ refreshTick = 0 }) {
                     <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:5}}>
                       <div className="bar-bg"><div className="bar-fill" style={{width:barW+"%",background:barColor}}/></div>
                       <span style={{fontSize:11,width:38,textAlign:"right",flexShrink:0,color:over?overCard:"var(--muted)"}}>
-                        {pot>0?Math.round(ratio*100)+"%":"—"}
+                        {/* Label clamped, bar already is: $129 spent against a
+                            $1 pot is honestly 12900%, but five digits overflow
+                            the 38px span and read as a glitch — the real
+                            amounts sit in the adjacent assigned/spent text. */}
+                        {pot>0?(ratio>9.99?">999%":Math.round(ratio*100)+"%"):"—"}
                       </span>
                     </div>
 
@@ -3100,22 +3212,30 @@ export default function Dashboard({ refreshTick = 0 }) {
                             color:cs.ink,background:cs.bg,flexShrink:0}}
                             title={`Spent ${fmtAuto(r.spent)} of the ${fmtAuto(r.assigned)} assigned, ahead of the ${Math.round(pace.elapsed*100)}% of the month elapsed`}>
                             ⏱ ahead of pace</span>);})()}
+                        {/* 32px hit floor on all three (⟳ is a settings WRITE —
+                            a fat-finger silently changes carry behavior). The
+                            -3px horizontal margins make adjacent hit boxes ABUT
+                            under the row's gap:6, never overlap; -10px vertical
+                            keeps the row's layout height (the :3905 recipe). */}
                         <button onClick={()=>togglePace(r.category)} disabled={envBusy}
                           title={paceOn
                             ?"Pace warning on — flags when spending runs ahead of the month. Tap to turn off"
                             :"Warn when this envelope is spending ahead of a flat month pace (best for fungible categories like groceries, not fixed bills)"}
-                          style={{background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",padding:"0 2px",
+                          style={{background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",padding:0,
+                            minWidth:32,minHeight:32,margin:"-10px -3px",display:"inline-flex",alignItems:"center",justifyContent:"center",
                             fontSize:13,lineHeight:1,color:paceOn?"var(--accent)":"var(--border)",flexShrink:0}}>⏱</button>
                         <button onClick={()=>setMoveFrom(r.category)} disabled={envBusy}
                           title="Move money between this envelope and another"
-                          style={{background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",padding:"0 2px",
+                          style={{background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",padding:0,
+                            minWidth:32,minHeight:32,margin:"-10px -3px",display:"inline-flex",alignItems:"center",justifyContent:"center",
                             fontSize:13,lineHeight:1,color:"var(--muted)",flexShrink:0}}>⇄</button>
                         <button onClick={()=>saveRollover(r.category,!r.rollover)}
                           disabled={envBusy||(r.targetKind==="by_date"&&r.target!=null)}
                           title={r.targetKind==="by_date"&&r.target!=null
                             ?"A sinking fund only reaches its date because leftovers carry — rollover stays on while the by-date target exists"
                             :r.rollover?"Leftover rolls into next month — tap to turn off":"Leftover resets each month — tap to roll it over"}
-                          style={{background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",padding:"0 2px",
+                          style={{background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",padding:0,
+                            minWidth:32,minHeight:32,margin:"-10px -3px",display:"inline-flex",alignItems:"center",justifyContent:"center",
                             fontSize:13,lineHeight:1,color:r.rollover?"var(--accent)":"var(--border)",flexShrink:0}}>⟳</button>
                       </div>
                     ):(
@@ -3156,16 +3276,26 @@ export default function Dashboard({ refreshTick = 0 }) {
   const assignableRows=budgetableRows.filter(r=>!isParentCat(r.category));
   const fundNeeds=assignableRows.map(r=>({row:r,need:targetNeed(r,{year,month})})).filter(x=>x.need>0);
   const fundTotal=fundNeeds.reduce((s,x)=>s+x.need,0);
-  const rta=envelopes?readyToAssign(income?.income,envelopes.totals):null;
   // "Fill from ⟨prev month⟩" — the auto-fill's source month and its label.
   const prevYM=month===1?{y:year-1,m:12}:{y:year,m:month-1};
   const prevMonthName=new Date(prevYM.y,prevYM.m-1,1).toLocaleString("default",{month:"long"});
   const monShort=new Date(year,month-1,1).toLocaleString("default",{month:"short"});
-  // Wall-clock local day for the pace warning — the SAME reasoning as the
-  // Recurring tab's clock: "is this envelope spending ahead of pace?" is a
-  // question about the present moment, so it uses today, not the viewed month
+  // Wall-clock local day for the pace warning AND the hybrid income rule —
+  // the SAME reasoning as the Recurring tab's clock: "is this envelope
+  // spending ahead of pace?" and "is this month over?" are questions about
+  // the present moment, so they use today, not the viewed month
   // (envelopePace returns null unless today falls inside the viewed month).
   const paceToday=(()=>{const d=new Date();return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;})();
+  // Which income figure this month runs on (the hybrid rule, Mason 2026-08-13):
+  // the month in progress budgets on the TYPED figure; a completed month reads
+  // ACTUAL measured income. The month tag on actualInc rejects a stale month's
+  // measurement; the resolver falls back to manual when there's no usable
+  // actual (uncovered history, failed read) rather than blanking RTA.
+  const actualForMonth=actualInc&&actualInc.y===year&&actualInc.m===month?actualInc:null;
+  const incomeResolved=resolveBudgetIncome({year,month,todayKey:paceToday,
+    manual:income?.income??null,actual:actualForMonth?.amount??null,
+    coverageStart:actualForMonth?.coverageStart??null});
+  const rta=envelopes?readyToAssign(incomeResolved.amount,envelopes.totals):null;
   // --- Expected transactions, DISPLAY-ONLY derivations (the envelopePace
   // contract: none of this ever feeds the walk, available, or any total).
   // Shown in the viewed month: pending rows due that month, plus — only when
@@ -3354,7 +3484,7 @@ export default function Dashboard({ refreshTick = 0 }) {
               <span aria-hidden="true" style={{fontSize:14,lineHeight:1}}>{themeUi.icon}</span>
               {themeUi.label}
             </button>
-            <button className="ibtn" onClick={()=>fetchData(year,month,{sync:true})} disabled={loading} style={{padding:"0 12px"}}>
+            <button className="ibtn" onClick={()=>fetchData(year,month,{sync:"refresh"})} disabled={loading} style={{padding:"0 12px"}}>
               <span style={{display:"inline-block",animation:loading?"spin 1s linear infinite":"none"}}>↻</span>
               {lastUpd?lastUpd.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}):"Refresh"}
             </button>
@@ -3393,8 +3523,12 @@ export default function Dashboard({ refreshTick = 0 }) {
                 :<>Bank feed hasn't updated since {new Date(feedHealth.last_pulled_at).toLocaleDateString([],{month:"short",day:"numeric"})}.</>}
               {" "}<button onClick={()=>setConnectingSfin(true)} style={{background:"none",border:"none",padding:0,font:"inherit",color:"inherit",textDecoration:"underline",cursor:"pointer"}}>Check connection</button>
             </div>
+            {/* 32px hit box (the :3905 recipe); -6px vertical keeps the glyph on
+                the first text line and the banner height unchanged, -8px eats
+                the gap:8 without reaching the Check-connection text. */}
             <button onClick={()=>setFeedHealth(null)} aria-label="Dismiss" title="Dismiss"
-              style={{background:"none",border:"none",cursor:"pointer",color:"inherit",fontSize:18,lineHeight:1,padding:"0 2px",flexShrink:0}}>×</button>
+              style={{background:"none",border:"none",cursor:"pointer",color:"inherit",fontSize:18,lineHeight:1,padding:0,
+                minWidth:32,minHeight:32,margin:"-6px -8px",display:"inline-flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>×</button>
           </div>
         )}
 
@@ -3427,7 +3561,10 @@ export default function Dashboard({ refreshTick = 0 }) {
             {label:"Card balance",val:loading?null:fmt(balance),sub:tileAcct?.name||"Linked account",cycle:!loading&&creditAccts.length>1},
             {label:"vs last month",val:loading||delta==null?null:`${delta>=0?"+":""}${fmt(delta)}`,sub:delta==null?"—":delta>=0?"↑ more spending":"↓ less spending",clr:delta==null?"var(--muted)":inkOn(delta>=0?"#D85A30":"#1D9E75",surf.card)},
           ].map((c,i)=>(
-            <div key={i} className="card" style={{animationDelay:i*.04+"s",...(c.cycle?{cursor:"pointer",userSelect:"none"}:{})}}
+            /* minWidth:0 — grid items default to min-width:auto, so the nowrap
+               sub lines inflate the 1fr tracks past the viewport (the page
+               scrolled sideways ~11px). 0 lets the ellipsis engage instead. */
+            <div key={i} className="card" style={{minWidth:0,animationDelay:i*.04+"s",...(c.cycle?{cursor:"pointer",userSelect:"none"}:{})}}
               onClick={c.cycle?()=>cycleCard(1):undefined}
               onTouchStart={c.cycle?(e)=>{const t=e.touches[0];cardSwipe.current={x:t.clientX,y:t.clientY};}:undefined}
               onTouchEnd={c.cycle?(e)=>{
@@ -3569,8 +3706,8 @@ export default function Dashboard({ refreshTick = 0 }) {
                 <div key={g.name} style={{marginBottom:14,animationDelay:gi*.03+"s"}}>
                   <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:5}}>
                     <div style={{display:"flex",alignItems:"center",gap:8,flex:1,minWidth:0}}>
-                      <Swatch color={getColor(g.name)} onChange={hex=>saveColors({...customColors,[g.name]:hex})}/>
-                      <EditName name={getName(g.name)} onSave={v=>saveNames({...customNames,[g.name]:v})}/>
+                      <Swatch color={getColor(g.name)} onChange={hex=>saveColor(g.name,hex)}/>
+                      <EditName name={getName(g.name)} onSave={v=>saveName(g.name,v)}/>
                       <span style={{fontSize:10,color:"var(--muted)",flexShrink:0}}>
                         {kids.length} subcategor{kids.length!==1?"ies":"y"}
                       </span>
@@ -3737,11 +3874,26 @@ export default function Dashboard({ refreshTick = 0 }) {
                 </div>
               )}
 
-              {/* Ready to Assign — rule 1, on hand-entered income. */}
+              {/* Ready to Assign — rule 1, on the hybrid income (typed for the
+                  month in progress, measured for a completed month). */}
               <div style={{background:"var(--bg)",borderRadius:10,padding:"12px 14px",marginBottom:14}}>
                 <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",fontSize:12,marginBottom:8}}>
                   <span style={{color:"var(--muted)"}}>Income</span>
-                  <IncomeEdit value={income?.income} isDefault={!!income?.isDefault} onSave={saveIncome}/>
+                  {incomeResolved.source==="actual"?(
+                    /* A completed month is read-only: the measured figure drives
+                       RTA, so offering the editor here would be a trap — an
+                       edit that visibly changes nothing. The typed plan stays
+                       visible beside it so the switchover is never silent. */
+                    <span title="Actual income for this completed month — money into your checking and savings from outside your linked accounts"
+                      style={{display:"inline-flex",alignItems:"baseline",gap:5}}>
+                      <span style={{fontSize:13,fontWeight:600,color:"var(--text)",fontFamily:"'DM Mono',monospace"}}>{fmtAuto(incomeResolved.actual)}</span>
+                      <span style={{fontSize:10,fontWeight:500,color:"var(--muted)"}}>
+                        actual{incomeResolved.manual!=null?` · planned ${fmtAuto(incomeResolved.manual)}`:""}
+                      </span>
+                    </span>
+                  ):(
+                    <IncomeEdit value={income?.income} isDefault={!!income?.isDefault} onSave={saveIncome}/>
+                  )}
                   <span style={{flex:1}}/>
                   <span style={{color:"var(--muted)"}}>Assigned <strong style={MONO}>{fmtAuto(envelopes.totals.assigned)}</strong></span>
                 </div>
@@ -3755,11 +3907,23 @@ export default function Dashboard({ refreshTick = 0 }) {
                   </div>
                 ):(
                   <div style={{fontSize:11,color:"var(--muted)",lineHeight:1.5}}>
-                    Set your income for the month to see what's left to assign. It's typed in by hand —
-                    the feed can't be trusted to see every paycheck, and a budget built on a partial
-                    number would silently run low.
+                    Set your income for the month to see what's left to assign. The month in progress
+                    is typed in by hand — its paychecks haven't all landed yet, so a measured number
+                    would run low exactly while you're budgeting against it. Once a month is over it
+                    switches to actual income from your accounts automatically.
                   </div>
                 )}
+                {/* The walk's own total Available — how much budgeted money is
+                    sitting in envelopes right now. A DIFFERENT number from RTA
+                    (income − assigned), and it covers BUDGETED envelopes only:
+                    walkEnvelopes' totals filter excludes the read-only
+                    unbudgeted rows (Uncategorized), so this deliberately does
+                    not sum against every row below — the label says so. */}
+                <div style={{marginTop:8,fontSize:11,color:"var(--muted)"}}>
+                  <strong style={{...MONO,color:envelopes.totals.available<0?overBg:MONO.color}}>{fmtAuto(envelopes.totals.available)}</strong>
+                  {" "}sitting in budgeted envelopes
+                  {envelopes.totals.target>0&&<> · spent <strong style={MONO}>{fmtAuto(envelopes.totals.spent)}</strong> of <strong style={MONO}>{fmtAuto(envelopes.totals.target)}</strong> targeted</>}
+                </div>
                 {fundNeeds.length>0&&(
                   <button className="ibtn" disabled={envBusy}
                     onClick={()=>runEnvelopeWrite("the targets",()=>fundTargets(
@@ -3962,7 +4126,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                       No assign editor, no target button, no move destination:
                       one owner per dollar (see the envGroups comment). */}
                   <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
-                    <Swatch color={getColor(g.name)} onChange={hex=>saveColors({...customColors,[g.name]:hex})}/>
+                    <Swatch color={getColor(g.name)} onChange={hex=>saveColor(g.name,hex)}/>
                     <span style={{fontSize:13,fontWeight:600,color:"var(--text)",minWidth:0,overflow:"hidden",
                       textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{getName(g.name)}</span>
                     <span style={{fontSize:10,color:"var(--muted)",flexShrink:0}}>rollup</span>
@@ -4001,7 +4165,8 @@ export default function Dashboard({ refreshTick = 0 }) {
                       <span style={{color:g.own.available<0?overCard:"var(--muted)"}}>{fmtAuto(g.own.available)} available</span>
                       <button onClick={()=>setMoveFrom(g.name)} disabled={envBusy}
                         title="Move this money into one of the subcategories"
-                        style={{background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",padding:"0 2px",
+                        style={{background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",padding:0,
+                          minWidth:32,minHeight:32,margin:"-10px -3px",display:"inline-flex",alignItems:"center",justifyContent:"center",
                           fontSize:13,lineHeight:1,color:"var(--muted)",flexShrink:0}}>⇄</button>
                       <span style={{width:"100%",fontSize:10,lineHeight:1.5}}>
                         A category with subcategories takes no new assignment — assign in the subcategories, or
@@ -4301,13 +4466,13 @@ export default function Dashboard({ refreshTick = 0 }) {
                   hunting a statement that has nothing on it. */}
               Nothing is wrong with the connection — the feed just doesn't reach further back.
               If the account is older than that, import a CSV or PDF statement to fill its history in.
-              {feedGaps.truncated&&" (Only the first 25 fed accounts were checked.)"}
+              {feedGaps.truncated&&` (Only the first ${FEED_GAP_SCAN_CAP} fed accounts were checked.)`}
             </div>
           </div>
         )}
 
-        {/* DATA COVERAGE — TEMPORARY troubleshooting aid (may be hidden or
-            removed later): per-account first/last tx date, row count and
+        {/* DATA COVERAGE — troubleshooting aid, ruled KEEP by Mason 2026-08-13
+            (revisit only if he asks): per-account first/last tx date, row count and
             source breakdown, so "what history does the app actually hold?"
             has an answer on screen. Collapsed by default; the whole-table
             scan only runs on first expand. Hidden accounts included on
@@ -4351,7 +4516,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                   <div style={{fontSize:12,color:"var(--muted)"}}>No accounts.</div>
                 )}
                 <div style={{marginTop:8,fontSize:10,color:"var(--muted)"}}>
-                  Temporary troubleshooting view — counts every stored row per account by feed source.
+                  Troubleshooting view — counts every stored row per account by feed source.
                 </div>
               </div>
             )}
@@ -4435,7 +4600,12 @@ export default function Dashboard({ refreshTick = 0 }) {
                 </div>
                 {selAcct.type==="depository"&&(
                   <div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:8}}>
-                    {["checking","savings"].map(st=>{
+                    {/* Both this list and ACCOUNT_TYPES above are OWNED BY
+                        dataAdapter.js — updateAccount validates writes against
+                        the same constants, so re-inlining either array here
+                        would let the picker offer (or stop offering) a value
+                        the writer disagrees with. */}
+                    {ACCOUNT_SUBTYPES.map(st=>{
                       const active=(selAcct.subtype==="savings"?"savings":"checking")===st;
                       const cs=active?chipOn(TYPE_CHIP,surf.bg):null;
                       return (
@@ -4738,8 +4908,15 @@ export default function Dashboard({ refreshTick = 0 }) {
                       </div>
                     ))}
                   </div>
-                  <div style={{fontSize:11,color:"var(--muted)"}}>
-                    {plan.perDebt.filter(d=>d.months!=null).map(d=>`${d.name||"?"} clears month ${d.months}`).join(" · ")}
+                  {/* Same month conversion as debtFreeMonth (addMonths from
+                      startMonth), so the LAST debt here always reads the same
+                      month as the Debt-free tile above. perDebt[].interest is
+                      the per-debt share of totalInterest — the number that
+                      explains why avalanche beats snowball. */}
+                  <div style={{fontSize:11,color:"var(--muted)",lineHeight:1.7}}>
+                    {plan.perDebt.filter(d=>d.months!=null).map(d=>(
+                      <div key={d.id}>{d.name||"?"} clears {monthYear(addMonths(startMonth,d.months))} · {fmtAuto(d.interest)} interest</div>
+                    ))}
                   </div>
                 </>
               )}

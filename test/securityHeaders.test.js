@@ -96,6 +96,22 @@ test('companion headers present', () => {
   assert.ok(get('Permissions-Policy'), 'Permissions-Policy must exist');
 });
 
+test('vercel.json carries ONLY known top-level keys', () => {
+  // Vercel REJECTS unknown top-level keys: schema validation fails the
+  // deployment BEFORE it builds, while the site silently keeps serving the
+  // previous deploy — and nothing local validates the schema (PR #45's
+  // underscore-prefixed derivation key shipped exactly that way).
+  // Documentation about the config goes in docs/, never inside it; a new
+  // legitimate key is added to this allowlist in the same PR that adds it
+  // to vercel.json.
+  assert.deepEqual(Object.keys(config).sort(), [
+    'buildCommand',
+    'headers',
+    'outputDirectory',
+    'rewrites',
+  ]);
+});
+
 test('adding headers did not disturb the SPA rewrite or build config', () => {
   assert.equal(config.outputDirectory, 'dist');
   assert.deepEqual(config.rewrites, [

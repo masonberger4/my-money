@@ -3,7 +3,12 @@
 // exactly how this file failed its own first CI run.
 import { toTxShape, spendingGroups, biggestMovers } from '../../../src/spending.js';
 import { markInternalTransfers } from '../../../src/cashFlow.js';
-export { targetNeed, readyToAssign, envelopePace, monthKey, effectiveTarget } from '../../../src/envelopes.js';
+import { setRegistryParent } from '../../../src/categoryTree.js';
+// The aliased settings store — the registry updaters below read-merge-write
+// the same rows Dashboard's mount reads hit, so the adopt-merged-value path
+// renders honestly.
+import { getSetting, setSetting } from './db.js';
+export { targetNeed, readyToAssign, envelopePace, monthKey, effectiveTarget, resolveBudgetIncome } from '../../../src/envelopes.js';
 import { walkEnvelopes } from '../../../src/envelopes.js';
 import { normalizeMerchant } from '../../../src/recurring.js';
 export const ACCOUNT_TYPES = ['depository', 'credit', 'loan'];
@@ -228,10 +233,36 @@ export async function deleteSavedChat(id) {
   SAVED_CHATS = SAVED_CHATS.filter(c => c.id !== id);
   return getSavedChats();
 }
+// --- Category-registry rows (dash:cats / dash:colors / dash:names) ----------
+// Read-merge-write against the settings store, resolving with the merged
+// value — the real adapter's contract (src/adapters/settingsIO.js).
+async function mergeSettingRow(key, empty, merge) {
+  let cur = empty;
+  const raw = await getSetting(key);
+  if (raw) { try { cur = JSON.parse(raw); } catch { /* corrupt row reads empty */ } }
+  const next = merge(cur);
+  await setSetting(key, JSON.stringify(next));
+  return next;
+}
+export const addRegistryEntry = entry => mergeSettingRow('dash:cats', [], cur =>
+  cur.some(c => (c?.name || '').trim() === (entry?.name || '').trim()) ? cur : [...cur, entry]);
+export const updateRegistryParent = (name, parent) =>
+  mergeSettingRow('dash:cats', [], cur => setRegistryParent(cur, name, parent));
+export const removeRegistryEntry = id =>
+  mergeSettingRow('dash:cats', [], cur => cur.filter(c => c?.id !== id));
+export const updateCategoryColor = (cat, color) =>
+  mergeSettingRow('dash:colors', {}, cur => ({ ...cur, [cat]: color }));
+export const updateCategoryAlias = (cat, alias) =>
+  mergeSettingRow('dash:names', {}, cur => ({ ...cur, [cat]: alias }));
+export const FEED_GAP_SCAN_CAP = 25;
 export function isManualAccount(a) { return !!a?.is_manual; }
 export function isSimpleFinAccount(a) { return String(a?.plaid_account_id || '').startsWith('sfin:'); }
 export async function setCategoryRule() {}
-export async function applyCategoryRuleToHistory() { return { matched: 0, updated: 0 }; }
+// Returns a COUNT — the real adapter returns matches.length (a number the
+// learn-confirm renders as "updates N past transactions"). The first version
+// of this mock returned an object, so the render gate exercised a state the
+// real app can never produce.
+export async function applyCategoryRuleToHistory() { return 0; }
 export async function getCategoryRules() { return []; }
 
 // --- taught-rules screen (RulesSheet) ---------------------------------------
@@ -242,6 +273,12 @@ let RULES = [
   { merchant_key: 'SHELL OIL', category: 'Vehicle expenses', source: 'user', updated_at: '2026-07-22T07:55:00Z' },
   { merchant_key: 'NEIGHBORHOOD HVAC CO', category: 'Home maintenance and improvement', source: 'import', updated_at: '2026-07-19T16:30:00Z' },
   { merchant_key: 'PUGET SOUND ENERGY', category: 'Utilities', source: 'user', updated_at: '2026-06-30T11:02:00Z' },
+  // Amount-scoped rule (amount non-null): RulesSheet keys rows on the
+  // (merchant_key, amount) PAIR and renders the amount as part of the rule's
+  // identity — without one in the fixture that whole path never renders in
+  // the gate.
+  { merchant_key: 'ZELLE TRANSFER', category: 'Rent', amount: 1800, source: 'user', updated_at: '2026-08-06T08:00:00Z' },
+  { merchant_key: 'ZELLE TRANSFER', category: 'Gifts', amount: null, source: 'user', updated_at: '2026-08-06T08:01:00Z' },
 ];
 export async function listCategoryRules() {
   await new Promise(r => setTimeout(r, 120));
@@ -289,12 +326,25 @@ export async function setCategoryRollover() {}
 export async function setTargetKind() {}
 export async function fundTargets() {}
 export async function moveMoney() {}
-export async function getBudgetIncome() { return 6200; }
+// The real adapter's shape ({income, isDefault, monthlyDefault}), so the
+// Budget header renders the typed figure instead of "＋ set income".
+export async function getBudgetIncome() { return { income: 6200, isDefault: true, monthlyDefault: 6200 }; }
 export async function setBudgetIncome() {}
+// The hybrid income rule's measured half. The render gate views the current
+// month, so the resolver picks manual and this value is never painted — it
+// exists so the read resolves without error.
+export async function getActualIncome() { return { amount: 5400, coverageStart: '2026-01-09' }; }
 export function invalidateEnvelopeSpending() {}
 export function isEnvelopeSchemaMissing() { return false; }
 export async function getEnvPace() { return false; }
 export async function setEnvPace() {}
+// Startup batch (the façade shape: raw Dashboard-owned rows in `values`, the
+// two adapter-owned rows parsed).
+export async function getStartupSettings(keys) {
+  const values = {};
+  for (const k of keys || []) values[k] = await getSetting(k);
+  return { values, envPace: await getEnvPace(), recIgnore: await getRecIgnore() };
+}
 // --- Tax tab (post-wipe) ----------------------------------------------------
 // A rental property whose whole year is now Uncategorized: the Schedule E
 // picker below it can offer nothing (isBudgetableCategory filters the

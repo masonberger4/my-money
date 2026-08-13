@@ -1,4 +1,4 @@
-# Supabase CLI config — FRESH INSTALLS ONLY, AND NOT YET REHEARSED.
+# Supabase CLI config — FRESH INSTALLS ONLY.
 #
 # This file exists so that a brand-new Supabase project can be built by
 # replaying `supabase/migrations/` with the CLI:
@@ -7,11 +7,18 @@
 #   supabase db push
 #   # then paste supabase/bootstrap_household.sql in the SQL Editor
 #
-# STATUS: the 18-file replay has never been run end-to-end against an empty
-# database. Until someone does it once on a throwaway project, the verified
-# install path is the SQL Editor paste (docs/SETUP.md Path B). Treat an error
-# during `db push` as the expected outcome of an unrehearsed path, not as
-# evidence your project is broken — fall back to Path B.
+# STATUS: partially rehearsed (2026-08-11). The 18-file replay was run with
+# the real CLI (`supabase db push --db-url …`, v2.113.0) against a throwaway
+# empty local PG16 cluster carrying the platform stub the RLS harness uses
+# (test/fixtures/rls_stub.sql — roles, auth schema, minimal storage): all 18
+# applied cleanly and supabase_migrations.schema_migrations held all 18 rows.
+# So the migrations themselves and the CLI's ordering/runner are proven.
+# STILL UNREHEARSED: `supabase link` + push against a HOSTED project — real
+# PG17, the real auth/storage schemas (the stub is not GoTrue/storage-api),
+# platform grants. Until someone runs that once on a throwaway hosted project,
+# the verified install path remains the SQL Editor paste (docs/SETUP.md
+# Path B) — an error in the hosted half is the expected outcome of the
+# unrehearsed remainder, not evidence your project is broken.
 #
 # DO NOT link the LIVE household project. Migrations on prod are pasted by
 # hand into the Supabase SQL Editor, in the order (and sometimes the inverted

@@ -43,9 +43,9 @@ Steps 1–2 are shared by both paths. Then pick **Path A** (Supabase CLI) or **P
 
    While you're there, **disable public signups** (Authentication → Sign In/Up → Email → turn off signups). Nothing in the app uses them, the publishable key in the deployed bundle would otherwise let anyone mint auth users via the API, and the bootstrap binds the household to the *first* auth user by creation time — a stray signup could claim that slot on a re-run.
 
-### Path A — Supabase CLI (PENDING REHEARSAL — prefer Path B today)
+### Path A — Supabase CLI (PARTIALLY REHEARSED — Path B stays the verified path)
 
-> **Not yet rehearsed.** Nobody has replayed all 18 migrations end-to-end on an empty database via `db push`. The migration files are append-only history and are CLI-compatible by filename, but until someone has done a clean run, treat this path as unproven. **If you want the path that is known to work, use Path B.** Fall back to it if anything here errors.
+> **Partially rehearsed (2026-08-12).** The real `supabase db push --db-url` has replayed all 18 migrations cleanly on a throwaway LOCAL Postgres 16 cluster (with the `test/fixtures/rls_stub.sql` prerequisites in place) — the migration files and the CLI runner are proven. What has NOT been rehearsed: `supabase link` against a hosted project, and hosted Postgres 17 with the real auth/storage schemas. **If you want the path that is known to work end-to-end, use Path B.** Fall back to it if anything here errors.
 
 This is the direction the project is moving — `supabase/migrations/` is the source of truth, so replaying it is the honest fresh install, and it needs no hand-pasted tail. It becomes the default once someone rehearses it on a throwaway project.
 

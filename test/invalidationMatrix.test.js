@@ -72,7 +72,7 @@ test('invalidateEnvelopeSpending is the ONE invalidator: no bare rangeMemo.clear
   assert.equal(clears.length, 1, 'rangeMemo.clear() may appear only inside invalidateEnvelopeSpending');
   const invalidator = stripComments(exportedFunction(adapter, 'invalidateEnvelopeSpending'));
   assert.ok(invalidator.includes('rangeMemo.clear()'), 'the one clear() lives in the invalidator');
-  assert.ok(invalidator.includes('spendCache = null'), 'the invalidator drops the spend sums');
+  assert.ok(invalidator.includes('spendCache.clear()'), 'the invalidator drops the spend sums (the whole range-keyed Map)');
   assert.ok(invalidator.includes('spendGen++'), 'the invalidator bumps the generation (in-flight fetch guard)');
 });
 

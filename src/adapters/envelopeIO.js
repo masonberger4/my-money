@@ -120,11 +120,15 @@ export function isMissingOverrideColumnError(error) {
   return blob.includes('target_override');
 }
 
-// Household income for a month, for Ready to Assign. Hand-entered: the feed
-// still cannot be trusted for take-home pay (SimpleFIN only syncs what is
-// linked and unhidden, and a missed paycheck would silently read as less to
-// budget). `budget:income` is the recurring default; `budget:income:YYYY-MM`
-// overrides one month. Both live in `settings`, so this needs no migration.
+// The MANUAL household income for a month. Since the hybrid income rule
+// (Mason, 2026-08-13 — resolveBudgetIncome in src/envelopes.js) this figure
+// drives Ready to Assign only for the month in progress and future months —
+// their paychecks haven't all landed, so a measured number would read low
+// exactly while it's being budgeted against. A completed month reads ACTUAL
+// income from the ledger instead (getActualIncome in dataAdapter.js); the
+// typed figure survives as the plan. `budget:income` is the recurring
+// default; `budget:income:YYYY-MM` overrides one month. Both live in
+// `settings`, so this needed no migration.
 const INCOME_KEY = 'budget:income';
 
 export async function getBudgetIncome({ year, month }) {
@@ -165,10 +169,14 @@ export async function setBudgetIncome({ year, month }, amount, { scope = 'month'
 // budgets column would need a migration and this is a pure display preference.
 // Default OFF for every category (absent key ⇒ {}), so a fixed bill that spends
 // 100% on day 1 never false-alarms; opting in is a deliberate per-envelope act.
-const ENV_PACE_KEY = 'env:pace';
+// Key + parse exported for the startup batch read (getStartupSettings in
+// dataAdapter.js) — the parse rule lives beside its writer, never inline in a
+// component.
+export const ENV_PACE_KEY = 'env:pace';
 
-export async function getEnvPace() {
-  const value = await getSetting(ENV_PACE_KEY);
+// Tolerant parse (the parseIgnoreList idiom): a corrupt or absent row reads
+// as {} — every category defaults to opted-out.
+export function parseEnvPace(value) {
   if (value == null || String(value).trim() === '') return {};
   try {
     const parsed = JSON.parse(value);
@@ -176,6 +184,10 @@ export async function getEnvPace() {
   } catch {
     return {};
   }
+}
+
+export async function getEnvPace() {
+  return parseEnvPace(await getSetting(ENV_PACE_KEY));
 }
 
 export async function setEnvPace(map) {

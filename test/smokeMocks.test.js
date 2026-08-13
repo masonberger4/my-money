@@ -63,6 +63,10 @@ for (const [suffix, mockPath] of [
   ['db.js', './smoke/mocks/db.js'],
   ['sync.js', './smoke/mocks/sync.js'],
   ['apiClient.js', './smoke/mocks/apiClient.js'],
+  // Fifth aliased module (2026-08-12): App.jsx's direct supabaseClient import,
+  // mocked so the render gate mounts the real App. The named-import scan below
+  // covers `supabase`/`configError`/`getAccessToken` the same as any other.
+  ['supabaseClient.js', './smoke/mocks/supabaseClient.js'],
 ]) {
   test(`smoke harness mock covers every ${suffix} export src/ imports`, () => {
     const wanted = [...new Set(importedNames(sources, suffix))];
@@ -84,7 +88,8 @@ for (const [suffix, mockPath] of [
 // and the render check fails with a stack trace nobody wants to read twice.
 test('the smoke harness contains no machine-absolute imports', () => {
   const files = ['./smoke/mocks/dataAdapter.js', './smoke/mocks/db.js', './smoke/mocks/sync.js',
-    './smoke/mocks/apiClient.js', './smoke/main.jsx', './smoke/vite.config.js', './smoke/render.mjs'];
+    './smoke/mocks/apiClient.js', './smoke/mocks/supabaseClient.js',
+    './smoke/main.jsx', './smoke/vite.config.js', './smoke/render.mjs'];
   const offenders = [];
   for (const f of files) {
     for (const m of read(f).matchAll(/from\s*['"](\/[^'"]+)['"]/g)) offenders.push(`${f}: ${m[1]}`);
