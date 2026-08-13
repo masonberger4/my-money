@@ -1434,7 +1434,7 @@ export default function Dashboard({ refreshTick = 0 }) {
   const [expDismissId,setExpDismissId]=useState(null); // expectation id whose skip/stop confirm is open (recurring cadences only)
   // "Fill from ⟨prev month⟩" inline confirm: null (idle) | "loading" | {plan}.
   const [fillPlan,setFillPlan]=useState(null);
-  // --- Data coverage panel (TEMPORARY troubleshooting aid; Accounts tab) ---
+  // --- Data coverage panel (troubleshooting aid, ruled KEEP by Mason 2026-08-13; Accounts tab) ---
   // Lazy: the query pages the whole transactions table, so nothing is fetched
   // until the card is first expanded.
   const [covOpen,setCovOpen]=useState(false);
@@ -4471,8 +4471,8 @@ export default function Dashboard({ refreshTick = 0 }) {
           </div>
         )}
 
-        {/* DATA COVERAGE — TEMPORARY troubleshooting aid (may be hidden or
-            removed later): per-account first/last tx date, row count and
+        {/* DATA COVERAGE — troubleshooting aid, ruled KEEP by Mason 2026-08-13
+            (revisit only if he asks): per-account first/last tx date, row count and
             source breakdown, so "what history does the app actually hold?"
             has an answer on screen. Collapsed by default; the whole-table
             scan only runs on first expand. Hidden accounts included on
@@ -4516,7 +4516,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                   <div style={{fontSize:12,color:"var(--muted)"}}>No accounts.</div>
                 )}
                 <div style={{marginTop:8,fontSize:10,color:"var(--muted)"}}>
-                  Temporary troubleshooting view — counts every stored row per account by feed source.
+                  Troubleshooting view — counts every stored row per account by feed source.
                 </div>
               </div>
             )}

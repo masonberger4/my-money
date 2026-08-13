@@ -1600,8 +1600,8 @@ export async function getReceiptTxIds() {
   return ids;
 }
 
-// TEMPORARY TROUBLESHOOTING AID (see src/coverage.js) — per-account transaction
-// coverage for the Accounts tab's "Data coverage" panel. Pages the WHOLE
+// Troubleshooting aid, ruled KEEP by Mason 2026-08-13 (see src/coverage.js) —
+// per-account transaction coverage for the Accounts tab's "Data coverage" panel. Pages the WHOLE
 // transactions table (account_id/date/source only), so callers should fetch
 // lazily — Dashboard loads it only when the panel is first expanded.
 // Return shape (stable): { [account_id]: { first: 'YYYY-MM-DD'|null,

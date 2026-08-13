@@ -1,7 +1,8 @@
-// TEMPORARY TROUBLESHOOTING AID — powers the Accounts tab's "Data coverage"
-// panel so we can see, per account, what history the app actually holds
-// (first/last tx date, row count, per-source breakdown). May be hidden or
-// removed once the coverage questions are settled. Pure, zero imports.
+// TROUBLESHOOTING AID — powers the Accounts tab's "Data coverage" panel so we
+// can see, per account, what history the app actually holds (first/last tx
+// date, row count, per-source breakdown). Shipped TEMPORARY; ruled KEEP by
+// Mason 2026-08-13 ("i kinda like it") — revisit only if he asks (removal
+// recipe: the plan doc's item 5). Pure, zero imports.
 //
 // aggregateCoverage(rows): rows are [{account_id, date, source}] in any order.
 // Returns a plain object keyed by account_id:
@@ -30,8 +31,9 @@ export function aggregateCoverage(rows) {
 }
 
 // ---------------------------------------------------------------------------
-// Feed reach / coverage shortfall — NOT temporary, unlike aggregateCoverage
-// above. This is the tell for history the SimpleFIN feed can never fetch.
+// Feed reach / coverage shortfall — permanent from the day it shipped (and
+// since 2026-08-13 the panel above is kept too). This is the tell for history
+// the SimpleFIN feed can never fetch.
 //
 // THE ONE COPY of the feed's reach. api/_lib/simplefin.js imports it as the
 // default for MAX_LOOKBACK_DAYS (the api → src direction is the established
