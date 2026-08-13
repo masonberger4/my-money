@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from "react";
-import { getOverview, getSpending, getBiggestMovers, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES, ACCOUNT_SUBTYPES, setCategoryRule, applyCategoryRuleToHistory, listCategoryRules, countCategoryRuleMatches, deleteCategoryRule, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, invalidateEnvelopeSpending, isEnvelopeSchemaMissing, targetNeed, readyToAssign, envelopePace, setEnvPace as persistEnvPace, updateRecIgnore, getStartupSettings, monthKey, getEntities, createEntity, updateEntity, getTaxYearTransactions, getMileage, addMileage, deleteMileage, getReceiptTxIds, getDebts, getBalanceSnapshots, getNetWorthSeries, addManualTransaction, createManualAccount, updateManualBalance, getDataCoverage, getFeedCoverageGaps, FEED_GAP_SCAN_CAP, signOut, autoFillMonth, setTargetOverride, effectiveTarget, getExpectedTransactions, addExpected, dismissExpected, matchExpectedManually, getSavedChats, saveChatToApp, deleteSavedChat, addRegistryEntry, updateRegistryParent, removeRegistryEntry, updateCategoryColor, updateCategoryAlias } from "../dataAdapter.js";
+import { getOverview, getSpending, getBiggestMovers, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES, ACCOUNT_SUBTYPES, setCategoryRule, applyCategoryRuleToHistory, listCategoryRules, countCategoryRuleMatches, deleteCategoryRule, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, getActualIncome, resolveBudgetIncome, invalidateEnvelopeSpending, isEnvelopeSchemaMissing, targetNeed, readyToAssign, envelopePace, setEnvPace as persistEnvPace, updateRecIgnore, getStartupSettings, monthKey, getEntities, createEntity, updateEntity, getTaxYearTransactions, getMileage, addMileage, deleteMileage, getReceiptTxIds, getDebts, getBalanceSnapshots, getNetWorthSeries, addManualTransaction, createManualAccount, updateManualBalance, getDataCoverage, getFeedCoverageGaps, FEED_GAP_SCAN_CAP, signOut, autoFillMonth, setTargetOverride, effectiveTarget, getExpectedTransactions, addExpected, dismissExpected, matchExpectedManually, getSavedChats, saveChatToApp, deleteSavedChat, addRegistryEntry, updateRegistryParent, removeRegistryEntry, updateCategoryColor, updateCategoryAlias } from "../dataAdapter.js";
 // Pure cores imported directly (never Supabase — the mock-harness alias rule
 // only covers dataAdapter/sync/db/apiClient; pure modules are safe).
 import { planAutoFill } from "../envelopes.js";
@@ -503,11 +503,12 @@ function AssignEdit({value,onSave}) {
   );
 }
 
-// The household's money for the month, typed in by hand. The feed can't answer
-// this trustworthily — a missed paycheck would silently read as less to
-// budget — so Ready to Assign runs on a number the household states (see
-// CLAUDE.md, "the income wall"). Saving offers both scopes because most months
-// repeat and some don't.
+// The TYPED income for the month — what the month in progress (and any future
+// month) budgets against, since its paychecks haven't all landed yet. Once the
+// month is over, RTA switches to actual measured income and this figure
+// survives as the plan (the hybrid income rule — resolveBudgetIncome, CLAUDE.md
+// envelope Conventions). Saving offers both scopes because most months repeat
+// and some don't.
 function IncomeEdit({value,isDefault,onSave}) {
   const [ed,setEd]=useState(false);
   const [val,setVal]=useState(value!=null?String(value):"");
@@ -1372,6 +1373,13 @@ export default function Dashboard({ refreshTick = 0 }) {
   // --- Envelope budgeting (Budget tab) ---
   const [envelopes,setEnvelopes]=useState(null);
   const [income,setIncome]=useState(null);
+  // Measured income for the viewed month (the hybrid income rule). MONTH-TAGGED
+  // ({y,m,amount,coverageStart}) — the movers month-tagging lesson: a transient
+  // load failure keeps the previous state, and without the tag a month switch
+  // would render the old month's actual under the new month's header. A tag
+  // mismatch reads as "no actual yet", which resolveBudgetIncome falls back
+  // from (to manual) instead of blanking RTA.
+  const [actualInc,setActualInc]=useState(null);
   const [targetEdit,setTargetEdit]=useState(null);   // category name
   const [moveFrom,setMoveFrom]=useState(null);       // category name
   const [envBusy,setEnvBusy]=useState(false);
@@ -1937,7 +1945,7 @@ export default function Dashboard({ refreshTick = 0 }) {
     // the one path that catches ANOTHER device's writes.
     const eseq=++envSeq.current;
     try{
-      const[ov,sp,tx,ac,bu,en,inc,ents]=await Promise.all([
+      const[ov,sp,tx,ac,bu,en,inc,ai,ents]=await Promise.all([
         cur?getOverview():Promise.resolve(null),
         getSpending({year:y,month:m}),
         getTransactions({year:y,month:m}),
@@ -1949,6 +1957,11 @@ export default function Dashboard({ refreshTick = 0 }) {
         // otherwise one flaky request would claim the migration never ran.
         getEnvelopes({year:y,month:m}).catch(e=>isEnvelopeSchemaMissing(e)?null:undefined),
         getBudgetIncome({year:y,month:m}).catch(()=>undefined),
+        // Measured income for the hybrid rule. A failure degrades to undefined
+        // (keep state — the month tag rejects a stale month, and the resolver
+        // falls back to manual), never an error: RTA must not blank on a
+        // hiccup in a read that only completed months even use.
+        getActualIncome({year:y,month:m}).catch(()=>undefined),
         // Eager because the transaction sheet and account sheet both offer the
         // entity picker; degrades to [] until the rental-tax migration lands
         // (inside getEntities) — undefined = transient failure, keep state.
@@ -1972,6 +1985,9 @@ export default function Dashboard({ refreshTick = 0 }) {
         if(en!==undefined)setEnvelopes(en);
         if(inc!==undefined)setIncome(inc);
       }
+      // Outside the eseq guard: envelope writes never move transactions, so a
+      // write completing mid-reload can't have made this snapshot stale.
+      if(ai!==undefined)setActualInc({y,m,amount:ai.amount,coverageStart:ai.coverageStart});
       setRecurring(null); // recompute lazily on next Recurring-tab visit
       setDebtData(null);  // same: refetch balances/liability fields on next Debt-tab visit
       setLastUpd(new Date());
@@ -3260,16 +3276,26 @@ export default function Dashboard({ refreshTick = 0 }) {
   const assignableRows=budgetableRows.filter(r=>!isParentCat(r.category));
   const fundNeeds=assignableRows.map(r=>({row:r,need:targetNeed(r,{year,month})})).filter(x=>x.need>0);
   const fundTotal=fundNeeds.reduce((s,x)=>s+x.need,0);
-  const rta=envelopes?readyToAssign(income?.income,envelopes.totals):null;
   // "Fill from ⟨prev month⟩" — the auto-fill's source month and its label.
   const prevYM=month===1?{y:year-1,m:12}:{y:year,m:month-1};
   const prevMonthName=new Date(prevYM.y,prevYM.m-1,1).toLocaleString("default",{month:"long"});
   const monShort=new Date(year,month-1,1).toLocaleString("default",{month:"short"});
-  // Wall-clock local day for the pace warning — the SAME reasoning as the
-  // Recurring tab's clock: "is this envelope spending ahead of pace?" is a
-  // question about the present moment, so it uses today, not the viewed month
+  // Wall-clock local day for the pace warning AND the hybrid income rule —
+  // the SAME reasoning as the Recurring tab's clock: "is this envelope
+  // spending ahead of pace?" and "is this month over?" are questions about
+  // the present moment, so they use today, not the viewed month
   // (envelopePace returns null unless today falls inside the viewed month).
   const paceToday=(()=>{const d=new Date();return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;})();
+  // Which income figure this month runs on (the hybrid rule, Mason 2026-08-13):
+  // the month in progress budgets on the TYPED figure; a completed month reads
+  // ACTUAL measured income. The month tag on actualInc rejects a stale month's
+  // measurement; the resolver falls back to manual when there's no usable
+  // actual (uncovered history, failed read) rather than blanking RTA.
+  const actualForMonth=actualInc&&actualInc.y===year&&actualInc.m===month?actualInc:null;
+  const incomeResolved=resolveBudgetIncome({year,month,todayKey:paceToday,
+    manual:income?.income??null,actual:actualForMonth?.amount??null,
+    coverageStart:actualForMonth?.coverageStart??null});
+  const rta=envelopes?readyToAssign(incomeResolved.amount,envelopes.totals):null;
   // --- Expected transactions, DISPLAY-ONLY derivations (the envelopePace
   // contract: none of this ever feeds the walk, available, or any total).
   // Shown in the viewed month: pending rows due that month, plus — only when
@@ -3848,11 +3874,26 @@ export default function Dashboard({ refreshTick = 0 }) {
                 </div>
               )}
 
-              {/* Ready to Assign — rule 1, on hand-entered income. */}
+              {/* Ready to Assign — rule 1, on the hybrid income (typed for the
+                  month in progress, measured for a completed month). */}
               <div style={{background:"var(--bg)",borderRadius:10,padding:"12px 14px",marginBottom:14}}>
                 <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",fontSize:12,marginBottom:8}}>
                   <span style={{color:"var(--muted)"}}>Income</span>
-                  <IncomeEdit value={income?.income} isDefault={!!income?.isDefault} onSave={saveIncome}/>
+                  {incomeResolved.source==="actual"?(
+                    /* A completed month is read-only: the measured figure drives
+                       RTA, so offering the editor here would be a trap — an
+                       edit that visibly changes nothing. The typed plan stays
+                       visible beside it so the switchover is never silent. */
+                    <span title="Actual income for this completed month — money into your checking and savings from outside your linked accounts"
+                      style={{display:"inline-flex",alignItems:"baseline",gap:5}}>
+                      <span style={{fontSize:13,fontWeight:600,color:"var(--text)",fontFamily:"'DM Mono',monospace"}}>{fmtAuto(incomeResolved.actual)}</span>
+                      <span style={{fontSize:10,fontWeight:500,color:"var(--muted)"}}>
+                        actual{incomeResolved.manual!=null?` · planned ${fmtAuto(incomeResolved.manual)}`:""}
+                      </span>
+                    </span>
+                  ):(
+                    <IncomeEdit value={income?.income} isDefault={!!income?.isDefault} onSave={saveIncome}/>
+                  )}
                   <span style={{flex:1}}/>
                   <span style={{color:"var(--muted)"}}>Assigned <strong style={MONO}>{fmtAuto(envelopes.totals.assigned)}</strong></span>
                 </div>
@@ -3866,9 +3907,10 @@ export default function Dashboard({ refreshTick = 0 }) {
                   </div>
                 ):(
                   <div style={{fontSize:11,color:"var(--muted)",lineHeight:1.5}}>
-                    Set your income for the month to see what's left to assign. It's typed in by hand —
-                    the feed can't be trusted to see every paycheck, and a budget built on a partial
-                    number would silently run low.
+                    Set your income for the month to see what's left to assign. The month in progress
+                    is typed in by hand — its paychecks haven't all landed yet, so a measured number
+                    would run low exactly while you're budgeting against it. Once a month is over it
+                    switches to actual income from your accounts automatically.
                   </div>
                 )}
                 {/* The walk's own total Available — how much budgeted money is

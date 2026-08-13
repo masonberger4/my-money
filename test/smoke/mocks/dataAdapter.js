@@ -8,7 +8,7 @@ import { setRegistryParent } from '../../../src/categoryTree.js';
 // the same rows Dashboard's mount reads hit, so the adopt-merged-value path
 // renders honestly.
 import { getSetting, setSetting } from './db.js';
-export { targetNeed, readyToAssign, envelopePace, monthKey, effectiveTarget } from '../../../src/envelopes.js';
+export { targetNeed, readyToAssign, envelopePace, monthKey, effectiveTarget, resolveBudgetIncome } from '../../../src/envelopes.js';
 import { walkEnvelopes } from '../../../src/envelopes.js';
 import { normalizeMerchant } from '../../../src/recurring.js';
 export const ACCOUNT_TYPES = ['depository', 'credit', 'loan'];
@@ -326,8 +326,14 @@ export async function setCategoryRollover() {}
 export async function setTargetKind() {}
 export async function fundTargets() {}
 export async function moveMoney() {}
-export async function getBudgetIncome() { return 6200; }
+// The real adapter's shape ({income, isDefault, monthlyDefault}), so the
+// Budget header renders the typed figure instead of "＋ set income".
+export async function getBudgetIncome() { return { income: 6200, isDefault: true, monthlyDefault: 6200 }; }
 export async function setBudgetIncome() {}
+// The hybrid income rule's measured half. The render gate views the current
+// month, so the resolver picks manual and this value is never painted — it
+// exists so the read resolves without error.
+export async function getActualIncome() { return { amount: 5400, coverageStart: '2026-01-09' }; }
 export function invalidateEnvelopeSpending() {}
 export function isEnvelopeSchemaMissing() { return false; }
 export async function getEnvPace() { return false; }

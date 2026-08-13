@@ -269,18 +269,46 @@ export function walkEnvelopes({ assignments = [], spending = [], settings = [], 
   return { month: targetKey, categories: rows, totals, truncated };
 }
 
-// Rule 1, as far as this app can honestly go. `income` is hand-entered — the
-// feed still can't be trusted for take-home pay (SimpleFIN only syncs what is
-// linked and unhidden, and a missed paycheck would silently read as less to
-// budget — the income wall). Deliberately NOT carried over from prior months:
-// with hand-entered income a carry-forward would compound whatever months the
-// user never filled in. One month in, one month out.
+// Rule 1. `income` is whatever resolveBudgetIncome picked for the month —
+// hand-entered for the month in progress, measured for a completed month (the
+// hybrid rule below). Deliberately NOT carried over from prior months: income
+// is a per-month figure, and a carry-forward would compound whatever months
+// the user never filled in. One month in, one month out.
 // Returns null when no income is set, so the UI can hide the number instead of
 // showing a confident zero.
 export function readyToAssign(income, totals) {
   const n = Number(income);
   if (income == null || income === '' || !Number.isFinite(n)) return null;
   return cents(n - (totals?.assigned || 0));
+}
+
+// The hybrid income rule (Mason, 2026-08-13 — opens the income wall halfway).
+// Which figure feeds Ready to Assign for a viewed month:
+//   - The month IN PROGRESS (and any future month) stays MANUAL: its paychecks
+//     haven't all landed, so the measured number is guaranteed-low exactly
+//     while it's the one being budgeted against. Same for a month the clock
+//     can't place (no todayKey): without a trustworthy "now", never switch.
+//   - A COMPLETED month reads ACTUAL income measured from the ledger (the
+//     shared cashIncome model — unpaired depository inflows), automatically.
+//     The typed figure survives as the PLAN for comparison; it no longer
+//     drives RTA once the month is over.
+//   - Fallbacks that keep the old wall's honesty: a completed month is only
+//     "measured" if the ledger actually covers it — coverageStart (the
+//     household's earliest visible depository row) must be on/before the 1st,
+//     else deriving would read missing history as $0 income. And a failed
+//     actual read (actual == null) falls back to manual rather than blanking
+//     RTA — a load hiccup must not zero the month.
+// Returns { amount, source: 'manual'|'actual', manual, actual } — amount may
+// be null (nothing to show), matching readyToAssign's null contract.
+export function resolveBudgetIncome({ year, month, todayKey, manual, actual, coverageStart }) {
+  const viewKey = monthKey(year, month);
+  const curKey = normalizeMonthKey(String(todayKey || '').slice(0, 7));
+  const manualOut = { amount: manual ?? null, source: 'manual', manual: manual ?? null, actual: actual ?? null };
+  if (!curKey || viewKey >= curKey) return manualOut;
+  const covered = coverageStart != null && String(coverageStart).slice(0, 10) <= `${viewKey}-01`;
+  const a = Number(actual);
+  if (!covered || actual == null || !Number.isFinite(a)) return manualOut;
+  return { amount: cents(a), source: 'actual', manual: manual ?? null, actual: cents(a) };
 }
 
 // Moving money between envelopes is rule 3's actual mechanic: cover an

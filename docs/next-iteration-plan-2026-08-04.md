@@ -63,8 +63,8 @@ nothing below relitigates a decided item.
      accounts** (5481 + savings CSVs, Venture X Jan–Jul PDFs reconciled to
      the penny, 2644 against the coverage wall after PR #79's
      empty-fed-account fix). Full record in CLAUDE.md's standing rulings.
-     Consequence: item 5 (coverage-panel retirement) is now UNGATED — it
-     awaits only Mason's keep-or-remove call. ~~First confirm the Checking 2644→5481 re-key theory~~ — REFUTED
+     Consequence: item 5 (coverage-panel retirement) was un-gated and then
+     RESOLVED 2026-08-13 — Mason ruled KEEP. ~~First confirm the Checking 2644→5481 re-key theory~~ — REFUTED
      2026-08-11 by Mason: two real, separate accounts (2644 personal/rarely
      used, 5481 the shared main checking); each backfills into its own row.
      Standing ruling in CLAUDE.md Pending.
@@ -104,14 +104,14 @@ nothing below relitigates a decided item.
    must keep importing through `dataAdapter.js` or it escapes the mocks
    (same rule recorded for the decomposition, backlog Section 3).
 
-5. **Retire the Data coverage panel** — backfill settled 2026-08-12, so this
-   is now LIVE and waits only on Mason's keep-or-remove call. It was
-   shipped as TEMPORARY (CLAUDE.md Merged features). **Removal recipe STALE
-   as of 2026-08-06:** `src/coverage.js` now ALSO holds the PERMANENT
-   feed-reach tell (`FEED_REACH_DAYS`/`feedCoverageGaps`, imported by
-   `api/_lib/simplefin.js` — the coverage.js key row's "two things, one
-   temporary and one not"). Delete the CARD and `aggregateCoverage`/
-   `getDataCoverage()` only; the file and `test/coverage.test.js` stay.
+5. ~~**Retire the Data coverage panel**~~ — **RESOLVED 2026-08-13: Mason
+   ruled KEEP** ("i kinda like it"), so the panel stays and drops its
+   TEMPORARY tag. Not a build item any more; revisit only if he asks. The
+   removal recipe stays recorded for that day: `src/coverage.js` ALSO holds
+   the PERMANENT feed-reach tell (`FEED_REACH_DAYS`/`feedCoverageGaps`,
+   imported by `api/_lib/simplefin.js`) — delete the CARD and
+   `aggregateCoverage`/`getDataCoverage()` only; the file and
+   `test/coverage.test.js` stay.
 
 6. ~~**SQL/RLS tests**~~ — **FULLY SHIPPED 2026-08-11 (PR #73)**: the
    storage-policy assertions (behavioral + catalog), the honest-allowlisted
@@ -329,13 +329,14 @@ prior backlog. Both are S/M with no blockers and no migration.*
    importing through dataAdapter.js so it stays inside the harness aliases.
    First big investment when feature pace slows; not before Mason says so.
 
-2. **Deriving RTA income (the income wall)** — CLAUDE.md's envelope section
-   says exactly what unlocks it: every income account reliably fed. That's a
-   data-quality gate, i.e. it sits BEHIND low-hanging items 1 (payroll dupe
-   RESOLVED — both rows real,
-   backfill) — and it's **Mason's call, not an automatic upgrade**. Deriving
-   income (via `cashIncome`, already pure) then unlocks honest RTA and Age
-   of Money (Roadmap: "wants real *measured* income").
+2. ~~**Deriving RTA income (the income wall)**~~ — **SHIPPED 2026-08-13 as
+   the HYBRID income rule** (Mason's call, made after backfill completed):
+   a COMPLETED month reads actual measured income (`resolveBudgetIncome` /
+   `getActualIncome`, the shared `cashIncome` model); the month IN PROGRESS
+   and future months stay hand-typed (their paychecks haven't all landed);
+   uncovered/pre-backfill months fall back to manual. Rules in CLAUDE.md's
+   envelope Conventions. Consequence: Age of Money (Roadmap: "wants real
+   *measured* income") is now buildable as its own decision.
 
 3. **Reconciliation** — spec open (Roadmap). Half the build exists:
    `reconcileCsv` (`src/csvImport.js`) already max-matches statement rows
