@@ -193,7 +193,9 @@ lives in git log, GitHub PRs, and the Vercel dashboard — don't duplicate it.
    stalled). Two boundaries: a PR meant to accumulate MORE commits before
    merging stays unarmed until its last push, and if the ruleset's required
    checks are ever removed, fall back to merging manually AFTER green — never
-   before. Auto mode doesn't lower
+   before. An ARMED PR needs no babysitting (Mason, 2026-08-13: "no need for
+   triggers"): don't schedule check-in timers/Routines for it — the merge
+   event is the confirmation; only investigate if CI goes RED. Auto mode doesn't lower
    the bar: anything risky, preference-shaped, or migration-sequenced still
    goes past Mason first. Merged head branches auto-delete on PR merge (repo
    setting, confirmed 2026-08-01); unmerged branches are untouched, and a
