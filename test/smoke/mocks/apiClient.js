@@ -8,4 +8,5 @@ export async function getSimpleFinStatus() {
 export async function claimSimpleFinToken() { return { ok: true }; }
 export async function disconnectSimpleFin() { return { ok: true }; }
 export async function restoreSimpleFinInstitution() { return { ok: true }; }
+export async function restoreImportedInstitution() { return { ok: true, unhidden: 2 }; }
 export async function runServerSync() { return { ok: true, results: [] }; }

@@ -11,6 +11,7 @@ import { setSyncCompletionHook } from './sync.js';
 import { amountOrClause, searchIsActive } from './searchFilters.js';
 import { CANDIDATE_WINDOW_MONTHS, parseIgnoreList } from './recurring.js';
 import { getSettings } from './db.js';
+import { unlinkSettingsKey, parseRestoreIds } from './unlinkRestore.js';
 import { aggregateCoverage, feedCoverageGaps, FEED_REACH_DAYS } from './coverage.js';
 import { netWorthSeries, clampSeries } from './netWorth.js';
 import {
@@ -1205,6 +1206,31 @@ export async function findOrCreateManualInstitution() {
     .single();
   if (error) throw error;
   return data.id;
+}
+
+// Is this manual institution currently REMOVED, and which of its accounts
+// would Restore bring back?
+//
+// A manual institution can't use the SimpleFIN tombstone — it is permanently
+// `status='disabled'` by design — so the `unlink:<id>` settings row the
+// soft-hide writes IS the removed marker (api/unlink-institution.js, which
+// consumes it on restore). Key and parse come from the shared pure
+// src/unlinkRestore.js so the two processes can't drift.
+//
+// Returns null when there is no record (not removed) and an id array when
+// there is. NEVER throws: a failed read must leave the Accounts tab exactly as
+// it was rather than claiming a recovery that may not be available — the
+// getFeedCoverageGaps instinct (a wrong recovery offer is worse than none).
+export async function getRestoreRecord(institutionId) {
+  if (!institutionId) return null;
+  try {
+    const byKey = await getSettings([unlinkSettingsKey(institutionId)]);
+    const ids = parseRestoreIds(byKey[unlinkSettingsKey(institutionId)]);
+    return ids.length ? ids : null;
+  } catch (err) {
+    console.error('restore record read failed', err);
+    return null;
+  }
 }
 
 // Create one manual account. kind is 'checking' | 'savings' | 'credit' | 'loan'.

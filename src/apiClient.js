@@ -38,27 +38,31 @@ export function runServerSync({ force = false } = {}) {
   return postJson('/api/sync', { force });
 }
 
-// Disconnect an institution. A SimpleFIN org is SOFT-HIDDEN by default: its
-// accounts are marked hidden and the institution row is disabled (the tombstone
-// that keeps the next pull from recreating it — one access URL covers every
-// bank). Nothing is deleted; Restore in the SimpleFIN modal unhides the
-// accounts that were visible at remove time. A manual "Imported" institution is
-// still deleted outright (nothing recreates it, so no tombstone is needed).
+// Remove an institution. BOTH kinds are SOFT-HIDDEN by default (manual joined
+// its SimpleFIN sibling 2026-08-13): the accounts are marked hidden and the
+// set that was visible at remove time is recorded so Restore can bring back
+// exactly those. Nothing is deleted either way. A SimpleFIN org additionally
+// gets the disabled tombstone that keeps the next pull from recreating it (one
+// access URL covers every bank); a manual "Imported" institution is already
+// permanently disabled, so its settings record is the whole marker.
 //
-// `permanent: true` is the buried real-delete path: the server requires the
-// literal confirm string 'delete' alongside it, and then removes the accounts
-// and every transaction under them (including CSV/PDF backfill) for good.
-//
-// `confirmDelete: true` is the MANUAL-institution assertion: that branch also
-// hard-deletes (cascading every imported account and transaction), so the
-// server requires the same literal — the caller passes this only after its
-// own "cannot be undone" confirm. Deliberately a separate option from
-// `permanent`, which routes a SimpleFIN institution to a different branch.
-export function unlinkInstitution(institutionId, { permanent = false, confirmDelete = false } = {}) {
+// `permanent: true` is the buried real-delete path for either kind: the server
+// requires the literal confirm string 'delete' alongside it, and then removes
+// the accounts and every transaction under them (including CSV/PDF backfill)
+// for good.
+export function unlinkInstitution(institutionId, { permanent = false } = {}) {
   return postJson('/api/unlink-institution', {
     institution_id: institutionId,
-    ...(permanent ? { permanent: true, confirm: 'delete' } : confirmDelete ? { confirm: 'delete' } : {}),
+    ...(permanent ? { permanent: true, confirm: 'delete' } : {}),
   });
+}
+
+// Undo a manual "Imported" removal: unhides exactly the recorded set and
+// consumes the record. The SimpleFIN twin is restoreSimpleFinInstitution
+// below — a different route because that one must also clear the disabled
+// tombstone, which a manual institution deliberately keeps forever.
+export function restoreImportedInstitution(institutionId) {
+  return postJson('/api/unlink-institution', { restore_institution_id: institutionId });
 }
 
 // ---- SimpleFIN --------------------------------------------------------------

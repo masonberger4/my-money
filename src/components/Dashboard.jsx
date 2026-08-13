@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from "react";
-import { getOverview, getSpending, getBiggestMovers, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES, ACCOUNT_SUBTYPES, setCategoryRule, applyCategoryRuleToHistory, listCategoryRules, countCategoryRuleMatches, deleteCategoryRule, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, getActualIncome, resolveBudgetIncome, invalidateEnvelopeSpending, isEnvelopeSchemaMissing, targetNeed, readyToAssign, envelopePace, setEnvPace as persistEnvPace, updateRecIgnore, getStartupSettings, monthKey, getEntities, createEntity, updateEntity, getTaxYearTransactions, getMileage, addMileage, deleteMileage, getReceiptTxIds, getDebts, getBalanceSnapshots, getNetWorthSeries, addManualTransaction, createManualAccount, updateManualBalance, getDataCoverage, getFeedCoverageGaps, FEED_GAP_SCAN_CAP, signOut, autoFillMonth, setTargetOverride, effectiveTarget, getExpectedTransactions, addExpected, dismissExpected, matchExpectedManually, getSavedChats, saveChatToApp, deleteSavedChat, addRegistryEntry, updateRegistryParent, removeRegistryEntry, updateCategoryColor, updateCategoryAlias } from "../dataAdapter.js";
+import { getOverview, getSpending, getBiggestMovers, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES, ACCOUNT_SUBTYPES, setCategoryRule, applyCategoryRuleToHistory, listCategoryRules, countCategoryRuleMatches, deleteCategoryRule, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, getActualIncome, resolveBudgetIncome, invalidateEnvelopeSpending, isEnvelopeSchemaMissing, targetNeed, readyToAssign, envelopePace, setEnvPace as persistEnvPace, updateRecIgnore, getStartupSettings, monthKey, getEntities, createEntity, updateEntity, getTaxYearTransactions, getMileage, addMileage, deleteMileage, getReceiptTxIds, getDebts, getBalanceSnapshots, getNetWorthSeries, addManualTransaction, createManualAccount, updateManualBalance, getDataCoverage, getFeedCoverageGaps, FEED_GAP_SCAN_CAP, getRestoreRecord, signOut, autoFillMonth, setTargetOverride, effectiveTarget, getExpectedTransactions, addExpected, dismissExpected, matchExpectedManually, getSavedChats, saveChatToApp, deleteSavedChat, addRegistryEntry, updateRegistryParent, removeRegistryEntry, updateCategoryColor, updateCategoryAlias } from "../dataAdapter.js";
 // Pure cores imported directly (never Supabase — the mock-harness alias rule
 // only covers dataAdapter/sync/db/apiClient; pure modules are safe).
 import { planAutoFill } from "../envelopes.js";
@@ -11,7 +11,8 @@ import { merchantKey, matchLearnedRule, isKeyPrefix } from "../txClassify.js";
 import { trimChatMsgs, buildSavedChat } from "../savedChats.js";
 import { patchTxShape } from "../spending.js";
 import { detectRecurring } from "../recurring.js";
-import { unlinkInstitution, askAssistant, getSimpleFinStatus } from "../apiClient.js";
+import { unlinkInstitution, restoreImportedInstitution, askAssistant, getSimpleFinStatus } from "../apiClient.js";
+import { restorableIds } from "../unlinkRestore.js";
 import { UNCATEGORIZED, isBudgetableCategory } from "../categoryMap.js";
 import { userCategoryList, missingCategories, isDuplicateCategoryName } from "../categoryList.js";
 import { parentIndex, parentOf, hasChildren, eligibleParents, canSetParent,
@@ -2393,6 +2394,11 @@ export default function Dashboard({ refreshTick = 0 }) {
   }
 
   const [unlinking,setUnlinking]=useState(false);
+  // Removed-and-restorable imported accounts: the ids Restore would unhide, or
+  // null for "nothing to offer" (not removed, no record, or the read failed).
+  const [restorable,setRestorable]=useState(null);
+  const [restoreEpoch,setRestoreEpoch]=useState(0);
+  const [restoring,setRestoring]=useState(false);
   const [togglingHide,setTogglingHide]=useState(false);
   const [selTx,setSelTx]=useState(null);
   const [importing,setImporting]=useState(false);
@@ -2801,42 +2807,95 @@ export default function Dashboard({ refreshTick = 0 }) {
     const siblings=accounts.filter(a=>a.institution_id===selAcct.institution_id);
     const instName=acctInst(selAcct)||"this bank";
     const list=siblings.map(a=>`  • ${acctLabel(a)}`).join("\n");
-    // SimpleFIN removal is a SOFT-HIDE: the server marks the accounts hidden
-    // and disables the institution (the tombstone that keeps the next pull from
-    // recreating it). Nothing is deleted — Restore in the SimpleFIN modal
-    // brings the visible accounts back. The buried permanent delete lives in
-    // that modal too, next to Restore, never here.
+    // BOTH kinds are a SOFT-HIDE (manual joined SimpleFIN 2026-08-13, Mason):
+    // the server marks the accounts hidden and records the set that was
+    // visible, so Restore brings back exactly those. Nothing is deleted. The
+    // two sentences differ only in where Restore lives — the SimpleFIN modal
+    // for a bank, this tab for the imported accounts — and in the fact that a
+    // SimpleFIN org stays connected at the Bridge. The buried permanent
+    // delete is never reachable from here.
     const ok=isSimpleFinAccount(selAcct)
       ?window.confirm(
         `Remove ${instName} from view?\n\nThis hides ${siblings.length} account${siblings.length!==1?"s":""} and stops them counting in any total:\n${list}\n\nNothing is deleted — all transactions (including any CSV/PDF backfill) are kept, and Restore in the SimpleFIN modal brings the bank back exactly as it was. It stays connected at SimpleFIN Bridge.`
       )
       :window.confirm(
-        `Unlink ${instName}?\n\nThis removes ${siblings.length} account${siblings.length!==1?"s":""} and all their transactions from the app:\n${list}\n\nThis cannot be undone.`
+        `Remove ${instName} from view?\n\nThis hides ${siblings.length} imported account${siblings.length!==1?"s":""} and stops them counting in any total:\n${list}\n\nNothing is deleted — every imported transaction is kept, and Restore on the Accounts tab brings them back exactly as they were.`
       );
     if(!ok)return;
     setUnlinking(true);
     try{
-      // A manual "Imported" institution hard-deletes server-side, and the
-      // server demands the literal confirm — sent only after the "cannot be
-      // undone" window.confirm above. The SimpleFIN soft-hide needs none.
-      await unlinkInstitution(selAcct.institution_id,
-        isSimpleFinAccount(selAcct)?{}:{confirmDelete:true});
+      // Plain remove = soft-hide for either kind; the permanent cascade needs
+      // { permanent: true } plus the server's literal confirm, and no caller
+      // here sends it.
+      await unlinkInstitution(selAcct.institution_id);
       // The server just hid (or deleted) the bank's rows — a write reloadData
       // no longer invalidates for, so drop the memoised ranges here.
       invalidateEnvelopeSpending();
       setSelAcct(null);
       setTxAcctFilter(null);
-      // The removed bank's rows no longer appear (hidden for SimpleFIN, deleted
-      // for manual), so a category filter set from them may now describe nothing.
+      // The removed bank's rows no longer appear (both kinds hide them), so a
+      // category filter set from them may now describe nothing.
       setTxCatFilter(null);
+      // A manual removal just wrote a restore record — the Accounts tab's
+      // Restore strip reads it, so re-check rather than waiting for a remount.
+      bumpRestore();
       await reloadData(year,month);
     }catch(err){
       console.error("unlink failed",err);
       // Prefer the human message the sanitized 500 body carries (the Ask tab
       // pattern) — detail.error is the stable machine code, not display text.
-      window.alert(`Unlink failed: ${err.detail?.message||err.detail?.error||err.message}`);
+      window.alert(`Removing that bank failed: ${err.detail?.message||err.detail?.error||err.message}`);
     }finally{
       setUnlinking(false);
+    }
+  }
+
+  // The Restore strip's state. An EPOCH, not a null sentinel (the recorded
+  // setState(null) gotcha): a remove or a restore bumps it, so a new sequence
+  // is always minted and an in-flight read can't paint a stale answer. A
+  // failed read leaves `restorable` null — the strip simply doesn't render,
+  // and the next Accounts visit retries (a failed load must not latch
+  // absence, the expected-transactions rule).
+  const restoreSeq=useRef(0);
+  const bumpRestore=useCallback(()=>setRestoreEpoch(e=>e+1),[]);
+  // The one manual institution ("Imported"): derived from the accounts already
+  // loaded, hidden ones included — after a removal they are ALL hidden, which
+  // is exactly the state the strip exists for.
+  const manualInstId=useMemo(()=>accounts.find(a=>isManualAccount(a))?.institution_id||null,[accounts]);
+  useEffect(()=>{
+    if(!manualInstId){setRestorable(null);return;}
+    const seq=++restoreSeq.current;
+    getRestoreRecord(manualInstId).then(ids=>{
+      if(restoreSeq.current!==seq)return;
+      // Only ids that are still present AND still hidden are honestly
+      // restorable: an account already unhidden by hand needs no restoring,
+      // and the count on the button must equal what the tap will do.
+      const hiddenIds=accounts.filter(a=>a.hidden).map(a=>a.id);
+      const ready=ids?restorableIds(ids,hiddenIds):[];
+      setRestorable(ready.length?ready:null);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[manualInstId,accounts,restoreEpoch]);
+
+  async function handleRestoreImported(){
+    if(!manualInstId)return;
+    setRestoring(true);
+    try{
+      const res=await restoreImportedInstitution(manualInstId);
+      invalidateEnvelopeSpending();
+      bumpRestore();
+      await reloadData(year,month);
+      // Say what actually came back. A record whose accounts were unhidden by
+      // hand in the meantime restores 0 — reporting "restored" then would be
+      // a claim the screen contradicts.
+      window.alert(res?.unhidden>0
+        ? `Restored ${res.unhidden} imported account${res.unhidden!==1?"s":""}.`
+        : "Nothing to restore — those accounts are already visible.");
+    }catch(err){
+      console.error("restore imported failed",err);
+      window.alert(`Restore failed: ${err.detail?.message||err.detail?.error||err.message}`);
+    }finally{
+      setRestoring(false);
     }
   }
 
@@ -4446,6 +4505,29 @@ export default function Dashboard({ refreshTick = 0 }) {
               Connect banks through SimpleFIN, or import a statement (CSV or PDF) for history a
               feed doesn't reach.
             </div>
+            {/* Removing the "Imported" institution soft-hides it (Mason,
+                2026-08-13) — this is its Restore, the counterpart of the one
+                in the SimpleFIN modal. It can't key on a disabled status the
+                way that one does: a manual institution is permanently
+                disabled by design, so the `unlink:<id>` settings record IS
+                the removed marker (getRestoreRecord). NEUTRAL, never amber —
+                a removal the user asked for is not a fault, and amber has to
+                keep meaning "something is broken" (the coverage-notice rule).
+                The count is what the tap will actually unhide: ids still
+                present AND still hidden, so it can never over-promise. */}
+            {restorable&&(
+              <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",marginBottom:14,
+                background:"var(--bg)",borderRadius:8,padding:"10px 12px"}}>
+                <div style={{fontSize:11,color:"var(--muted)",flex:"1 1 160px",minWidth:0,lineHeight:1.5}}>
+                  {restorable.length} imported account{restorable.length!==1?"s":""} removed from view.
+                  Nothing was deleted — the transactions are still here.
+                </div>
+                <button className="ibtn" onClick={handleRestoreImported} disabled={restoring}
+                  style={{fontSize:11,minHeight:32,opacity:restoring?.6:1,cursor:restoring?"default":"pointer"}}>
+                  {restoring?"Restoring…":"Restore"}
+                </button>
+              </div>
+            )}
             {loading&&accounts.length===0?[1,2,3].map(i=><div key={i} style={{marginBottom:12}}><Sk h={40}/></div>):
               [...accounts].sort((a,b)=>(a.hidden?1:0)-(b.hidden?1:0)).map((a,i)=>(
                 <div key={a.id} className="tx" style={{cursor:"pointer",animationDelay:i*.03+"s",opacity:a.hidden?.5:1}}
@@ -4601,20 +4683,23 @@ export default function Dashboard({ refreshTick = 0 }) {
                   color:"var(--text)",fontFamily:"inherit",fontSize:12,fontWeight:500,cursor:togglingHide?"default":"pointer",opacity:togglingHide?.6:1}}>
                 {togglingHide?"Saving…":selAcct.hidden?"Unhide":"Hide from dashboard"}
               </button>
-              {!isManualAccount(selAcct)&&(
-                <button onClick={handleUnlink} disabled={unlinking}
-                  style={{flex:1,padding:"8px 0",borderRadius:8,border:"1px solid var(--danger-border)",background:"none",
-                    color:"var(--danger)",fontFamily:"inherit",fontSize:12,fontWeight:500,cursor:unlinking?"default":"pointer",opacity:unlinking?.6:1}}>
-                  {unlinking?"Removing…":`${isSimpleFinAccount(selAcct)?"Remove":"Unlink"} ${acctInst(selAcct)||"bank"}…`}
-                </button>
-              )}
+              {/* Offered for IMPORTED accounts too since 2026-08-13: it was
+                  withheld from them while this route hard-deleted (there was
+                  no undo to offer), and it is exactly that delete which
+                  became a soft-hide. Same reversible operation for every
+                  kind now, so the same button. */}
+              <button onClick={handleUnlink} disabled={unlinking}
+                style={{flex:1,padding:"8px 0",borderRadius:8,border:"1px solid var(--danger-border)",background:"none",
+                  color:"var(--danger)",fontFamily:"inherit",fontSize:12,fontWeight:500,cursor:unlinking?"default":"pointer",opacity:unlinking?.6:1}}>
+                {unlinking?"Removing…":`Remove ${acctInst(selAcct)||"bank"}…`}
+              </button>
             </div>
             <div style={{marginTop:6,fontSize:10,color:"var(--muted)",textAlign:"center"}}>
               {isManualAccount(selAcct)
-                ?"Imported account · re-import a CSV to add or correct transactions (duplicates are skipped automatically)"
+                ?"Imported account · re-import a CSV to add or correct transactions (duplicates are skipped automatically) · Remove hides every imported account, deletes nothing, and Restore on this tab brings them back"
                 :isSimpleFinAccount(selAcct)
-                ?"Hide keeps syncing but drops it from totals · Remove deletes its data here and stops syncing this bank (it stays linked at SimpleFIN Bridge)"
-                :"Hide keeps syncing but drops it from totals · Unlink removes the connection and its data"}
+                ?"Hide keeps syncing but drops it from totals · Remove hides this bank's accounts and stops syncing it, deleting nothing (it stays linked at SimpleFIN Bridge)"
+                :"Hide keeps syncing but drops it from totals · Remove hides this bank's accounts and deletes nothing"}
             </div>
 
             {/* Account type — editable everywhere now.

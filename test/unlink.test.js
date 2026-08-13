@@ -12,7 +12,6 @@ import {
   restoreSet,
   isPermanentDeleteRequest,
   permanentDeleteAllowed,
-  manualDeleteAllowed,
   PERMANENT_CONFIRM,
   disconnectAllowed,
   DISCONNECT_CONFIRM,
@@ -102,36 +101,75 @@ test('isPermanentDeleteRequest is literal-true only', () => {
   assert.equal(isPermanentDeleteRequest(undefined), false);
 });
 
-test('manual-institution delete requires the literal confirm (parity with the other destructive gates)', () => {
-  // Same PERMANENT_CONFIRM literal — one spelling of 'delete' across both
-  // destructive gates.
-  assert.equal(manualDeleteAllowed({ confirm: PERMANENT_CONFIRM }), true);
-  assert.equal(manualDeleteAllowed({ confirm: 'delete' }), true);
-  // Every near-miss rejected: this branch cascades away the entire CSV/PDF
-  // statement backfill, and a bare { institution_id } POST used to reach it.
-  assert.equal(manualDeleteAllowed({}), false);
-  assert.equal(manualDeleteAllowed(null), false);
-  assert.equal(manualDeleteAllowed(undefined), false);
-  assert.equal(manualDeleteAllowed({ confirm: 'DELETE' }), false);
-  assert.equal(manualDeleteAllowed({ confirm: true }), false);
-  assert.equal(manualDeleteAllowed({ confirm: 'disconnect' }), false);
+
+// --- The manual "Imported" institution: soft-hide, not delete (2026-08-13) ---
+// Removing it used to cascade away every imported account and transaction —
+// the household's whole statement backfill, rebuilt from files that live on a
+// laptop, not in the app. It now takes the SimpleFIN shape: hide, record, and
+// restore. These pins are the route wiring (the pure decisions above are
+// shared by both branches) and the ONE-COPY contract between the two
+// processes that read the record.
+
+test('the manual branch soft-hides by default; the cascade sits behind the permanent gate', () => {
+  const route = readFileSync(fileURLToPath(new URL('../api/unlink-institution.js', import.meta.url)), 'utf8');
+  const manualAt = route.indexOf('const isManualInstitution =');
+  const permanentAt = route.indexOf('if (permanent) {', manualAt);
+  const deleteAt = route.indexOf(".from('institutions')\n        .delete()", manualAt);
+  const softHideAt = route.indexOf('softHideInstitution(supabase, user.householdId, inst.id)', manualAt);
+  assert.ok(manualAt > 0, 'the manual branch must still be reached by an ABSENT org id');
+  assert.ok(permanentAt > manualAt, 'the manual branch must test `permanent` before deleting');
+  assert.ok(deleteAt > permanentAt, 'the institutions delete must live INSIDE the permanent branch');
+  assert.ok(softHideAt > deleteAt, 'the default (fall-through) manual path must be the soft-hide');
+  // The manual institution is permanently status='disabled' (that status is
+  // what keeps it out of every sync path), so the soft-hide must not restate
+  // it the way the SimpleFIN branch does — its RECORD is the removed marker.
+  const manualTail = route.slice(softHideAt);
+  assert.ok(!manualTail.includes("status: 'disabled'"),
+    'the manual soft-hide must leave institutions.status alone');
 });
 
-test('unlink-institution wires the manual gate ahead of the delete, and the client sends the confirm', () => {
-  // Source scan (the simplefin-status precedent above): the guard only guards
-  // if the route calls it before the institutions delete, and the UI only
-  // works if apiClient sends the literal the server now demands.
+test('the restore branch is scoped to manual institutions and consumes the record', () => {
   const route = readFileSync(fileURLToPath(new URL('../api/unlink-institution.js', import.meta.url)), 'utf8');
-  const gateAt = route.indexOf('manualDeleteAllowed(req.body)');
-  const deleteAt = route.indexOf(".from('institutions')\n      .delete()");
-  assert.ok(gateAt > 0, 'route must call manualDeleteAllowed(req.body)');
-  assert.ok(deleteAt > gateAt, 'the gate must run before the institutions delete');
+  const restoreAt = route.indexOf('if (restore_institution_id) {');
+  assert.ok(restoreAt > 0, 'the route must handle restore_institution_id');
+  const branch = route.slice(restoreAt, route.indexOf('if (!institution_id)'));
+  assert.ok(branch.includes(".is('simplefin_org_id', null)"),
+    'restore here must refuse a SimpleFIN org — that restore lives in simplefin-status, which also clears the tombstone');
+  assert.ok(branch.includes(".from('settings')\n        .delete()"),
+    'the record must be consumed, or a second Restore replays a stale snapshot');
   const client = readFileSync(fileURLToPath(new URL('../src/apiClient.js', import.meta.url)), 'utf8');
-  assert.ok(client.includes("confirmDelete ? { confirm: 'delete' }"),
-    'unlinkInstitution must send the literal confirm for the manual path');
-  // The Dashboard call site must assert the manual case — a SimpleFIN remove
-  // stays a bare soft-hide request.
-  const dash = readFileSync(fileURLToPath(new URL('../src/components/Dashboard.jsx', import.meta.url)), 'utf8');
-  assert.ok(dash.includes('isSimpleFinAccount(selAcct)?{}:{confirmDelete:true}'),
-    'Dashboard must pass confirmDelete only for non-SimpleFIN institutions');
+  assert.ok(client.includes("{ restore_institution_id: institutionId }"),
+    'apiClient must send the restore body the route reads');
+  // The retired one-PR gate must be gone from BOTH sides, not just unused:
+  // its literal is now `permanentDeleteAllowed`'s, and a synonym predicate is
+  // the duplication hazard (the PR #61 rule).
+  const lib = readFileSync(fileURLToPath(new URL('../api/_lib/unlink.js', import.meta.url)), 'utf8');
+  assert.ok(!/export function manualDeleteAllowed/.test(lib),
+    'manualDeleteAllowed must be retired, not left as a synonym of permanentDeleteAllowed');
+  assert.ok(!client.includes('confirmDelete'),
+    'the client option that fed it must go with it');
+});
+
+test('ONE COPY of the restore record: api/_lib/unlink.js re-exports the shared pure module', async () => {
+  // The server writes the record; the client reads it to decide whether to
+  // offer Restore. A drifting second copy of the key or the parse fails
+  // silently — the button just never appears (absence has no alarm).
+  const shared = await import('../src/unlinkRestore.js');
+  assert.equal(shared.unlinkSettingsKey('abc-123'), unlinkSettingsKey('abc-123'));
+  assert.equal(parseRestoreSet, shared.parseRestoreIds);
+  assert.equal(restoreSet, shared.restorableIds);
+  const lib = readFileSync(fileURLToPath(new URL('../api/_lib/unlink.js', import.meta.url)), 'utf8');
+  assert.ok(lib.includes("from '../../src/unlinkRestore.js'"),
+    'api must import the shared module, not redeclare the key or the parse');
+  const adapter = readFileSync(fileURLToPath(new URL('../src/dataAdapter.js', import.meta.url)), 'utf8');
+  assert.ok(adapter.includes("from './unlinkRestore.js'"),
+    'the client read must come from the same module');
+});
+
+test('restorableIds is what the Restore button may promise: recorded ∩ still-hidden', async () => {
+  const { restorableIds } = await import('../src/unlinkRestore.js');
+  // a2 was unhidden by hand since the removal — restoring it is a no-op, so
+  // it must not be counted in what the button says it will bring back.
+  assert.deepEqual(restorableIds(['a1', 'a2', 'a3'], ['a1', 'a3']), ['a1', 'a3']);
+  assert.deepEqual(restorableIds(['a1'], []), []);
 });
