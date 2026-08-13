@@ -15,10 +15,11 @@ nothing below relitigates a decided item.
 
 ## Low-hanging fruit
 
-1. **The Pending data/ops tasks FIRST** — they're worth more than features
-   right now, because every model above them (income, Trends, RTA) reads the
-   same rows. All five live in CLAUDE.md's Pending section with full detail;
-   in priority order:
+1. ~~**The Pending data/ops tasks FIRST**~~ — **ALL FIVE RESOLVED (last
+   closed 2026-08-12, the statement backfill).** CLAUDE.md's Pending now
+   reads "Open data tasks: NONE"; the resolutions survive there as standing
+   rulings, and retraining is the only live task. Struck sub-items kept
+   below as the record; original priority order:
    - ~~Rotate the Supabase service_role key~~ **DONE 2026-08-04**, verified by
      a successful assistant round trip (an answer proves `requireUser` passed
      on the service client). The Anthropic spend cap is DONE too ($25/mo,
@@ -27,8 +28,10 @@ nothing below relitigates a decided item.
      of this item's prescription: the verification happened and BOTH rows are
      REAL** (confirmed against the Discover July statement's printed totals).
      Do NOT set `excluded=true` on either copy — the standing ruling lives in
-     CLAUDE.md's Pending and governs. July income was never overstated. Only
-     the ~$34 Venture X same-day dupes (Jun+Jul) remain unchecked.
+     CLAUDE.md's Pending and governs. July income was never overstated. The
+     ~$34 Venture X same-day dupes were RESOLVED 2026-08-12 the same way —
+     audited against the Jan–Jul statements, ALL REAL, do NOT exclude
+     (standing ruling in CLAUDE.md Pending).
    - ~~**Discover it (7933) twins**~~ — **RESOLVED 2026-08-10, Mason
      confirmed**: the data-holding Capital One-org row is unhidden and retyped
      Credit card; the empty Discover-org row stays hidden permanently. The
@@ -99,10 +102,13 @@ nothing below relitigates a decided item.
    item: main chunk ~584 kB (pdf.js's ~1.8 MB is already
    lazy via `pdfExtract.js`, as are the modals). Next lever is tab-level
    `React.lazy` inside Dashboard.jsx (Tax/Debt/Trends render heavy pure
-   cores). **Harness caveat:** the mock harness aliases
-   dataAdapter/sync/db/apiClient by full-match regex — any split-out module
-   must keep importing through `dataAdapter.js` or it escapes the mocks
-   (same rule recorded for the decomposition, backlog Section 3).
+   cores). **Harness caveat:** any split-out module must keep importing
+   through `dataAdapter.js` — the smoke harness aliases only the façade-level
+   modules (see the dataAdapter façade key row in CLAUDE.md; its fifth alias,
+   `supabaseClient.js`, exists for App.jsx and is not a licence for
+   components) — a module importing anywhere else either escapes the mocks or
+   silently bypasses the façade while the gate stays green (same rule
+   recorded for the decomposition, backlog Section 3).
 
 5. ~~**Retire the Data coverage panel**~~ — **RESOLVED 2026-08-13: Mason
    ruled KEEP** ("i kinda like it"), so the panel stays and drops its
@@ -225,8 +231,12 @@ prior backlog. Both are S/M with no blockers and no migration.*
      try/catch that **omits the `coverage` key** on any error (missing key =
      no notice — never render a gap you aren't sure of, and never 500 the
      Accounts tab). Client pure core is a **new `src/feedCoverage.js`**,
-     deliberately not an addition to `src/coverage.js` — that's the TEMPORARY
-     panel's core (item 5) and the tell must outlive it.
+     deliberately not an addition to `src/coverage.js` — at spec time that
+     was the TEMPORARY panel's core (item 5) and the tell had to outlive it.
+     (Overtaken twice: what shipped put the tell in `src/coverage.js` anyway
+     — see the ship note atop this item — and item 5 was RESOLVED KEEP
+     2026-08-13, so both halves now stay; the separation reasoning is
+     historical, and `src/feedCoverage.js` was never created.)
    - **Don't touch:** `api/sync.js` is unchanged, and **`pullWasClean` must
      keep ignoring `coverage_shortfall`** — `test/csvImport.test.js:262` is
      the REGRESSION keeping a shortfall from blocking the statement import
@@ -235,11 +245,15 @@ prior backlog. Both are S/M with no blockers and no migration.*
      feed-health banner — amber means the feed is broken, while a first-pull
      shortfall is the expected result of a first pull, and reusing amber
      trains it as noise. Ack via a stored ISO date, re-raising when
-     `worst_from` moves past it.
-   - **→ Mason decisions (flagged):** `GRACE_DAYS = 21` is a judgment call;
-     and the spec names the ack key `feed:coverage-ack` but not its store —
-     CLAUDE.md's rule points at `settings` (account-level fact, not a
-     device/visual pref), confirm before building. The source spec's §4 (UI)
+     `worst_from` moves past it (NOT built — see the flagged bullet).
+   - **→ Mason decisions (flagged):** MOOT since the 2026-08-06 ship:
+     `FEED_GRACE_DAYS` shipped as 7 (src/coverage.js), not the flagged 21,
+     and no ack key was ever built — the notice is read-only by decision, NO
+     dismiss/ack (CLAUDE.md's coverage.js key row). Original flags: `GRACE_DAYS
+     = 21` is a judgment call; and the spec names the ack key
+     `feed:coverage-ack` but not its store — CLAUDE.md's rule points at
+     `settings` (account-level fact, not a device/visual pref), confirm
+     before building. The source spec's §4 (UI)
      is unfinished — settle the strip's exact placement and copy at build.
 
 ## Harder, high value
@@ -364,9 +378,10 @@ prior backlog. Both are S/M with no blockers and no migration.*
 What field reports are actually useful, now that both phones run everything:
 
 - **Two-phone behaviors**: sign-out on one device affecting the other (it
-  must NOT — `scope:'local'`); saved chats, the recurring ignore list, and
-  expected bills appearing/updating on the second phone (all
-  settings-table-backed, read-merge-write serialized); any edit that shows
+  must NOT — `scope:'local'`); saved chats and the recurring ignore list
+  (settings-table-backed, read-merge-write serialized) and expected bills
+  (their own table; concurrent auto-match dup-gated) appearing/updating on
+  the second phone; any edit that shows
   on one device and not the other.
 - **Touch feel**: the Overview card-tile swipe (horizontal-intent
   threshold), the month jump picker, sheet scrolling — anything that feels
@@ -486,4 +501,4 @@ Ranked for a two-user household app in its retraining/backfill phase: correctnes
 
 ### Killed in verification (don't re-propose)
 
-- **Fifth supabaseClient.js smoke-harness alias + render App.jsx through the CI render gate** — its central acceptance criterion is falsified by current code: App.jsx:121-131 handles a cold-start count failure as `setCount(prev => prev ?? 0)`, so the "must never show EmptyState on error" assertion fails against main, and fixing that is a user-facing UX decision for Mason. A narrower re-scope (alias + healthy-count render only) may be viable as a NEW item, but not this one as specced.
+- **Fifth supabaseClient.js smoke-harness alias + render App.jsx through the CI render gate** — its central acceptance criterion is falsified by current code: App.jsx:121-131 handles a cold-start count failure as `setCount(prev => prev ?? 0)`, so the "must never show EmptyState on error" assertion fails against main, and fixing that is a user-facing UX decision for Mason. A narrower re-scope (alias + healthy-count render only) may be viable as a NEW item, but not this one as specced. **That narrower re-scope SHIPPED 2026-08-12 (PR #78)**: the fifth alias + real-App healthy-startup render are live in `test/smoke/` (canary-verified); the count-error-path assertion stays killed by decision (asserting it chooses user-facing behavior). The kill governs only the error-path half.
