@@ -27,7 +27,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { dirname, join, relative } from 'node:path';
+import { dirname, join, relative, sep } from 'node:path';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -80,12 +80,18 @@ function walk(dir) {
   return out;
 }
 
+// path.relative emits BACKSLASH paths on Windows — compare and publish
+// POSIX-normalized, or the OWN_FILE exclusion below silently never matches
+// there and this file's own allowlist tokens leak into the corpus (the
+// 2026-08-13 fresh-Windows-clone failure; CI is Linux, so it had no alarm).
+const relPosix = f => relative(root, f).split(sep).join('/');
+
 const corpusFiles = [
   ...['src', 'api', 'test', 'supabase', 'public'].flatMap(d => walk(join(root, d))),
   ...['package.json', 'vercel.json', 'index.html'].map(f => join(root, f)),
   // THIS file is excluded: its own source names the allowlist tokens and the
   // self-check's injected phantoms, which must not count as "exists in code".
-].filter(f => relative(root, f) !== OWN_FILE);
+].filter(f => relPosix(f) !== OWN_FILE);
 
 const corpus =
   corpusFiles
@@ -93,7 +99,7 @@ const corpus =
     .map(f => readFileSync(f, 'utf8'))
     .join('\n') +
   '\n' +
-  corpusFiles.map(f => relative(root, f)).join('\n');
+  corpusFiles.map(relPosix).join('\n');
 
 // --- extraction pipeline (shared by the real checks AND the self-check) ------
 

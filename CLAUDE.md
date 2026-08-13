@@ -1385,6 +1385,17 @@ surgically, never the foundation.
   policy, and the test is right to hash raw bytes because that is what Vite
   ships. A clone made before that file existed keeps its CRLF tree: re-clone,
   or `git add --renormalize .`.
+- **The other Windows-only failure shape: `path.relative` returns BACKSLASH
+  paths there.** Comparing one against a forward-slash literal silently never
+  matches — `test/claudeMdLockstep.test.js`'s own-file exclusion did exactly
+  that, so on a Windows clone the test's own source (which by design names
+  every allowlisted phantom) entered the scan corpus and both allowlist checks
+  went red while CI stayed green (found 2026-08-13, the first fresh-clone
+  `npm test` on real Windows). Repo-scan tests normalize before comparing or
+  publishing a relative path (that file's relPosix helper). Same alarm gap as
+  the LF bullet above: CI is Linux-only, so Windows-only breakage has no tell
+  short of a human running the suite there — treat any fresh-Windows-clone
+  test failure as potentially this class before suspecting the app.
 - **`vercel.json` REJECTS unknown top-level keys** — schema validation fails
   the deployment *before it builds*, so the site keeps serving the previous
   deploy while every new push dies with "should NOT have additional property".

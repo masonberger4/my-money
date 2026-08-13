@@ -277,8 +277,12 @@ test('the completion hook fires once per successful sync, after the response', (
       setSyncCompletionHook(() => {
         fired++;
         // The request has already happened when the hook runs — the caches
-        // are dropped AFTER the new rows exist, never before.
-        assert.equal(calls.length, 1, 'hook must run after the fetch');
+        // are dropped AFTER the new rows exist, never before. Compare against
+        // `fired`, not 1: the hook fires again for the force run below, and a
+        // hardcoded 1 makes that second firing throw (swallowed by
+        // notifySyncCompletion, so the test still passed — but it logged a
+        // scary assertion error into every suite run).
+        assert.equal(calls.length, fired, 'hook must run after the fetch');
       });
       await runSync();
       assert.equal(fired, 1);
