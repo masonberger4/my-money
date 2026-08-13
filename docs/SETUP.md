@@ -13,7 +13,12 @@ Accounts you need:
 | [SimpleFIN Bridge](https://bridge.simplefin.org/) | ~$15/yr | Yes, for automatic bank sync (CSV/PDF import works without it) |
 | [Anthropic API key](https://console.anthropic.com) | Pay-as-you-go | Optional — powers the "Ask" tab only; without it that tab shows "not configured" and everything else works |
 
-Local tooling: git and **Node 21 or newer (22 recommended)**. The test script relies on `node --test` expanding its own glob (`test/**/*.test.js`), a feature added in Node 21 — on older Node, `npm test` finds zero test files. There is no pinned `engines` field.
+Local tooling: git and **Node 21 or newer (22 recommended)**. The test script relies on `node --test` expanding its own glob (`test/**/*.test.js`), a feature added in Node 21 — on older Node, `npm test` errors out instead of running. There is no pinned `engines` field.
+
+**On Windows**, everything below works in either `cmd.exe` or PowerShell; where the two differ, both forms are given. Two setup notes:
+
+- The repo's `.gitattributes` forces LF checkouts, which `test/securityHeaders.test.js` depends on (it hashes `index.html`'s raw bytes against the CSP pin in `vercel.json`). You don't need to change `core.autocrlf` — but if you cloned before that file existed, re-clone.
+- Clone somewhere short and **outside OneDrive** (e.g. `%USERPROFILE%\code\`). Desktop and Documents are usually redirected into OneDrive, which will sync all of `node_modules` to the cloud.
 
 ## 1. Fork/clone and install
 
@@ -162,6 +167,8 @@ cp .env.example .env.local     # fill in your values; dev-server.js loads this v
 npm run dev
 ```
 
+On **Windows `cmd.exe`** use `copy .env.example .env.local` (PowerShell aliases `cp`, so it works there as-is). Either way the copy must happen in a shell — File Explorer refuses to create a name that is all extension. Then edit it; in Notepad's Save As, quote the name as `".env.local"` or it becomes `.env.local.txt`.
+
 `npm run dev` runs two processes concurrently:
 
 - `vite` — the SPA dev server; it proxies `/api` to port 3001
@@ -175,6 +182,22 @@ Other scripts: `npm run build` (Vite build to `dist/`), `npm run preview`, `npm 
 VITE_SUPABASE_URL=https://placeholder.supabase.co VITE_SUPABASE_ANON_KEY=placeholder npm run build
 ```
 
+That inline `VAR=value` prefix is POSIX-only and is a syntax error in **both** Windows shells. Equivalents:
+
+```bat
+:: cmd.exe — quote the whole assignment so no trailing space enters the value
+set "VITE_SUPABASE_URL=https://placeholder.supabase.co"
+set "VITE_SUPABASE_ANON_KEY=placeholder"
+npm run build
+```
+
+```powershell
+# PowerShell — semicolons, not && (5.1 has no && operator)
+$env:VITE_SUPABASE_URL='https://placeholder.supabase.co'; $env:VITE_SUPABASE_ANON_KEY='placeholder'; npm run build
+```
+
+(Never `setx` — it writes the registry and doesn't affect the window you typed it in.) If you already have a `.env.local`, plain `npm run build` works too: Vite reads it during production builds. The prefix exists only to make the check independent of local config.
+
 ## 5. Deploy to Vercel
 
 1. Import your fork as a new Vercel project. `vercel.json` already sets the build command (`npm run build`), output directory (`dist`), the SPA rewrite (everything except `/api/*` → `index.html`), and the security headers (CSP, HSTS, frame denial, etc. — rationale in `docs/csp-derivation.md`; note these headers are served only by Vercel, so nothing local exercises them, and `test/securityHeaders.test.js` is the guard against breaking them).
@@ -182,7 +205,13 @@ VITE_SUPABASE_URL=https://placeholder.supabase.co VITE_SUPABASE_ANON_KEY=placeho
    - **If your Supabase URL is not `*.supabase.co`** (custom domain or self-hosted Supabase): the CSP in `vercel.json` pins `connect-src`/`img-src` to `https://*.supabase.co` and `wss://*.supabase.co`, so every API call would be silently blocked **in production only**. Add your host to those directives (and update the pins in `test/securityHeaders.test.js`) before deploying. Read `docs/csp-derivation.md` first.
 2. Set **every** env var from section 3 in Project Settings → Environment Variables — for **Production AND Preview**. Remember `VITE_*` vars are baked at build time: changing one requires a redeploy.
 3. Push to `main` (Vercel's production branch) or click Deploy.
-4. Sanity-check the API actually loaded: `POST https://<your-app>/api/sync` with no auth should return **401** (proves the function module loaded and rejected you). A 500 means a module-load failure; a 404 on a route proves nothing.
+4. Sanity-check the API actually loaded: an unauthenticated `POST` to `https://<your-app>/api/sync` should return **401** (proves the function module loaded and rejected you). A 500 means a module-load failure; a 404 on a route proves nothing.
+
+   ```bash
+   curl -i -X POST https://<your-app>/api/sync
+   ```
+
+   On Windows write `curl.exe`, not `curl` — in PowerShell 5.1 `curl` is an alias for `Invoke-WebRequest`, which rejects `-X` and then *throws* on the 401 you're trying to confirm, so success looks like failure. `curl.exe` ships with Windows 10 1803+.
 5. Sign in with the household email/password you created in step 2.
 
 Note if you use Preview deploys: they share your **production** Supabase database — preview edits are real data.
