@@ -1,0 +1,21 @@
+# Normalize line endings to LF in the repository, and check them out as LF on
+# every platform — including Windows, where Git's default core.autocrlf=true
+# would otherwise convert them on checkout.
+#
+# This is not a style preference, it is load-bearing:
+# test/securityHeaders.test.js reads index.html off disk, sha256s the raw bytes
+# of its inline theme <script>, and asserts the digest matches the hash pinned
+# in vercel.json's Content-Security-Policy. CRLF changes those bytes, so a
+# Windows clone with the default settings fails that test with a hash mismatch
+# that reads like a broken CSP rather than a line-ending problem. The test is
+# right to hash raw bytes — it guards what Vite actually ships — so the fix
+# belongs here.
+#
+# Every tracked file was LF when this landed, so this changes no content.
+* text=auto eol=lf
+
+# Binary assets: never touch these.
+*.png binary
+*.ico binary
+*.woff2 binary
+*.pdf binary
