@@ -64,6 +64,20 @@ export function permanentDeleteAllowed(body) {
   return body?.permanent === true && body?.confirm === PERMANENT_CONFIRM;
 }
 
+// The manual-institution gate (parity fix, 2026-08-13). That branch
+// HARD-DELETES: it cascades away every account and transaction under the
+// "Imported" institution — i.e. the entire CSV/PDF statement backfill — yet it
+// was the one destructive path a bare `{ institution_id }` POST could reach
+// while both of its siblings above demanded a literal. Same discipline:
+// `confirm` must be exactly 'delete' (the PERMANENT_CONFIRM literal — one
+// spelling of the word across both destructive gates), not truthy, not
+// case-insensitive. A stale PWA client that predates this gate fails CLOSED
+// with a 400 until its service worker refreshes — the right direction for a
+// destructive action.
+export function manualDeleteAllowed(body) {
+  return body?.confirm === PERMANENT_CONFIRM;
+}
+
 // The simplefin-status DELETE gate (forget the stored access URL). Same
 // literal-string discipline as permanentDeleteAllowed: `confirm` must be
 // exactly 'disconnect' — not truthy, not case-insensitive — so a bare

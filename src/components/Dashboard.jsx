@@ -7,7 +7,7 @@ import { buildSearchFilters, searchIsActive } from "../searchFilters.js";
 import { expectedByCategory, expectedStatus, isMissedExpected, seedFromRecurring, projectFutureCycles } from "../expectedTx.js";
 import { payoffWhatIf, debtFreeMonth, isMortgage, amortizationSchedule, addMonths, MAX_MONTHS } from "../debtPayoff.js";
 import { SCHEDULE_E_LINES, RENTS_KEY, DEFAULT_SCHEDULE_E_MAP, scheduleEReport, entityMonthly, entityLedger, personalDeductionReport, DEDUCTION_BUCKETS, DEFAULT_DEDUCTION_MAP, mileageDeduction, scheduleECsv } from "../taxReport.js";
-import { merchantKey, matchLearnedRule } from "../txClassify.js";
+import { merchantKey, matchLearnedRule, isKeyPrefix } from "../txClassify.js";
 import { trimChatMsgs, buildSavedChat } from "../savedChats.js";
 import { patchTxShape } from "../spending.js";
 import { detectRecurring } from "../recurring.js";
@@ -17,7 +17,7 @@ import { userCategoryList, missingCategories, isDuplicateCategoryName } from "..
 import { parentIndex, parentOf, hasChildren, eligibleParents, canSetParent,
   setRegistryParent, groupCategories, groupMembers, rollupFields,
   orderGroups, earliestMemberRank } from "../categoryTree.js";
-import { teachQueueGroups, nonSpendLabel } from "../teachQueue.js";
+import { teachQueueGroups, nonSpendLabel, categorizedShare } from "../teachQueue.js";
 import { displayBalance, isDebtAccount as isDebtType } from "../accountBalance.js";
 import { unhideConfirmMessage } from "../unhideConfirm.js";
 import { createSheetHistory } from "../sheetHistory.js";
@@ -1537,6 +1537,14 @@ export default function Dashboard({ refreshTick = 0 }) {
   // queue leads with what it is for, but never dropped — the count is always on
   // screen, so the size of that group stays visible even while it is folded.
   const [teachOther,setTeachOther]=useState(false);
+  // How many queue rows render (per list). TEACH_LIMIT is the floor; "Show N
+  // more" raises it in place of the old dead-end "N more behind these"
+  // sentence — the full ranked lists already exist (teachQueueGroups returns
+  // them whole; only the slice hid merchants 11+). Reset on month navigation
+  // so the card opens compact for every month.
+  const [teachShown,setTeachShown]=useState(TEACH_LIMIT);
+  const [teachOtherShown,setTeachOtherShown]=useState(TEACH_LIMIT);
+  useEffect(()=>{setTeachShown(TEACH_LIMIT);setTeachOtherShown(TEACH_LIMIT);},[year,month]);
   // Property drill-in on the Tax tab: the entity id whose compiled ledger is
   // open, or null. Rows come from taxData, so the sheet shows the tax cache's
   // busy state while an edit's invalidation refetches.
@@ -2482,7 +2490,7 @@ export default function Dashboard({ refreshTick = 0 }) {
 
   // Learned merchant rules: after a manual recategorization, offer to remember
   // the merchant so the correction survives the next sync/import.
-  const [learnPrompt,setLearnPrompt]=useState(null); // {descriptor,key,category,count}
+  const [learnPrompt,setLearnPrompt]=useState(null); // {descriptor (the string a teach saves — the trimmed key when trimmed),key,fullKey,category,amount,scope,count,previewError,counting}
   const [learnedNote,setLearnedNote]=useState(null);
   const [learning,setLearning]=useState(false);
   // Clear the prompt when a different transaction is opened.
@@ -2504,11 +2512,22 @@ export default function Dashboard({ refreshTick = 0 }) {
   // other things at every other amount — and the merchant-wide rule would be
   // WRONG for most of them. Defaulting to 'any' keeps the common case one tap.
   const previewSeq=useRef(0);
-  async function offerToLearn(category,scope="any"){
+  // trimmedKey (optional) is the trim-the-key editor's cut: a LEADING
+  // whole-token prefix of the full key, chosen by tapping tokens in the
+  // confirm. Anything else — stale state, a key from another row — falls back
+  // to the full key (isKeyPrefix, the txClassify guard), because an invalid
+  // trim would teach a rule that matches nothing while reading as taught.
+  async function offerToLearn(category,scope="any",trimmedKey=null){
     if(!selTx)return;
     const descriptor=txDescriptor(selTx);
-    const key=merchantKey(descriptor);
-    if(!key)return;
+    const fullKey=merchantKey(descriptor);
+    if(!fullKey)return;
+    const key=trimmedKey&&isKeyPrefix(trimmedKey,fullKey)?trimmedKey:fullKey;
+    // The string the rule is TAUGHT from. merchantKey is idempotent on its
+    // own output, so passing the trimmed key as the descriptor needs no
+    // adapter change; untrimmed keeps the raw descriptor, byte-identical to
+    // the pre-trim behaviour.
+    const taught=key===fullKey?descriptor:key;
     const amount=typeof selTx.amount==="number"?selTx.amount:null;
     // An amount-scoped rule needs an amount to scope BY. A row without a
     // usable one only gets the merchant-wide offer rather than a scope
@@ -2517,12 +2536,13 @@ export default function Dashboard({ refreshTick = 0 }) {
     const seq=++previewSeq.current;
     // Show the prompt immediately with a pending count; the preview is a
     // round trip and the toggle must not feel dead while it runs.
-    setLearnPrompt({descriptor,key,category,amount,scope:eff,count:null,previewError:null,counting:true});
+    setLearnPrompt({descriptor:taught,key,fullKey,category,amount,scope:eff,count:null,previewError:null,counting:true});
     let count=null,previewError=null;
-    try{ count=await applyCategoryRuleToHistory(descriptor,category,{dryRun:true,amount:eff==="amount"?amount:null}); }
+    try{ count=await applyCategoryRuleToHistory(taught,category,{dryRun:true,amount:eff==="amount"?amount:null}); }
     catch(err){ console.error("rule preview failed",err); previewError=err.message||String(err); }
-    // Guard: two fast toggles must not let the slower response paint its count
-    // under the other scope's label (the movers month-tagging lesson).
+    // Guard: two fast toggles (or two fast trims) must not let the slower
+    // response paint its count under the other key's label (the movers
+    // month-tagging lesson). One seq covers both — every trim mints a new one.
     if(previewSeq.current!==seq)return;
     setLearnPrompt(p=>p?{...p,count,previewError,counting:false}:p);
   }
@@ -2796,7 +2816,11 @@ export default function Dashboard({ refreshTick = 0 }) {
     if(!ok)return;
     setUnlinking(true);
     try{
-      await unlinkInstitution(selAcct.institution_id);
+      // A manual "Imported" institution hard-deletes server-side, and the
+      // server demands the literal confirm — sent only after the "cannot be
+      // undone" window.confirm above. The SimpleFIN soft-hide needs none.
+      await unlinkInstitution(selAcct.institution_id,
+        isSimpleFinAccount(selAcct)?{}:{confirmDelete:true});
       // The server just hid (or deleted) the bank's rows — a write reloadData
       // no longer invalidates for, so drop the memoised ranges here.
       invalidateEnvelopeSpending();
@@ -2817,6 +2841,11 @@ export default function Dashboard({ refreshTick = 0 }) {
   }
 
   const cats=spending?.groups||[];
+  // The retraining progress meter (teach-queue card): fraction of the month's
+  // counted spending that carries a real category. Derived in render like the
+  // queue itself (no cache — the setState(null) gotcha never applies); null =
+  // no positive spending this month = render nothing, never a fake 100%.
+  const taughtShare=categorizedShare(cats,UNCATEGORIZED);
   const txs=transactions?.transactions||[];
   // While a search is active the Transactions tab renders results across all
   // months instead of the selected month; the account and category chips still
@@ -3761,11 +3790,33 @@ export default function Dashboard({ refreshTick = 0 }) {
                     ?<>Teach it — {teachQueue.spending.length} merchant{teachQueue.spending.length!==1?"s":""} spending this month</>
                     :<>Teach it — nothing untaught spent money this month</>}
                 </div>
+                {/* The retraining progress meter. Lives ON this card so it
+                    disappears with the queue when retraining finishes. The
+                    display never rounds a partial share up to 100% — while
+                    any counted SPENDING is untaught, "100%" would contradict
+                    the merchant list under it (the confidently-wrong shape,
+                    in miniature). Scope note: the meter measures counted
+                    spending ONLY (its own text says "spending"), so a true
+                    100% can legitimately render above the other-list — an
+                    untaught paycheck or transfer leg is not spending. */}
+                {taughtShare!==null&&(()=>{
+                  const pct=taughtShare>=1?100:Math.min(99,Math.round(taughtShare*100));
+                  return (
+                    <div style={{marginBottom:8}}>
+                      <div style={{fontSize:10,color:"var(--muted)",marginBottom:3}}>
+                        {pct}% of this month’s spending is categorized
+                      </div>
+                      <div style={{height:4,borderRadius:2,background:"var(--track)",overflow:"hidden"}}>
+                        <div style={{height:"100%",width:`${pct}%`,background:"var(--accent)",borderRadius:2}}/>
+                      </div>
+                    </div>
+                  );
+                })()}
                 {/* Tapping a row opens the detail sheet for the group's most
                     recent COUNTED transaction — the existing pick-a-category →
                     offerToLearn → learnMerchant flow, dry-run preview and all;
                     Uncategorized is never offerable there. */}
-                {teachQueue.spending.slice(0,TEACH_LIMIT).map(g=>(
+                {teachQueue.spending.slice(0,teachShown).map(g=>(
                   <button key={g.key} onClick={()=>setSelTx(g.tx)} style={TEACH_ROW}>
                     <span style={TEACH_KEY}>{g.key}</span>
                     <span style={{fontSize:10,color:"var(--muted)",flexShrink:0}}>{g.spendCount} txn{g.spendCount!==1?"s":""}</span>
@@ -3773,11 +3824,16 @@ export default function Dashboard({ refreshTick = 0 }) {
                     <span style={{fontSize:11,color:"var(--muted)",flexShrink:0}}>›</span>
                   </button>
                 ))}
+                {teachQueue.spending.length>teachShown&&(
+                  <button className="ibtn" onClick={()=>setTeachShown(n=>n+TEACH_LIMIT)}
+                    style={{fontSize:10,color:"var(--muted)",minHeight:32,padding:"0 2px",marginTop:2}}>
+                    Show {Math.min(TEACH_LIMIT,teachQueue.spending.length-teachShown)} more ›
+                  </button>
+                )}
                 {teachQueue.spending.length>0&&(
                   <div style={{fontSize:10,color:"var(--muted)",marginTop:4,lineHeight:1.5}}>
                     Tap one, pick or make its category, and say “always” — it remembers the merchant and
                     backfills the transactions you already have.
-                    {teachQueue.spending.length>TEACH_LIMIT&&<> {teachQueue.spending.length-TEACH_LIMIT} more behind these.</>}
                   </div>
                 )}
                 {/* Money in, transfer legs and card payments are in no spending
@@ -3797,7 +3853,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                       why it isn't ranked above — but it is still Uncategorized, and a paycheck or a transfer
                       is worth a category too.
                     </div>
-                    {teachQueue.other.slice(0,TEACH_LIMIT).map(g=>(
+                    {teachQueue.other.slice(0,teachOtherShown).map(g=>(
                       <button key={g.key} onClick={()=>setSelTx(g.tx)} style={TEACH_ROW}>
                         <span style={TEACH_KEY}>{g.key}</span>
                         <span style={{fontSize:10,color:"var(--muted)",flexShrink:0}}>{g.otherCount} txn{g.otherCount!==1?"s":""}</span>
@@ -3805,10 +3861,11 @@ export default function Dashboard({ refreshTick = 0 }) {
                         <span style={{fontSize:11,color:"var(--muted)",flexShrink:0}}>›</span>
                       </button>
                     ))}
-                    {teachQueue.other.length>TEACH_LIMIT&&(
-                      <div style={{fontSize:10,color:"var(--muted)",marginTop:4}}>
-                        {teachQueue.other.length-TEACH_LIMIT} more behind these.
-                      </div>
+                    {teachQueue.other.length>teachOtherShown&&(
+                      <button className="ibtn" onClick={()=>setTeachOtherShown(n=>n+TEACH_LIMIT)}
+                        style={{fontSize:10,color:"var(--muted)",minHeight:32,padding:"0 2px",marginTop:2}}>
+                        Show {Math.min(TEACH_LIMIT,teachQueue.other.length-teachOtherShown)} more ›
+                      </button>
                     )}
                   </>)}
                 </>)}
@@ -5903,6 +5960,62 @@ export default function Dashboard({ refreshTick = 0 }) {
                   {!learnPrompt.counting&&learnPrompt.count>0&&<> Also updates {learnPrompt.count} past transaction{learnPrompt.count!==1?"s":""}.</>}
                   {!learnPrompt.counting&&learnPrompt.count===0&&<> No past transactions match it.</>}
                 </div>
+                {/* The trim-the-key editor (the recorded honest fix for the
+                    over-specific-key limit): matching is a whole-token PREFIX,
+                    rule→row, so a key taught from "COSTCO GAS #0117 SEATTLE WA"
+                    matches that one store and nothing else. Tapping a word
+                    drops it and everything after it — trailing trim only, so
+                    the short key stays a legal prefix (isKeyPrefix) — and each
+                    tap re-runs the dry-run count above, so generalizing the
+                    key is an EXPLICIT choice with an honest live preview,
+                    never automatic stemming (the never-guess rule). Tapping a
+                    struck word brings it (and the words before it) back.
+                    The FIRST token is not tappable: dropping a leading token
+                    is structurally impossible (prefix-only matching), and the
+                    obvious misread — tap "TST" to strip processor noise —
+                    would otherwise invert into "match ONLY TST", teaching
+                    every Toast-processed merchant at once. Review catch.
+                    Everything here disables while `learning`: a trim tapped
+                    mid-save would visibly register and then be discarded when
+                    the in-flight save (captured pre-trim) closes the confirm. */}
+                {(()=>{
+                  const toks=learnPrompt.fullKey.split(" ");
+                  if(toks.length<2)return null;
+                  const kept=learnPrompt.key.split(" ").length;
+                  return (
+                    <div style={{marginBottom:8}}>
+                      <div style={{fontSize:10,color:"var(--muted)",lineHeight:1.4,marginBottom:4}}>
+                        Match on fewer words? Tap a word to drop it and everything after it — a shorter
+                        match covers more of this merchant’s wordings.
+                      </div>
+                      <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+                        {toks.map((tok,i)=>{
+                          const on=i<kept;
+                          const chipStyle={fontSize:10,fontWeight:600,minHeight:32,padding:"0 8px",borderRadius:16,
+                            fontFamily:"inherit",display:"inline-flex",alignItems:"center",transition:"all .15s",
+                            background:"var(--card)",
+                            color:on?"var(--text)":"var(--muted)",
+                            textDecoration:on?"none":"line-through",
+                            opacity:on?1:.55,
+                            border:`1px solid ${on?"var(--border)":"transparent"}`};
+                          if(i===0)return <span key={i} style={chipStyle}>{tok}</span>;
+                          return (
+                            <button key={i} disabled={learning}
+                              onClick={()=>{
+                                const cut=on?i:i+1;
+                                if(cut===kept)return;
+                                offerToLearn(learnPrompt.category,learnPrompt.scope,toks.slice(0,cut).join(" "));
+                              }}
+                              aria-pressed={on}
+                              style={{...chipStyle,cursor:learning?"default":"pointer"}}>
+                              {tok}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })()}
                 {/* The scope choice. Only offered when the row has an amount to
                     scope by — see offerToLearn. */}
                 {learnPrompt.amount!==null&&(
@@ -5914,8 +6027,14 @@ export default function Dashboard({ refreshTick = 0 }) {
                     {[["any","Any amount"],["amount",`Only ${fmtX(learnPrompt.amount)}`]].map(([s,label])=>{
                       const on=learnPrompt.scope===s;
                       return (
-                        <button key={s} onClick={()=>offerToLearn(learnPrompt.category,s)}
-                          style={{flex:1,fontSize:10,fontWeight:600,padding:"5px 8px",borderRadius:20,fontFamily:"inherit",cursor:"pointer",
+                        // Passing the current key keeps a trim through a scope
+                        // toggle — without it the re-offer would silently
+                        // restore the full key under the user's thumb.
+                        // Disabled while saving, like the trim chips: a toggle
+                        // mid-save registers on screen and then loses to the
+                        // in-flight save captured from the older prompt.
+                        <button key={s} disabled={learning} onClick={()=>offerToLearn(learnPrompt.category,s,learnPrompt.key)}
+                          style={{flex:1,fontSize:10,fontWeight:600,padding:"5px 8px",borderRadius:20,fontFamily:"inherit",cursor:learning?"default":"pointer",
                             background:on?"var(--accent)":"var(--card)",color:on?"var(--accent-text)":"var(--muted)",
                             border:`1px solid ${on?"var(--accent)":"var(--border)"}`,transition:"all .15s"}}>
                           {label}

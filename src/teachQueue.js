@@ -55,8 +55,10 @@ function newer(a, b) {
 //        A falsy key means "no descriptor to teach from" — those rows are
 //        skipped, exactly as before.
 //
-// Returns { spending, other }, both fully sorted — the caller slices, so the
-// "N more behind these" counts come off the full lists.
+// Returns { spending, other }, both fully sorted and NEVER capped here — the
+// caller slices (the Show-more paging raises its slice bound over these full
+// lists, so capping them in this module would silently break it; the old
+// "N more behind these" remainder sentence read its counts off them too).
 //   spending: at least one counted row. { spendCount, spent } are that row set;
 //             `otherCount` records how many of the group's rows sat outside the
 //             total, so a mixed merchant is not silently trimmed.
@@ -128,6 +130,28 @@ export function teachQueueGroups(rows, keyOf) {
     );
 
   return { spending, other };
+}
+
+// The retraining progress meter's core: what fraction of the month's COUNTED
+// spending already carries a real category. `groups` is the spendingGroups
+// output ({ label, amount } rows — the isSpend() fold, so transfer legs, card
+// payments and Returns can never dilute the share); the Uncategorized label is
+// INJECTED to keep this module zero-import (the keyOf pattern above). Returns
+// a 0..1 fraction, or null when the month has no positive counted spending —
+// a meter with no denominator must render NOTHING, never a fake 100%.
+export function categorizedShare(groups, uncategorizedLabel) {
+  let total = 0;
+  let uncat = 0;
+  for (const g of Array.isArray(groups) ? groups : []) {
+    if (!g) continue;
+    const amount = Number(g.amount) || 0;
+    total += amount;
+    if (g.label === uncategorizedLabel) uncat += amount;
+  }
+  if (!(total > 0)) return null;
+  // Clamp: a negative-net group (refunds exceeding spend under one label) can
+  // push the raw ratio outside [0,1]; the meter stays a fraction.
+  return Math.min(1, Math.max(0, 1 - uncat / total));
 }
 
 // The label a non-spending group renders INSTEAD of a dollar total — the fix

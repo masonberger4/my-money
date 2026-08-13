@@ -4,6 +4,7 @@ import {
   visibleAccountIds,
   isPermanentDeleteRequest,
   permanentDeleteAllowed,
+  manualDeleteAllowed,
 } from './_lib/unlink.js';
 
 export default async function handler(req, res) {
@@ -141,6 +142,16 @@ export default async function handler(req, res) {
     const isManualInstitution = inst.simplefin_org_id === null || inst.simplefin_org_id === undefined;
     if (!isManualInstitution) {
       return res.status(400).json({ error: 'Unrecognised institution feed; refusing to delete' });
+    }
+
+    // This branch hard-deletes (no soft-hide sibling exists for manual rows),
+    // so it takes the same literal-confirm discipline as the permanent path
+    // above: a bare { institution_id } must never cascade away the statement
+    // backfill. A pre-gate client fails closed here with a 400.
+    if (!manualDeleteAllowed(req.body)) {
+      return res
+        .status(400)
+        .json({ error: "Deleting an imported institution requires confirm: 'delete'" });
     }
 
     // Cascades: accounts, and their transactions. Unlike the SimpleFIN branch

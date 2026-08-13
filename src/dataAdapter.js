@@ -753,11 +753,19 @@ export async function countCategoryRuleMatches(descriptor, category, amount = nu
 // lives in src/ruleHistory.js (pure, tested with fakes); this wrapper only
 // binds the real client.
 export async function applyCategoryRuleToHistory(descriptor, category, { dryRun = false, amount = null } = {}) {
+  // The FULL rules bag, so the re-match runs the same precedence as write-time
+  // classification: a row an existing amount-scoped or longer-key rule would
+  // win is left alone instead of being clobbered and re-diverged by the next
+  // sync (the trim-the-key editor made overlapping prefix keys mainline —
+  // see applyRuleToHistory's `rules` contract). getCategoryRules degrades to
+  // {} pre-migration, which bagWithRule treats as "only the taught rule".
+  const rules = await getCategoryRules();
   const result = await applyRuleToHistory({
     descriptor,
     category,
     amount,
     dryRun,
+    rules,
     fetchPage: (pat, from, to) =>
       supabase
         .from('transactions')

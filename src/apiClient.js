@@ -48,10 +48,16 @@ export function runServerSync({ force = false } = {}) {
 // `permanent: true` is the buried real-delete path: the server requires the
 // literal confirm string 'delete' alongside it, and then removes the accounts
 // and every transaction under them (including CSV/PDF backfill) for good.
-export function unlinkInstitution(institutionId, { permanent = false } = {}) {
+//
+// `confirmDelete: true` is the MANUAL-institution assertion: that branch also
+// hard-deletes (cascading every imported account and transaction), so the
+// server requires the same literal — the caller passes this only after its
+// own "cannot be undone" confirm. Deliberately a separate option from
+// `permanent`, which routes a SimpleFIN institution to a different branch.
+export function unlinkInstitution(institutionId, { permanent = false, confirmDelete = false } = {}) {
   return postJson('/api/unlink-institution', {
     institution_id: institutionId,
-    ...(permanent ? { permanent: true, confirm: 'delete' } : {}),
+    ...(permanent ? { permanent: true, confirm: 'delete' } : confirmDelete ? { confirm: 'delete' } : {}),
   });
 }
 

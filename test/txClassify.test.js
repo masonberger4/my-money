@@ -4,7 +4,7 @@
 // stayed invisible: every part of it looks reasonable read one line at a time.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { merchantKey, matchLearnedRule, guessCategory, isCardPaymentDescriptor } from '../src/txClassify.js';
+import { merchantKey, matchLearnedRule, guessCategory, isCardPaymentDescriptor, isKeyPrefix } from '../src/txClassify.js';
 
 // --- merchantKey: what collapses and what stays distinct --------------------
 
@@ -325,4 +325,43 @@ test('isCardPaymentDescriptor: transfer wording naming a card is a payment; plai
   assert.equal(isCardPaymentDescriptor('DISCOVER TIRE AND AUTO CENTER'), false);
   // A Wells Fargo BANK deposit is not a card payment (issuer without payment wording).
   assert.equal(isCardPaymentDescriptor('WELLS FARGO DES:DEPOSIT'), false);
+});
+
+// ---------------------------------------------------------------------------
+// The trim-the-key editor (the recorded honest fix for the over-specific-key
+// limit): the learn confirm lets the user shorten the key to a leading
+// whole-token prefix. These pins are the feature's contract — a trimmed key
+// must actually generalize, and the guard must reject every shape that would
+// mint a rule that LOOKS taught but matches nothing.
+// ---------------------------------------------------------------------------
+
+test('isKeyPrefix: leading whole-token prefixes only', () => {
+  const full = 'COSTCO GAS SEATTLE WA';
+  assert.equal(isKeyPrefix('COSTCO', full), true);
+  assert.equal(isKeyPrefix('COSTCO GAS', full), true);
+  assert.equal(isKeyPrefix(full, full), true);
+  // A mid-key subset would never fire (matching is rule→row startsWith).
+  assert.equal(isKeyPrefix('COSTCO SEATTLE', full), false);
+  assert.equal(isKeyPrefix('GAS SEATTLE WA', full), false);
+  // A partial token is not a prefix — the match must end at a token boundary.
+  assert.equal(isKeyPrefix('COSTCO G', full), false);
+  // Empty and non-string shapes are unteachable, never "valid".
+  assert.equal(isKeyPrefix('', full), false);
+  assert.equal(isKeyPrefix(null, full), false);
+  assert.equal(isKeyPrefix('COSTCO', null), false);
+  assert.equal(isKeyPrefix(undefined, undefined), false);
+});
+
+test('a trimmed key is teachable as-is and matches the long descriptors it came from', () => {
+  // merchantKey is idempotent on its own output — that is what lets the
+  // confirm pass the trimmed key straight through setCategoryRule with zero
+  // adapter changes.
+  assert.equal(merchantKey('COSTCO GAS'), 'COSTCO GAS');
+  assert.equal(merchantKey(merchantKey('COSTCO GAS #0117 SEATTLE WA')), merchantKey('COSTCO GAS #0117 SEATTLE WA'));
+  // The point of trimming: the short rule now covers every store of the chain…
+  const rules = { 'COSTCO GAS': 'Transportation' };
+  assert.equal(matchLearnedRule('COSTCO GAS #0117 SEATTLE WA', rules), 'Transportation');
+  assert.equal(matchLearnedRule('COSTCO GAS #0552 TUKWILA WA', rules), 'Transportation');
+  // …without swallowing the sibling merchant (the deliberate no-stemming rule).
+  assert.equal(matchLearnedRule('COSTCO WHSE #0117 SEATTLE WA', rules), null);
 });

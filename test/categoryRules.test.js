@@ -16,6 +16,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   applyRuleToHistory,
+  bagWithRule,
   ilikeCandidatePattern,
   isRangeExhaustedError,
 } from '../src/ruleHistory.js';
@@ -642,4 +643,72 @@ test('listCategoryRules drops the amount column rather than reading it as a miss
   assert.doesNotMatch(calls[0].columns, /amount/);
   assert.equal(rows[0].amount, null);
   assert.notEqual(rows, null);
+});
+
+// --- Full-bag precedence in the history apply (the trim-editor's guard) ------
+// applyRuleToHistory used to re-match rows against a bag containing ONLY the
+// rule being taught, so an apply could clobber rows a previously taught
+// amount-scoped or longer-key rule owns — and the next sync, classifying with
+// the FULL bag, would flip the re-pulled rows back: a permanent split. The
+// trim-the-key editor makes overlapping prefix keys the mainline flow, so the
+// rewrite paths now take `rules` and only touch rows the taught rule WINS.
+
+test('an existing amount-scoped rule keeps its rows through an overlapping prefix apply', async () => {
+  const rules = { 'ZELLE TRANSFER': [{ amount: 1800, category: 'Rent' }] };
+  const db = makeDb([
+    { id: 1, description: 'ZELLE TRANSFER JOHN SMITH', amount: 1800, mapped_category: 'Rent' },
+    { id: 2, description: 'ZELLE TRANSFER JOHN SMITH', amount: 50, mapped_category: 'Uncategorized' },
+    { id: 3, description: 'ZELLE TO MOM', amount: 200, mapped_category: 'Uncategorized' },
+  ]);
+  // The trimmed teach: ZELLE → Personal, any amount, with the household bag.
+  const dry = await apply(db, 'ZELLE', 'Personal', { dryRun: true, rules });
+  assert.equal(dry, 2, 'the $1,800 rows the scoped rule wins must not be counted');
+  const wet = await apply(db, 'ZELLE', 'Personal', { rules });
+  assert.equal(wet, 2);
+  assert.equal(db.rows.find(r => r.id === 1).mapped_category, 'Rent',
+    'the scoped rule keeps its history — write-time precedence and the apply agree');
+  assert.equal(db.rows.find(r => r.id === 2).mapped_category, 'Personal');
+  assert.equal(db.rows.find(r => r.id === 3).mapped_category, 'Personal');
+  // No flip-flop left: write-time classification of row 1 with the post-teach
+  // bag still answers Rent, which is exactly what the apply preserved.
+  const after = bagWithRule(rules, 'ZELLE', 'Personal', null);
+  assert.equal(matchLearnedRule('ZELLE TRANSFER JOHN SMITH', after, 1800), 'Rent');
+});
+
+test('an existing longer-key rule keeps its rows through a shorter prefix apply', async () => {
+  const rules = { 'COSTCO GAS': 'Transportation' };
+  const db = makeDb([
+    { id: 1, description: 'COSTCO GAS #0117 SEATTLE', amount: 45, mapped_category: 'Transportation' },
+    { id: 2, description: 'COSTCO WHSE #0552', amount: 160, mapped_category: 'Uncategorized' },
+  ]);
+  const n = await apply(db, 'COSTCO', 'Shopping', { rules });
+  assert.equal(n, 1, 'only the row the short rule actually wins');
+  assert.equal(db.rows.find(r => r.id === 1).mapped_category, 'Transportation');
+  assert.equal(db.rows.find(r => r.id === 2).mapped_category, 'Shopping');
+});
+
+test('re-teaching a key replaces its own slot in the bag — legacy string shape included', async () => {
+  // The bag's old any-amount entry for the SAME key must be displaced by the
+  // taught one (setCategoryRule's delete-then-insert), not shadow it.
+  const rules = { ZELLE: 'Shopping' }; // legacy string shape, still read everywhere
+  const db = makeDb([
+    { id: 1, description: 'ZELLE TO MOM', amount: 200, mapped_category: 'Shopping' },
+  ]);
+  const n = await apply(db, 'ZELLE', 'Personal', { rules });
+  assert.equal(n, 1, 'the row must follow the re-taught category');
+  assert.equal(db.rows.find(r => r.id === 1).mapped_category, 'Personal');
+});
+
+test('countAll DELIBERATELY ignores the bag — it states the rule\'s reach, not who wins', async () => {
+  const rules = { 'ZELLE TRANSFER': [{ amount: 1800, category: 'Rent' }] };
+  const db = makeDb([
+    { id: 1, description: 'ZELLE TRANSFER JOHN SMITH', amount: 1800, mapped_category: 'Rent' },
+    { id: 2, description: 'ZELLE TO MOM', amount: 200, mapped_category: 'Personal' },
+  ]);
+  const n = await apply(db, 'ZELLE', 'Personal', {
+    countAll: true,
+    rules,
+    updateBatch: () => { throw new Error('countAll must never write'); },
+  });
+  assert.equal(n, 2, 'countAll counts every row the rule matches AT ALL, scoped winners included');
 });
