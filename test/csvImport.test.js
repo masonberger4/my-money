@@ -1,6 +1,9 @@
 // Tests for the pure CSV-import core (src/csvImport.js).
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
 import {
   parseCsv,
   analyzeCsv,
@@ -13,6 +16,9 @@ import {
 } from '../src/csvImport.js';
 import { TRANSFER_CATEGORY, FALLBACK_CATEGORY } from '../src/categoryMap.js';
 import { pullWasClean } from '../src/sync.js';
+
+const root = join(dirname(fileURLToPath(import.meta.url)), '..');
+const read = p => readFileSync(join(root, p), 'utf8');
 
 // --- parseCsv: the quoted/embedded-comma cases its own comment names --------
 
@@ -389,4 +395,32 @@ test('fileKindOf derives pdf from extension or MIME, csv otherwise (matches onFi
   assert.equal(fileKindOf('download', 'application/pdf'), 'pdf');
   assert.equal(fileKindOf('history.csv', 'text/csv'), 'csv');
   assert.equal(fileKindOf('export.txt', 'text/plain'), 'csv');
+});
+
+// --- Dashboard/modal source pin: the batch abort ref ------------------------
+// The batch runner's abort flag is set by an unmount CLEANUP. React 18
+// StrictMode (dev only, src/main.jsx) runs a mount effect setup -> cleanup ->
+// setup on the SAME fiber, and refs survive that simulated unmount — so a
+// cleanup-ONLY effect latches the flag true for the modal's whole life in
+// `npm run dev`. runBatch then creates the account, breaks before file 0, and
+// returns without a summary, an error, or clearing batchRunning: an empty
+// account, zero rows, no message. Prod builds don't double-invoke, so this had
+// NO alarm anywhere — it survived a real fresh-install test until the empty
+// account was traced by hand (2026-08-13). A source pin is the honest guard:
+// the behaviour is React's, not ours, and nothing in the Node test environment
+// can mount the component.
+test('REGRESSION: the batch abort ref RESETS on mount — StrictMode must never latch it true', () => {
+  const src = read('src/components/CsvImport.jsx');
+
+  assert.doesNotMatch(
+    src,
+    /useEffect\(\s*\(\)\s*=>\s*\(\)\s*=>\s*\{[\s\S]{0,300}?batchAbortRef\.current\s*=\s*true/,
+    'cleanup-ONLY abort effect: StrictMode latches batchAbortRef true and every batch import silently writes nothing'
+  );
+
+  assert.match(
+    src,
+    /batchAbortRef\.current\s*=\s*false;[\s\S]{0,600}?return\s*\(\)\s*=>\s*\{[\s\S]{0,300}?batchAbortRef\.current\s*=\s*true/,
+    'the mount effect must clear batchAbortRef BEFORE returning the cleanup that sets it'
+  );
 });

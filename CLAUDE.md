@@ -1542,6 +1542,28 @@ surgically, never the foundation.
   per-month view state must carry its month (`{y,m,list}`) so a transient
   failure after a month switch cannot render the old month's data under the
   new month's labels — the auto-fill preview guard applies the same rule.
+- **A ref set ONLY in an effect's cleanup is latched `true` forever under
+  StrictMode.** React 18 dev (`<React.StrictMode>`, `src/main.jsx`) runs a
+  mount effect **setup → cleanup → setup on the SAME fiber**, and `useRef`
+  values survive that simulated unmount — so the cleanup-only form
+  `useEffect(() => () => { ref.current = true }, [])` leaves the flag true for
+  the component's whole life under `npm run dev`. `CsvImport`'s
+  `batchAbortRef` was exactly that shape: every MULTI-FILE batch import created
+  its account (`runBatch`), broke before file 0 on the abort check, and
+  returned early with no summary, no error and `batchRunning` still true — an
+  empty account, zero rows, no message, and a modal frozen on "Importing… 1 of
+  N" whose ✕/Escape/backdrop are all disabled mid-run, so the only exit is a
+  reload. **Production builds don't double-invoke, so this had NO alarm
+  anywhere**: the prod seven-PDF backfill (PR #75) worked while local dev
+  silently wrote nothing, and it survived until a fresh-install test
+  (2026-08-13) produced an empty account that had to be traced by hand.
+  Reset the flag in the effect's SETUP before returning the cleanup; the
+  cleanup-only form is pinned red by a source scan in
+  `test/csvImport.test.js`. Same family as the SimpleFIN watermark deadlock —
+  a failure whose only tell is the ABSENCE of something — with the extra
+  twist that dev-only breakage is invisible to CI, which builds but never
+  drives the dev server (the Windows-path and CRLF gotchas are the other two
+  in this class).
 - **`<input type="date">` emits COMPLETE values while a year is typed** —
   "0002-06-15", "0020-06-15", "0202-06-15", "2026-06-15". Committing on `change`
   therefore writes garbage years (and, with an optimistic patch, the later blur
