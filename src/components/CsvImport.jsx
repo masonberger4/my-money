@@ -741,10 +741,21 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
   // written stay written — the content-hash dedup makes the re-run they need
   // idempotent.
   const batchAbortRef = useRef(false);
-  useEffect(() => () => {
-    batchAbortRef.current = true;
-    const r = batchPauseResolveRef.current;
-    if (r) { batchPauseResolveRef.current = null; r({ action: "skip" }); }
+  useEffect(() => {
+    // The reset is LOAD-BEARING, not tidiness. React 18 StrictMode (dev only,
+    // src/main.jsx) runs a mount effect setup -> cleanup -> setup on the SAME
+    // fiber, and refs survive that simulated unmount. With a cleanup-ONLY
+    // effect the abort flag latched true for the modal's whole life in
+    // `npm run dev`: every multi-file batch created its account (:781), broke
+    // at file 0 (:794), and returned at :950 with no summary, no error and
+    // batchRunning still true — an empty account, zero rows, no message.
+    // Found 2026-08-13 on a fresh install; see the StrictMode Gotcha.
+    batchAbortRef.current = false;
+    return () => {
+      batchAbortRef.current = true;
+      const r = batchPauseResolveRef.current;
+      if (r) { batchPauseResolveRef.current = null; r({ action: "skip" }); }
+    };
   }, []);
 
   // Hand the paused runner its answer: { action: 'save', template } resumes,
