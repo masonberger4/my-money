@@ -29,7 +29,7 @@ branches.
 
 ## Ship record (updated by each PR)
 
-- [ ] PR A — tokens + primitives
+- [x] PR A — tokens + primitives (shipped 2026-08-15)
 - [ ] PR B — bottom nav + IA + smoke harness
 - [ ] PR D — user_type migration + model (MIGRATION — Mason pastes SQL)
 - [ ] PR C — Spending list redesign

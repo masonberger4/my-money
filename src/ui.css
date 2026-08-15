@@ -59,22 +59,26 @@
   --light-shadow: rgba(0, 0, 0, .08);
   --light-overlay: rgba(0, 0, 0, .45);
 
-  /* dark palette */
-  --dark-bg: #18181A;
-  --dark-card: #222224;
-  --dark-text: #F0EFEB;          /* 13.8:1 on --card */
-  --dark-muted: #9A9992;         /* 5.56:1 on --card */
-  --dark-border: #2E2E30;
-  --dark-accent: #A79FF0;        /* 7.48:1 on --bg */
-  --dark-accent-text: #18181A;   /* 7.48:1 on --accent */
+  /* dark palette — near-black navy (the 2026-08-15 YNAB-style re-theme).
+     Ratios measured with src/paletteContrast.js; index.html's dark
+     theme-color meta + pre-paint backgrounds mirror --dark-bg in lockstep
+     (test/lockstep.test.js), and test/paletteContrast.test.js's
+     DARK_SURFACES mirror the four surfaces below. */
+  --dark-bg: #12141F;
+  --dark-card: #1C1F2E;
+  --dark-text: #F0EFEB;          /* 14.21:1 on --card */
+  --dark-muted: #9FA3B5;         /* grey-lavender, 6.52:1 on --card */
+  --dark-border: #2B2F42;
+  --dark-accent: #A79FF0;        /* 7.73:1 on --bg */
+  --dark-accent-text: #12141F;   /* = --dark-bg; 7.73:1 on --accent */
   --dark-danger: #F2A0A0;        /* 8.16:1 on --danger-bg */
   --dark-danger-bg: #2A1A1C;
   --dark-danger-border: #7F3639;
   --dark-warn: #E8C069;          /* 8.95:1 on --warn-bg */
   --dark-warn-bg: #2A2415;
   --dark-warn-border: #5A4A22;
-  --dark-input-bg: #2A2A2C;
-  --dark-track: #6E6E76;         /* 3.14:1 on --card — a data mark, not a hairline */
+  --dark-input-bg: #232738;
+  --dark-track: #6E7188;         /* 3.41:1 on --card — a data mark, not a hairline */
   --dark-shadow: rgba(0, 0, 0, .5);
   --dark-overlay: rgba(0, 0, 0, .65);
 }
@@ -164,13 +168,13 @@
 @keyframes fadeIn { from { opacity: 0; transform: translateY(5px) } to { opacity: 1; transform: none } }
 @keyframes spin { to { transform: rotate(360deg) } }
 
-.card { background: var(--card); border-radius: 14px; border: 1px solid var(--border); padding: 18px 20px; animation: fadeIn .25s ease both; }
+.card { background: var(--card); border-radius: 16px; border: 1px solid var(--border); padding: 20px; animation: fadeIn .25s ease both; }
 
 .tab { background: none; border: none; cursor: pointer; font-family: inherit; font-size: 13px; font-weight: 500; color: var(--muted); padding: 6px 10px; border-radius: 20px; transition: all .15s; flex: 1; }
 .tab.active { background: var(--card); color: var(--text); box-shadow: 0 1px 3px var(--shadow); }
 .tab:hover:not(.active) { color: var(--text); }
 
-.ibtn { background: none; border: 1px solid var(--border); border-radius: 8px; padding: 5px 12px; font-family: inherit; font-size: 12px; font-weight: 500; color: var(--muted); cursor: pointer; display: inline-flex; align-items: center; gap: 5px; transition: all .15s; }
+.ibtn { background: none; border: 1px solid var(--border); border-radius: 10px; padding: 5px 12px; font-family: inherit; font-size: 12px; font-weight: 500; color: var(--muted); cursor: pointer; display: inline-flex; align-items: center; gap: 5px; transition: all .15s; }
 .ibtn:hover { color: var(--text); border-color: var(--text); }
 .ibtn:disabled { opacity: .35; cursor: default; }
 
@@ -186,12 +190,30 @@
    This is the same trap as the dark-mode incident, where .card/.tab/.ibtn were
    trapped in that same block. Anything a pre-Dashboard screen can render
    belongs here. */
-.nbtn { background: var(--card); border: 1px solid var(--border); border-radius: 8px; width: 32px; height: 32px; display: flex; align-items: center; justify-content: center; cursor: pointer; font-size: 16px; transition: all .15s; line-height: 1; } /* 32px = the hit-area floor */
+.nbtn { background: var(--card); border: 1px solid var(--border); border-radius: 10px; width: 36px; height: 36px; display: flex; align-items: center; justify-content: center; cursor: pointer; font-size: 16px; transition: all .15s; line-height: 1; } /* 36px ≥ the 32px hit-area floor */
 .nbtn:hover:not(:disabled) { border-color: var(--text); }
 .nbtn:disabled { opacity: .3; cursor: default; }
 
 .overlay { position: fixed; inset: 0; background: var(--overlay); display: flex; align-items: center; justify-content: center; z-index: 100; }
-.modal { background: var(--card); border-radius: 16px; padding: 24px; width: 320px; border: 1px solid var(--border); }
+.modal { background: var(--card); border-radius: 20px; padding: 24px; width: 320px; border: 1px solid var(--border); }
+
+/* Full-screen sheet (the redesigned transaction detail, PR E of the YNAB
+   redesign). Swaps in for .modal inside the same .overlay shell — the
+   overlay keeps the backdrop, stacking and close-on-backdrop behavior. */
+.sheet-full { background: var(--card); width: 100%; height: 100dvh; max-height: 100dvh; border-radius: 0; border: none; overflow-y: auto; padding: 0; }
+
+/* Bottom navigation (Dashboard, PR B of the YNAB redesign). Fixed, floating.
+   z-index 50 sits UNDER .overlay (100) so every sheet covers it; the content
+   column adds bottom padding so the bar never covers the last row. The
+   ACTIVE label stays var(--text): the accent fails 4.5:1 on the light bg
+   (3.48:1), so the accent tint is carried by the icon (.bnav-ico), a
+   non-text mark held to the 3:1 floor. */
+.bnav { position: fixed; bottom: calc(10px + env(safe-area-inset-bottom)); left: 50%; transform: translateX(-50%); width: min(688px, calc(100vw - 24px)); background: var(--card); border: 1px solid var(--border); border-radius: 24px; box-shadow: 0 4px 16px var(--shadow); z-index: 50; display: flex; padding: 6px; gap: 2px; }
+.bnav-item { flex: 1; background: none; border: none; cursor: pointer; font-family: inherit; display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 6px 0 5px; border-radius: 18px; font-size: 11px; font-weight: 500; color: var(--muted); transition: all .15s; line-height: 1.2; }
+.bnav-item .bnav-ico { font-size: 17px; line-height: 1; }
+.bnav-item.active { background: var(--bg); color: var(--text); font-weight: 600; }
+.bnav-item.active .bnav-ico { color: var(--accent); }
+.bnav-item:hover:not(.active) { color: var(--text); }
 
 .tx { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--border); }
 .tx:last-child { border-bottom: none; }
