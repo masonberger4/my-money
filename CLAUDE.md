@@ -1136,6 +1136,15 @@ normally — the permanent wrong-sign hazard lives in the `csvImport.js` key row
 
 ## Roadmap
 
+**The approved BUILD SPEC for the YNAB-style redesign is
+`docs/ynab-redesign-plan-2026-08-15.md`** (Mason, 2026-08-15): six PRs — navy
+re-theme, bottom 5-item nav, day-grouped Spending list, the 4-type
+`transactions.user_type` override routed through the shared model, the
+full-screen tx sheet, final re-skins. A session-starter process artifact (the
+`next-session-prompt.md` precedent, below): each PR marks its phase shipped in
+that file, and the PR that finishes it DELETES it after migrating its durable
+rules here. Not a second roadmap.
+
 **The forward-looking doc is `docs/next-iteration-plan-2026-08-04.md`** — the
 ONLY one. (`docs/next-session-prompt.md` is a session STARTER, a process
 artifact deleted by the session that spends it — not a second roadmap.
