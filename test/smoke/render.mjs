@@ -30,7 +30,12 @@ try {
 
 const PORT = process.env.SMOKE_PORT || '5199';
 const URL = `http://localhost:${PORT}`;
-const EXPECTED_TABS = 10;
+// The bottom-nav IA (PR B of the YNAB redesign): 5 nav items, 11 views —
+// home, plan, spending, accounts (+ its debt segment), reflect, and reflect's
+// five report screens. Every legacy tab body still exists; only the walk
+// changed.
+const EXPECTED_NAV_ITEMS = 5;
+const EXPECTED_VIEWS = 11;
 
 const fail = msg => {
   console.error(`SMOKE FAIL: ${msg}`);
@@ -65,7 +70,7 @@ try {
   // Wait for the thing we are asserting on rather than a fixed sleep: React
   // mounts when the module graph settles, and a hardcoded delay is either
   // slower than needed or flaky on a loaded CI runner.
-  await page.waitForSelector('.tab', { timeout: 30_000 });
+  await page.waitForSelector('[data-mm-nav]', { timeout: 30_000 });
 } catch (e) {
   gotoError = e.message;
 }
@@ -75,35 +80,54 @@ const bodyHasBoundary = async () =>
     await page.evaluate(() => document.body.innerText || '').catch(() => '')
   );
 
-const tabCount = await page.$$eval('.tab', els => els.length).catch(() => 0);
+const navCount = await page.$$eval('[data-mm-nav]', els => els.length).catch(() => 0);
 const boundaryAtStart = await bodyHasBoundary();
 
-// Visit each tab by INDEX, re-reading the handle each time: clicking re-renders
-// the tab strip, so handles captured up front go stale.
+// The walk: every bottom-nav destination, the Accounts screen's debt segment,
+// and each Reflect report (returning to the hub between reports). Selectors
+// are RE-QUERIED on every step — clicking re-renders, so handles captured up
+// front go stale (the old tab-strip rule, kept).
+const WALK = [
+  ['home', '[data-mm-nav=home]'],
+  ['plan', '[data-mm-nav=plan]'],
+  ['spending', '[data-mm-nav=spending]'],
+  ['accounts', '[data-mm-nav=accounts]'],
+  ['debt', '[data-mm-seg=debt]'],
+  ['reflect', '[data-mm-nav=reflect]'],
+];
+for (const report of ['categories', 'trends', 'recurring', 'tax', 'ask']) {
+  WALK.push([report, `[data-mm-report=${report}]`]);
+  // Back to the hub so the next report card exists to click. Not counted as
+  // its own view — reflect is already in the list above.
+  WALK.push([null, '[data-mm-nav=reflect]']);
+}
+
 const visited = [];
-if (!gotoError && tabCount >= EXPECTED_TABS) {
-  for (let i = 0; i < tabCount; i++) {
-    const tabs = await page.$$('.tab');
-    if (!tabs[i]) break;
-    const label = (await tabs[i].innerText().catch(() => `#${i}`)).trim() || `#${i}`;
-    where = `tab: ${label}`;
+if (!gotoError && navCount >= EXPECTED_NAV_ITEMS) {
+  for (const [view, selector] of WALK) {
+    where = view ? `view: ${view}` : 'returning to reflect';
+    const el = await page.$(selector);
+    if (!el) {
+      await browser.close();
+      fail(`selector ${selector} not found (walk step "${where}")`);
+    }
     try {
-      await tabs[i].click({ timeout: 10_000 });
+      await el.click({ timeout: 10_000 });
     } catch (e) {
       await browser.close();
-      fail(`could not click tab "${label}" — ${e.message}`);
+      fail(`could not click ${selector} — ${e.message}`);
     }
-    // Let the tab's effects run and paint. A lazy tab (trends/recurring/debt/
-    // tax) resolves a promise before it renders anything real.
+    // Let the view's effects run and paint. A lazy view (trends/recurring/
+    // debt/tax) resolves a promise before it renders anything real.
     await page.waitForTimeout(600);
     if (await bodyHasBoundary()) {
       await browser.close();
       fail(
-        `the ErrorBoundary rendered on the "${label}" tab — that tab crashed.\n` +
+        `the ErrorBoundary rendered on the "${where}" step — that view crashed.\n` +
           (consoleErrors.length ? `  console: ${consoleErrors.slice(-5).join('\n  console: ')}` : '')
       );
     }
-    visited.push(label);
+    if (view) visited.push(view);
   }
 }
 
@@ -117,14 +141,14 @@ if (pageErrors.length) {
   );
 }
 if (boundaryAtStart) fail('the ErrorBoundary rendered — the app crashed on first render');
-if (tabCount < EXPECTED_TABS) {
-  fail(`expected ${EXPECTED_TABS} tabs, found ${tabCount} — the Dashboard did not mount`);
+if (navCount !== EXPECTED_NAV_ITEMS) {
+  fail(`expected ${EXPECTED_NAV_ITEMS} bottom-nav items, found ${navCount} — the Dashboard did not mount`);
 }
-if (visited.length < EXPECTED_TABS) {
-  fail(`only visited ${visited.length}/${EXPECTED_TABS} tabs — the tab strip changed mid-run`);
+if (visited.length < EXPECTED_VIEWS) {
+  fail(`only visited ${visited.length}/${EXPECTED_VIEWS} views — the walk broke mid-run`);
 }
 
-console.log(`SMOKE OK: ${visited.length} tabs rendered, no page errors, no ErrorBoundary.`);
+console.log(`SMOKE OK: ${visited.length} views rendered, no page errors, no ErrorBoundary.`);
 console.log(`  visited: ${visited.join(' · ')}`);
 if (consoleErrors.length) {
   console.log(`  (${consoleErrors.length} console error(s), non-fatal — the mock rejects some reads on purpose)`);
