@@ -21,6 +21,7 @@ import { parentIndex, parentOf, hasChildren, eligibleParents, canSetParent,
 import { teachQueueGroups, nonSpendLabel, categorizedShare } from "../teachQueue.js";
 import { displayBalance, isDebtAccount as isDebtType, balanceAsOf, BALANCE_STALE_DAYS } from "../accountBalance.js";
 import { unhideConfirmMessage } from "../unhideConfirm.js";
+import { NAV_ITEMS, REFLECT_TABS, navForTab, pageTitle } from "../nav.js";
 import { createSheetHistory } from "../sheetHistory.js";
 import { runSync } from "../sync.js";
 // Lazy: both are modals rendered only on user action, and CsvImport reaches the
@@ -1330,6 +1331,35 @@ function PropertySheet({name,year,rows,busy,receiptTxIds,surf,getName,getColor,a
 // `surface` = the token value of whatever the pill sits on (every pill sits on a
 // card today). The tint, the label ink and the dot are all derived from `color`
 // against it, so the same stored colour stays legible in either theme.
+// The fixed 5-item bottom navigation (PR B of the YNAB redesign). src/nav.js
+// owns the tab→item map; ui.css's .bnav owns the chrome (z-index 50, UNDER
+// every .overlay). Module-private like Pill. The Spending badge is the viewed
+// month's Uncategorized row count — the retraining backlog, the same number
+// the Spending screen's Review banner (PR C) opens on.
+function BottomNav({tab,onGo,badge,surface}){
+  const active=navForTab(tab);
+  const b=chipOn(OVER_MONEY,surface);
+  return (
+    <nav className="bnav" aria-label="Primary">
+      {NAV_ITEMS.map(item=>(
+        <button key={item.id} className={`bnav-item${active===item.id?" active":""}`}
+          data-mm-nav={item.id} aria-current={active===item.id?"page":undefined}
+          onClick={()=>onGo(item.tab)}>
+          <span className="bnav-ico" aria-hidden="true" style={{position:"relative"}}>
+            {item.icon}
+            {item.id==="spending"&&badge>0&&(
+              <span style={{position:"absolute",top:-5,right:-16,background:b.bg,color:b.ink,
+                borderRadius:9,fontSize:9,fontWeight:700,lineHeight:"14px",minWidth:14,
+                padding:"0 4px",textAlign:"center",filter:"none"}}>{badge>99?"99+":badge}</span>
+            )}
+          </span>
+          {item.label}
+        </button>
+      ))}
+    </nav>
+  );
+}
+
 function Pill({label,color,surface}) {
   const c=chipOn(color,surface);
   return <span style={{display:"inline-flex",alignItems:"center",gap:4,fontSize:10,background:c.bg,color:c.ink,
@@ -3594,10 +3624,24 @@ export default function Dashboard({ refreshTick = 0 }) {
     }
   });
 
+  // The ONE nav handler — the old tab strip's side effects, verbatim: leaving
+  // the accounts group closes the account sheet, and only Budget may sit on a
+  // future month, so leaving it snaps back.
+  const go=(t)=>{
+    setTab(t);
+    if(t!=="accounts")setSelAcct(null);
+    if(t!=="budget"&&isFuture)goCurrentMonth();
+  };
+  // The Spending item's badge: the viewed month's Uncategorized rows (the
+  // retraining backlog). Derived in render like the teach queue — no cache.
+  // `txs` is the shaped month list (transactions?.transactions||[]).
+  const uncatBadge=txs.filter(t=>t.category===UNCATEGORIZED).length;
+
   return (
     <div style={{fontFamily:"'DM Sans','Helvetica Neue',sans-serif",background:"var(--bg)",minHeight:"100vh",
       color:"var(--text)"}}>
-      <div style={{maxWidth:720,margin:"0 auto",padding:"24px 16px"}}>
+      {/* 96px bottom padding keeps the fixed bottom nav clear of the last row. */}
+      <div style={{maxWidth:720,margin:"0 auto",padding:"24px 16px 96px"}}>
 
         {/* Header */}
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,flexWrap:"wrap",marginBottom:18}}>
@@ -3688,7 +3732,33 @@ export default function Dashboard({ refreshTick = 0 }) {
           </div>
         )}
 
-        {/* Summary */}
+        {/* Reflect children get a way back to the hub (the bottom bar's
+            Reflect item also returns there). */}
+        {REFLECT_TABS.includes(tab)&&(
+          <button className="ibtn" onClick={()=>go("reflect")} style={{marginBottom:12}}>‹ Reflect</button>
+        )}
+
+        {/* The Accounts screen's two segments — Accounts and Debt keep their
+            own tab values and bodies; this is just the switch between them. */}
+        {(tab==="accounts"||tab==="debt")&&(
+          <div style={{display:"flex",gap:8,marginBottom:12}}>
+            {[["accounts","Accounts"],["debt","Debt"]].map(([t,label])=>{
+              const active=tab===t;
+              const c=chipOn(TYPE_CHIP,surf.card);
+              return (
+                <button key={t} data-mm-seg={t} onClick={()=>go(t)}
+                  style={{border:`1px solid ${active?c.ink:"var(--border)"}`,background:active?c.bg:"none",
+                    color:active?c.ink:"var(--muted)",borderRadius:16,padding:"6px 14px",fontSize:13,
+                    fontWeight:600,cursor:"pointer",fontFamily:"inherit"}}>
+                  {label}
+                </button>
+              );
+            })}
+          </div>
+        )}
+
+        {/* Summary (Home only since the bottom-nav IA — it was global) */}
+        {tab==="overview"&&(
         <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10,marginBottom:14}}>
           {[
             // The comparison figure must be the one the tile beside it computed
@@ -3740,22 +3810,22 @@ export default function Dashboard({ refreshTick = 0 }) {
             </div>
           ))}
         </div>
+        )}
 
-        {/* Tabs */}
-        <div style={{display:"flex",gap:3,background:"var(--bg)",borderRadius:24,padding:4,marginBottom:14,border:"1px solid var(--border)",overflowX:"auto"}}>
-          {["overview","categories","budget","transactions","accounts","debt","trends","recurring","tax","ask"].map(t=>(
-            <button key={t} className={`tab${tab===t?" active":""}`}
-              onClick={()=>{
-                setTab(t);
-                if(t!=="accounts")setSelAcct(null);
-                // Only the Budget tab can look into the future; every other tab
-                // would just show an empty month, so leaving snaps back.
-                if(t!=="budget"&&isFuture)goCurrentMonth();
-              }}>
-              {t[0].toUpperCase()+t.slice(1)}
-            </button>
-          ))}
-        </div>
+        {/* REFLECT hub — the fifth bottom-nav destination. PR B ships the
+            shell (link cards); PR F fills in the report cards. */}
+        {tab==="reflect"&&(
+          <div style={{display:"flex",flexDirection:"column",gap:12}}>
+            {REFLECT_TABS.map((t,i)=>(
+              <button key={t} className="card" data-mm-report={t} onClick={()=>go(t)}
+                style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,
+                  textAlign:"left",cursor:"pointer",font:"inherit",color:"var(--text)",animationDelay:i*.04+"s"}}>
+                <span style={{fontSize:15,fontWeight:600}}>{pageTitle(t)}</span>
+                <span aria-hidden="true" style={{color:"var(--muted)",fontSize:18}}>›</span>
+              </button>
+            ))}
+          </div>
+        )}
 
         {/* OVERVIEW */}
         {tab==="overview"&&(
@@ -6028,6 +6098,8 @@ export default function Dashboard({ refreshTick = 0 }) {
 
         <div style={{textAlign:"center",marginTop:18,fontSize:11,color:"var(--muted)"}}>my-money</div>
       </div>
+
+      <BottomNav tab={tab} onGo={go} badge={uncatBadge} surface={surf.card}/>
 
       {/* Category drill-in. Rendered BEFORE the transaction sheet on purpose:
           both are .overlay at the same z-index, so DOM order is what puts the
