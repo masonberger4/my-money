@@ -16,7 +16,7 @@
     <!-- --bg light/dark, kept in lockstep with src/ui.css. These follow the OS;
          src/theme.js rewrites both @content values when a theme is forced. -->
     <meta name="theme-color" content="#F7F6F2" media="(prefers-color-scheme: light)" />
-    <meta name="theme-color" content="#18181A" media="(prefers-color-scheme: dark)" />
+    <meta name="theme-color" content="#12141F" media="(prefers-color-scheme: dark)" />
 
     <!-- iOS home-screen app -->
     <meta name="apple-mobile-web-app-capable" content="yes" />
@@ -43,10 +43,10 @@
          src/ui.css — parsed before the stylesheet loads, so they must be
          changed in lockstep with it. */
       html, body { margin: 0; background: #F7F6F2; }
-      @media (prefers-color-scheme: dark) { html, body { background: #18181A; } }
+      @media (prefers-color-scheme: dark) { html, body { background: #12141F; } }
       /* A forced theme must beat the OS in both directions. */
       html[data-theme="light"], html[data-theme="light"] body { background: #F7F6F2; }
-      html[data-theme="dark"], html[data-theme="dark"] body { background: #18181A; }
+      html[data-theme="dark"], html[data-theme="dark"] body { background: #12141F; }
       /* Pad the app for the iPhone notch + home indicator when launched
          from the home screen with status-bar-style: black-translucent. */
       body {
