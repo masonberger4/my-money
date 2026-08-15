@@ -63,7 +63,10 @@ export function isLoanAccount(t) {
 // row counts whatever its wording says. A positive amount on a credit account
 // is a purchase by definition (a payment arrives as money in), so the
 // descriptor test is skipped there — same guard as txClassify's write path.
-function isCardPaymentRow(t) {
+// Exported since the 4-type override (2026-08-15): deriveTxType renders the
+// SAME verdict as a "Card payment" display type — one predicate, one home,
+// a new consumer, not a second predicate.
+export function isCardPaymentRow(t) {
   if (t.user_category) return t.user_category === TRANSFER_CATEGORY;
   if (t.accounts?.type === 'credit') return false;
   return isCardPaymentDescriptor(t.description) || isCardPaymentDescriptor(t.merchant_name);
@@ -86,9 +89,23 @@ function isCardPaymentRow(t) {
 // structure, and only the card-payment verdict vetoes an unpaired row. An
 // unpaired transfer-worded row crossed the boundary and counts (it shows in
 // Categories under the transfer label — visible, like Uncategorized).
+//
+// The 4-type override (transactions.user_type, 2026-08-15) reads FOURTH, by
+// design — precedence is excluded > loan > sign > user_type > structure:
+//   - excluded still wins overall (the existing full-exclusion escape);
+//   - loan rows IGNORE the override (Mason's rule: loan ledger rows never
+//     count — and an account retyped to loan later must not resurrect one);
+//   - the SIGN guard outranks it: 'spending' on a money-in row is inert
+//     (honoring it would ADD a negative and silently shrink sumSpending);
+//   - a non-null override then beats structure, INCLUDING both card-payment
+//     vetoes — an explicit 'spending' on a payment-worded row counts.
+// Overridden rows never enter markInternalTransfers' candidate pool, so
+// _internal and user_type are mutually exclusive in practice; the _internal
+// check staying first is harmless and keeps unpaired lists honest.
 export function isSpend(t) {
   if (t.excluded || t._internal || isLoanAccount(t)) return false;
   if (t.amount <= 0) return false;
+  if (t.user_type) return t.user_type === 'spending';
   return !isCardPaymentRow(t);
 }
 
@@ -98,6 +115,55 @@ export function sumSpending(txs) {
     if (isSpend(t)) total += t.amount;
   }
   return total;
+}
+
+// --- The 4-type transaction model (2026-08-15, Mason — YNAB vocabulary) ------
+// A row is exactly one of Spending / Inflow / Transfer / Card payment (plus
+// the display-only 'loan'). The DERIVED type restates the structural verdicts
+// above — it introduces no second predicate — and transactions.user_type is
+// the user's override, which isSpend/cashIncome read directly (see isSpend's
+// precedence note). These live HERE because they read isCardPaymentRow /
+// isLoanAccount; src/txType.js holds the labels + selector policy and
+// re-exports these two.
+
+export const TX_TYPES = ['spending', 'inflow', 'transfer', 'card_payment'];
+
+// The structural (no-override) display type. Same reads as isSpend/cashIncome,
+// restated as a name:
+//   _internal pair        -> 'transfer', EXCEPT on a credit account or
+//                            payment-worded row -> 'card_payment' (a
+//                            checking→card payment labeled "Transfer" on both
+//                            legs would contradict the YNAB vocabulary this
+//                            exists to adopt; display-only, totals identical);
+//   unpaired positive     -> 'spending', or 'card_payment' via the veto;
+//   any negative          -> 'inflow' (a depository negative is income; a
+//                            credit negative is Return — never income, and it
+//                            DISPLAYS as Inflow);
+//   loan-account rows     -> 'loan' first: they never count (isLoanAccount)
+//                            and IGNORE user_type — an account retyped to
+//                            loan must not resurrect an old override.
+// Same accuracy caveat as `counted`: _internal only exists on rows that went
+// through markInternalTransfers, so on never-paired lists (the account sheet,
+// search results) a washable transfer leg derives 'spending' — those lists
+// don't render totals from it.
+export function deriveTxType(t) {
+  if (isLoanAccount(t)) return 'loan';
+  if (t._internal) {
+    return t.accounts?.type === 'credit'
+      || isCardPaymentDescriptor(t.description)
+      || isCardPaymentDescriptor(t.merchant_name)
+      ? 'card_payment' : 'transfer';
+  }
+  if (t.amount > 0) return isCardPaymentRow(t) ? 'card_payment' : 'spending';
+  return 'inflow';
+}
+
+// Effective type = user_type ?? structural — the effective-category rule's
+// shape. An unknown/garbage stored value falls back to the derivation rather
+// than rendering a type the UI has no vocabulary for.
+export function effectiveTxType(t) {
+  if (isLoanAccount(t)) return 'loan';
+  return TX_TYPES.includes(t.user_type) ? t.user_type : deriveTxType(t);
 }
 
 // Spending up to and including a DAY OF THE MONTH — the honest half of the
@@ -210,6 +276,14 @@ export function toTxShape(t) {
     user_category: t.user_category || null,
     user_description: t.user_description || null,
     excluded: !!t.excluded,
+    // The 4-type model, mirroring the category/description pattern exactly:
+    // the override, the un-overridden derivation (so an optimistic type edit
+    // or its reset can recompute tx_type locally — the auto_category rule),
+    // and the effective value the UI renders. auto_tx_type carries the same
+    // pairing caveat as `counted` (see deriveTxType).
+    user_type: t.user_type ?? null,
+    auto_tx_type: deriveTxType(t),
+    tx_type: effectiveTxType(t),
     // The row's OWN rental assignment (null = inherit the account's default —
     // resolve against accounts.entity_id where the effective value matters).
     entity_id: t.entity_id ?? null,
@@ -245,6 +319,7 @@ export function patchTxShape(t, fields) {
   const next = { ...t, ...fields };
   if ('user_category' in fields) next.category = fields.user_category || t.auto_category;
   if ('user_description' in fields) next.merchant_name = fields.user_description || t.auto_description;
+  if ('user_type' in fields) next.tx_type = fields.user_type || t.auto_tx_type;
   return next;
 }
 

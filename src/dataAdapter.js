@@ -136,7 +136,20 @@ export {
 } from './spending.js';
 
 const TX_COLUMNS =
-  'id, plaid_tx_id, account_id, date, amount, merchant_name, description, mapped_category, raw_category, user_category, user_description, excluded, pending';
+  'id, plaid_tx_id, account_id, date, amount, merchant_name, description, mapped_category, raw_category, user_category, user_description, excluded, pending, user_type';
+
+// The 4-type override column (20260815000001). It lives IN the column lists
+// so test/recurringColumns.test.js can pin it as an isSpend input; before the
+// migration is pasted, txCols() strips it and the callers' catches flip this
+// flag (the transactionsHaveEntity pattern). The client-side degrade is
+// REQUIRED, not belt-and-braces: a bare 42703 surfacing through getEnvelopes
+// would read as "envelopes not installed" (isEnvelopeSchemaMissing) and kill
+// the Budget tab. The server (api/_lib/spendingContext.js) deliberately has
+// no equivalent — see the comment there.
+let transactionsHaveUserType = true;
+const stripUserType = cols =>
+  cols.split(',').map(s => s.trim()).filter(c => c !== 'user_type').join(', ');
+const txCols = cols => (transactionsHaveUserType ? cols : stripUserType(cols));
 
 // The rental-tax columns (20260730000001) ride along on every transaction read
 // so the detail sheet can show and edit them from ANY list — transactions tab,
@@ -161,7 +174,7 @@ async function fetchRawBetween(start, end, columns) {
   // An explicit `columns` (the envelope walk's narrow list) skips the tax
   // columns; the default wide read carries them, degrading pre-migration.
   const fetchAll = async withEntity => {
-    const cols = columns ?? (withEntity ? TX_COLUMNS + TX_TAX_COLUMNS : TX_COLUMNS);
+    const cols = txCols(columns ?? (withEntity ? TX_COLUMNS + TX_TAX_COLUMNS : TX_COLUMNS));
     const join = `accounts!inner(hidden, type, subtype${withEntity ? ', entity_id' : ''})`;
     return pagedRows((from, to) =>
       supabase
@@ -181,9 +194,15 @@ async function fetchRawBetween(start, end, columns) {
   try {
     return await fetchAll(!columns && transactionsHaveEntity);
   } catch (error) {
+    // Each branch flips its flag and RE-ENTERS so the other flag still gets
+    // its own retry when both columns are missing (a fresh install mid-replay).
     if (!columns && transactionsHaveEntity && isMissingColumnError(error, 'entity_id')) {
       transactionsHaveEntity = false;
-      return await fetchAll(false);
+      return await fetchRawBetween(start, end, columns);
+    }
+    if (transactionsHaveUserType && isMissingColumnError(error, 'user_type')) {
+      transactionsHaveUserType = false;
+      return await fetchRawBetween(start, end, columns);
     }
     throw error;
   }
@@ -247,10 +266,11 @@ async function getTransactionsBetween(start, end, { columns } = {}) {
 // The subset of TX_COLUMNS that isSpend() + effectiveCategory() +
 // markInternalTransfers actually read (plus `id`, which the pagination
 // tiebreaker orders by). account_id feeds the pairing (different-account
-// rule); description/merchant_name feed the card-payment veto. isLoanAccount
+// rule); description/merchant_name feed the card-payment veto; user_type is
+// the 4-type override isSpend reads (and the pairing pool drops). isLoanAccount
 // reads accounts.type, which the inner join already selects.
 const SPEND_TX_COLUMNS =
-  'id, account_id, date, amount, description, merchant_name, mapped_category, user_category, excluded';
+  'id, account_id, date, amount, description, merchant_name, mapped_category, user_category, excluded, user_type';
 
 // The recurring candidate fetch (~40 months — the app's largest query) needs
 // only what detectRecurring reads off the toTxShape rows: the spending
@@ -350,6 +370,8 @@ export async function updateTransaction(id, fields) {
   if ('user_category' in fields) allowed.user_category = fields.user_category;
   if ('user_description' in fields) allowed.user_description = fields.user_description;
   if ('excluded' in fields) allowed.excluded = fields.excluded;
+  // The 4-type override; null = back to automatic (the user_category shape).
+  if ('user_type' in fields) allowed.user_type = fields.user_type;
   if ('entity_id' in fields) allowed.entity_id = fields.entity_id;
   if ('is_capital' in fields) allowed.is_capital = fields.is_capital;
   if ('placed_in_service' in fields) allowed.placed_in_service = fields.placed_in_service;
@@ -550,7 +572,7 @@ export async function getAccountTransactions(accountId, { limit = 500 } = {}) {
   const attempt = withEntity =>
     supabase
       .from('transactions')
-      .select(`${withEntity ? TX_COLUMNS + TX_TAX_COLUMNS : TX_COLUMNS}, accounts(type)`)
+      .select(`${txCols(withEntity ? TX_COLUMNS + TX_TAX_COLUMNS : TX_COLUMNS)}, accounts(type)`)
       .eq('account_id', accountId)
       .order('date', { ascending: false })
       .limit(limit + 1);
@@ -558,6 +580,10 @@ export async function getAccountTransactions(accountId, { limit = 500 } = {}) {
   if (error && transactionsHaveEntity && isMissingColumnError(error, 'entity_id')) {
     transactionsHaveEntity = false;
     ({ data, error } = await attempt(false));
+  }
+  if (error && transactionsHaveUserType && isMissingColumnError(error, 'user_type')) {
+    transactionsHaveUserType = false;
+    ({ data, error } = await attempt(transactionsHaveEntity));
   }
   if (error) throw error;
   for (const t of data) {
@@ -1044,7 +1070,7 @@ export async function searchTransactions(query, { limit = 200, offset = 0, filte
   const attempt = withEntity => {
     let b = supabase
       .from('transactions')
-      .select(`${withEntity ? TX_COLUMNS + TX_TAX_COLUMNS : TX_COLUMNS}, accounts!inner(hidden, type, subtype)`)
+      .select(`${txCols(withEntity ? TX_COLUMNS + TX_TAX_COLUMNS : TX_COLUMNS)}, accounts!inner(hidden, type, subtype)`)
       .eq('accounts.hidden', false);
     if (textOr) b = b.or(textOr);
     if (amtOr) b = b.or(amtOr);
@@ -1059,6 +1085,10 @@ export async function searchTransactions(query, { limit = 200, offset = 0, filte
   if (error && transactionsHaveEntity && isMissingColumnError(error, 'entity_id')) {
     transactionsHaveEntity = false;
     ({ data, error } = await attempt(false));
+  }
+  if (error && transactionsHaveUserType && isMissingColumnError(error, 'user_type')) {
+    transactionsHaveUserType = false;
+    ({ data, error } = await attempt(transactionsHaveEntity));
   }
   if (error) {
     if (isRangeExhaustedError(error)) return { transactions: [], hasMore: false };
@@ -1566,7 +1596,7 @@ export async function addManualTransaction(
     return client
       .from('transactions')
       .insert(payload)
-      .select(`${TX_COLUMNS}, accounts!inner(hidden, type, subtype)`)
+      .select(`${txCols(TX_COLUMNS)}, accounts!inner(hidden, type, subtype)`)
       .single();
   };
 
@@ -1574,6 +1604,12 @@ export async function addManualTransaction(
   if (error && transactionsHaveSource && isMissingColumnError(error, 'source')) {
     transactionsHaveSource = false;
     ({ data, error } = await attempt(false));
+  }
+  if (error && transactionsHaveUserType && isMissingColumnError(error, 'user_type')) {
+    // The INSERT itself never names user_type (buildManualTxRow omits it —
+    // pinned in test/manualTx.test.js); only the read-back select does.
+    transactionsHaveUserType = false;
+    ({ data, error } = await attempt(transactionsHaveSource));
   }
   if (error) throw error;
 

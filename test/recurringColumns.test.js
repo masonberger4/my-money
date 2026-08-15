@@ -27,6 +27,7 @@ test('recurring columns carry every input of the toTxShape fields detection read
     'mapped_category', // effectiveCategory
     'user_category', // effectiveCategory override
     'excluded', // isSpend
+    'user_type', // isSpend's 4-type override — a `counted` input
   ]) {
     assert.ok(cols.includes(need), `RECURRING_TX_COLUMNS missing ${need}`);
   }

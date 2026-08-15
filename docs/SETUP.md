@@ -88,24 +88,25 @@ The CLI is **not** a project dependency: `npx supabase` fetches it on demand (or
    select (select count(*) > 0 from household_members) as household_linked;
    ```
 
-   It must return `true`. If it doesn't, create the auth user and re-run the script — and then **re-apply all five migrations from the next step**, because re-running `setup_all.sql` drops the tables and columns those migrations create.
+   It must return `true`. If it doesn't, create the auth user and re-run the script — and then **re-apply all the migrations from the next step**, because re-running `setup_all.sql` drops the tables and columns those migrations create.
 
-4. **Apply the five newer migrations.** `setup_all.sql` is currently stale: it replays migrations only through `20260731000001_receipts.sql`, and its end-of-script self-check also stops there — so it passes green while missing five later migrations. Paste and run these files from `supabase/migrations/`, **in filename order**, after `setup_all.sql`:
+4. **Apply the newer migrations.** `setup_all.sql` is currently stale: it replays migrations only through `20260731000001_receipts.sql`, and its end-of-script self-check also stops there — so it passes green while missing every later migration. Paste and run these files from `supabase/migrations/`, **in filename order**, after `setup_all.sql`:
 
    1. `20260801000001_debt_tracker.sql`
    2. `20260804000001_budget_month_target_override.sql`
    3. `20260804000002_expected_transactions.sql`
    4. `20260805000001_user_owned_categories.sql`
    5. `20260805000002_category_rule_amounts.sql`
+   6. `20260815000001_transaction_user_type.sql`
 
-   All five run clean on the fresh baseline. Two of them are **not safe to re-run**, so paste each exactly once:
+   All of them run clean on the fresh baseline. Two are **not safe to re-run**, so paste each exactly once:
 
    - `20260804000002_expected_transactions.sql` uses bare `create table` / `create policy` / `create index` — a second run errors with "already exists". If you hit that, the statement already applied; move on to the next file rather than starting over.
    - `20260805000001_user_owned_categories.sql` copies rows into its `legacy_*` archive tables with no conflict target, so a second run **silently duplicates** those archive rows instead of erroring. Harmless on an empty fresh install (it copies nothing), but don't make a habit of it.
 
-   The other three (`20260801000001`, `20260804000001`, `20260805000002`) are fully guarded with `if not exists` / `drop … if exists` and are safe to re-run. (The "paste after deploy" ordering notes inside some of them apply only to migrations run against a **live** database with the old code still deployed — irrelevant on a fresh install.)
+   The others (`20260801000001`, `20260804000001`, `20260805000002`, `20260815000001`) are fully guarded with `if not exists` / `drop … if exists` and are safe to re-run. (The "paste after deploy" ordering notes inside some of them apply only to migrations run against a **live** database with the old code still deployed — irrelevant on a fresh install.)
 
-5. **Verify the install.** Paste `supabase/bootstrap_household.sql` into the SQL Editor and run it. `setup_all.sql` already linked the household, so its bootstrap block correctly does nothing — you're running it for the verification SELECT at the bottom, which is the only check that covers the five migrations you just pasted by hand. **Every boolean must read `true`.** (`setup_all.sql`'s own self-check stops at the receipts migration, so it passes green whether or not you completed step 4.) The file is idempotent and non-destructive.
+5. **Verify the install.** Paste `supabase/bootstrap_household.sql` into the SQL Editor and run it. `setup_all.sql` already linked the household, so its bootstrap block correctly does nothing — you're running it for the verification SELECT at the bottom, which is the only check that covers the migrations you just pasted by hand. **Every boolean must read `true`.** (`setup_all.sql`'s own self-check stops at the receipts migration, so it passes green whether or not you completed step 4.) The file is idempotent and non-destructive.
 
 6. **Verify the receipts storage policy** — see "Storage policy check" below.
 

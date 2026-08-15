@@ -97,8 +97,12 @@ async function fetchBudgetInputs(supabase, householdId, visibleIds, year, month)
       const { data, error } = await supabase
         .from('transactions')
         // description/merchant_name feed the unified isSpend()'s card-payment
-        // veto; account_id feeds markInternalTransfers' different-account rule.
-        .select('account_id, date, amount, description, merchant_name, mapped_category, user_category, excluded')
+        // veto; account_id feeds markInternalTransfers' different-account rule;
+        // user_type is the 4-type override the shared model reads — without it
+        // the Ask tab would contradict every screen. No 42703 degrade here
+        // (unlike the client): the migration pastes before the merge, and a
+        // LOUD assistant failure beats a silent fork of the totals.
+        .select('account_id, date, amount, description, merchant_name, mapped_category, user_category, excluded, user_type')
         .eq('household_id', householdId)
         .in('account_id', visibleIds)
         .gte('date', `${earliestKey}-01`)
@@ -161,7 +165,9 @@ export async function buildSpendingContext(householdId) {
   if (visibleIds.length) {
     const { data, error: txErr } = await supabase
       .from('transactions')
-      .select('account_id, date, amount, merchant_name, description, mapped_category, user_category, user_description, excluded')
+      // user_type rides for the same reason as the envelope read above — the
+      // shared model reads it; same deliberate no-degrade stance.
+      .select('account_id, date, amount, merchant_name, description, mapped_category, user_category, user_description, excluded, user_type')
       .eq('household_id', householdId)
       .in('account_id', visibleIds)
       .gte('date', sinceStr)

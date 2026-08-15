@@ -41,7 +41,13 @@ export function markInternalTransfers(rows) {
   const outsByAmount = new Map();
   const insByAmount = new Map();
   for (const t of rows) {
-    if (t.excluded || t.accounts?.type === 'loan') continue;
+    // A non-null user_type is an EXPLICIT verdict (the 4-type override,
+    // 2026-08-15) — it never pairs. Dropping the row from the pool is the
+    // whole transfer-override mechanism (isSpend/cashIncome read user_type
+    // directly), and it is also what makes the false-wash fix work: override
+    // one leg and its former partner re-derives structurally on the next
+    // read (an unpaired depository inflow is income again).
+    if (t.excluded || t.accounts?.type === 'loan' || t.user_type) continue;
     if (t.amount > 0) {
       pushTo(outsByAmount, t.amount.toFixed(2), t);
     } else if (t.amount < 0) {
@@ -176,7 +182,14 @@ export function cashIncome(txs) {
   let total = 0;
   for (const t of txs) {
     if (t.excluded || t._internal) continue;
-    if (t.accounts?.type === 'depository' && t.amount < 0) total += Math.abs(t.amount);
+    if (t.accounts?.type !== 'depository' || t.amount >= 0) continue;
+    // The 4-type override: any non-'inflow' verdict vetoes income; 'inflow'
+    // (which also pulled the row out of the pairing pool) forces a
+    // falsely-washed paycheck to count. The depository-only gate above stays
+    // OUTSIDE the override — income counts depository inflows ONLY, so
+    // 'inflow' on a credit negative behaves like Return: in neither total.
+    if (t.user_type && t.user_type !== 'inflow') continue;
+    total += Math.abs(t.amount);
   }
   return total;
 }

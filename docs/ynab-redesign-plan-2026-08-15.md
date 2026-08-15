@@ -31,7 +31,7 @@ branches.
 
 - [x] PR A — tokens + primitives (shipped 2026-08-15)
 - [ ] PR B — bottom nav + IA + smoke harness
-- [ ] PR D — user_type migration + model (MIGRATION — Mason pastes SQL)
+- [x] PR D — user_type migration + model (built 2026-08-15; merge gated on Mason's SQL paste + bootstrap verification)
 - [ ] PR C — Spending list redesign
 - [ ] PR E — transaction detail sheet + type selector
 - [ ] PR F — final re-skins + CLAUDE.md migration + delete this doc

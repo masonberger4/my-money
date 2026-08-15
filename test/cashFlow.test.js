@@ -105,11 +105,13 @@ function lcg(seed) {
 }
 
 // Exhaustive maximum matching over the same eligibility rules the real code
-// applies: equal amount, different account, |date gap| ≤ window, and neither
-// leg on a loan account (loans never pair — model decision 2026-08-03).
+// applies: equal amount, different account, |date gap| ≤ window, neither
+// leg on a loan account (loans never pair — model decision 2026-08-03), and
+// neither leg carrying a user_type override (an explicit verdict never
+// pairs — the 4-type override, 2026-08-15).
 // Fine at n ≤ 8.
 function bruteMax(outs, ins) {
-  const eligible = t => t.accounts?.type !== 'loan';
+  const eligible = t => t.accounts?.type !== 'loan' && !t.user_type;
   const adj = outs.map(o =>
     ins
       .map((r, j) => j)
@@ -155,13 +157,21 @@ test('REGRESSION (g): random MIXED-account-type instances — washed-pair count 
     const ins = [];
     const nOuts = randInt(9);
     const nIns = randInt(9);
+    // ~1 row in 6 carries a user_type override, so the parity check also
+    // covers the pool gate: an overridden leg must neither pair nor stop its
+    // would-be partner from pairing with someone else.
+    const OVERRIDES = ['spending', 'inflow', 'transfer', 'card_payment'];
+    const maybeType = t => {
+      if (randInt(6) === 0) t.user_type = OVERRIDES[randInt(OVERRIDES.length)];
+      return t;
+    };
     for (let i = 0; i < nOuts; i++) {
       const [id, acct] = accountPool[randInt(accountPool.length)];
-      outs.push(out(amounts[randInt(amounts.length)], randInt(13), id, acct));
+      outs.push(maybeType(out(amounts[randInt(amounts.length)], randInt(13), id, acct)));
     }
     for (let j = 0; j < nIns; j++) {
       const [id, acct] = accountPool[randInt(accountPool.length)];
-      ins.push(inn(amounts[randInt(amounts.length)], randInt(13), id, acct));
+      ins.push(maybeType(inn(amounts[randInt(amounts.length)], randInt(13), id, acct)));
     }
     const rows = [...outs, ...ins];
     for (let k = rows.length - 1; k > 0; k--) {
@@ -199,4 +209,57 @@ test('unified model: cashSpending counts ALL unpaired non-loan outflows (incl. s
   ];
   assert.equal(cashSpending(rows), 290);
   assert.equal(cashIncome(rows), 1250);
+});
+
+// --- the 4-type override (transactions.user_type, 2026-08-15) ----------------
+
+test('an overridden leg leaves the pairing pool and its former partner re-derives structurally', () => {
+  // The false-wash fix: an accidental equal-amount coincidence washed a
+  // paycheck against an unrelated outflow. Marking the outflow 'spending'
+  // pulls it from the pool; the paycheck is unpaired again and counts as
+  // income with NO second edit.
+  const o = out(2200, 0);
+  const i = inn(2200, 2); // the paycheck leg
+  markInternalTransfers([o, i]);
+  assert.equal(o._internal, true, 'fixture: the coincidence pairs before the override');
+  const o2 = { ...out(2200, 0), user_type: 'spending' };
+  const i2 = inn(2200, 2);
+  markInternalTransfers([o2, i2]);
+  assert.ok(!o2._internal, 'an explicit verdict never pairs');
+  assert.ok(!i2._internal, 'the former partner is unpaired again');
+  assert.equal(cashIncome([o2, i2]), 2200, 'the paycheck counts as income again');
+  assert.equal(cashSpending([o2, i2]), 2200, 'the overridden outflow counts as spending');
+});
+
+test("user_type 'transfer' lands a row in neither total, paired or not", () => {
+  // A missed wash (legs 6 days apart — outside the window): mark both legs.
+  const o = { ...out(300, 0), user_type: 'transfer' };
+  const i = { ...inn(300, WINDOW + 2), user_type: 'transfer' };
+  markInternalTransfers([o, i]);
+  assert.ok(!o._internal && !i._internal, 'overridden rows never pair');
+  assert.equal(cashSpending([o, i]), 0);
+  assert.equal(cashIncome([o, i]), 0);
+});
+
+test("cashIncome: any non-'inflow' override vetoes income; 'inflow' on credit stays non-income (Return)", () => {
+  const rows = [
+    { accounts: CHK, amount: -500, user_type: 'transfer' }, // vetoed
+    { accounts: CHK, amount: -400, user_type: 'card_payment' }, // vetoed
+    { accounts: CHK, amount: -300, user_type: 'inflow' }, // counts
+    { accounts: CHK, amount: -200 }, // structural income, still counts
+    { accounts: CC, amount: -100, user_type: 'inflow' }, // credit: NEVER income
+  ];
+  assert.equal(cashIncome(rows), 500);
+});
+
+test("sign guard outranks the override: 'inflow' on money-out and 'spending' on money-in are inert", () => {
+  const rows = [
+    { accounts: CHK, amount: 80, user_type: 'inflow' }, // money out: not income…
+    { accounts: CHK, amount: -90, user_type: 'spending' }, // money in: not spending…
+  ];
+  assert.equal(cashIncome(rows), 0, "money-out 'inflow' never counts as income");
+  // …and the money-out 'inflow' row is not spending either (isSpend returns
+  // user_type === 'spending'), so an inert override removes the row from both
+  // totals rather than corrupting one — pinned in spending.test.js too.
+  assert.equal(cashSpending(rows), 0);
 });
