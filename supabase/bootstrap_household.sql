@@ -99,6 +99,11 @@ select
           where table_schema = 'public' and table_name = 'transactions'
             and column_name = 'legacy_categories_saved')          as category_wipe_applied,
 
+  -- 20260815000001 — the 4-type transaction override (user_type).
+  exists (select 1 from information_schema.columns
+          where table_schema = 'public' and table_name = 'transactions'
+            and column_name = 'user_type')                          as transactions_user_type,
+
   -- 20260731000001 — receipts Storage. The bucket row, and the storage.objects
   -- policy that can fail with 42501 and be downgraded to an unseen NOTICE.
   -- If receipts_objects_policy is false, create the policy by hand in

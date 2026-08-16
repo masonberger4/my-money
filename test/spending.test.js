@@ -640,3 +640,56 @@ test('REGRESSION: both Overview tiles quote the SAME last-month base', () => {
   assert.ok(!grid.includes('fmt(lastSpent)'), 'and must not print the full-month figure beside a to-date delta');
   assert.ok(grid.includes('by this day'), 'the wording names which basis is being quoted');
 });
+
+// --- the 4-type override in isSpend (transactions.user_type, 2026-08-15) -----
+
+test("override precedence: 'spending' beats BOTH card-payment vetoes; excluded and loan beat the override", () => {
+  const A = makeAccounts();
+  // Payment-worded on checking — structurally vetoed…
+  const worded = makeTx(A.checking, 'ut1', '2026-07-05', 400, 'CAPITAL ONE AUTOPAY PYMT');
+  assert.ok(!isSpend(worded), 'fixture: the descriptor veto fires without an override');
+  // …until the user says it is spending.
+  const forced = makeTx(A.checking, 'ut2', '2026-07-05', 400, 'CAPITAL ONE AUTOPAY PYMT', { user_type: 'spending' });
+  assert.ok(isSpend(forced), "an explicit 'spending' outranks the descriptor veto");
+  // The user-category veto (TRANSFER_CATEGORY) loses to the override the same way.
+  const catVeto = makeTx(A.checking, 'ut3', '2026-07-05', 60, 'SAFEWAY 1467', { user_category: TRANSFER_CATEGORY });
+  assert.ok(!isSpend(catVeto), 'fixture: the category veto fires');
+  const catForced = makeTx(A.checking, 'ut4', '2026-07-05', 60, 'SAFEWAY 1467', { user_category: TRANSFER_CATEGORY, user_type: 'spending' });
+  assert.ok(isSpend(catForced), "an explicit 'spending' outranks the category veto");
+  // excluded and loan still win over any override.
+  assert.ok(!isSpend(makeTx(A.checking, 'ut5', '2026-07-05', 60, 'SAFEWAY 1467', { user_type: 'spending', excluded: true })));
+  assert.ok(!isSpend(makeTx(A.mortgage, 'ut6', '2026-07-05', 60, 'SUSPENSE POSTING', { user_type: 'spending' })));
+});
+
+test("override removal: 'transfer' / 'card_payment' / 'inflow' pull a purchase out of spending", () => {
+  const A = makeAccounts();
+  for (const ut of ['transfer', 'card_payment', 'inflow']) {
+    const t = makeTx(A.card1, `ut-${ut}`, '2026-07-06', 82.5, 'SOME STORE', { user_type: ut });
+    assert.ok(!isSpend(t), `${ut} must remove the row`);
+  }
+});
+
+test('conservation: toggling an override moves exactly that row, nothing else', () => {
+  const rows = washed(standardLedger().visibleRows());
+  const base = sumSpending(rows);
+  const victim = rows.find(t => isSpend(t));
+  assert.ok(victim, 'fixture: a counted row exists');
+  victim.user_type = 'transfer';
+  near(sumSpending(rows), base - victim.amount, 'removing one row moves exactly its amount');
+  victim.user_type = 'spending';
+  near(sumSpending(rows), base, 'forcing it back restores the total');
+  victim.user_type = null;
+  near(sumSpending(rows), base, 'null = automatic reproduces the structural total');
+});
+
+test('toTxShape carries user_type/auto_tx_type/tx_type and patchTxShape recomputes tx_type (the auto_category rule)', () => {
+  const A = makeAccounts();
+  const shaped = toTxShape(makeTx(A.checking, 'ut7', '2026-07-07', 45, 'SAFEWAY 1467'));
+  assert.equal(shaped.user_type, null);
+  assert.equal(shaped.auto_tx_type, 'spending');
+  assert.equal(shaped.tx_type, 'spending');
+  const patched = patchTxShape(shaped, { user_type: 'card_payment' });
+  assert.equal(patched.tx_type, 'card_payment', 'the effective type follows the edit locally');
+  const reset = patchTxShape(patched, { user_type: null });
+  assert.equal(reset.tx_type, shaped.auto_tx_type, 'reset falls back to the derivation');
+});

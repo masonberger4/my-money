@@ -208,6 +208,28 @@ test('REGRESSION: the excluded rows still LIST, marked, so re-adding the list ma
   assert.ok(!listed.find(l => l.includes('TRANSFER FROM CHECKING')).endsWith('| not counted as spending'));
 });
 
+test('the 4-type override moves the assistant totals the way every screen moves (user_type rides the context)', () => {
+  // An override on the purchase pulls it out of the total AND flips its list
+  // marker; a 'spending' override on the unlinked card payment forces it in.
+  // The context reads the SHARED model, so this must track isSpend exactly —
+  // a context that ignored user_type would contradict the screens.
+  const txs = clone(BOUNDARY_TXS);
+  txs.find(t => t.description === 'SAFEWAY 1467').user_type = 'transfer';
+  txs.find(t => t.description === 'CAPITAL ONE - PAYMENT').user_type = 'spending';
+  const text = formatSpendingContext(clone(BOUNDARY_ACCOUNTS), txs);
+  const spendLines = text.split('\n').filter(l => /^- 2026-07 /.test(l));
+  assert.deepEqual(spendLines, ['- 2026-07 Uncategorized: $250.00'], text);
+  const listed = text.split('\n').filter(l => /^2026-07-\d\d \| /.test(l));
+  assert.ok(
+    listed.find(l => l.includes('SAFEWAY')).endsWith('| not counted as spending'),
+    'the overridden-out purchase gains the marker'
+  );
+  assert.ok(
+    !listed.find(l => l.includes('CAPITAL ONE - PAYMENT')).endsWith('| not counted as spending'),
+    'the forced-in payment loses it'
+  );
+});
+
 test('an UNPAIRED transfer out still counts — structure decides, not wording', () => {
   // Same transfer, but the receiving account is not in the row set (money left
   // the linked boundary). The linked-boundary model counts it; the old

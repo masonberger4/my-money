@@ -71,6 +71,9 @@ export function makeTx(account, id, date, amount, description, overrides = {}) {
     user_category: null,
     user_description: null,
     excluded: false,
+    // The 4-type override (null = automatic) — rides every real read the way
+    // TX_COLUMNS / SPEND_TX_COLUMNS deliver it; set it via overrides.
+    user_type: null,
     pending: false,
     entity_id: null,
     is_capital: false,

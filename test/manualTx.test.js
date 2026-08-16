@@ -13,6 +13,11 @@ test('mints a manual: plaid_tx_id (uuid, not the csv content hash)', () => {
   assert.notEqual(a.plaid_tx_id, b.plaid_tx_id);
 });
 
+test('never emits user_type — the 4-type override is user-owned, set only via updateTransaction', () => {
+  const row = buildManualTxRow({ date: '2026-08-01', amount: 12.5, description: 'X' });
+  assert.ok(!('user_type' in row), 'a writer emitting user_type would restate the override on insert');
+});
+
 test('stores the amount already-signed, positive = money out (no flip)', () => {
   // The form collects a positive "spent" figure, which already IS positive=out.
   assert.equal(buildManualTxRow({ date: '2026-08-01', amount: 40, description: 'Y' }).amount, 40);
