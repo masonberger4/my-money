@@ -496,6 +496,10 @@ paste — never a technical unknown.
 
 ### Budgeting ergonomics (the YNAB muscle-memory gaps)
 
+> Note (2026-08-16): distinct from the YNAB-style VISUAL redesign, which
+> shipped separately (six PRs; rules in CLAUDE.md). These items are budgeting
+> BEHAVIOR gaps and remain open.
+
 - **Cover overspending — start the move from the red envelope** — S. An
   overspent envelope renders red (`envRowNode`'s `over`), but its only money
   affordance is ⇄, which moves money OUT of the envelope already negative.
