@@ -1086,13 +1086,23 @@ function CategorySheet({name,color,when,rows,kids,surf,getName,acctById,acctLabe
 // applied to the income side. There is deliberately no "not counted" section:
 // its population would be every washed transfer leg and every refund in six
 // months, and the question this sheet answers is what the number is made of.
-// `busy` is not decoration. Retyping a row FROM this sheet (tap a row → the
-// detail sheet stacks → mark it a Transfer) is the loop this exists to close,
-// and saveTx's reloadData calls invalidateTrends, which nulls cashFlow — so
-// the open sheet is momentarily holding an empty report while the refetch
-// runs. Rendering "No income measured yet" in that window would read as "your
-// edit just deleted all your income". Empty-and-loading is a skeleton;
-// empty-and-settled is the real answer.
+// Rows route through `openTx` like every other list (PR #98's gate), NOT
+// straight to setSelTx. These rows did go through markInternalTransfers — the
+// cash-flow fetch pairs — so their auto_tx_type is honestly derived; but
+// openTx resolves against the VIEWED MONTH's list, so a row from an earlier
+// month in the window still opens tagged `_unpairedShape` and without the type
+// selector. That is the conservative side of a rule whose failure mode is
+// storing a wrong override, and it costs only the retype: the viewed month —
+// where a surprise is most likely to be looked at — resolves and stays fully
+// editable.
+//
+// Which is why `busy` is not decoration. Retyping such a row (tap → the detail
+// sheet stacks → mark it a Transfer) closes the audit loop, and saveTx's
+// reloadData calls invalidateTrends, which nulls cashFlow — so the open sheet
+// momentarily holds an empty report while the refetch runs. Rendering "No
+// income measured yet" in that window would read as "your edit just deleted
+// all your income". Empty-and-loading is a skeleton; empty-and-settled is the
+// real answer.
 function IncomeSheet({report,when,busy,surf,acctById,acctLabel,acctColor,onPick,onClose}) {
   useEscClose(onClose);
   // Money in — green, contrast-corrected for the card it sits on.
@@ -3772,6 +3782,24 @@ export default function Dashboard({ refreshTick = 0 }) {
   // `txs` is the shaped month list (transactions?.transactions||[]).
   const uncatBadge=txs.filter(t=>t.category===UNCATEGORIZED).length;
 
+  // THE one way a row opens the detail sheet. Rows from never-paired reads
+  // (the account sheet, search results) carry the documented counted/
+  // auto_tx_type caveat — without markInternalTransfers, deriveTxType calls a
+  // genuinely-washed transfer leg 'spending'. That was display-only until the
+  // sheet started WRITING from tx_type: trusting the unpaired shape lets a
+  // user "confirm" Transfer on a washed leg, which stores a REAL override
+  // (the null-equals-automatic comparison keys on the mis-derived
+  // auto_tx_type), drops the leg from the pairing pool, un-washes its
+  // partner, and silently counts the transfer as income (the verified
+  // 2026-08-16 sweep finding). So: resolve by id against the PAIRED month
+  // list first; anything unresolved is tagged _unpairedShape and the sheet
+  // withholds the type selector for it (pre-redesign behavior for those
+  // lists — the month view is always available to edit the type).
+  const openTx=t=>{
+    const paired=transactions?.transactions?.find(x=>x.id===t.id);
+    setSelTx(paired||{...t,_unpairedShape:true});
+  };
+
   return (
     <div style={{fontFamily:"'DM Sans','Helvetica Neue',sans-serif",background:"var(--bg)",minHeight:"100vh",
       color:"var(--text)"}}>
@@ -3968,7 +3996,14 @@ export default function Dashboard({ refreshTick = 0 }) {
           // (openDrill's rule) — a null onClick makes DrillNum plain text, so
           // a still-loading card never invites a tap into an empty sheet.
           const openIncomeDrill=incomeReport.count?()=>setIncomeDrill(true):null;
-          const segColor=s=>s.others?"var(--track)":markOn(getColor(s.label),surf.card);
+          // Data marks go through markOn even for the track grey: --light-track
+          // (#E4E2DC) is a 1.30:1 hairline on the white card — invisible as a
+          // bar fill — while markOn lifts it to the 3:1 mark floor and leaves
+          // the already-passing dark value untouched (the verified sweep
+          // finding; the token itself must stay a hairline — it is also the
+          // rail surface behind every progress bar).
+          const trackMark=markOn(surf.track,surf.card);
+          const segColor=s=>s.others?trackMark:markOn(getColor(s.label),surf.card);
           const linkCard={display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,
             textAlign:"left",cursor:"pointer",font:"inherit",color:"var(--text)",width:"100%"};
           return (
@@ -4053,7 +4088,10 @@ export default function Dashboard({ refreshTick = 0 }) {
                     </DrillNum>
                   </span>
                   <span style={{display:"inline-flex",alignItems:"center",gap:6}}>
-                    <span style={{width:8,height:8,borderRadius:"50%",flexShrink:0,background:"var(--track)"}}/>
+                    {/* trackMark, not the raw token: a legend swatch must be
+                        the same colour as the mark it labels, and PR #98 lifted
+                        that bar off the 1.30:1 hairline. */}
+                    <span style={{width:8,height:8,borderRadius:"50%",flexShrink:0,background:trackMark}}/>
                     Spending
                     <span style={{fontFamily:"'DM Mono',monospace",fontWeight:500,color:"var(--text)"}}>
                       {fmt(insight.avgSpending)}/mo
@@ -4075,7 +4113,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                     {cashFlow.periods.map(p=>(
                       <div key={p.label} title={p.label} style={{flex:1,display:"flex",gap:2,alignItems:"flex-end",height:"100%"}}>
                         <div style={{flex:1,height:`${Math.max(4,p.income.amount/max*100)}%`,background:markOn(OK_MONEY,surf.card),borderRadius:3}}/>
-                        <div style={{flex:1,height:`${Math.max(4,p.spending.amount/max*100)}%`,background:"var(--track)",borderRadius:3}}/>
+                        <div style={{flex:1,height:`${Math.max(4,p.spending.amount/max*100)}%`,background:trackMark,borderRadius:3}}/>
                       </div>
                     ))}
                   </button>
@@ -4133,7 +4171,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                 txs.slice(0,6).map((t,i)=>{
                   const a=acctById(t.account_id);
                   return (
-                  <div key={i} className="tx" onClick={()=>setSelTx(t)} style={{cursor:"pointer",opacity:t.excluded?.5:1}}>
+                  <div key={i} className="tx" onClick={()=>openTx(t)} style={{cursor:"pointer",opacity:t.excluded?.5:1}}>
                     <div style={{width:34,height:34,borderRadius:10,background:"var(--bg)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:15,flexShrink:0}}>{TX_ICONS[t.category]||"🛍"}</div>
                     <div style={{flex:1,minWidth:0}}>
                       <div style={{fontSize:13,fontWeight:500,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{t.merchant_name||t.description}</div>
@@ -4826,7 +4864,9 @@ export default function Dashboard({ refreshTick = 0 }) {
                 row like the accounts above: usable width inside .card at 390px
                 is ~318px and "Home maintenance and improvement" alone is ~230px,
                 so wrapping ~15 of these would bury the list under six rows of
-                chips. Horizontal scroll is already the tab bar's idiom.
+                chips. (Horizontal scroll WAS the old tab strip's idiom — that
+                strip is gone since the 2026-08-15 bottom nav; the width math
+                above is the surviving reason.)
                 The `||txCatFilter` in the guard is load-bearing — without it a
                 pool that collapses to one category unmounts the row while the
                 filter is still applied, taking "All categories" with it. */}
@@ -4904,7 +4944,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                     const typePill=t.tx_type==="transfer"||t.tx_type==="card_payment";
                     const sign=t.amount===0?"":t.amount<0?"+":"−";
                     return (
-                      <div key={t.plaid_tx_id||i} className="tx" onClick={()=>setSelTx(t)}
+                      <div key={t.plaid_tx_id||i} className="tx" onClick={()=>openTx(t)}
                         style={{animationDelay:i*.015+"s",cursor:"pointer",opacity:t.excluded?.5:1}}>
                         <div style={{flex:1,minWidth:0}}>
                           <div style={{fontSize:14,fontWeight:600,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{t.merchant_name||t.description}</div>
@@ -5344,7 +5384,7 @@ export default function Dashboard({ refreshTick = 0 }) {
             ):(
               <>
                 {acctTxs.map((t,i)=>(
-                  <div key={t.plaid_tx_id||i} className="tx" onClick={()=>setSelTx(t)} style={{animationDelay:Math.min(i,20)*.015+"s",cursor:"pointer",opacity:t.excluded?.5:1}}>
+                  <div key={t.plaid_tx_id||i} className="tx" onClick={()=>openTx(t)} style={{animationDelay:Math.min(i,20)*.015+"s",cursor:"pointer",opacity:t.excluded?.5:1}}>
                     <div style={{width:34,height:34,borderRadius:10,background:"var(--bg)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:15,flexShrink:0}}>{TX_ICONS[t.category]||"🛍"}</div>
                     <div style={{flex:1,minWidth:0}}>
                       <div style={{fontSize:13,fontWeight:500,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{t.merchant_name||t.description}</div>
@@ -6470,7 +6510,7 @@ export default function Dashboard({ refreshTick = 0 }) {
         <CategorySheet name={catDrill} color={getColor(catDrill)} when={monthLabel(year,month)}
           rows={drillRows} kids={catDrillKids} surf={surf} getName={getName}
           acctById={acctById} acctLabel={acctLabel} acctColor={acctColor}
-          onPick={t=>setSelTx(t)} onClose={()=>setCatDrill(null)}/>
+          onPick={t=>openTx(t)} onClose={()=>setCatDrill(null)}/>
       )}
 
       {/* Income drill-in — same stacking rule as the category sheet above:
@@ -6487,7 +6527,7 @@ export default function Dashboard({ refreshTick = 0 }) {
         return (
           <IncomeSheet report={incomeReport} when={when} busy={trendsLoading||!cashFlow} surf={surf}
             acctById={acctById} acctLabel={acctLabel} acctColor={acctColor}
-            onPick={t=>setSelTx(t)} onClose={()=>setIncomeDrill(false)}/>
+            onPick={t=>openTx(t)} onClose={()=>setIncomeDrill(false)}/>
         );
       })()}
 
@@ -6508,7 +6548,7 @@ export default function Dashboard({ refreshTick = 0 }) {
           <PropertySheet name={ent.name} year={taxYear} rows={propRows} busy={taxLoading||!taxData}
             receiptTxIds={receiptTxIds} surf={surf} getName={getName} getColor={getColor}
             acctById={acctById} acctLabel={acctLabel} acctColor={acctColor}
-            onPick={t=>setSelTx(t)} onClose={()=>setTaxDrill(null)}/>
+            onPick={t=>openTx(t)} onClose={()=>setTaxDrill(null)}/>
         );
       })()}
 
@@ -6550,8 +6590,12 @@ export default function Dashboard({ refreshTick = 0 }) {
                 </div>
                 {/* The 4-type pill. Loan rows get a static label and no menu —
                     the model ignores user_type on them (loan ledger rows never
-                    count; the linked-boundary Convention). */}
-                {selTx.tx_type==="loan"?(
+                    count; the linked-boundary Convention). An _unpairedShape
+                    row (openTx couldn't resolve it against the paired month
+                    list) gets NO type UI at all: its derivation can't see
+                    pairing, so both the label and the store-vs-null decision
+                    would be wrong exactly on washed transfer legs. */}
+                {selTx._unpairedShape?null:selTx.tx_type==="loan"?(
                   <div style={{marginTop:10,fontSize:12,color:"var(--muted)"}}>Loan account</div>
                 ):(
                   <button onClick={()=>setTypeMenuFor(menuOpen?null:selTx.id)} aria-expanded={menuOpen}
