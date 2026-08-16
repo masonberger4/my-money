@@ -22,6 +22,7 @@ import { teachQueueGroups, nonSpendLabel, categorizedShare } from "../teachQueue
 import { displayBalance, isDebtAccount as isDebtType, balanceAsOf, BALANCE_STALE_DAYS } from "../accountBalance.js";
 import { unhideConfirmMessage } from "../unhideConfirm.js";
 import { NAV_ITEMS, REFLECT_TABS, navForTab, pageTitle } from "../nav.js";
+import { groupByDay, longDate } from "../txList.js";
 import { createSheetHistory } from "../sheetHistory.js";
 import { runSync } from "../sync.js";
 // Lazy: both are modals rendered only on user action, and CsvImport reaches the
@@ -4445,6 +4446,34 @@ export default function Dashboard({ refreshTick = 0 }) {
 
         {/* TRANSACTIONS */}
         {tab==="transactions"&&(
+          <div>
+            {/* Spending screen header (PR C): page title + the quick-add
+                entry, replacing the old "+ Add transaction" ibtn in the count
+                row. NOT a floating FAB — Mason's 2026-08-01 ruling stands. */}
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,marginBottom:12}}>
+              <div style={{fontSize:30,fontWeight:600,letterSpacing:"-.03em"}}>Spending</div>
+              <button className="nbtn" title="Add transaction" aria-label="Add transaction"
+                onClick={()=>setQuickAdd(true)}>＋</button>
+            </div>
+            {/* Review banner — the SAME number as the bottom nav's Spending
+                badge (the viewed month's Uncategorized backlog; the nav badge
+                and this banner must never disagree). Review filters the list
+                to Uncategorized; tapping again clears (the chip idiom).
+                Hidden while a search is active — the banner is a month
+                surface and search results span months. */}
+            {uncatBadge>0&&!searchActive&&(
+              <div className="card" style={{display:"flex",alignItems:"center",gap:10,marginBottom:12,padding:"14px 16px"}}>
+                <span style={{background:"var(--bg)",borderRadius:14,padding:"2px 10px",fontSize:13,fontWeight:700,flexShrink:0}}>{uncatBadge}</span>
+                <div style={{flex:1,fontSize:13,minWidth:0}}>uncategorized transaction{uncatBadge!==1?"s":""} to teach</div>
+                <button onClick={()=>setTxCatFilter(txCatFilter===UNCATEGORIZED?null:UNCATEGORIZED)}
+                  style={{background:txCatFilter===UNCATEGORIZED?"none":"var(--accent)",
+                    color:txCatFilter===UNCATEGORIZED?"var(--muted)":"var(--accent-text)",
+                    border:txCatFilter===UNCATEGORIZED?"1px solid var(--border)":"none",
+                    borderRadius:16,padding:"7px 14px",fontSize:12,fontWeight:600,cursor:"pointer",fontFamily:"inherit",flexShrink:0}}>
+                  {txCatFilter===UNCATEGORIZED?"Show all":"Review"}
+                </button>
+              </div>
+            )}
           <div className="card">
             <div style={{position:"relative",marginBottom:12}}>
               <input value={searchQ} onChange={e=>setSearchQ(e.target.value)} placeholder="Search all transactions…"
@@ -4505,7 +4534,6 @@ export default function Dashboard({ refreshTick = 0 }) {
                     ?(searching?"searching…":`${shownSearch.length} match${shownSearch.length!==1?"es":""}`)
                     :`${shownTxs.length} transaction${shownTxs.length!==1?"s":""}`}
                 </span>
-                <button className="ibtn" style={{fontSize:11}} onClick={()=>setQuickAdd(true)}>+ Add transaction</button>
               </div>
             </div>
             {accounts.filter(a=>!a.hidden).length>1&&(
@@ -4592,27 +4620,57 @@ export default function Dashboard({ refreshTick = 0 }) {
                   return "No transactions for this period.";
                 })()}
               </div>
-            ):listTxs.map((t,i)=>{
-              const a=acctById(t.account_id);
-              return (
-              <div key={t.plaid_tx_id||i} className="tx" onClick={()=>setSelTx(t)} style={{animationDelay:i*.015+"s",cursor:"pointer",opacity:t.excluded?.5:1}}>
-
-                <div style={{width:34,height:34,borderRadius:10,background:"var(--bg)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:15,flexShrink:0}}>{TX_ICONS[t.category]||"🛍"}</div>
-                <div style={{flex:1,minWidth:0}}>
-                  <div style={{fontSize:13,fontWeight:500,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{t.merchant_name||t.description}</div>
-                  <div style={{fontSize:11,color:"var(--muted)",marginTop:3,display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
-                    <span>{t.transaction_date}</span>
-                    <span>·</span>
-                    <Pill label={getName(t.category)} color={getColor(t.category)} surface={surf.card}/>
-                    {a&&<Pill label={acctLabel(a)} color={acctColor(a)} surface={surf.card}/>}
-                    {entPill(t.entity_id)}
-                    {t.excluded&&<Pill label="Excluded" color="#888780" surface={surf.card}/>}
-                  </div>
+            ):(()=>{
+              // Day-grouped YNAB row anatomy (PR C). Section headers carry
+              // the date, so rows drop their date span. Row amounts are
+              // DIRECTIONAL at row level ONLY — stored positive (out) shows
+              // "−$", money in shows green "+$" — while every aggregate in
+              // the app keeps positive magnitudes (sumSpending unchanged;
+              // the recorded row-display rule). Transfer/Card-payment rows
+              // show a type pill instead of a category chip — the category
+              // is meaningless on a row that is in neither total.
+              let ri=0;
+              return groupByDay(listTxs).map(sec=>(
+                <div key={sec.date||"nodate"}>
+                  <div style={{fontSize:11,fontWeight:600,color:"var(--muted)",textTransform:"uppercase",
+                    letterSpacing:".05em",padding:"10px 0 5px"}}>{longDate(sec.date)}</div>
+                  {sec.rows.map(t=>{
+                    const a=acctById(t.account_id);
+                    const i=ri++;
+                    const typePill=t.tx_type==="transfer"||t.tx_type==="card_payment";
+                    const sign=t.amount===0?"":t.amount<0?"+":"−";
+                    return (
+                      <div key={t.plaid_tx_id||i} className="tx" onClick={()=>setSelTx(t)}
+                        style={{animationDelay:i*.015+"s",cursor:"pointer",opacity:t.excluded?.5:1}}>
+                        <div style={{flex:1,minWidth:0}}>
+                          <div style={{fontSize:14,fontWeight:600,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{t.merchant_name||t.description}</div>
+                          <div style={{fontSize:11,color:"var(--muted)",marginTop:4,display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
+                            {typePill
+                              ?<Pill label={t.tx_type==="transfer"?"Transfer":"Card payment"} color="#888780" surface={surf.card}/>
+                              :(()=>{const cc=chipOn(getColor(t.category),surf.card);return (
+                                <span style={{display:"inline-flex",alignItems:"center",gap:4,fontSize:10,fontWeight:600,
+                                  background:cc.bg,color:cc.ink,borderRadius:20,padding:"2px 8px",maxWidth:170}}>
+                                  <span aria-hidden="true">{TX_ICONS[t.category]||"🛍"}</span>
+                                  <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{getName(t.category)}</span>
+                                </span>);})()}
+                            {entPill(t.entity_id)}
+                            {t.excluded&&<Pill label="Excluded" color="#888780" surface={surf.card}/>}
+                          </div>
+                        </div>
+                        <div style={{textAlign:"right",flexShrink:0}}>
+                          <div style={{fontSize:13,fontFamily:"'DM Mono',monospace",fontWeight:500,
+                            color:t.amount<0?inkOn(OK_MONEY,surf.card):"var(--text)"}}>
+                            {sign}{fmtX(Math.abs(t.amount))}
+                          </div>
+                          {a&&<div style={{fontSize:10,color:"var(--muted)",marginTop:3,whiteSpace:"nowrap",
+                            overflow:"hidden",textOverflow:"ellipsis",maxWidth:130}}>{acctLabel(a)}</div>}
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
-                <div style={{fontSize:13,fontFamily:"'DM Mono',monospace",fontWeight:500,flexShrink:0}}>{fmtX(t.amount)}</div>
-              </div>
-              );
-            })}
+              ));
+            })()}
             {searchActive&&!searching&&searchRes?.hasMore&&(
               <div style={{textAlign:"center",marginTop:12}}>
                 <button className="ibtn" style={{fontSize:11}} disabled={searchMore} onClick={loadMoreSearch}>
@@ -4620,6 +4678,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                 </button>
               </div>
             )}
+          </div>
           </div>
         )}
 
