@@ -23,6 +23,7 @@ import { displayBalance, isDebtAccount as isDebtType, balanceAsOf, BALANCE_STALE
 import { unhideConfirmMessage } from "../unhideConfirm.js";
 import { NAV_ITEMS, REFLECT_TABS, navForTab, pageTitle } from "../nav.js";
 import { groupByDay, longDate } from "../txList.js";
+import { TX_TYPES, TX_TYPE_LABELS, allowedUserTypes } from "../txType.js";
 import { createSheetHistory } from "../sheetHistory.js";
 import { runSync } from "../sync.js";
 // Lazy: both are modals rendered only on user action, and CsvImport reaches the
@@ -2451,6 +2452,12 @@ export default function Dashboard({ refreshTick = 0 }) {
   const [monthPicker,setMonthPicker]=useState(false);
   const [quickAdd,setQuickAdd]=useState(false); // manual transaction quick-add sheet
   const [quickAddBusy,setQuickAddBusy]=useState(false);
+  // The detail sheet's two local panels, keyed by TRANSACTION ID rather than
+  // booleans: opening a different row can never inherit an open type menu or
+  // an expanded Show-more (no per-open reset wiring needed — the id mismatch
+  // is the reset). Not a new overlay layer: Escape/back peel the whole sheet.
+  const [typeMenuFor,setTypeMenuFor]=useState(null);
+  const [showMoreFor,setShowMoreFor]=useState(null);
 
   // Escape closes the topmost INLINE overlay (the three sheets rendered
   // directly in Dashboard's JSX rather than as components — they can't call
@@ -6211,39 +6218,102 @@ export default function Dashboard({ refreshTick = 0 }) {
         // is never a manual choice: it means "not taught yet", and the way to
         // undo a wrong pick is "Reset to automatic" below, not to assert
         // ignorance by hand.
+        const menuOpen=typeMenuFor===selTx.id;
+        const more=showMoreFor===selTx.id;
+        const sign=selTx.amount===0?"":selTx.amount<0?"+":"−";
         return (
         <div className="overlay" onClick={()=>setSelTx(null)}>
-          <div className="modal" role="dialog" aria-modal="true" onClick={e=>e.stopPropagation()} style={{maxHeight:"80vh",overflowY:"auto"}}>
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",gap:10,marginBottom:4}}>
-              <div style={{fontSize:16,fontWeight:600,color:"var(--text)",minWidth:0,flex:1}}>
-                <EditName name={selTx.merchant_name||selTx.description} onSave={v=>saveTx({user_description:v||null})}/>
+          {/* Full-screen sheet (PR E of the YNAB redesign). Same .overlay
+              shell + registration (anySheetOpen/closeAllSheets/sheetHistory/
+              Escape) — only the panel class changed. */}
+          <div className="sheet-full" role="dialog" aria-modal="true" aria-label="Transaction details" onClick={e=>e.stopPropagation()}>
+            {/* Gradient header — token-only, no literals. */}
+            <div style={{background:"linear-gradient(180deg, var(--input-bg), var(--card))",padding:"14px 16px 24px"}}>
+              <button className="nbtn" aria-label="Close" title="Close" onClick={()=>setSelTx(null)}>×</button>
+              <div style={{textAlign:"center",marginTop:2}}>
+                <div style={{fontSize:42,fontFamily:"'DM Mono',monospace",fontWeight:500,letterSpacing:"-.02em",
+                  color:selTx.amount<0?inkOn(OK_MONEY,surf.card):"var(--text)"}}>
+                  {sign}{fmtX(Math.abs(selTx.amount))}
+                </div>
+                {/* The 4-type pill. Loan rows get a static label and no menu —
+                    the model ignores user_type on them (loan ledger rows never
+                    count; the linked-boundary Convention). */}
+                {selTx.tx_type==="loan"?(
+                  <div style={{marginTop:10,fontSize:12,color:"var(--muted)"}}>Loan account</div>
+                ):(
+                  <button onClick={()=>setTypeMenuFor(menuOpen?null:selTx.id)} aria-expanded={menuOpen}
+                    style={{marginTop:10,display:"inline-flex",alignItems:"center",gap:6,background:"var(--bg)",
+                      border:"1px solid var(--border)",borderRadius:18,padding:"7px 14px",fontSize:13,fontWeight:600,
+                      color:"var(--text)",cursor:"pointer",fontFamily:"inherit"}}>
+                    {TX_TYPE_LABELS[selTx.tx_type]||selTx.tx_type}
+                    <span aria-hidden="true" style={{fontSize:10,color:"var(--muted)"}}>▾</span>
+                  </button>
+                )}
               </div>
-              <div style={{fontSize:16,fontFamily:"'DM Mono',monospace",fontWeight:600,flexShrink:0}}>{fmtX(selTx.amount)}</div>
             </div>
-            <div style={{fontSize:11,color:"var(--muted)",marginBottom:14,display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
-              <span>{selTx.transaction_date}</span>
-              {a&&<Pill label={acctLabel(a)} color={acctColor(a)} surface={surf.card}/>}
-              {selTx.user_description&&(
-                <button onClick={()=>saveTx({user_description:null})}
-                  style={{background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",fontSize:10,color:"var(--muted)",textDecoration:"underline",padding:0}}>
-                  reset name
-                </button>
-              )}
-            </div>
-            {/* The RAW bank descriptor, shown only when it differs from the
-                name on screen. Two things collapse into that name — the
-                cleanup in bankName() and any hand rename — so the text the
-                classifier actually matched on can be invisible here. That
-                matters now that a learned rule is the only categorizer: the
-                rule is taught from this string, and "why didn't my rule
-                fire?" is unanswerable if the string is never shown. */}
-            {selTx.description&&selTx.description!==(selTx.merchant_name||"")&&(
-              <div style={{fontSize:10,color:"var(--muted)",marginTop:-10,marginBottom:8,fontFamily:"'DM Mono',monospace",wordBreak:"break-word"}}>
-                Bank text: {selTx.description}
+            <div style={{padding:"14px 16px 24px",display:"flex",flexDirection:"column",gap:12,maxWidth:560,margin:"0 auto",width:"100%"}}>
+            {/* The four-type menu. All four render; a sign-incompatible one is
+                DISABLED with the reason — the UI mirror of the model's sign
+                guards, so the menu can never offer a verdict the totals would
+                ignore (allowedUserTypes). Selecting the structural answer
+                stores null (the user_category null-equals-automatic shape). */}
+            {menuOpen&&(
+              <div className="card" style={{padding:"6px 0"}}>
+                {TX_TYPES.map(ty=>{
+                  const active=selTx.tx_type===ty;
+                  const allowed=allowedUserTypes(selTx).includes(ty);
+                  return (
+                    <div key={ty}>
+                      <button disabled={!allowed}
+                        onClick={()=>{
+                          setTypeMenuFor(null);
+                          const next=ty===selTx.auto_tx_type?null:ty;
+                          if((selTx.user_type||null)!==next)saveTx({user_type:next});
+                        }}
+                        style={{display:"flex",alignItems:"center",gap:10,width:"100%",background:"none",border:"none",
+                          padding:"11px 16px",fontFamily:"inherit",fontSize:14,fontWeight:active?600:500,textAlign:"left",
+                          color:"var(--text)",cursor:allowed?"pointer":"default",opacity:allowed?1:.45}}>
+                        <span aria-hidden="true" style={{width:16,flexShrink:0,color:"var(--accent)"}}>{active?"✓":""}</span>
+                        {TX_TYPE_LABELS[ty]}
+                      </button>
+                      {!allowed&&(
+                        <div style={{fontSize:10,color:"var(--muted)",padding:"0 16px 8px 42px",marginTop:-6}}>
+                          {ty==="spending"?"Money-in rows can't be Spending.":"Money-out rows can't be Inflow."}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+                {selTx.user_type&&(
+                  <button onClick={()=>{setTypeMenuFor(null);saveTx({user_type:null});}}
+                    style={{display:"block",width:"100%",background:"none",border:"none",borderTop:"1px solid var(--border)",
+                      padding:"10px 16px",fontFamily:"inherit",fontSize:11,color:"var(--muted)",textDecoration:"underline",
+                      cursor:"pointer",textAlign:"left"}}>
+                    Reset to automatic ({TX_TYPE_LABELS[selTx.auto_tx_type]||selTx.auto_tx_type})
+                  </button>
+                )}
               </div>
             )}
-            <div style={{fontSize:10,color:"var(--muted)",marginTop:-4,marginBottom:12}}>Double-click the name to rename this transaction.</div>
 
+            {/* Field card: Payee / Category / Account / Date. */}
+            <div className="card" style={{padding:"4px 16px"}}>
+            <div style={{padding:"12px 0",borderBottom:"1px solid var(--border)"}}>
+              <div style={{fontSize:11,color:"var(--muted)",marginBottom:3}}>Payee</div>
+              <div style={{display:"flex",alignItems:"baseline",gap:8,flexWrap:"wrap"}}>
+                <span style={{fontSize:15,fontWeight:600,color:"var(--text)",display:"flex",flex:"1 1 180px",minWidth:0}}>
+                  <EditName name={selTx.merchant_name||selTx.description} onSave={v=>saveTx({user_description:v||null})}/>
+                </span>
+                {selTx.user_description&&(
+                  <button onClick={()=>saveTx({user_description:null})}
+                    style={{background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",fontSize:10,color:"var(--muted)",textDecoration:"underline",padding:0}}>
+                    reset name
+                  </button>
+                )}
+              </div>
+              <div style={{fontSize:10,color:"var(--muted)",marginTop:3}}>Double-click the name to rename this transaction.</div>
+            </div>
+
+            <div style={{padding:"12px 0",borderBottom:"1px solid var(--border)"}}>
             <div style={{fontSize:12,color:"var(--muted)",marginBottom:8}}>Category</div>
             <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:6}}>
               {userCats.map(cat=>{
@@ -6410,6 +6480,48 @@ export default function Dashboard({ refreshTick = 0 }) {
             {learnedNote&&(
               <div style={{marginTop:10,fontSize:11,color:inkOn("#1D9E75",surf.card),lineHeight:1.5}}>{learnedNote}</div>
             )}
+            </div>
+
+            <div style={{padding:"12px 0",borderBottom:"1px solid var(--border)",display:"flex",alignItems:"center",justifyContent:"space-between",gap:10}}>
+              <div style={{fontSize:11,color:"var(--muted)"}}>Account</div>
+              {a?<Pill label={acctLabel(a)} color={acctColor(a)} surface={surf.card}/>:<span style={{fontSize:12,color:"var(--muted)"}}>—</span>}
+            </div>
+            {/* Date is display-only — date editing does not exist today and is
+                deliberately deferred, not forgotten (the spec's deferred list). */}
+            <div style={{padding:"12px 0",display:"flex",alignItems:"center",justifyContent:"space-between",gap:10}}>
+              <div style={{fontSize:11,color:"var(--muted)"}}>Date</div>
+              <div style={{fontSize:13,fontWeight:500,color:"var(--text)"}}>{longDate(selTx.transaction_date)}</div>
+            </div>
+            </div>
+
+            {/* Receipt photos. Owns its own load/state (not a transactions
+                column, so it's outside the saveTx patch discipline); receipt
+                changes only need the tax cache dropped for the no-receipt
+                nag. key remounts on row change so state can't bleed. */}
+            <div className="card">
+              <div style={{fontSize:11,color:"var(--muted)",marginBottom:4}}>Photo</div>
+              <ReceiptSection key={selTx.id} txId={selTx.id} onChanged={invalidateTax}/>
+            </div>
+
+            {/* Everything below the fold: the raw bank text, the rental/tax
+                block and the exclude toggle — present but tucked away, the
+                YNAB "Show more" pattern. */}
+            {!more?(
+              <button className="ibtn" style={{justifyContent:"center"}} onClick={()=>setShowMoreFor(selTx.id)}>Show more</button>
+            ):(
+            <div className="card" style={{display:"flex",flexDirection:"column",gap:12}}>
+            {/* The RAW bank descriptor, shown only when it differs from the
+                name on screen. Two things collapse into that name — the
+                cleanup in bankName() and any hand rename — so the text the
+                classifier actually matched on can be invisible here. That
+                matters now that a learned rule is the only categorizer: the
+                rule is taught from this string, and "why didn't my rule
+                fire?" is unanswerable if the string is never shown. */}
+            {selTx.description&&selTx.description!==(selTx.merchant_name||"")&&(
+              <div style={{fontSize:10,color:"var(--muted)",fontFamily:"'DM Mono',monospace",wordBreak:"break-word"}}>
+                Bank text: {selTx.description}
+              </div>
+            )}
 
             {/* Rental property + capital flag. selTx.entity_id is the row's
                 OWN assignment; null inherits the account's default. Offered
@@ -6498,22 +6610,23 @@ export default function Dashboard({ refreshTick = 0 }) {
               </>);
             })()}
 
-            {/* Receipt photos. Owns its own load/state (not a transactions
-                column, so it's outside the saveTx patch discipline); receipt
-                changes only need the tax cache dropped for the no-receipt
-                nag. key remounts on row change so state can't bleed. */}
-            <ReceiptSection key={selTx.id} txId={selTx.id} onChanged={invalidateTax}/>
-
-            <div style={{borderTop:"1px solid var(--border)",margin:"12px 0"}}/>
             <button onClick={()=>saveTx({excluded:!selTx.excluded})}
               style={{width:"100%",padding:"9px 0",borderRadius:8,border:"1px solid var(--border)",background:"none",
                 color:"var(--text)",fontFamily:"inherit",fontSize:12,fontWeight:500,cursor:"pointer"}}>
               {selTx.excluded?"Include in spending again":"Exclude from spending"}
             </button>
-            <div style={{marginTop:6,marginBottom:12,fontSize:10,color:"var(--muted)",textAlign:"center"}}>
+            <div style={{fontSize:10,color:"var(--muted)",textAlign:"center",marginTop:-6}}>
               Excluded transactions stay visible but don't count toward totals or charts.
             </div>
-            <button onClick={()=>setSelTx(null)} className="ibtn" style={{width:"100%",justifyContent:"center"}}>Done</button>
+            </div>
+            )}
+
+            <button onClick={()=>setSelTx(null)}
+              style={{width:"100%",padding:"13px 0",borderRadius:24,border:"none",background:"var(--accent)",
+                color:"var(--accent-text)",fontFamily:"inherit",fontSize:14,fontWeight:600,cursor:"pointer"}}>
+              Done
+            </button>
+            </div>
           </div>
         </div>
         );
