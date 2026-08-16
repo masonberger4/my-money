@@ -7,7 +7,7 @@
 // washed pairs is compared against an exhaustive brute-force maximum matching.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { markInternalTransfers, cashSpending, cashIncome } from '../src/cashFlow.js';
+import { markInternalTransfers, cashSpending, cashIncome, isIncome } from '../src/cashFlow.js';
 
 const WINDOW = 4; // must mirror INTERNAL_MATCH_WINDOW_DAYS (not exported)
 
@@ -262,4 +262,57 @@ test("sign guard outranks the override: 'inflow' on money-out and 'spending' on 
   // user_type === 'spending'), so an inert override removes the row from both
   // totals rather than corrupting one — pinned in spending.test.js too.
   assert.equal(cashSpending(rows), 0);
+});
+
+// --- isIncome: the ONE income predicate --------------------------------------
+// Extracted from cashIncome's fold (2026-08-16) so the Reflect hub's income
+// drill-in can LIST the rows behind the number instead of re-deriving the rule
+// in the UI. The pin that matters is the DELEGATION: whatever the fold counts,
+// the predicate admits, and vice versa — the two can never answer differently,
+// which is what makes the drill-in's total the chart's number by construction
+// (the isSpend/sumSpending contract, and toTxShape's `counted`, on the income
+// side).
+
+test('isIncome is exactly what cashIncome sums — same rows, same answer', () => {
+  const rows = [
+    { accounts: CHK, amount: -1000 }, // checking inflow → income
+    { accounts: SAV, amount: -250 }, // savings inflow → income
+    { accounts: { type: 'depository', subtype: null }, amount: -15 }, // lenient subtype
+    { accounts: CC, amount: -25 }, // credit refund → Return, never income
+    { accounts: { type: 'loan', subtype: null }, amount: -500 }, // loan row → never income
+    { accounts: CHK, amount: 50 }, // money out → not income
+    { accounts: CHK, amount: 0 }, // a zero row is neither
+    { accounts: CHK, amount: -75, _internal: true }, // washed transfer leg
+    { accounts: CHK, amount: -40, excluded: true }, // hand-excluded
+    { accounts: CHK, amount: -500, user_type: 'transfer' }, // override vetoes
+    { accounts: CHK, amount: -300, user_type: 'inflow' }, // override forces
+    { accounts: CC, amount: -100, user_type: 'inflow' }, // credit stays out
+    { amount: -60 }, // no accounts join at all → not depository, not income
+  ];
+  const admitted = rows.filter(isIncome);
+  assert.deepEqual(
+    admitted.map(r => r.amount),
+    [-1000, -250, -15, -300],
+    'exactly the four unpaired, un-vetoed depository inflows'
+  );
+  // The delegation invariant, stated both ways.
+  assert.equal(cashIncome(rows), 1565);
+  assert.equal(
+    admitted.reduce((s, r) => s + Math.abs(r.amount), 0),
+    cashIncome(rows),
+    'summing the admitted rows reproduces the fold — a drill-in listing them cannot disagree with the bar'
+  );
+  assert.equal(cashIncome(rows.filter(r => !isIncome(r))), 0, 'nothing the predicate rejects contributes');
+});
+
+test('isIncome over a real pairing: the washed leg drops out, the paycheck stays', () => {
+  // The structural half, end to end — pairing first, predicate after, which is
+  // the order every consumer runs (getTransactionsBetween marks, then folds).
+  const transferOut = out(300, 0);
+  const transferIn = inn(300, 1); // pairs with the above → both _internal
+  const paycheck = inn(2200, 2); // no partner → income
+  const rows = [transferOut, transferIn, paycheck];
+  markInternalTransfers(rows);
+  assert.deepEqual(rows.filter(isIncome), [paycheck]);
+  assert.equal(cashIncome(rows), 2200);
 });

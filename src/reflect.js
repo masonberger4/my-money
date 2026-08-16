@@ -1,8 +1,9 @@
 // The Reflect hub's pure cores (PR F of the YNAB redesign, 2026-08-16).
 // Zero imports. Two shapes feed it, both already computed elsewhere:
 // spendingGroups' output for the breakdown card, and getCashFlow's periods
-// for the income-vs-spending insight — this layer only ARRANGES numbers the
-// shared model produced; it never re-derives spending or income.
+// for the income-vs-spending insight and the income drill-in — this layer only
+// ARRANGES numbers the shared model produced; it never re-derives spending or
+// income.
 
 // The Spending Breakdown card's stacked bar + top list: the biggest `max`
 // positive groups plus one "All Others" bucket carrying the rest, each with
@@ -21,6 +22,49 @@ export function breakdownSegments(groups, { max = 6 } = {}) {
     segments.push({ label: 'All Others', amount, share: amount / total, others: true });
   }
   return { total, segments };
+}
+
+// The income drill-in's arrangement: getCashFlow's periods → NEWEST-FIRST
+// month sections, each carrying that month's income rows and the month's own
+// income figure, plus the window's total and row count.
+//
+// Two rules, both deliberate:
+//   • The section total is the period's OWN `income.amount` — the number the
+//     chart drew — never a re-fold of the rows. The adapter derives both from
+//     one isIncome() pass, so they cannot disagree; reading the measured
+//     figure is what makes that guarantee visible rather than coincidental.
+//     Same reasoning as toTxShape's `counted`: the list behind a number must
+//     not be able to contradict the number that opened it.
+//   • Months with NO income are KEPT, not filtered out. "$0 measured in March"
+//     is the answer to a real question (a month the ledger doesn't reach, or a
+//     paycheck that washed against a transfer); dropping the row would hide it
+//     and make the window look shorter than it is — the unknowns-stay-visible
+//     rule that `Uncategorized` and the amber tax bucket encode elsewhere.
+export function incomeSections(periods) {
+  const sections = (periods || []).map(p => ({
+    label: (p && p.label) || '',
+    start: (p && p.start) || null,
+    amount: Number(p && p.income && p.income.amount) || 0,
+    // getCashFlow attaches the rows already ordered newest-first (the range
+    // fetch orders date desc, id desc and the bucketing fold preserves it) —
+    // the caller's sort IS the display order, groupByDay's contract.
+    rows: (p && p.income && p.income.transactions) || [],
+  }));
+  // getCashFlow emits oldest→newest (chart order); a ledger reads newest-first.
+  sections.reverse();
+  const total = sections.reduce((s, x) => s + x.amount, 0);
+  return {
+    total,
+    // The per-month rate — the SAME arithmetic incomeVsSpendingInsight does
+    // (sum ÷ period count, no months dropped), so the figure printed on the
+    // card is the figure the sheet it opens quotes back. Two reviewers read
+    // the $26,100 header as contradicting the $4,350/mo they tapped; stating
+    // both, from one derivation, is what makes the link legible instead of
+    // arithmetic the reader has to do. Pinned equal in test/reflect.test.js.
+    average: sections.length ? total / sections.length : 0,
+    count: sections.reduce((s, x) => s + x.rows.length, 0),
+    sections,
+  };
 }
 
 // The Income vs. Spending card's plain-language sentence. Averages over the
