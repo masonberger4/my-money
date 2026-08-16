@@ -156,6 +156,30 @@ test('AGREEMENT: over a random overridden ledger, tx_type and the totals never d
 
 // --- sync-omit source pins ------------------------------------------------------
 
+test('the sheet never trusts a never-paired row shape (openTx + the _unpairedShape gate)', () => {
+  // The verified 2026-08-16 sweep finding: rows from the account sheet and
+  // search results never run markInternalTransfers, so deriveTxType calls a
+  // genuinely-washed transfer leg 'spending'. Display-only until the sheet
+  // WRITES from tx_type — then "confirming" Transfer on such a row stores a
+  // real override (the null-equals-automatic comparison keys on the
+  // mis-derived auto_tx_type), drops the leg from the pairing pool,
+  // un-washes its partner, and counts the transfer as income. The fix has
+  // two halves, both pinned here by source scan (the teachQueue precedent):
+  // every row-open goes through openTx (which resolves against the paired
+  // month list and tags the rest _unpairedShape), and the type UI withholds
+  // itself for _unpairedShape rows.
+  const dash = readFileSync(new URL('../src/components/Dashboard.jsx', import.meta.url), 'utf8');
+  assert.ok(dash.includes('const openTx=t=>{'), 'openTx helper exists');
+  assert.ok(/transactions\?\.transactions\?\.find\(x=>x\.id===t\.id\)/.test(dash),
+    'openTx resolves against the paired month list');
+  assert.ok(dash.includes('_unpairedShape:true'), 'unresolved rows are tagged');
+  assert.ok(dash.includes('selTx._unpairedShape?null:'), 'the sheet withholds the type UI for unpaired shapes');
+  const opens = (dash.match(/openTx\(t\)/g) || []).length;
+  assert.ok(opens >= 5, `every row-open site routes through openTx (found ${opens}, expected >= 5)`);
+  assert.ok(!/className="tx" onClick=\{\(\)=>setSelTx\(t\)\}/.test(dash),
+    'no list row bypasses openTx straight into setSelTx');
+});
+
 test('no feed writer names user_type (user-owned — it must survive re-pulls)', () => {
   const sync = readFileSync(new URL('../api/sync.js', import.meta.url), 'utf8');
   assert.ok(!sync.includes('user_type'), 'api/sync.js must not write user_type');
