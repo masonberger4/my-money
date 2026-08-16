@@ -32,7 +32,7 @@ branches.
 - [x] PR A — tokens + primitives (shipped 2026-08-15)
 - [x] PR B — bottom nav + IA + smoke harness (shipped 2026-08-15)
 - [x] PR D — user_type migration + model (shipped 2026-08-16; migration pasted + verified by Mason — transactions_user_type = true)
-- [ ] PR C — Spending list redesign
+- [x] PR C — Spending list redesign (shipped 2026-08-16; the Review banner counts the month backlog — same number as the nav badge — and the search-focus icon button was dropped as redundant, the input is always visible)
 - [ ] PR E — transaction detail sheet + type selector
 - [ ] PR F — final re-skins + CLAUDE.md migration + delete this doc
 
