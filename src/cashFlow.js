@@ -172,24 +172,37 @@ export function cashSpending(txs) {
   return sumSpending(txs);
 }
 
-// Income = money into a depository (checking or savings) account from OUTSIDE
-// the linked boundary: an unpaired depository inflow. Paired inflows are the
-// household's own money arriving from another linked account and were washed
-// by markInternalTransfers. Credit-account negatives are never income — they
-// are payments received or refunds ("Return" via applyAccountRules).
+// THE income test — the income side's `isSpend`, and the ONE place the rule
+// lives. Income = money into a depository (checking or savings) account from
+// OUTSIDE the linked boundary: an unpaired depository inflow. Paired inflows
+// are the household's own money arriving from another linked account and were
+// washed by markInternalTransfers. Credit-account negatives are never income —
+// they are payments received or refunds ("Return" via applyAccountRules).
+//
+// Extracted from cashIncome's fold (2026-08-16) for the Reflect hub's income
+// drill-in, which has to LIST the rows behind the number: a drill-in that
+// re-derived "is this income?" in the UI would be a second answer to a
+// question the model already answers, and the two would drift — the exact
+// hazard `counted` (toTxShape) exists to prevent on the spending side. The
+// fold below is now the only caller that sums; every consumer that needs the
+// verdict per row asks here. Behaviour is unchanged.
+export function isIncome(t) {
+  if (t.excluded || t._internal) return false;
+  if (t.accounts?.type !== 'depository' || t.amount >= 0) return false;
+  // The 4-type override: any non-'inflow' verdict vetoes income; 'inflow'
+  // (which also pulled the row out of the pairing pool) forces a
+  // falsely-washed paycheck to count. The depository-only gate above stays
+  // OUTSIDE the override — income counts depository inflows ONLY, so
+  // 'inflow' on a credit negative behaves like Return: in neither total.
+  if (t.user_type && t.user_type !== 'inflow') return false;
+  return true;
+}
+
 // Exported for the CSV-import dry-run harness (see markInternalTransfers).
 export function cashIncome(txs) {
   let total = 0;
   for (const t of txs) {
-    if (t.excluded || t._internal) continue;
-    if (t.accounts?.type !== 'depository' || t.amount >= 0) continue;
-    // The 4-type override: any non-'inflow' verdict vetoes income; 'inflow'
-    // (which also pulled the row out of the pairing pool) forces a
-    // falsely-washed paycheck to count. The depository-only gate above stays
-    // OUTSIDE the override — income counts depository inflows ONLY, so
-    // 'inflow' on a credit negative behaves like Return: in neither total.
-    if (t.user_type && t.user_type !== 'inflow') continue;
-    total += Math.abs(t.amount);
+    if (isIncome(t)) total += Math.abs(t.amount);
   }
   return total;
 }

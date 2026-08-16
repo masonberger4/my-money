@@ -2,7 +2,7 @@ import { supabase } from './supabaseClient.js';
 import { applyAccountRules } from './categoryMap.js';
 import { merchantKey, classifyDescription } from './txClassify.js';
 import { applyRuleToHistory, isRangeExhaustedError } from './ruleHistory.js';
-import { markInternalTransfers, cashIncome, cashSpending } from './cashFlow.js';
+import { markInternalTransfers, isIncome, cashIncome, cashSpending } from './cashFlow.js';
 import { walkEnvelopes, monthKey } from './envelopes.js';
 import { matchExpected, rollForwardDate, isDuplicateExpected, isDuplicateRollForward } from './expectedTx.js';
 import { isSpend, sumSpending, spendingToDate, spendingGroups, biggestMovers, toTxShape, aggregateEnvelopeSpending } from './spending.js';
@@ -104,7 +104,7 @@ export async function getStartupSettings(keys) {
 
 // Re-export the pure cash-flow model (src/cashFlow.js) so existing importers
 // and the CSV-import dry-run harness keep working.
-export { markInternalTransfers, cashIncome, cashSpending } from './cashFlow.js';
+export { markInternalTransfers, isIncome, cashIncome, cashSpending } from './cashFlow.js';
 
 // Same deal for the pure envelope model (src/envelopes.js) — Dashboard and any
 // harness import the helpers from one place.
@@ -1161,7 +1161,15 @@ export async function getCashFlow({ num_periods = 6 } = {}) {
       label: monthLabel(year, month),
       start,
       spending: { amount: spending },
-      income: { amount: income },
+      // The ROWS behind the income figure ride along with it (additive, 2026-08-16
+      // — the Reflect hub's income drill-in lists them). Filtering with the same
+      // isIncome() predicate cashIncome folds over, on the same already-paired
+      // rows, in the same pass, is what makes the drill-in's total the bar's
+      // number BY CONSTRUCTION: a separate read would pair over a different
+      // window and could silently disagree (the spendingContext window rule).
+      // Cheap — the query already fetched every row; only the shaping is new,
+      // and income rows are a small slice of a household's ledger.
+      income: { amount: income, transactions: txs.filter(isIncome).map(toTxShape) },
     });
     spendSum += spending;
     spendCount += 1;

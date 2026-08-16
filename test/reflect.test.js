@@ -1,10 +1,11 @@
 // The Reflect hub's pure cores (src/reflect.js): the stacked bar must
-// conserve the month's total exactly, All-Others must bucket the tail, and
-// the insight sentence must band honestly — including saying NOTHING when
-// there is no measured income to compare against.
+// conserve the month's total exactly, All-Others must bucket the tail, the
+// insight sentence must band honestly — including saying NOTHING when there is
+// no measured income to compare against — and the income drill-in's sections
+// must read the chart's own numbers rather than re-adding the rows.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { breakdownSegments, incomeVsSpendingInsight } from '../src/reflect.js';
+import { breakdownSegments, incomeVsSpendingInsight, incomeSections } from '../src/reflect.js';
 
 const g = (label, amount) => ({ label, amount, transaction_count: 1, percent_of_total: 0 });
 
@@ -63,4 +64,62 @@ test('insight says NOTHING without measured income (never a claim from $0)', () 
   assert.equal(incomeVsSpendingInsight([]), null);
   assert.equal(incomeVsSpendingInsight(null), null);
   assert.equal(incomeVsSpendingInsight([{ income: 0, spending: 500 }]), null);
+});
+
+// --- incomeSections: the income drill-in's arrangement -----------------------
+
+const period = (label, amount, rows = []) => ({
+  label, start: `2026-${label}-01`, spending: { amount: 100 },
+  income: { amount, transactions: rows },
+});
+const inRow = (id, amount) => ({ id, amount, transaction_date: '2026-07-15' });
+
+test('sections run newest-first and carry the period\'s OWN income figure', () => {
+  // getCashFlow emits oldest→newest (chart order); a ledger reads newest-first.
+  const out = incomeSections([
+    period('06', 4200, [inRow('a', -4200)]),
+    period('07', 4500, [inRow('b', -2200), inRow('c', -2300)]),
+    period('08', 2200, [inRow('d', -2200)]),
+  ]);
+  assert.deepEqual(out.sections.map(s => s.label), ['08', '07', '06']);
+  assert.deepEqual(out.sections.map(s => s.amount), [2200, 4500, 4200]);
+  assert.equal(out.total, 10900);
+  assert.equal(out.count, 4);
+  assert.deepEqual(out.sections[1].rows.map(r => r.id), ['b', 'c'], 'row order is preserved, not re-sorted');
+});
+
+test('a section total is the MEASURED figure, never a re-fold of the rows', () => {
+  // The whole point: the adapter derives amount and rows from one isIncome()
+  // pass, so the sheet quotes the number the bar drew instead of recomputing
+  // it. If the two ever disagreed, silently re-adding the rows would hide the
+  // bug — and the drill-in would contradict the chart it was opened from.
+  const out = incomeSections([period('07', 4500, [inRow('b', -1)])]);
+  assert.equal(out.sections[0].amount, 4500);
+  assert.equal(out.total, 4500);
+});
+
+test('a month with NO income is KEPT, not filtered away', () => {
+  // "$0 measured in March" is an answer — the ledger may not reach back that
+  // far, or a paycheck may have washed against a transfer. Dropping the
+  // section would make the window read shorter than it is.
+  const out = incomeSections([period('03', 0), period('04', 2200, [inRow('a', -2200)])]);
+  assert.deepEqual(out.sections.map(s => s.label), ['04', '03']);
+  assert.equal(out.sections[1].rows.length, 0);
+  assert.equal(out.count, 1);
+  assert.equal(out.total, 2200);
+});
+
+test('empty/garbage input degrades to an empty report, never throws', () => {
+  assert.deepEqual(incomeSections([]), { total: 0, count: 0, sections: [] });
+  assert.deepEqual(incomeSections(null), { total: 0, count: 0, sections: [] });
+  assert.deepEqual(incomeSections(undefined), { total: 0, count: 0, sections: [] });
+  // A pre-drill-in cashFlow payload (no `transactions` key) still reads: the
+  // totals survive and the row lists are simply empty, which is what gates the
+  // affordance off rather than crashing the hub.
+  const legacy = incomeSections([{ label: 'Jul', income: { amount: 4500 } }]);
+  assert.equal(legacy.total, 4500);
+  assert.equal(legacy.count, 0);
+  assert.deepEqual(legacy.sections[0].rows, []);
+  // A period with no income key at all reads as $0 rather than NaN.
+  assert.equal(incomeSections([{ label: 'Jul' }]).total, 0);
 });

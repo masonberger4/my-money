@@ -24,7 +24,7 @@ import { unhideConfirmMessage } from "../unhideConfirm.js";
 import { NAV_ITEMS, REFLECT_TABS, navForTab, pageTitle } from "../nav.js";
 import { groupByDay, longDate } from "../txList.js";
 import { TX_TYPES, TX_TYPE_LABELS, allowedUserTypes } from "../txType.js";
-import { breakdownSegments, incomeVsSpendingInsight } from "../reflect.js";
+import { breakdownSegments, incomeVsSpendingInsight, incomeSections } from "../reflect.js";
 import { createSheetHistory } from "../sheetHistory.js";
 import { runSync } from "../sync.js";
 // Lazy: both are modals rendered only on user action, and CsvImport reaches the
@@ -1065,6 +1065,111 @@ function CategorySheet({name,color,when,rows,kids,surf,getName,acctById,acctLabe
   );
 }
 
+// Every transaction the shared model COUNTS AS INCOME, over the same rolling
+// window the Reflect hub's Income vs. Spending card charts. Opened by tapping
+// that card's income figure — the DrillNum affordance, same idiom as tapping a
+// category's amount.
+//
+// Why it exists: income stopped being a number you only look at. The hybrid
+// income rule (2026-08-13) budgets a COMPLETED month on MEASURED income, so
+// Ready to Assign is now downstream of "which rows counted" — and that answer
+// was unreachable from the UI. isIncome() is structural (an UNPAIRED depository
+// inflow), so its surprises are structural too: a paycheck washed against a
+// same-amount transfer, a card refund that is not income at all, a month the
+// ledger doesn't reach. This is where each becomes legible instead of a
+// silently missing $2,200.
+//
+// The list cannot disagree with the chart. getCashFlow filters these rows with
+// the SAME isIncome() pass, over the same already-paired rows, that produced
+// each bar's amount, and the section totals rendered here ARE those amounts
+// (incomeSections, src/reflect.js) — the CategorySheet/`counted` contract
+// applied to the income side. There is deliberately no "not counted" section:
+// its population would be every washed transfer leg and every refund in six
+// months, and the question this sheet answers is what the number is made of.
+// `busy` is not decoration. Retyping a row FROM this sheet (tap a row → the
+// detail sheet stacks → mark it a Transfer) is the loop this exists to close,
+// and saveTx's reloadData calls invalidateTrends, which nulls cashFlow — so
+// the open sheet is momentarily holding an empty report while the refetch
+// runs. Rendering "No income measured yet" in that window would read as "your
+// edit just deleted all your income". Empty-and-loading is a skeleton;
+// empty-and-settled is the real answer.
+function IncomeSheet({report,when,busy,surf,acctById,acctLabel,acctColor,onPick,onClose}) {
+  useEscClose(onClose);
+  // Money in — green, contrast-corrected for the card it sits on.
+  const green=inkOn(OK_MONEY,surf.card);
+  const pending=busy&&report.sections.length===0;
+  return (
+    <div className="overlay" onClick={onClose}>
+      <div className="modal" role="dialog" aria-modal="true" onClick={e=>e.stopPropagation()}
+        style={{width:"min(460px,92vw)",maxHeight:"82vh",overflowY:"auto"}}>
+        <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
+          <span style={{width:10,height:10,borderRadius:3,background:markOn(OK_MONEY,surf.card),flexShrink:0}}/>
+          <span style={{fontSize:16,fontWeight:600,color:"var(--text)"}}>Income</span>
+          <span style={{flex:1}}/>
+          <span style={{fontSize:16,fontWeight:600,fontFamily:"'DM Mono',monospace",color:green,flexShrink:0}}>
+            {pending?<Sk w={90} h={16}/>:fmtAuto(report.total)}
+          </span>
+        </div>
+        <div style={{fontSize:12,color:"var(--muted)",marginBottom:10}}>
+          {pending?"Recalculating…":<>{when} · {report.count} transaction{report.count!==1?"s":""}</>}
+        </div>
+        <div style={{fontSize:10,color:"var(--muted)",lineHeight:1.5,marginBottom:14}}>
+          Money arriving in a checking or savings account from outside your linked accounts.
+          Moves between your own accounts are matched up and left out, and money back on a credit
+          card is a refund, not income.
+        </div>
+
+        {pending?<Sk h={90}/>:report.sections.length===0?(
+          <div style={{textAlign:"center",padding:"24px 0",color:"var(--muted)",fontSize:13}}>
+            No income measured yet.
+          </div>
+        ):report.sections.map(s=>(
+          <div key={s.label} style={{marginBottom:14}}>
+            <div style={{display:"flex",alignItems:"baseline",gap:8,paddingBottom:4,marginBottom:2,
+              borderBottom:"1px solid var(--border)"}}>
+              <span style={{fontSize:12,fontWeight:600}}>{s.label}</span>
+              <span style={{flex:1}}/>
+              <span style={{fontSize:12,fontFamily:"'DM Mono',monospace",color:s.amount>0?green:"var(--muted)"}}>
+                {fmtAuto(s.amount)}
+              </span>
+            </div>
+            {/* A month with nothing counted SAYS so. Dropping the section would
+                make the window read shorter than it is, and "$0 that month" is
+                itself the answer — the ledger may not reach back that far, or a
+                paycheck may have washed against a transfer. */}
+            {s.rows.length===0?(
+              <div style={{fontSize:11,color:"var(--muted)",padding:"8px 0"}}>Nothing counted as income.</div>
+            ):s.rows.map(t=>{
+              const a=acctById(t.account_id);
+              return (
+                <div key={t.id} className="tx" onClick={()=>onPick(t)} style={{cursor:"pointer"}}>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{fontSize:13,fontWeight:500,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
+                      {t.merchant_name||t.description}
+                    </div>
+                    <div style={{fontSize:11,color:"var(--muted)",marginTop:2,display:"flex",alignItems:"center",gap:5,flexWrap:"wrap"}}>
+                      <span>{t.transaction_date}</span>
+                      {a&&<Pill label={acctLabel(a)} color={acctColor(a)} surface={surf.card}/>}
+                    </div>
+                  </div>
+                  {/* Every row here is money IN, so the row-level directional
+                      rule (PR C) renders it green and signed. Stored amounts
+                      are negative for money in; the sign is presentation. */}
+                  <div style={{fontSize:13,fontFamily:"'DM Mono',monospace",fontWeight:500,flexShrink:0,color:green}}>
+                    +{fmtX(Math.abs(t.amount))}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        ))}
+
+        <button onClick={onClose} className="ibtn" style={{width:"100%",justifyContent:"center",marginTop:10}}>Done</button>
+      </div>
+    </div>
+  );
+}
+
 // The taught-rules review screen. Before this, a learned rule was an
 // invisible, unremovable write-time authority: deleteCategoryRule existed with
 // zero callers, category_rules.source was written and read by nothing, and a
@@ -1389,6 +1494,16 @@ export default function Dashboard({ refreshTick = 0 }) {
   // invalidateTrends() (epoch-bumped, the taxEpoch pattern — never a bare
   // null sentinel, the setState(null) gotcha).
   const [cashFlow,setCashFlow]=useState(null);
+  // The Reflect hub's income drill-in. Declared here — well above the
+  // anySheetOpen line it feeds — per the TDZ rule recorded there.
+  const [incomeDrill,setIncomeDrill]=useState(false);
+  // The rows behind each income bar, arranged newest-first by the pure core.
+  // Derived in render with no cache of its own (the teach-queue precedent):
+  // cashFlow IS the cached lazy load, so there is nothing here to invalidate.
+  // Empty (count 0) until that load lands, which is exactly what gates the
+  // affordance below — DrillNum renders plain text with a null onClick, so a
+  // dead tap is never offered.
+  const incomeReport=useMemo(()=>incomeSections(cashFlow?.periods),[cashFlow]);
   // Biggest movers (Trends): viewed month vs the month before, through the ONE
   // unified isSpend() model — the same count the cash-flow bars sum
   // (cashSpending delegates to sumSpending). Shape {y,m,list} — MONTH-TAGGED,
@@ -2522,7 +2637,7 @@ export default function Dashboard({ refreshTick = 0 }) {
   // window used to push a racing entry and then be flash-closed by the landing
   // pop — and (b) lets onMount consume an {mmSheet:true} entry stranded by a
   // reload-with-sheet-open, so the first back gesture isn't a dead press.
-  const anySheetOpen=!!(selTx||catDrill||taxDrill||schedDebtId||monthPicker||importing||connectingSfin||quickAdd||targetEdit||moveFrom||addingCat||rulesOpen);
+  const anySheetOpen=!!(selTx||catDrill||incomeDrill||taxDrill||schedDebtId||monthPicker||importing||connectingSfin||quickAdd||targetEdit||moveFrom||addingCat||rulesOpen);
   const anySheetOpenRef=useRef(false);
   anySheetOpenRef.current=anySheetOpen;
   const sheetHistRef=useRef(null);
@@ -2533,7 +2648,7 @@ export default function Dashboard({ refreshTick = 0 }) {
     });
   }
   const closeAllSheets=useCallback(()=>{
-    setSelTx(null);setCatDrill(null);setTaxDrill(null);setSchedDebtId(null);setMonthPicker(false);
+    setSelTx(null);setCatDrill(null);setIncomeDrill(false);setTaxDrill(null);setSchedDebtId(null);setMonthPicker(false);
     setImporting(false);setConnectingSfin(false);setQuickAdd(false);
     setTargetEdit(null);setMoveFrom(null);setPickingCat(false);setAddingCat(false);setRulesOpen(false);
   },[]);
@@ -3842,6 +3957,10 @@ export default function Dashboard({ refreshTick = 0 }) {
           // the arranging; the shared model did the measuring.
           const bd=breakdownSegments(cats,{max:6});
           const insight=incomeVsSpendingInsight(cashFlow?.periods);
+          // Only offer the drill-in when there is something behind the number
+          // (openDrill's rule) — a null onClick makes DrillNum plain text, so
+          // a still-loading card never invites a tap into an empty sheet.
+          const openIncomeDrill=incomeReport.count?()=>setIncomeDrill(true):null;
           const segColor=s=>s.others?"var(--track)":markOn(getColor(s.label),surf.card);
           const linkCard={display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,
             textAlign:"left",cursor:"pointer",font:"inherit",color:"var(--text)",width:"100%"};
@@ -3887,18 +4006,52 @@ export default function Dashboard({ refreshTick = 0 }) {
 
             {/* Income vs. Spending — the plain-language read over the same
                 6-month cash-flow data Trends renders; says NOTHING without
-                measured income (incomeVsSpendingInsight returns null). */}
-            <button className="card" data-mm-report="trends" onClick={()=>go("trends")}
-              style={{textAlign:"left",cursor:"pointer",font:"inherit",color:"var(--text)",width:"100%"}}>
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
+                measured income (incomeVsSpendingInsight returns null).
+                Unlike the breakdown card above, this one is a DIV carrying two
+                separate actions rather than one card-sized button: the header
+                opens the full Trends report, and the income figure opens the
+                drill-in. A button inside a button is invalid HTML and browsers
+                disagree about which one a tap belongs to, so the outer card
+                had to stop being one — the accessible, keyboard-reachable path
+                to Trends is the header button (which also carries the smoke
+                harness's data-mm-report hook). */}
+            <div className="card">
+              <button data-mm-report="trends" onClick={()=>go("trends")}
+                style={{display:"flex",justifyContent:"space-between",alignItems:"center",width:"100%",
+                  background:"none",border:"none",padding:0,font:"inherit",color:"var(--text)",
+                  cursor:"pointer",textAlign:"left",marginBottom:4}}>
                 <span style={{fontSize:14,fontWeight:600,color:"var(--accent)"}}>Income vs. Spending</span>
                 <span aria-hidden="true" style={{color:"var(--muted)",fontSize:18}}>›</span>
-              </div>
+              </button>
               {insight?(
                 <div style={{fontSize:20,fontWeight:600,lineHeight:1.35,margin:"4px 0 12px"}}>{insight.sentence}</div>
               ):(
                 <div style={{fontSize:12,color:"var(--muted)",margin:"4px 0 12px"}}>
                   {trendsLoading?"Measuring…":"Not enough measured income yet."}
+                </div>
+              )}
+              {/* The two averages the sentence is a verdict on, and the legend
+                  the bars below never had. Income is the tap target Mason
+                  asked for: the same tap-a-number affordance the Categories
+                  rows use, offered only once the rows exist behind it. */}
+              {insight&&(
+                <div style={{display:"flex",gap:16,flexWrap:"wrap",fontSize:12,color:"var(--muted)",marginBottom:12}}>
+                  <span style={{display:"inline-flex",alignItems:"center",gap:6}}>
+                    <span style={{width:8,height:8,borderRadius:"50%",flexShrink:0,background:markOn(OK_MONEY,surf.card)}}/>
+                    Income
+                    <DrillNum onClick={openIncomeDrill}
+                      title={`See the ${incomeReport.count} transactions counted as income`}
+                      style={{fontFamily:"'DM Mono',monospace",fontWeight:500,color:"var(--text)"}}>
+                      {fmt(insight.avgIncome)}/mo
+                    </DrillNum>
+                  </span>
+                  <span style={{display:"inline-flex",alignItems:"center",gap:6}}>
+                    <span style={{width:8,height:8,borderRadius:"50%",flexShrink:0,background:"var(--track)"}}/>
+                    Spending
+                    <span style={{fontFamily:"'DM Mono',monospace",fontWeight:500,color:"var(--text)"}}>
+                      {fmt(insight.avgSpending)}/mo
+                    </span>
+                  </span>
                 </div>
               )}
               {cashFlow?.periods?.length>0&&(()=>{
@@ -3914,7 +4067,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                   </div>
                 );
               })()}
-            </button>
+            </div>
 
             {["recurring","tax","ask"].map((t,i)=>(
               <button key={t} className="card" data-mm-report={t} onClick={()=>go(t)}
@@ -6305,6 +6458,24 @@ export default function Dashboard({ refreshTick = 0 }) {
           acctById={acctById} acctLabel={acctLabel} acctColor={acctColor}
           onPick={t=>setSelTx(t)} onClose={()=>setCatDrill(null)}/>
       )}
+
+      {/* Income drill-in — same stacking rule as the category sheet above:
+          rendered before the transaction sheet so a tapped row's detail opens
+          on top, and closing it drops back to this list. Its window is the
+          cash-flow window (anchored on the CURRENT month, not the viewed one),
+          so the header states the range rather than leaving it implied. */}
+      {incomeDrill&&(()=>{
+        const ss=incomeReport.sections;
+        const when=ss.length===0?"No months measured"
+          :ss.length===1?ss[0].label
+          // sections are newest-first, so the range reads oldest → newest.
+          :`${ss[ss.length-1].label} – ${ss[0].label}`;
+        return (
+          <IncomeSheet report={incomeReport} when={when} busy={trendsLoading||!cashFlow} surf={surf}
+            acctById={acctById} acctLabel={acctLabel} acctColor={acctColor}
+            onPick={t=>setSelTx(t)} onClose={()=>setIncomeDrill(false)}/>
+        );
+      })()}
 
       {rulesOpen&&rules&&(
         <RulesSheet rules={rules} monthRows={txs} monthLabel={monthLabel(year,month)}

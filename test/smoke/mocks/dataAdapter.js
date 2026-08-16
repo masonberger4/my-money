@@ -2,7 +2,7 @@
 // absolute paths work on one machine and fail on every CI runner — which is
 // exactly how this file failed its own first CI run.
 import { toTxShape, spendingGroups, biggestMovers } from '../../../src/spending.js';
-import { markInternalTransfers } from '../../../src/cashFlow.js';
+import { markInternalTransfers, cashIncome } from '../../../src/cashFlow.js';
 import { setRegistryParent } from '../../../src/categoryTree.js';
 // The aliased settings store — the registry updaters below read-merge-write
 // the same rows Dashboard's mount reads hit, so the adopt-merged-value path
@@ -135,12 +135,26 @@ export async function getTransactions({ year, month }) {
   const txs = inMonth(year, month).slice().sort((a, b) => a.date === b.date ? b.amount - a.amount : (a.date < b.date ? 1 : -1));
   return { transactions: txs.map(toTxShape) };
 }
+// Each period carries the ROWS behind its income figure — the real
+// getCashFlow filters them with the same isIncome() pass it folds the amount
+// from, and the Reflect hub's income drill-in lists them. Derived the same way
+// here (cashIncome over the same rows) rather than hardcoded beside them, so
+// the harness's sheet total equals its bars exactly as production's does; the
+// two paychecks still sum to the 4200/4500 the bars drew before.
+const CASHFLOW_PERIODS = ['Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug'].map((label, i) => {
+  const mm = String(3 + i).padStart(2, '0');
+  const rows = [
+    raw(`2026-${mm}-15`, -2100, 'ACH DEPOSIT PAYROLL POME HOLISTIC PE', null, 'a1'),
+    raw(`2026-${mm}-01`, -(2100 + (i % 2) * 300), 'DIRECT DEP EMPLOYER INC', null, 'a1'),
+  ];
+  return {
+    label, start: `2026-${mm}-01`,
+    spending: { amount: 1800 + i * 120 },
+    income: { amount: cashIncome(rows), transactions: rows.map(toTxShape) },
+  };
+});
 export async function getCashFlow() {
-  const periods = ['Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug'].map((label, i) => ({
-    label, start: `2026-0${3 + i}-01`,
-    spending: { amount: 1800 + i * 120 }, income: { amount: 4200 + (i % 2) * 300 },
-  }));
-  return { periods, averages: { spending: { amount: 2100 } } };
+  return { periods: CASHFLOW_PERIODS, averages: { spending: { amount: 2100 } } };
 }
 export async function getAccounts() { return { accounts: ACCTS.map(a => ({ ...a })) }; }
 export async function updateAccount() {}
