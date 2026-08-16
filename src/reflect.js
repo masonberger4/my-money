@@ -52,8 +52,16 @@ export function incomeSections(periods) {
   }));
   // getCashFlow emits oldest→newest (chart order); a ledger reads newest-first.
   sections.reverse();
+  const total = sections.reduce((s, x) => s + x.amount, 0);
   return {
-    total: sections.reduce((s, x) => s + x.amount, 0),
+    total,
+    // The per-month rate — the SAME arithmetic incomeVsSpendingInsight does
+    // (sum ÷ period count, no months dropped), so the figure printed on the
+    // card is the figure the sheet it opens quotes back. Two reviewers read
+    // the $26,100 header as contradicting the $4,350/mo they tapped; stating
+    // both, from one derivation, is what makes the link legible instead of
+    // arithmetic the reader has to do. Pinned equal in test/reflect.test.js.
+    average: sections.length ? total / sections.length : 0,
     count: sections.reduce((s, x) => s + x.rows.length, 0),
     sections,
   };

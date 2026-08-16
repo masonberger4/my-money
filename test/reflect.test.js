@@ -88,6 +88,23 @@ test('sections run newest-first and carry the period\'s OWN income figure', () =
   assert.deepEqual(out.sections[1].rows.map(r => r.id), ['b', 'c'], 'row order is preserved, not re-sorted');
 });
 
+test('the sheet quotes back the SAME rate the card was showing when it was tapped', () => {
+  // The number on the Reflect card is incomeVsSpendingInsight's avgIncome; the
+  // sheet it opens headlines the window TOTAL. Both reviewers of this feature
+  // read that as a contradiction, so the sheet states the rate too — and it
+  // must be the same derivation, not a second one that can drift.
+  const periods = [
+    period('06', 4200, [inRow('a', -4200)]),
+    period('07', 4500, [inRow('b', -4500)]),
+    period('08', 2100, [inRow('c', -2100)]),
+  ];
+  assert.equal(incomeSections(periods).average, incomeVsSpendingInsight(periods).avgIncome);
+  // …including over $0 months, which BOTH divide by (neither drops a period).
+  const withGap = [period('06', 0), ...periods];
+  assert.equal(incomeSections(withGap).average, incomeVsSpendingInsight(withGap).avgIncome);
+  assert.equal(incomeSections([]).average, 0, 'no periods is 0, never NaN');
+});
+
 test('a section total is the MEASURED figure, never a re-fold of the rows', () => {
   // The whole point: the adapter derives amount and rows from one isIncome()
   // pass, so the sheet quotes the number the bar drew instead of recomputing
@@ -110,9 +127,10 @@ test('a month with NO income is KEPT, not filtered away', () => {
 });
 
 test('empty/garbage input degrades to an empty report, never throws', () => {
-  assert.deepEqual(incomeSections([]), { total: 0, count: 0, sections: [] });
-  assert.deepEqual(incomeSections(null), { total: 0, count: 0, sections: [] });
-  assert.deepEqual(incomeSections(undefined), { total: 0, count: 0, sections: [] });
+  const empty = { total: 0, average: 0, count: 0, sections: [] };
+  assert.deepEqual(incomeSections([]), empty);
+  assert.deepEqual(incomeSections(null), empty);
+  assert.deepEqual(incomeSections(undefined), empty);
   // A pre-drill-in cashFlow payload (no `transactions` key) still reads: the
   // totals survive and the row lists are simply empty, which is what gates the
   // affordance off rather than crashing the hub.

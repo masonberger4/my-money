@@ -1106,12 +1106,19 @@ function IncomeSheet({report,when,busy,surf,acctById,acctLabel,acctColor,onPick,
           <span style={{width:10,height:10,borderRadius:3,background:markOn(OK_MONEY,surf.card),flexShrink:0}}/>
           <span style={{fontSize:16,fontWeight:600,color:"var(--text)"}}>Income</span>
           <span style={{flex:1}}/>
-          <span style={{fontSize:16,fontWeight:600,fontFamily:"'DM Mono',monospace",color:green,flexShrink:0}}>
+          {/* A DIV, not a span: Sk renders a div, and phrasing content can't
+              hold flow content — the same validity rule that stopped the card
+              outside from being one big button. */}
+          <div style={{fontSize:16,fontWeight:600,fontFamily:"'DM Mono',monospace",color:green,flexShrink:0}}>
             {pending?<Sk w={90} h={16}/>:fmtAuto(report.total)}
-          </span>
+          </div>
         </div>
         <div style={{fontSize:12,color:"var(--muted)",marginBottom:10}}>
-          {pending?"Recalculating…":<>{when} · {report.count} transaction{report.count!==1?"s":""}</>}
+          {/* The window total is the honest headline for a list of rows, but
+              the number TAPPED to get here was the monthly rate — so quote it
+              back, from incomeSections' own arithmetic, rather than leaving
+              the reader to divide by six. */}
+          {pending?"Recalculating…":<>{when} · {report.count} transaction{report.count!==1?"s":""} · {fmt(report.average)}/mo</>}
         </div>
         <div style={{fontSize:10,color:"var(--muted)",lineHeight:1.5,marginBottom:14}}>
           Money arriving in a checking or savings account from outside your linked accounts.
@@ -4018,8 +4025,8 @@ export default function Dashboard({ refreshTick = 0 }) {
             <div className="card">
               <button data-mm-report="trends" onClick={()=>go("trends")}
                 style={{display:"flex",justifyContent:"space-between",alignItems:"center",width:"100%",
-                  background:"none",border:"none",padding:0,font:"inherit",color:"var(--text)",
-                  cursor:"pointer",textAlign:"left",marginBottom:4}}>
+                  background:"none",border:"none",padding:"4px 0",minHeight:32,font:"inherit",
+                  color:"var(--text)",cursor:"pointer",textAlign:"left"}}>
                 <span style={{fontSize:14,fontWeight:600,color:"var(--accent)"}}>Income vs. Spending</span>
                 <span aria-hidden="true" style={{color:"var(--muted)",fontSize:18}}>›</span>
               </button>
@@ -4040,7 +4047,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                     <span style={{width:8,height:8,borderRadius:"50%",flexShrink:0,background:markOn(OK_MONEY,surf.card)}}/>
                     Income
                     <DrillNum onClick={openIncomeDrill}
-                      title={`See the ${incomeReport.count} transactions counted as income`}
+                      title={`See the ${incomeReport.count} transaction${incomeReport.count===1?"":"s"} counted as income`}
                       style={{fontFamily:"'DM Mono',monospace",fontWeight:500,color:"var(--text)"}}>
                       {fmt(insight.avgIncome)}/mo
                     </DrillNum>
@@ -4054,17 +4061,24 @@ export default function Dashboard({ refreshTick = 0 }) {
                   </span>
                 </div>
               )}
+              {/* The chart carries the card's second route to Trends. Before
+                  the split above, tapping anywhere on the card opened the
+                  report; a header strip alone would have been a real loss of
+                  target on a phone. Bars are plain divs, so wrapping them in a
+                  button nests nothing interactive. */}
               {cashFlow?.periods?.length>0&&(()=>{
                 const max=Math.max(...cashFlow.periods.map(p=>Math.max(p.income.amount,p.spending.amount)),1);
                 return (
-                  <div style={{display:"flex",gap:8,alignItems:"flex-end",height:56}}>
+                  <button onClick={()=>go("trends")} aria-label="Open the Trends report"
+                    style={{display:"flex",gap:8,alignItems:"flex-end",height:56,width:"100%",
+                      background:"none",border:"none",padding:0,cursor:"pointer"}}>
                     {cashFlow.periods.map(p=>(
                       <div key={p.label} title={p.label} style={{flex:1,display:"flex",gap:2,alignItems:"flex-end",height:"100%"}}>
                         <div style={{flex:1,height:`${Math.max(4,p.income.amount/max*100)}%`,background:markOn(OK_MONEY,surf.card),borderRadius:3}}/>
                         <div style={{flex:1,height:`${Math.max(4,p.spending.amount/max*100)}%`,background:"var(--track)",borderRadius:3}}/>
                       </div>
                     ))}
-                  </div>
+                  </button>
                 );
               })()}
             </div>
