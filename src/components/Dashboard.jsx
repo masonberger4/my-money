@@ -24,6 +24,7 @@ import { unhideConfirmMessage } from "../unhideConfirm.js";
 import { NAV_ITEMS, REFLECT_TABS, navForTab, pageTitle } from "../nav.js";
 import { groupByDay, longDate } from "../txList.js";
 import { TX_TYPES, TX_TYPE_LABELS, allowedUserTypes } from "../txType.js";
+import { breakdownSegments, incomeVsSpendingInsight } from "../reflect.js";
 import { createSheetHistory } from "../sheetHistory.js";
 import { runSync } from "../sync.js";
 // Lazy: both are modals rendered only on user action, and CsvImport reaches the
@@ -2124,7 +2125,11 @@ export default function Dashboard({ refreshTick = 0 }) {
   // retries on the next state change/tab visit; a cash-flow failure leaves
   // cashFlow null, retried on the next tab visit.
   useEffect(()=>{
-    if(tab!=="trends")return;
+    // The Reflect hub's Income-vs-Spending card reads the same cash-flow
+    // data, so the lazy load fires for either screen. invalidateTrends still
+    // bumps trendsSeq ITSELF (the recorded gotcha) — this gate change doesn't
+    // touch that.
+    if(tab!=="trends"&&tab!=="reflect")return;
     const needCf=!cashFlow;
     const needMv=!(movers&&movers.y===year&&movers.m===month);
     if(!needCf&&!needMv)return;
@@ -3651,39 +3656,47 @@ export default function Dashboard({ refreshTick = 0 }) {
       {/* 96px bottom padding keeps the fixed bottom nav clear of the last row. */}
       <div style={{maxWidth:720,margin:"0 auto",padding:"24px 16px 96px"}}>
 
-        {/* Header */}
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,flexWrap:"wrap",marginBottom:18}}>
-          <div>
-            <div style={{fontSize:11,fontWeight:600,letterSpacing:".08em",color:"var(--muted)",textTransform:"uppercase",marginBottom:4}}>Spending Dashboard</div>
-            <div style={{display:"flex",alignItems:"center",gap:10}}>
-              <button className="nbtn" onClick={prevMonth}>‹</button>
-              <h1 role="button" tabIndex={0} title="Jump to a month" aria-label="Jump to a month"
-                onClick={()=>setMonthPicker(true)}
-                onKeyDown={e=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();setMonthPicker(true);}}}
-                style={{fontSize:20,fontWeight:600,letterSpacing:"-.02em",minWidth:190,textAlign:"center",color:"var(--text)",cursor:"pointer"}}>
-                {loading&&!lastUpd?<span style={{opacity:.4}}>Loading…</span>:monthLabel(year,month)}
-              </h1>
-              <button className="nbtn" onClick={nextMonth} disabled={!canNext}>›</button>
-            </div>
+        {/* Header (PR F): the page title IS the header — the eyebrow is gone —
+            with the month pill under it on month-scoped screens ONLY (the
+            month cursor's STATE is untouched; elsewhere the label was just
+            noise about a month the screen ignores). Theme + refresh collapse
+            to icon buttons (labels live in title/aria-label); Sign out keeps
+            its word — an icon-only sign-out on a shared login is a mis-tap
+            hazard, and the confirm text is the safety net. */}
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:10,marginBottom:16}}>
+          <div style={{minWidth:0}}>
+            <h1 style={{fontSize:30,fontWeight:600,letterSpacing:"-.03em",lineHeight:1.15,color:"var(--text)"}}>{pageTitle(tab)}</h1>
+            {["overview","budget","transactions","categories"].includes(tab)&&(
+              <div style={{display:"flex",alignItems:"center",gap:4,marginTop:8}}>
+                <button className="nbtn" onClick={prevMonth} aria-label="Previous month" style={{width:30,height:30,fontSize:14}}>‹</button>
+                <button title="Jump to a month" aria-label="Jump to a month" onClick={()=>setMonthPicker(true)}
+                  style={{background:"var(--card)",border:"1px solid var(--border)",borderRadius:16,minWidth:148,
+                    padding:"5px 12px",fontSize:13,fontWeight:600,color:"var(--text)",cursor:"pointer",fontFamily:"inherit"}}>
+                  {loading&&!lastUpd?<span style={{opacity:.4}}>Loading…</span>:monthLabel(year,month)}
+                </button>
+                <button className="nbtn" onClick={nextMonth} disabled={!canNext} aria-label="Next month" style={{width:30,height:30,fontSize:14}}>›</button>
+              </div>
+            )}
           </div>
-          {/* Header controls. `stretch` against the 40px row gives both buttons a
-              40px tap target (.ibtn's own padding is ~26px, too small for a
-              thumb); the header wraps this row under the month nav at 390px
-              rather than overflowing or squeezing the buttons. */}
-          <div style={{display:"flex",alignItems:"stretch",gap:8,minHeight:40,marginLeft:"auto"}}>
-            <button className="ibtn" onClick={cycleTheme} title={themeTitle} aria-label={themeTitle}
-              style={{padding:"0 12px",flexShrink:0}}>
+          <div style={{display:"flex",alignItems:"center",gap:8,marginLeft:"auto",flexShrink:0}}>
+            {/* Per-screen action: quick-add on Spending (was PR C's in-body
+                title row, folded up here when the global title landed). */}
+            {tab==="transactions"&&(
+              <button className="nbtn" title="Add transaction" aria-label="Add transaction"
+                onClick={()=>setQuickAdd(true)}>＋</button>
+            )}
+            <button className="nbtn" onClick={cycleTheme} title={themeTitle} aria-label={themeTitle}>
               <span aria-hidden="true" style={{fontSize:14,lineHeight:1}}>{themeUi.icon}</span>
-              {themeUi.label}
             </button>
-            <button className="ibtn" onClick={()=>fetchData(year,month,{sync:"refresh"})} disabled={loading} style={{padding:"0 12px"}}>
+            <button className="nbtn" onClick={()=>fetchData(year,month,{sync:"refresh"})} disabled={loading}
+              title={lastUpd?`Refresh · updated ${lastUpd.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}`:"Refresh"}
+              aria-label="Refresh">
               <span style={{display:"inline-block",animation:loading?"spin 1s linear infinite":"none"}}>↻</span>
-              {lastUpd?lastUpd.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}):"Refresh"}
             </button>
             {/* Shared household login — confirm so a stray tap can't sign the
                 whole household out on this device. App.jsx's onAuthStateChange
                 renders the Login screen once the session ends. */}
-            <button className="ibtn" title="Sign out" aria-label="Sign out" style={{padding:"0 12px",flexShrink:0}}
+            <button className="ibtn" title="Sign out" aria-label="Sign out" style={{minHeight:36,flexShrink:0}}
               onClick={async()=>{
                 if(!window.confirm("Sign out on this device? You'll need the household password to sign back in."))return;
                 try{await signOut();}catch(e){alert("Sign-out failed: "+(e?.message||e));}
@@ -3822,18 +3835,97 @@ export default function Dashboard({ refreshTick = 0 }) {
 
         {/* REFLECT hub — the fifth bottom-nav destination. PR B ships the
             shell (link cards); PR F fills in the report cards. */}
-        {tab==="reflect"&&(
+        {tab==="reflect"&&(()=>{
+          // The hub's two REPORT cards render from data other screens already
+          // load (cats = the month's spendingGroups; cashFlow lazy-loads for
+          // this screen too — the trends effect's gate). src/reflect.js does
+          // the arranging; the shared model did the measuring.
+          const bd=breakdownSegments(cats,{max:6});
+          const insight=incomeVsSpendingInsight(cashFlow?.periods);
+          const segColor=s=>s.others?"var(--track)":markOn(getColor(s.label),surf.card);
+          const linkCard={display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,
+            textAlign:"left",cursor:"pointer",font:"inherit",color:"var(--text)",width:"100%"};
+          return (
           <div style={{display:"flex",flexDirection:"column",gap:12}}>
-            {REFLECT_TABS.map((t,i)=>(
+            {/* Spending Breakdown — the month total, the stacked bar and the
+                top list; tapping anywhere opens the full Categories report. */}
+            <button className="card" data-mm-report="categories" onClick={()=>go("categories")}
+              style={{textAlign:"left",cursor:"pointer",font:"inherit",color:"var(--text)",width:"100%"}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
+                <span style={{fontSize:14,fontWeight:600,color:"var(--accent)"}}>Spending Breakdown</span>
+                <span aria-hidden="true" style={{color:"var(--muted)",fontSize:18}}>›</span>
+              </div>
+              <div style={{fontSize:12,color:"var(--muted)"}}>{monthLabel(year,month)}</div>
+              <div style={{fontSize:38,fontWeight:600,fontFamily:"'DM Mono',monospace",letterSpacing:"-.02em",margin:"2px 0 12px"}}>
+                {loading?<Sk w={160} h={34}/>:fmt(totalSpent)}
+              </div>
+              {bd.segments.length>0&&(
+                <div style={{display:"flex",height:34,borderRadius:8,overflow:"hidden",marginBottom:14}}>
+                  {bd.segments.map(s=>(
+                    <div key={s.label} style={{width:`${s.share*100}%`,background:segColor(s),
+                      borderRight:"2px solid var(--card)"}}/>
+                  ))}
+                </div>
+              )}
+              <div style={{display:"flex",justifyContent:"space-between",fontSize:11,fontWeight:500,color:"var(--muted)",
+                textTransform:"uppercase",letterSpacing:".05em",marginBottom:8}}>
+                <span>Top categories</span><span>Spent</span>
+              </div>
+              {bd.segments.map(s=>(
+                <div key={s.label} style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
+                  <span style={{width:8,height:8,borderRadius:"50%",flexShrink:0,background:segColor(s)}}/>
+                  <span style={{flex:1,fontSize:13,minWidth:0,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
+                    {s.others?"All Others":getName(s.label)}
+                  </span>
+                  <span style={{fontSize:13,fontFamily:"'DM Mono',monospace",color:"var(--muted)",flexShrink:0}}>{fmtX(s.amount)}</span>
+                </div>
+              ))}
+              {!loading&&bd.segments.length===0&&(
+                <div style={{fontSize:12,color:"var(--muted)"}}>No spending this month yet.</div>
+              )}
+            </button>
+
+            {/* Income vs. Spending — the plain-language read over the same
+                6-month cash-flow data Trends renders; says NOTHING without
+                measured income (incomeVsSpendingInsight returns null). */}
+            <button className="card" data-mm-report="trends" onClick={()=>go("trends")}
+              style={{textAlign:"left",cursor:"pointer",font:"inherit",color:"var(--text)",width:"100%"}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
+                <span style={{fontSize:14,fontWeight:600,color:"var(--accent)"}}>Income vs. Spending</span>
+                <span aria-hidden="true" style={{color:"var(--muted)",fontSize:18}}>›</span>
+              </div>
+              {insight?(
+                <div style={{fontSize:20,fontWeight:600,lineHeight:1.35,margin:"4px 0 12px"}}>{insight.sentence}</div>
+              ):(
+                <div style={{fontSize:12,color:"var(--muted)",margin:"4px 0 12px"}}>
+                  {trendsLoading?"Measuring…":"Not enough measured income yet."}
+                </div>
+              )}
+              {cashFlow?.periods?.length>0&&(()=>{
+                const max=Math.max(...cashFlow.periods.map(p=>Math.max(p.income.amount,p.spending.amount)),1);
+                return (
+                  <div style={{display:"flex",gap:8,alignItems:"flex-end",height:56}}>
+                    {cashFlow.periods.map(p=>(
+                      <div key={p.label} title={p.label} style={{flex:1,display:"flex",gap:2,alignItems:"flex-end",height:"100%"}}>
+                        <div style={{flex:1,height:`${Math.max(4,p.income.amount/max*100)}%`,background:markOn(OK_MONEY,surf.card),borderRadius:3}}/>
+                        <div style={{flex:1,height:`${Math.max(4,p.spending.amount/max*100)}%`,background:"var(--track)",borderRadius:3}}/>
+                      </div>
+                    ))}
+                  </div>
+                );
+              })()}
+            </button>
+
+            {["recurring","tax","ask"].map((t,i)=>(
               <button key={t} className="card" data-mm-report={t} onClick={()=>go(t)}
-                style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,
-                  textAlign:"left",cursor:"pointer",font:"inherit",color:"var(--text)",animationDelay:i*.04+"s"}}>
+                style={{...linkCard,animationDelay:i*.04+"s"}}>
                 <span style={{fontSize:15,fontWeight:600}}>{pageTitle(t)}</span>
                 <span aria-hidden="true" style={{color:"var(--muted)",fontSize:18}}>›</span>
               </button>
             ))}
           </div>
-        )}
+          );
+        })()}
 
         {/* OVERVIEW */}
         {tab==="overview"&&(
@@ -3884,7 +3976,11 @@ export default function Dashboard({ refreshTick = 0 }) {
                         {t.excluded&&<Pill label="Excluded" color="#888780" surface={surf.card}/>}
                       </div>
                     </div>
-                    <div style={{fontSize:13,fontFamily:"'DM Mono',monospace",fontWeight:500,flexShrink:0}}>{fmtX(t.amount)}</div>
+                    {/* Directional at ROW level only — the PR C rule. */}
+                    <div style={{fontSize:13,fontFamily:"'DM Mono',monospace",fontWeight:500,flexShrink:0,
+                      color:t.amount<0?inkOn(OK_MONEY,surf.card):"var(--text)"}}>
+                      {t.amount===0?"":t.amount<0?"+":"−"}{fmtX(Math.abs(t.amount))}
+                    </div>
                   </div>
                   );
                 })}
@@ -4454,14 +4550,8 @@ export default function Dashboard({ refreshTick = 0 }) {
         {/* TRANSACTIONS */}
         {tab==="transactions"&&(
           <div>
-            {/* Spending screen header (PR C): page title + the quick-add
-                entry, replacing the old "+ Add transaction" ibtn in the count
-                row. NOT a floating FAB — Mason's 2026-08-01 ruling stands. */}
-            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,marginBottom:12}}>
-              <div style={{fontSize:30,fontWeight:600,letterSpacing:"-.03em"}}>Spending</div>
-              <button className="nbtn" title="Add transaction" aria-label="Add transaction"
-                onClick={()=>setQuickAdd(true)}>＋</button>
-            </div>
+            {/* The quick-add entry lives in the global header since PR F
+                (the page title moved there); still not a FAB. */}
             {/* Review banner — the SAME number as the bottom nav's Spending
                 badge (the viewed month's Uncategorized backlog; the nav badge
                 and this banner must never disagree). Review filters the list
@@ -4728,7 +4818,23 @@ export default function Dashboard({ refreshTick = 0 }) {
               </div>
             )}
             {loading&&accounts.length===0?[1,2,3].map(i=><div key={i} style={{marginBottom:12}}><Sk h={40}/></div>):
-              [...accounts].sort((a,b)=>(a.hidden?1:0)-(b.hidden?1:0)).map((a,i)=>(
+              (()=>{
+              // Grouped sections (PR F, the YNAB accounts anatomy): Cash
+              // (every non-debt kind), Credit, Loans — each with a section
+              // total over its VISIBLE members' displayBalance (positive
+              // green, owed plain with the minus) — and hidden accounts sunk
+              // into a Hidden section at the bottom (their type is an
+              // unconfirmed guess; their balances stay out of every total,
+              // consistent with the query-level rule).
+              const visible=accounts.filter(a=>!a.hidden);
+              const sections=[
+                ["Cash",visible.filter(a=>!isDebtType(a.type))],
+                ["Credit",visible.filter(a=>a.type==="credit")],
+                ["Loans",visible.filter(a=>a.type==="loan")],
+              ].filter(([,list])=>list.length>0);
+              const hiddenList=accounts.filter(a=>a.hidden);
+              let ri=0;
+              const renderRow=a=>{const i=ri++;return (
                 <div key={a.id} className="tx" style={{cursor:"pointer",animationDelay:i*.03+"s",opacity:a.hidden?.5:1}}
                   onClick={()=>setSelAcct(a)}>
                   <div onClick={e=>e.stopPropagation()} style={{display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
@@ -4767,7 +4873,29 @@ export default function Dashboard({ refreshTick = 0 }) {
                     })()}
                   </div>
                 </div>
-              ))}
+              );};
+              return (<>
+                {sections.map(([label,list])=>{
+                  const total=list.reduce((s,a)=>s+displayBalance(Number(a.current_balance)||0,a.type),0);
+                  return (
+                    <div key={label}>
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 0 4px"}}>
+                        <span style={{fontSize:11,fontWeight:600,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em"}}>{label}</span>
+                        <span style={{fontSize:13,fontWeight:600,fontFamily:"'DM Mono',monospace",
+                          color:total>0?inkOn(OK_MONEY,surf.card):"var(--text)"}}>{fmtX(total)}</span>
+                      </div>
+                      {list.map(renderRow)}
+                    </div>
+                  );
+                })}
+                {hiddenList.length>0&&(
+                  <div>
+                    <div style={{padding:"10px 0 4px",fontSize:11,fontWeight:600,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em"}}>Hidden</div>
+                    {hiddenList.map(renderRow)}
+                  </div>
+                )}
+              </>);
+              })()}
             {!loading&&accounts.length===0&&(
               <div style={{textAlign:"center",padding:"30px 0",color:"var(--muted)",fontSize:14}}>No accounts yet. Link one to get started.</div>
             )}
