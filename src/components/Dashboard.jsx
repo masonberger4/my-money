@@ -1587,6 +1587,14 @@ export default function Dashboard({ refreshTick = 0 }) {
   const [filterDraft,setFilterDraft]=useState(EMPTY_SEARCH_FILTERS);
   const [searchFilters,setSearchFilters]=useState(EMPTY_SEARCH_FILTERS);
   const [searchMore,setSearchMore]=useState(false);
+  // Spending search disclosure: the WHOLE search UI (input + filter row) hides
+  // behind the magnifier toggle in the list card's label row. Device-ephemeral,
+  // NOT a sheet — no anySheetOpen/sheetHistory registration (an inline
+  // disclosure must not eat a back gesture). INVARIANT: collapsed ⇒ search
+  // INACTIVE — closing clears searchQ/filterDraft/searchFilters (every writer
+  // of those three lives inside the panel), so cross-month results can never
+  // render with no visible input explaining or clearing them.
+  const [searchOpen,setSearchOpen]=useState(false);
   const [selAcct,setSelAcct]=useState(null);
   const [acctTxs,setAcctTxs]=useState(null);
   const [acctHasMore,setAcctHasMore]=useState(false);
@@ -4820,8 +4828,54 @@ export default function Dashboard({ refreshTick = 0 }) {
               </div>
             )}
           <div className="card">
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10,gap:10}}>
+              <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em"}}>
+                {searchActive?"Search results · all months":monthLabel(year,month)}
+              </div>
+              <div style={{display:"flex",alignItems:"center",gap:10}}>
+                <span style={{fontSize:12,color:"var(--muted)"}}>
+                  {searchActive
+                    ?(searching?"searching…":`${shownSearch.length} match${shownSearch.length!==1?"es":""}`)
+                    :`${shownTxs.length} transaction${shownTxs.length!==1?"s":""}`}
+                </span>
+                {/* Search disclosure toggle. Closing CLEARS the query AND the
+                    filters — collapsed ⇒ search inactive (the searchOpen
+                    invariant), so the list can never sit on cross-month results
+                    with no visible input. The emoji takes the .bnav-ico
+                    treatment (emoji ignore CSS color) so it reads monochrome
+                    idle and full-colour + accent-bordered while open. The
+                    data hook is what the smoke WALK clicks — this JSX is
+                    collapsed by default and would otherwise never render in CI. */}
+                <button className="nbtn" data-mm-search-toggle=""
+                  title={searchOpen?"Close search":"Search transactions"}
+                  aria-label={searchOpen?"Close search":"Search transactions"}
+                  aria-expanded={searchOpen}
+                  onClick={()=>{
+                    if(searchOpen){
+                      setSearchQ("");setFilterDraft(EMPTY_SEARCH_FILTERS);setSearchFilters(EMPTY_SEARCH_FILTERS);
+                      setSearchOpen(false);
+                    }else setSearchOpen(true);
+                  }}
+                  style={{width:32,height:32,flexShrink:0,...(searchOpen?{borderColor:"var(--accent)"}:{})}}>
+                  <span aria-hidden="true" style={{fontSize:15,lineHeight:1,
+                    filter:searchOpen?"none":"grayscale(1)",opacity:searchOpen?1:.75}}>🔍</span>
+                </button>
+              </div>
+            </div>
+            {/* The search UI proper. `searchActive` rides along in the gate as
+                defence in depth: every writer of searchQ/searchFilters lives
+                inside here today, so collapsed genuinely means inactive, but a
+                future writer outside would otherwise strand results with no
+                input on screen. */}
+            {(searchOpen||searchActive)&&(<>
             <div style={{position:"relative",marginBottom:12}}>
+              {/* autoFocus is gated on !searchActive, not bare: the tab BODY
+                  unmounts on tab change while the search state persists, so a
+                  bare autoFocus would pop the iOS keyboard on every return to
+                  Spending with a live search. A toggle-tap mount is always
+                  inactive (collapse clears), so opening still focuses. */}
               <input value={searchQ} onChange={e=>setSearchQ(e.target.value)} placeholder="Search all transactions…"
+                autoFocus={!searchActive}
                 style={{width:"100%",padding:"9px 34px 9px 12px",borderRadius:8,border:"1px solid var(--border)",
                   background:"var(--bg)",color:"var(--text)",fontSize:16,fontFamily:"inherit",outline:"none"}}/>
               {searchQ&&(
@@ -4837,9 +4891,10 @@ export default function Dashboard({ refreshTick = 0 }) {
                 search debounce; DATE inputs commit on BLUR with a year sanity
                 floor (sanitizeDateInput) — <input type="date"> emits complete
                 garbage years mid-typing (the CLAUDE.md gotcha).
-                Always rendered (not gated on searchActive) so a FILTER-ONLY
-                search is reachable: setting a bound with no text query
-                activates the search by itself. */}
+                Always rendered WITHIN the panel (not gated on searchActive) so
+                a FILTER-ONLY search stays reachable once the panel is open:
+                setting a bound with no text query activates the search by
+                itself. */}
             {(()=>{
               const fSt={padding:"6px 8px",borderRadius:8,border:"1px solid var(--border)",background:"var(--bg)",
                 color:"var(--text)",fontSize:12,fontFamily:"inherit",outline:"none"};
@@ -4869,18 +4924,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                 </div>
               );
             })()}
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10,gap:10}}>
-              <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em"}}>
-                {searchActive?"Search results · all months":monthLabel(year,month)}
-              </div>
-              <div style={{display:"flex",alignItems:"center",gap:10}}>
-                <span style={{fontSize:12,color:"var(--muted)"}}>
-                  {searchActive
-                    ?(searching?"searching…":`${shownSearch.length} match${shownSearch.length!==1?"es":""}`)
-                    :`${shownTxs.length} transaction${shownTxs.length!==1?"s":""}`}
-                </span>
-              </div>
-            </div>
+            </>)}
             {accounts.filter(a=>!a.hidden).length>1&&(
               <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:12}}>
                 {/* "All accounts" has no palette colour of its own — it stays on
