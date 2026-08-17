@@ -883,9 +883,11 @@ function DrillNum({onClick,title,style,children}) {
 // The list is split by `counted` — the flag the adapter stamps from the SAME
 // isSpend() predicate the bars and envelopes aggregate on. So the total printed
 // here is the number that was tapped to open it, by construction, and the rows
-// that are in the category but not in the total (excluded, refunds, loan
-// postings) are still shown rather than silently dropped — "where did the other
-// $40 go" is exactly the question this sheet exists to answer.
+// that are in the category but not in the total (excluded rows, card payments,
+// loan postings) are still shown rather than silently dropped — "where did the
+// other $40 go" is exactly the question this sheet exists to answer. NOTE a
+// refund is no longer one of those: since 2026-08-17 it is COUNTED, negatively,
+// so it appears in the top section and is part of the total by construction.
 // Per-debt payoff schedule drill-in: THIS debt alone, amortized at its own
 // minimum payment — the multi-debt snowball/avalanche interplay stays in the
 // projection card; this sheet answers "where does each payment on this card
@@ -3377,8 +3379,10 @@ export default function Dashboard({ refreshTick = 0 }) {
     // Clamped at 0: a category can be NEGATIVE now (refund netting), and a
     // negative width is an INVALID CSS declaration — the browser drops it and
     // .bar-fill falls back to width:auto, i.e. a FULL bar on a refunded
-    // category. An empty bar beside a green negative amount is the honest
-    // reading; the same clamp is applied at every bar site below.
+    // category. An empty bar beside a negative amount is the honest reading.
+    // EVERY bar whose width is driven by a spending fold needs this — the
+    // parent rollup, the envelope row and the Trends income-vs-spending rows
+    // all carry the same Math.max(0, …), and a new one must too.
     const barW=Math.max(0,hasB?Math.min(ratio,1)*100:(c.amount/maxCatBar)*100);
     return (
     <div key={c.label} style={{marginBottom:14,animationDelay:i*.03+"s",
@@ -3479,7 +3483,11 @@ export default function Dashboard({ refreshTick = 0 }) {
                 // An unbudgetable row has no envelope; its available is just
                 // −spent, which must not read as an overspend alarm.
                 const over=budgetable&&r.available<0;
-                const barW=pot>0?Math.min(ratio,1)*100:0;
+                // Clamped BELOW as well as above: `r.spent` folds isSpend, so a
+                // refund can take an envelope's spent negative, and a negative
+                // width is invalid CSS — the browser drops it and .bar-fill
+                // falls back to a FULL bar on the emptiest envelope there is.
+                const barW=pot>0?Math.max(0,Math.min(ratio,1))*100:0;
                 const barColor=markOn(over?OVER_MONEY:ratio>=0.8?"#FAC775":getColor(r.category),surf.track);
                 const need=budgetable?targetNeed(r,{year,month}):0;
                 // Pace warning: opt-in, budgetable envelopes only, off the
@@ -4971,9 +4979,10 @@ export default function Dashboard({ refreshTick = 0 }) {
               // Day-grouped YNAB row anatomy (PR C). Section headers carry
               // the date, so rows drop their date span. Row amounts are
               // DIRECTIONAL at row level ONLY — stored positive (out) shows
-              // "−$", money in shows green "+$" — while every aggregate in
-              // the app keeps positive magnitudes (sumSpending unchanged;
-              // the recorded row-display rule). Transfer/Card-payment rows
+              // "−$", money in shows green "+$". No aggregate is re-signed per
+              // row (sumSpending unchanged), but an aggregate CAN be negative
+              // since refund netting (2026-08-17) — the old "every aggregate
+              // keeps positive magnitudes" absolute is retired. Transfer/Card-payment rows
               // show a type pill instead of a category chip — the category
               // is meaningless on a row that is in neither total.
               let ri=0;

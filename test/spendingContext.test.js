@@ -87,6 +87,23 @@ test('a credit-card refund nets in its own category, and the context SAYS it doe
   assert.ok(row && !row.includes('not counted as spending'), row);
 });
 
+test('a DEBIT-card refund nets once marked, and the context says that too', () => {
+  // 2026-08-17b: a depository inflow the household typed 'spending' is a
+  // refund and subtracts. The sentence has to admit the exception or the model
+  // reads "money into checking is never spending" beside a line where it was —
+  // the same contradiction the credit half of this test guards.
+  const rows = clone(TXS).concat([{
+    account_id: 'a-chk', date: '2026-07-20', amount: -50, merchant_name: '',
+    description: 'TARGET REFUND', mapped_category: 'Groceries', user_category: null,
+    user_description: null, excluded: false, user_type: 'spending',
+  }]);
+  const text = formatSpendingContext(clone(ACCOUNTS), rows);
+  // Groceries is 85.50 of purchases minus the 50 refund.
+  assert.ok(text.includes('- 2026-07 Groceries: $35.50'), `the debit refund nets:\n${text}`);
+  assert.ok(!/never counts as spending/.test(text), 'the retired absolute is gone');
+  assert.ok(/marked that row a Refund/.test(text), 'the exception IS stated');
+});
+
 // --- Recurring + envelope sections -----------------------------------------
 
 // A ~monthly subscription: 4 charges ~30 days apart, similar amounts, with the
