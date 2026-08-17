@@ -104,14 +104,21 @@ export function isCardPaymentDescriptor(descriptor) {
 // Failure direction is deliberate: an unrecognised wording FAILS TO NET, which
 // is exactly today's behaviour, while a missed veto would subtract a
 // four-figure card payment from a category. Conservative side up.
+// WORD-BOUNDARY anchored, and that is load-bearing rather than tidy. Without
+// the boundaries `PMT` matched inside "AMAZON MKTPLACE PMTS" — Amazon's own
+// merchant descriptor — so 18 genuine marketplace refunds ($836.09 across
+// Mason's real card history) were vetoed and silently failed to net. Note
+// `PMT` stays SINGULAR for exactly that reason: the plural form is a merchant
+// string here, not a payment. Verified against the household's full
+// credit-account money-in vocabulary; pinned in test/txClassify.test.js.
 const CARD_CREDIT_NON_REFUND_RE = new RegExp(
-  [
+  '\\b(?:' + [
     // Payments received from the cardholder.
-    'PAYMENT', 'PYMT', 'PYMNT', 'PMT', 'AUTOPAY', 'AUTO ?PAY', 'DIRECTPAY', 'BILL ?PAY',
+    'PAYMENTS?', 'PYMT', 'PYMNT', 'PMT', 'AUTOPAY', 'AUTO ?PAY', 'DIRECTPAY', 'BILL ?PAY',
     // Rewards and issuer-side credits — money in, but not a purchase reversal.
-    'CASH ?BACK', 'CASHBACK', 'REWARD', 'REDEMPTION', 'REDEEM', 'STATEMENT CREDIT',
+    'CASH ?BACK', 'CASHBACK', 'REWARDS?', 'REDEMPTION', 'REDEEM', 'STATEMENT CREDIT',
     'BALANCE TRANSFER', 'INTEREST REFUND', 'FEE REFUND', 'FEE REVERSAL', 'CREDIT ADJUSTMENT',
-  ].join('|'),
+  ].join('|') + ')\\b',
   'i'
 );
 
