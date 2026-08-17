@@ -20,7 +20,9 @@
 import { UNCATEGORIZED, TRANSFER_CATEGORY } from './categoryMap.js';
 import { isCardPaymentDescriptor, isCardPaymentReceived } from './txClassify.js';
 
-// User override wins over the classifier's answer.
+// User override wins over the classifier's answer. This is the RAW merge; the
+// category a row PRESENTS is displayCategory (below the type derivers), which
+// locks the two types that own their own category.
 export function effectiveCategory(t) {
   return t.user_category || t.mapped_category || UNCATEGORIZED;
 }
@@ -163,7 +165,7 @@ export function sumSpending(txs) {
 }
 
 // --- The 4-type transaction model (2026-08-15, Mason — YNAB vocabulary) ------
-// A row is exactly one of Spending / Inflow / Transfer / Card payment (plus
+// A row is exactly one of Spending / Income / Transfer / Card payment (plus
 // the display-only 'loan'). The DERIVED type restates the structural verdicts
 // above — it introduces no second predicate — and transactions.user_type is
 // the user's override, which isSpend/cashIncome read directly (see isSpend's
@@ -181,9 +183,9 @@ export const TX_TYPES = ['spending', 'inflow', 'transfer', 'card_payment'];
 //                            legs would contradict the YNAB vocabulary this
 //                            exists to adopt; display-only, totals identical);
 //   unpaired positive     -> 'spending', or 'card_payment' via the veto;
-//   any negative          -> 'inflow' (a depository negative is income; a
-//                            credit negative is Return — never income, and it
-//                            DISPLAYS as Inflow);
+//   any negative          -> 'inflow' (a depository negative is income; it
+//                            DISPLAYS as "Income" — the stored value keeps its
+//                            original name, see src/txType.js);
 //   loan-account rows     -> 'loan' first: they never count (isLoanAccount)
 //                            and IGNORE user_type — an account retyped to
 //                            loan must not resurrect an old override.
@@ -216,6 +218,39 @@ export function deriveTxType(t) {
 export function effectiveTxType(t) {
   if (isLoanAccount(t)) return 'loan';
   return TX_TYPES.includes(t.user_type) ? t.user_type : deriveTxType(t);
+}
+
+// The category a row PRESENTS once the 4-type verdict is in (Mason,
+// 2026-08-17): a Transfer or Card-payment row's category IS its type. Those two
+// are in neither total, so a category on them describes nothing — and while the
+// Spending list already swapped the chip for a type pill, the underlying label
+// kept leaking: an untaught transfer leg sat in the Uncategorized backlog the
+// teach queue asks you to clear, and a category picked BEFORE the row was
+// retyped went on feeding recurring detection, the Schedule E worksheet and
+// every picker that scans rows for names still in use.
+//
+// A READ, never a write. user_category is deliberately NOT cleared on retype:
+// null-equals-automatic has to stay reversible (clearing can't be undone by
+// resetting the type), clearing wouldn't even achieve this — mapped_category
+// independently carries a real category on a hand-typed transfer, since the
+// write-time guard only fires on transfer WORDING and applyRuleToHistory
+// rewrites mapped_category with no guard at all — and isCardPaymentRow reads
+// user_category as a verdict, so clearing it mid-save would flip the very
+// derivation the stored override is compared against.
+//
+// Lands on TRANSFER_CATEGORY rather than a new label because that bucket is
+// already excluded everywhere this needs it to be: pickers (isUserCategory),
+// budgets/envelopes (isBudgetableCategory), recurring detection and the tax
+// line-mapping picker. 'loan' falls through on purpose — loan rows keep their
+// raw category (they never count either way) and their sheet keeps its picker.
+// effectiveCategory itself stays raw: its callers are isSpend-gated folds
+// (spendingGroups, aggregateEnvelopeSpending) that a locked row can never
+// reach, so widening it would be blast radius with no behaviour.
+export function displayCategory(t) {
+  const ty = effectiveTxType(t);
+  return ty === 'transfer' || ty === 'card_payment'
+    ? TRANSFER_CATEGORY
+    : effectiveCategory(t);
 }
 
 // Spending up to and including a DAY OF THE MONTH — the honest half of the
@@ -325,7 +360,11 @@ export function toTxShape(t) {
     description: t.description,
     transaction_date: t.date,
     amount: t.amount,
-    category: effectiveCategory(t),
+    // The PRESENTED category (displayCategory): a Transfer/Card-payment row
+    // reads as the transfer bucket whatever it stores. auto_category stays the
+    // raw un-overridden value — it is what "reset to automatic" falls back to,
+    // and the reset link only renders on rows that aren't locked.
+    category: displayCategory(t),
     auto_category: t.mapped_category || UNCATEGORIZED,
     // The un-overridden name, so an optimistic rename (or its reset) can
     // recompute `merchant_name` locally the same way displayName() does.
@@ -369,16 +408,30 @@ export function toTxShape(t) {
 // one stale on screen (the shipped "a rename never appeared" / "a category
 // change made from search never appeared" bugs — the saveTx Gotcha in
 // CLAUDE.md):
-//   category      = user_category || auto_category      (effectiveCategory)
+//   category      = displayCategory (type-locked, else user_category || auto)
 //   merchant_name = user_description || auto_description (displayName)
 // `counted` is deliberately NOT recomputed — isSpend needs accounts.type,
 // which the shape doesn't carry. Its one reader (CategorySheet) must render
 // from a list that gets refetched (`transactions`, via reloadData).
+//
+// tx_type is recomputed FIRST because category now depends on it: retyping a
+// row to Transfer must swap its category to the transfer bucket in the same
+// patch (otherwise the Review badge keeps counting a row that just stopped
+// being uncategorized), and resetting the type must hand the old category
+// back. Known, pre-existing, deliberately not fixed: a user_category edit
+// alone never recomputes tx_type/auto_tx_type even where isCardPaymentRow's
+// verdict would move — unreachable from the UI, since mechanism categories
+// never enter the picker and a locked row has no picker at all.
 export function patchTxShape(t, fields) {
   const next = { ...t, ...fields };
-  if ('user_category' in fields) next.category = fields.user_category || t.auto_category;
-  if ('user_description' in fields) next.merchant_name = fields.user_description || t.auto_description;
   if ('user_type' in fields) next.tx_type = fields.user_type || t.auto_tx_type;
+  if ('user_category' in fields || 'user_type' in fields) {
+    next.category =
+      next.tx_type === 'transfer' || next.tx_type === 'card_payment'
+        ? TRANSFER_CATEGORY
+        : next.user_category || t.auto_category;
+  }
+  if ('user_description' in fields) next.merchant_name = fields.user_description || t.auto_description;
   return next;
 }
 

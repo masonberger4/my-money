@@ -43,6 +43,9 @@ function raw(date, amount, desc, cat, acct = 'a1', extra = {}) {
     raw_category: extra.raw_category || null, entity_id: null,
     is_capital: false, placed_in_service: null, useful_life_years: null,
     accounts: { type: acctType(acct), subtype: ACCTS.find(a => a.id === acct)?.subtype },
+    // Anything else the fixture wants to state outright (user_type, a stored
+    // user_category) overrides the defaults above.
+    ...extra,
   };
 }
 
@@ -69,6 +72,13 @@ const AUG = [
   // the same card, which must NOT net and which no issuer name appears in.
   raw('2026-08-04', -30.00, 'SAFEWAY #1234 SEATTLE WA', 'Groceries', 'a3'),
   raw('2026-08-05', -600.00, 'PAYMENT THANK YOU', null, 'a3'),
+  // The type-locked category (2026-08-17): a row the USER typed as a transfer,
+  // still carrying the category it was given first. Nothing else in the
+  // harness reaches that branch — the derived transfer/card-payment rows above
+  // have no stored override — so without it the sheet's read-only Category row
+  // and the lock's precedence over a real user_category render untested.
+  raw('2026-08-06', 300.00, 'ZELLE TO CONTRACTOR', 'Home maintenance and improvement', 'a1',
+    { user_type: 'transfer', user_category: 'Home maintenance and improvement' }),
 ];
 const JUL = [
   raw('2026-07-28', 92.10, 'SAFEWAY #1234 SEATTLE WA', 'Groceries', 'a3'),

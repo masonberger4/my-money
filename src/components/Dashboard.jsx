@@ -59,7 +59,20 @@ const TX_ICONS = {
   "Entertainment and subscriptions":"🎬","Shopping and gear":"🛍","Travel and vacation":"✈️",
   "Healthcare and pharmacy":"💊","Education":"📚","Side hustles and business":"💼",
   "Return":"↩️","Uncategorized":"❓",
+  // The transfer bucket is what a Transfer / Card-payment row now presents as
+  // its category (displayCategory), so it needs its own glyph — the "🛍"
+  // fallback read as "shopping" right beside a pill saying Transfer.
+  "Transfers and card payments":"🔁",
 };
+
+// Row-level wording for the two types that OWN their category (Mason,
+// 2026-08-17): a Transfer / Card-payment row shows its type where a category
+// chip would go, on every list. THE ONE COPY of these two short labels — the
+// Spending list had them inline and the other three lists printed the raw
+// category instead, so the same row read differently depending on the screen.
+// Deliberately shorter than TX_TYPE_LABELS' "Credit Card Payment", which the
+// detail sheet uses: a 34px-tall list row is not the place for three words.
+const TYPE_PILL={transfer:"Transfer",card_payment:"Card payment"};
 
 const ACCOUNT_COLORS = ["#7F77DD","#1D9E75","#D85A30","#378ADD","#FAC775","#D4537E","#639922","#E24B4A"];
 
@@ -1054,7 +1067,7 @@ function CategorySheet({name,color,when,rows,kids,surf,getName,acctById,acctLabe
             letterSpacing:".05em",marginBottom:4}}>Not counted</div>
           <div style={{fontSize:10,color:"var(--muted)",lineHeight:1.5,marginBottom:6}}>
             In this category, but outside the total above — excluded by hand, money coming back in,
-            or posted on a loan account.
+            typed as a transfer or card payment, or posted on a loan account.
           </div>
           {other.map(t=>row(t,true))}
         </>)}
@@ -1395,7 +1408,7 @@ function PropertySheet({name,year,rows,busy,receiptTxIds,surf,getName,getColor,a
           </div>
           <div style={{fontSize:11,color:"var(--muted)",marginTop:2,display:"flex",alignItems:"center",gap:5,flexWrap:"wrap"}}>
             <span>{shortDate(t.transaction_date)}</span>
-            <Pill label={getName(t.category)} color={getColor(t.category)} surface={surf.card}/>
+            <Pill label={TYPE_PILL[t.tx_type]||getName(t.category)} color={TYPE_PILL[t.tx_type]?"#888780":getColor(t.category)} surface={surf.card}/>
             {a&&<Pill label={acctLabel(a)} color={acctColor(a)} surface={surf.card}/>}
             {t.is_capital&&<Pill label="Capital" color={ENTITY_CHIP} surface={surf.card}/>}
             {hasReceipt&&<span title="Receipt attached">📎</span>}
@@ -4226,7 +4239,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                     <div style={{flex:1,minWidth:0}}>
                       <div style={{fontSize:13,fontWeight:500,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{t.merchant_name||t.description}</div>
                       <div style={{fontSize:11,color:"var(--muted)",marginTop:2,display:"flex",alignItems:"center",gap:5,flexWrap:"wrap"}}>
-                        <span>{getName(t.category)} · {t.transaction_date}</span>
+                        <span>{TYPE_PILL[t.tx_type]||getName(t.category)} · {t.transaction_date}</span>
                         {a&&<Pill label={acctLabel(a)} color={acctColor(a)} surface={surf.card}/>}
                         {t.excluded&&<Pill label="Excluded" color="#888780" surface={surf.card}/>}
                       </div>
@@ -4388,12 +4401,15 @@ export default function Dashboard({ refreshTick = 0 }) {
                     backfills the transactions you already have.
                   </div>
                 )}
-                {/* Money in, transfer legs and card payments are in no spending
-                    total, so ranking them beside merchants was the old bug — but
-                    hiding them would be the worse one (they are still untaught
+                {/* Money in and hand-excluded rows are in no spending total, so
+                    ranking them beside merchants was the old bug — but hiding
+                    them would be the worse one (they are still untaught
                     Uncategorized money). They keep their own labelled list, with
                     their REAL in/out amounts rather than the "$0" the old
-                    positive-only sum printed for an income merchant. */}
+                    positive-only sum printed for an income merchant. Transfer
+                    legs and card payments no longer reach this list at all:
+                    their category IS their type since 2026-08-17, so they are
+                    not Uncategorized and there is nothing to teach. */}
                 {teachQueue.other.length>0&&(<>
                   <button className="ibtn" onClick={()=>setTeachOther(v=>!v)} aria-expanded={teachOther}
                     style={{fontSize:10,color:"var(--muted)",minHeight:32,padding:"0 2px",marginTop:teachQueue.spending.length?6:0}}>
@@ -4401,9 +4417,9 @@ export default function Dashboard({ refreshTick = 0 }) {
                   </button>
                   {teachOther&&(<>
                     <div style={{fontSize:10,color:"var(--muted)",lineHeight:1.5,marginBottom:2}}>
-                      Money in, transfer legs and card payments. None of it is in a spending total, which is
-                      why it isn't ranked above — but it is still Uncategorized, and a paycheck or a transfer
-                      is worth a category too.
+                      Money in, and rows you excluded by hand. None of it is in a spending total, which is
+                      why it isn't ranked above — but it is still Uncategorized, and a paycheck is worth a
+                      category too.
                     </div>
                     {teachQueue.other.slice(0,teachOtherShown).map(g=>(
                       <button key={g.key} onClick={()=>setSelTx(g.tx)} style={TEACH_ROW}>
@@ -5028,7 +5044,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                   {sec.rows.map(t=>{
                     const a=acctById(t.account_id);
                     const i=ri++;
-                    const typePill=t.tx_type==="transfer"||t.tx_type==="card_payment";
+                    const typePill=TYPE_PILL[t.tx_type];
                     const sign=t.amount===0?"":t.amount<0?"+":"−";
                     return (
                       <div key={t.plaid_tx_id||i} className="tx" onClick={()=>openTx(t)}
@@ -5037,7 +5053,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                           <div style={{fontSize:14,fontWeight:600,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{t.merchant_name||t.description}</div>
                           <div style={{fontSize:11,color:"var(--muted)",marginTop:4,display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
                             {typePill
-                              ?<Pill label={t.tx_type==="transfer"?"Transfer":"Card payment"} color="#888780" surface={surf.card}/>
+                              ?<Pill label={typePill} color="#888780" surface={surf.card}/>
                               :(()=>{const cc=chipOn(getColor(t.category),surf.card);return (
                                 <span style={{display:"inline-flex",alignItems:"center",gap:4,fontSize:10,fontWeight:600,
                                   background:cc.bg,color:cc.ink,borderRadius:20,padding:"2px 8px",maxWidth:170}}>
@@ -5478,7 +5494,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                       <div style={{fontSize:11,color:"var(--muted)",marginTop:3,display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
                         <span>{t.transaction_date}</span>
                         <span>·</span>
-                        <Pill label={getName(t.category)} color={getColor(t.category)} surface={surf.card}/>
+                        <Pill label={TYPE_PILL[t.tx_type]||getName(t.category)} color={TYPE_PILL[t.tx_type]?"#888780":getColor(t.category)} surface={surf.card}/>
                         {entPill(t.entity_id)}
                         {t.excluded&&<Pill label="Excluded" color="#888780" surface={surf.card}/>}
                       </div>
@@ -6709,6 +6725,15 @@ export default function Dashboard({ refreshTick = 0 }) {
         const menuOpen=typeMenuFor===selTx.id;
         const more=showMoreFor===selTx.id;
         const sign=selTx.amount===0?"":selTx.amount<0?"+":"−";
+        // Transfer / Card payment OWN their category (Mason, 2026-08-17), so
+        // the picker below is replaced by the type, read-only. Gated on
+        // tx_type ALONE — safe even on an _unpairedShape row, whose type UI is
+        // withheld: a DERIVED 'transfer' requires `_internal`, which a
+        // never-paired shape cannot carry, and the 'card_payment' derivations
+        // (wording, the veto) plus a stored user_type are pairing-independent.
+        // Loan rows are excluded on purpose: they never count either way and
+        // keep an editable category.
+        const catLocked=selTx.tx_type==="transfer"||selTx.tx_type==="card_payment";
         return (
         <div className="overlay" onClick={()=>setSelTx(null)}>
           {/* Full-screen sheet (PR E of the YNAB redesign). Same .overlay
@@ -6759,6 +6784,11 @@ export default function Dashboard({ refreshTick = 0 }) {
                       <button disabled={!allowed}
                         onClick={()=>{
                           setTypeMenuFor(null);
+                          // A retype can hide the category picker under the
+                          // confirm, so drop any pending teach prompt with it —
+                          // otherwise "Always categorize X as Groceries?" hangs
+                          // over a row that no longer has a category at all.
+                          setLearnPrompt(null);setLearnedNote(null);
                           const next=ty===selTx.auto_tx_type?null:ty;
                           if((selTx.user_type||null)!==next)saveTx({user_type:next});
                         }}
@@ -6770,14 +6800,18 @@ export default function Dashboard({ refreshTick = 0 }) {
                       </button>
                       {!allowed&&(
                         <div style={{fontSize:10,color:"var(--muted)",padding:"0 16px 8px 42px",marginTop:-6}}>
-                          {ty==="spending"?"Money-in rows can't be Spending.":"Money-out rows can't be Inflow."}
+                          {/* The only option allowedUserTypes ever withholds:
+                              'inflow' on a money-out row (money-in rows are
+                              offered all four since refund netting, and loan
+                              rows never open this menu). */}
+                          Money-out rows can't be Income.
                         </div>
                       )}
                     </div>
                   );
                 })}
                 {selTx.user_type&&(
-                  <button onClick={()=>{setTypeMenuFor(null);saveTx({user_type:null});}}
+                  <button onClick={()=>{setTypeMenuFor(null);setLearnPrompt(null);setLearnedNote(null);saveTx({user_type:null});}}
                     style={{display:"block",width:"100%",background:"none",border:"none",borderTop:"1px solid var(--border)",
                       padding:"10px 16px",fontFamily:"inherit",fontSize:11,color:"var(--muted)",textDecoration:"underline",
                       cursor:"pointer",textAlign:"left"}}>
@@ -6807,6 +6841,23 @@ export default function Dashboard({ refreshTick = 0 }) {
 
             <div style={{padding:"12px 0",borderBottom:"1px solid var(--border)"}}>
             <div style={{fontSize:12,color:"var(--muted)",marginBottom:8}}>Category</div>
+            {/* Locked: the type IS the category. The whole picker is withheld
+                rather than disabled — a greyed chip row invites tapping and
+                explains nothing, and the teach-the-merchant confirm below is
+                only reachable from a chip, so hiding the grid closes that
+                path too (a rule taught off a transfer leg would fire on every
+                later row from the same descriptor). */}
+            {catLocked?(
+              <div>
+                <div style={{fontSize:13,fontWeight:500,color:"var(--text)"}}>{txTypeLabel(selTx.tx_type,selTx.amount)}</div>
+                <div style={{fontSize:10,color:"var(--muted)",lineHeight:1.5,marginTop:3}}>
+                  {selTx.tx_type==="transfer"
+                    ?"A transfer moves money between your own accounts, so it carries no category and is in no spending total."
+                    :"A card payment pays down a card balance, so it carries no category and is in no spending total."}
+                  {" "}Change the type above to give it one.
+                </div>
+              </div>
+            ):(<>
             <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:6}}>
               {userCats.map(cat=>{
                 const active=selTx.category===cat;
@@ -6972,6 +7023,7 @@ export default function Dashboard({ refreshTick = 0 }) {
             {learnedNote&&(
               <div style={{marginTop:10,fontSize:11,color:inkOn("#1D9E75",surf.card),lineHeight:1.5}}>{learnedNote}</div>
             )}
+            </>)}
             </div>
 
             <div style={{padding:"12px 0",borderBottom:"1px solid var(--border)",display:"flex",alignItems:"center",justifyContent:"space-between",gap:10}}>
