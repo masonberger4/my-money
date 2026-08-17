@@ -131,6 +131,7 @@ export {
   toTxShape,
   patchTxShape,
   effectiveCategory,
+  displayCategory,
   aggregateEnvelopeSpending,
 } from './spending.js';
 

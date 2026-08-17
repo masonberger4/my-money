@@ -224,6 +224,41 @@ test('REGRESSION: the excluded rows still LIST, marked, so re-adding the list ma
   assert.ok(!listed.find(l => l.includes('TRANSFER FROM CHECKING')).endsWith('| not counted as spending'));
 });
 
+test('the listed category of a transfer leg / card payment IS its type, not Uncategorized', () => {
+  // displayCategory, mirrored server-side (2026-08-17). It has to be computed
+  // AFTER the per-month pairing pass — before it, no leg carries `_internal`
+  // and both of these would still print "Uncategorized", which is what the
+  // teach queue means by "tell me what this is".
+  const text = formatSpendingContext(clone(BOUNDARY_ACCOUNTS), clone(BOUNDARY_TXS));
+  const listed = text.split('\n').filter(l => /^2026-07-\d\d \| /.test(l));
+  for (const desc of ['TRANSFER TO SAVINGS', 'TRANSFER FROM CHECKING', 'CAPITAL ONE - PAYMENT']) {
+    assert.ok(
+      listed.find(l => l.includes(desc)).includes('| Transfers and card payments |'),
+      `${desc} should read as its type: ${listed.join('\n')}`
+    );
+  }
+  // The ordinary purchase is untouched.
+  assert.ok(listed.find(l => l.includes('SAFEWAY')).includes('| Uncategorized |'), text);
+});
+
+test('a hand-typed transfer drops out of the recurring section (it was never a charge)', () => {
+  // detectRecurring excludes by CATEGORY, and the category it now reads is the
+  // type-locked one — so a monthly self-transfer the user typed as Transfer
+  // stops being announced to the assistant as a recurring subscription.
+  const monthly = ['2026-05-04', '2026-06-04', '2026-07-04'].map((date, i) =>
+    row({ account_id: 'a-chk', date, amount: 900, description: 'ZELLE TO LANDLORD', id: `z${i}` })
+  );
+  const withType = monthly.map(t => ({ ...t, user_type: 'transfer' }));
+  const before = formatSpendingContext(clone(BOUNDARY_ACCOUNTS), clone(monthly));
+  const after = formatSpendingContext(clone(BOUNDARY_ACCOUNTS), clone(withType));
+  // The recurring section prints a prettified merchant name, so match loosely.
+  const LANDLORD = /zelle to landlord/i;
+  const recurringOf = text => text.split('## Recurring charges')[1].split('\n##')[0];
+  assert.match(recurringOf(before), LANDLORD, 'fixture sanity: untyped, it IS detected');
+  assert.doesNotMatch(recurringOf(after), LANDLORD, recurringOf(after));
+  assert.match(after, LANDLORD, 'the rows themselves still list');
+});
+
 test('the 4-type override moves the assistant totals the way every screen moves (user_type rides the context)', () => {
   // An override on the purchase pulls it out of the total AND flips its list
   // marker; a 'spending' override on the unlinked card payment forces it in.

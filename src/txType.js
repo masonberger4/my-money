@@ -13,11 +13,24 @@ import { isLoanAccount } from './spending.js';
 
 export { TX_TYPES, deriveTxType, effectiveTxType } from './spending.js';
 
-// Display labels — YNAB's vocabulary exactly. 'loan' is the display-only
-// fifth value deriveTxType can return; it is never storable.
+// Display labels — YNAB's vocabulary, except 'inflow' reads "Income" (Mason,
+// 2026-08-17: "inflows should be renamed income"). DISPLAY ONLY: the stored
+// value stays 'inflow', which is what the DB CHECK constraint allows
+// (20260815000001_transaction_user_type.sql) and what every read in the model
+// compares against — renaming the column value would need a migration and
+// would break every row already stored. 'loan' is the display-only fifth value
+// deriveTxType can return; it is never storable.
+//
+// Accepted wrinkle of the rename: a DEPOSITORY negative is income and reads
+// "Income" honestly, but deriveTxType also returns 'inflow' for money-in
+// shapes the model does not count as income (a loan-account negative is 'loan'
+// first, so the live case is narrow) — the label is the type's name, not a
+// claim about the income total. The one money-in row that never says "Income"
+// is a credit-card refund, which derives 'spending' and relabels to "Refund"
+// below. Pinned byte-exact in test/txType.test.js so a partial rename is red.
 export const TX_TYPE_LABELS = {
   spending: 'Spending',
-  inflow: 'Inflow',
+  inflow: 'Income',
   transfer: 'Transfer',
   card_payment: 'Credit Card Payment',
   loan: 'Loan',

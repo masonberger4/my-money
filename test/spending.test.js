@@ -19,6 +19,7 @@ import {
   toTxShape,
   patchTxShape,
   effectiveCategory,
+  displayCategory,
   aggregateEnvelopeSpending,
 } from '../src/spending.js';
 import { markInternalTransfers, cashIncome, cashSpending } from '../src/cashFlow.js';
@@ -370,6 +371,14 @@ test('patchTxShape(shaped, edit) equals a full re-shape of the edited raw row �
     { excluded: true },                        // exclude toggle
     { entity_id: 'ent-rental' },               // rental tag
     { is_capital: true, useful_life_years: 5 },// multi-field edit
+    { user_type: 'transfer' },                 // retype: LOCKS the category
+    { user_type: 'card_payment' },             // retype: locks it too
+    { user_type: null },                       // reset to automatic: unlocks
+    // NOT covered here, deliberately: { user_category: TRANSFER_CATEGORY }.
+    // Setting that column flips isCardPaymentRow's verdict, so a re-shape
+    // recomputes auto_tx_type/tx_type while the patch cannot — the documented
+    // pre-existing divergence (patchTxShape). Unreachable from the UI: the
+    // mechanism categories never enter the picker.
   ];
   for (const fields of edits) {
     const { counted: pc, ...patched } = patchTxShape(shaped, fields);
@@ -726,6 +735,105 @@ test('toTxShape carries user_type/auto_tx_type/tx_type and patchTxShape recomput
   assert.equal(shaped.tx_type, 'spending');
   const patched = patchTxShape(shaped, { user_type: 'card_payment' });
   assert.equal(patched.tx_type, 'card_payment', 'the effective type follows the edit locally');
+  assert.equal(patched.category, TRANSFER_CATEGORY, 'and the locked category follows it in the SAME patch');
   const reset = patchTxShape(patched, { user_type: null });
   assert.equal(reset.tx_type, shaped.auto_tx_type, 'reset falls back to the derivation');
+  assert.equal(reset.category, shaped.category, 'and hands the row its own category back');
+});
+
+// --- displayCategory: the type-locked category read ---------------------------
+// Mason, 2026-08-17: "Transfer and credit card payment transactions can't have
+// an additional category. Their category is transfer or credit card payment."
+// The stored columns are untouched — this is a READ.
+
+test('displayCategory: a hand-typed transfer presents the transfer bucket, and the stored override SURVIVES', () => {
+  const A = makeAccounts();
+  const raw = makeTx(A.checking, 'dc1', '2026-07-08', 1800.0, 'PAYMENT TO A PERSON', {
+    user_category: 'Pets',
+    user_type: 'transfer',
+  });
+  assert.equal(displayCategory(raw), TRANSFER_CATEGORY);
+  assert.equal(effectiveCategory(raw), 'Pets', 'the RAW merge is unchanged — nothing was cleared');
+  const shaped = toTxShape(raw);
+  assert.equal(shaped.category, TRANSFER_CATEGORY, 'the shape presents the lock');
+  assert.equal(shaped.user_category, 'Pets', 'reversibility: the override rides along');
+  // Resetting the type gives the category straight back — the reason the write
+  // path never clears the column.
+  assert.equal(displayCategory({ ...raw, user_type: null }), 'Pets');
+});
+
+test('displayCategory: why clearing user_category could never have been the fix', () => {
+  // A TAUGHT merchant the user then types as a transfer: the category lives in
+  // mapped_category, which no override write touches. Clearing user_category
+  // (there is none) would leave 'Groceries' on a transfer row — only a
+  // read-time rule keyed on the effective TYPE closes it.
+  const A = makeAccounts();
+  const raw = makeTx(A.checking, 'dc1b', '2026-07-09', 120.0, 'SAFEWAY 1467 EVERETT WA', { user_type: 'transfer' });
+  assert.equal(raw.user_category, null, 'fixture sanity: no override to clear');
+  assert.equal(raw.mapped_category, 'Groceries', 'fixture sanity: the classifier taught it');
+  assert.equal(displayCategory(raw), TRANSFER_CATEGORY);
+});
+
+test('displayCategory: a structurally PAIRED leg locks on both sides', () => {
+  const A = makeAccounts();
+  const rows = washed([
+    makeTx(A.checking, 'dc2', '2026-07-10', 300.0, 'ONLINE BANKING TRANSFER TO SAVINGS'),
+    makeTx(A.savings, 'dc3', '2026-07-11', -300.0, 'ONLINE BANKING TRANSFER FROM CHECKING'),
+  ]);
+  for (const r of rows) {
+    assert.ok(r._internal, 'fixture sanity: the pair washed');
+    assert.equal(displayCategory(r), TRANSFER_CATEGORY);
+  }
+});
+
+test('displayCategory: an untaught paired leg leaves the Uncategorized backlog (the Review badge / teach queue)', () => {
+  // Structural pairing has no wording gate, so a paired leg whose descriptor
+  // was never taught is tx_type 'transfer' + mapped_category Uncategorized.
+  // Those rows used to inflate the retraining backlog while the sheet offered
+  // nothing to teach.
+  const A = makeAccounts();
+  const rows = washed([
+    makeTx(A.checking, 'dc4', '2026-07-12', 220.0, 'SOMETHING UNTAUGHT'),
+    makeTx(A.savings, 'dc5', '2026-07-13', -220.0, 'ALSO UNTAUGHT'),
+  ]);
+  for (const r of rows) {
+    assert.equal(effectiveCategory(r), UNCATEGORIZED, 'fixture sanity: untaught');
+    assert.notEqual(toTxShape(r).category, UNCATEGORIZED, 'but the shape no longer reads as untaught');
+    assert.equal(toTxShape(r).category, TRANSFER_CATEGORY);
+  }
+});
+
+test('displayCategory: card payments lock; REFUNDS and loan rows keep their own category', () => {
+  const A = makeAccounts();
+  // An unpaired card-payment-worded row — locked by the veto, no pairing needed.
+  const pay = makeTx(A.checking, 'dc6', '2026-07-14', 510.19, 'External Withdrawal - BANK OF AMERICA - PAYMENT');
+  assert.equal(displayCategory(pay), TRANSFER_CATEGORY);
+
+  // A credit-card refund derives 'spending' (it NETS against its category since
+  // 2026-08-17), so locking it would erase the category it nets into.
+  const refund = makeTx(A.card1, 'dc7', '2026-07-15', -200.0, 'REI CO-OP SEATTLE', { user_category: 'Shopping and gear' });
+  assert.equal(displayCategory(refund), 'Shopping and gear');
+
+  // Loan rows fall through: they never count either way and keep their picker.
+  const loan = makeTx(A.mortgage, 'dc8', '2026-07-16', 800.0, 'ESCROW DISBURSEMENT COUNTY TAX', { user_category: 'Housing' });
+  assert.equal(displayCategory(loan), 'Housing');
+
+  // An explicit 'spending' verdict UNLOCKS a payment-worded row — the override
+  // beats the veto in the model, so the row's own stored category comes back
+  // (here the transfer bucket the write-time guard stamped, which the sheet
+  // then offers a picker over).
+  assert.equal(displayCategory({ ...pay, user_type: 'spending' }), effectiveCategory(pay));
+  // A garbage stored value falls back to the derivation, like effectiveTxType.
+  assert.equal(displayCategory({ ...pay, user_type: 'nonsense' }), TRANSFER_CATEGORY);
+});
+
+test('displayCategory changes NOTHING the spending model counts: a locked row is never counted', () => {
+  // The Categories bars / envelopes fold through isSpend, and every locked row
+  // fails it — which is what makes this a display rule with no total to move.
+  const rows = washed(standardLedger().visibleRows());
+  const before = sumSpending(rows);
+  for (const t of rows) {
+    if (displayCategory(t) !== effectiveCategory(t)) assert.equal(isSpend(t), false, `${t.id} locked but counted`);
+  }
+  near(sumSpending(rows), before, 'no total moved');
 });
