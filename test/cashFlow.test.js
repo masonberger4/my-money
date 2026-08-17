@@ -201,14 +201,41 @@ test('unified model: cashSpending counts ALL unpaired non-loan outflows (incl. s
     { accounts: { type: 'loan', subtype: null }, amount: 500 }, // loan ledger row → never spending
     { accounts: CHK, amount: -1000 }, // checking inflow → income
     { accounts: SAV, amount: -250 }, // savings inflow → income
-    { accounts: CC, amount: -25 }, // credit refund → NOT income
+    { accounts: CC, amount: -25, description: 'REI CO-OP' }, // credit REFUND → nets against spending (2026-08-17), never income
     { accounts: CHK, amount: 75, _internal: true }, // washed transfer legs skip both
     { accounts: SAV, amount: -75, _internal: true },
     { accounts: CHK, amount: 40, excluded: true }, // user-excluded skips both
     { accounts: CHK, amount: -40, excluded: true },
   ];
-  assert.equal(cashSpending(rows), 290);
+  // 290 of money out, MINUS the 25 refund — refund netting (Mason,
+  // 2026-08-17): money back on a card subtracts from the category it carries.
+  // Income is untouched at 1250: a credit negative was never income and still
+  // isn't, so exactly one number moved.
+  assert.equal(cashSpending(rows), 265);
   assert.equal(cashIncome(rows), 1250);
+});
+
+test('a card PAYMENT received never nets, paired or not — the two independent guards', () => {
+  // The disaster case refund netting had to be built around: money in on a
+  // card is either a refund (nets) or a payment the household sent (must not).
+  // A four-figure payment subtracting itself from a category would be silent
+  // and would also manufacture that much phantom envelope Available.
+  const paired = [out(2148.33, 0), { ...inn(2148.33, 1, 'acc-card1', CC), description: 'PAYMENT THANK YOU' }];
+  markInternalTransfers(paired);
+  assert.ok(paired[1]._internal, 'guard 1: the linked payment washes structurally');
+  assert.equal(cashSpending(paired), 0);
+
+  // Guard 2 — the card side stands alone when the paying account is unlinked,
+  // which is exactly where the pairing cannot help. These are Mason's real
+  // statement wordings, and NONE of them carries an issuer name, which is why
+  // isCardPaymentDescriptor misses every one (see isCardPaymentReceived).
+  for (const d of ['PAYMENT THANK YOU', 'PAYMENT RECEIVED', 'ELECTRONIC PAYMENT',
+                   'AUTOPAY PAYMENT THANK YOU', 'CASHBACK BONUS REDEMPTION', 'BALANCE TRANSFER']) {
+    const row = { accounts: CC, amount: -2148.33, description: d };
+    assert.equal(cashSpending([row]), 0, `unpaired "${d}" must not net`);
+  }
+  // …while a genuine refund on the same card does net.
+  assert.equal(cashSpending([{ accounts: CC, amount: -35, description: 'RIVER GEAR RETURNS' }]), -35);
 });
 
 // --- the 4-type override (transactions.user_type, 2026-08-15) ----------------
@@ -278,7 +305,7 @@ test('isIncome is exactly what cashIncome sums — same rows, same answer', () =
     { accounts: CHK, amount: -1000 }, // checking inflow → income
     { accounts: SAV, amount: -250 }, // savings inflow → income
     { accounts: { type: 'depository', subtype: null }, amount: -15 }, // lenient subtype
-    { accounts: CC, amount: -25 }, // credit refund → Return, never income
+    { accounts: CC, amount: -25 }, // credit refund → nets against spending, never income
     { accounts: { type: 'loan', subtype: null }, amount: -500 }, // loan row → never income
     { accounts: CHK, amount: 50 }, // money out → not income
     { accounts: CHK, amount: 0 }, // a zero row is neither

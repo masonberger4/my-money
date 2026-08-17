@@ -23,17 +23,32 @@ export const TX_TYPE_LABELS = {
   loan: 'Loan',
 };
 
+// The label a row's type renders under. Identical to TX_TYPE_LABELS except for
+// one case: a money-IN row that counts as spending is a REFUND (2026-08-17).
+// deriveTxType has to call it 'spending' so the rendered type and the totals
+// agree — it subtracts from a category — but printing "Spending" on money
+// coming back reads as a bug. Display-only, exactly like 'loan': the stored
+// vocabulary stays the four TX_TYPES.
+export function txTypeLabel(type, amount) {
+  if (type === 'spending' && amount < 0) return 'Refund';
+  return TX_TYPE_LABELS[type] || type;
+}
+
 // Which overrides the selector may WRITE for a row — the UI mirror of the
-// model's sign-guard precedence (isSpend keeps amount <= 0 -> false ahead of
-// the override read, cashIncome the inverse), so the menu can never offer a
-// verdict the totals would silently ignore:
+// model's precedence, so the menu can never offer a verdict the totals would
+// silently ignore:
 //   money-out rows: 'inflow' is inert   -> not offered;
-//   money-in rows:  'spending' is inert -> not offered;
+//   money-in on a CREDIT account: every verdict lands ('spending' means "this
+//     is a refund, net it"; the others keep it out of both totals);
+//   money-in on a DEPOSITORY account: 'spending' is inert -> not offered. The
+//     account gate in isSpend outranks the override there, because honoring it
+//     would subtract a paycheck from household spending;
 //   loan rows: the model ignores user_type entirely -> nothing offered.
 // The sheet renders the missing option disabled with a one-line reason.
 export function allowedUserTypes(t) {
   if (isLoanAccount(t)) return [];
-  return t.amount > 0
-    ? ['spending', 'transfer', 'card_payment']
+  if (t.amount > 0) return ['spending', 'transfer', 'card_payment'];
+  return t.accounts?.type === 'credit'
+    ? ['spending', 'inflow', 'transfer', 'card_payment']
     : ['inflow', 'transfer', 'card_payment'];
 }

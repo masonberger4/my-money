@@ -63,7 +63,7 @@ export function missingCategories(list, presentNames) {
 
 // The "+ Add category" guard. Case-insensitive against the user's own names AND
 // against the mechanism internals — a user-made "Return" would collide with the
-// synthesised one on every credit-card refund.
+// mechanism one, which stored rows may still carry.
 export function isDuplicateCategoryName(name, existing = []) {
   const n = String(name || '').trim().toLowerCase();
   if (!n) return false;

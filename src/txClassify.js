@@ -85,6 +85,40 @@ export function isCardPaymentDescriptor(descriptor) {
   return TRANSFER_RE.test(d) && CARD_PAYMENT_RE.test(d);
 }
 
+// Money IN on a credit account that is NOT a merchant refund — the guard that
+// had to exist before refunds could net (Mason, 2026-08-17).
+//
+// Why the issuer requirement above is dropped here, and why that is safe: on
+// the PAYER's statement, "payment" alone is ambiguous (a utility bill payment
+// is real spending), so an issuer name has to co-occur. On the CARD's own
+// statement the ambiguity runs the other way — an issuer never prints its own
+// name, so the real wordings are bare: "PAYMENT THANK YOU", "PAYMENT RECEIVED",
+// "ELECTRONIC PAYMENT" (all three transcribed from Mason's own Capital One /
+// Discover statements — see test/pdfImport.test.js). Every one of them fails
+// isCardPaymentDescriptor. Meanwhile a genuine refund carries the MERCHANT's
+// name ("REI CO-OP", "AMAZON.COM"), never payment-or-reward wording. The sign
+// and the account type have already done the disambiguating before this runs,
+// which is what makes the looser test correct rather than reckless — CALL IT
+// ONLY FOR CREDIT-ACCOUNT NEGATIVES.
+//
+// Failure direction is deliberate: an unrecognised wording FAILS TO NET, which
+// is exactly today's behaviour, while a missed veto would subtract a
+// four-figure card payment from a category. Conservative side up.
+const CARD_CREDIT_NON_REFUND_RE = new RegExp(
+  [
+    // Payments received from the cardholder.
+    'PAYMENT', 'PYMT', 'PYMNT', 'PMT', 'AUTOPAY', 'AUTO ?PAY', 'DIRECTPAY', 'BILL ?PAY',
+    // Rewards and issuer-side credits — money in, but not a purchase reversal.
+    'CASH ?BACK', 'CASHBACK', 'REWARD', 'REDEMPTION', 'REDEEM', 'STATEMENT CREDIT',
+    'BALANCE TRANSFER', 'INTEREST REFUND', 'FEE REFUND', 'FEE REVERSAL', 'CREDIT ADJUSTMENT',
+  ].join('|'),
+  'i'
+);
+
+export function isCardPaymentReceived(descriptor) {
+  return CARD_CREDIT_NON_REFUND_RE.test(String(descriptor ?? ''));
+}
+
 // ---------------------------------------------------------------------------
 // Learned merchant rules (the `category_rules` table).
 //

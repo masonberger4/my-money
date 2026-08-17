@@ -2,7 +2,6 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createRangeMemo } from '../src/monthMemo.js';
 import { markInternalTransfers } from '../src/cashFlow.js';
-import { applyAccountRules } from '../src/categoryMap.js';
 
 // A tiny fake fetch layer that counts calls and serves date-filtered rows,
 // like the real PostgREST range query would.
@@ -92,18 +91,15 @@ test('REGRESSION: cash-flow transfer marks never leak into another caller\'s cop
 
   // Simulate getCashFlow's pipeline on its own copy.
   const cfRows = await memo.getCopy('2026-06-01', '2026-08-31');
-  for (const t of cfRows) {
-    t.mapped_category = applyAccountRules(t.mapped_category, t.amount, t.accounts?.type);
-  }
   markInternalTransfers(cfRows);
   assert.ok(cfRows.some(t => t._internal), 'sanity: the transfer pair was marked');
-  const cfReturn = cfRows.find(t => t.id === 4);
-  assert.equal(cfReturn.mapped_category, 'Return', 'sanity: account rules applied');
-
-  // A purchase-model caller over the same range gets un-marked, un-rewritten rows.
+  // A purchase-model caller over the same range gets un-marked rows. (The
+  // category half of this regression retired with applyAccountRules on
+  // 2026-08-17 — nothing rewrites mapped_category on the way out any more, so
+  // the only per-row mutation the memo has to isolate is the pairing mark.)
   const spRows = await memo.getCopy('2026-06-01', '2026-08-31');
   assert.ok(spRows.every(t => !('_internal' in t)), 'no _internal on a fresh copy');
-  assert.equal(spRows.find(t => t.id === 4).mapped_category, 'Groceries', 'no mapped_category rewrite either');
+  assert.equal(spRows.find(t => t.id === 4).mapped_category, 'Groceries', 'categories arrive as stored');
 });
 
 // REJECTION EVICTION — a failed shared fetch must not poison the memo until

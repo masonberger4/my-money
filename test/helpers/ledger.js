@@ -8,7 +8,7 @@
 //   • rows carry the post-join shape (t.accounts = { hidden, type, subtype });
 //   • mapped_category is derived the way the write path does it — through
 //     classifyDescription (with accountType), then the read layer's
-//     applyAccountRules (credit negatives → 'Return');
+//     the read layer (which no longer rewrites any category — see makeTx);
 //     Since the built-in taxonomy and the keyword classifier were deleted
 //     (2026-08-04) the ONLY way a row gets a category is a LEARNED RULE, so the
 //     fixture ships LEDGER_RULES below — the household having taught these
@@ -22,7 +22,6 @@
 //     the fixture models the query contract; hidden exclusion is never
 //     asserted through isSpend.
 import { classifyDescription } from '../../src/txClassify.js';
-import { applyAccountRules } from '../../src/categoryMap.js';
 
 // The household's taught merchants (`category_rules`), keyed by merchantKey —
 // digits dropped, every other token kept. Transfer and card-payment descriptors
@@ -88,9 +87,9 @@ export function makeTx(account, id, date, amount, description, overrides = {}) {
     },
     ...fields,
   };
-  // Read layer: getTransactionsBetween applies the account rules on the way
-  // out (credit negatives → 'Return').
-  t.mapped_category = applyAccountRules(t.mapped_category, t.amount, t.accounts?.type);
+  // Read layer: nothing rewrites the category on the way out any more. The
+  // "Return" synthesis was deleted 2026-08-17 — a credit negative keeps the
+  // classifier's category and nets against it.
   return t;
 }
 
@@ -116,7 +115,9 @@ export function standardLedger() {
     // Credit card 1
     makeTx(A.card1, 'c1a', '2026-07-05', 220.0, 'CAPITAL ONE TRAVEL PORTLAND'), // purchase, NOT a card payment
     makeTx(A.card1, 'c1b', '2026-07-16', -400.0, 'CAPITAL ONE MOBILE PYMT AUTOPAY'), // payment received
-    makeTx(A.card1, 'c1c', '2026-07-19', -35.0, 'RIVER GEAR RETURNS'), // refund → Return
+    // Refund: since 2026-08-17 it NETS against whatever category it carries.
+    // Untaught here, so it lands in Uncategorized and takes that bucket to −2.
+    makeTx(A.card1, 'c1c', '2026-07-19', -35.0, 'RIVER GEAR RETURNS'),
     // Credit card 2
     makeTx(A.card2, 'c2a', '2026-07-09', 85.0, 'DISCOVER TIRE AND AUTO CENTER'), // purchase, NOT a card payment
     makeTx(A.card2, 'c2b', '2026-07-11', 6.5, 'ACME COFFEE 0042'),
@@ -140,7 +141,10 @@ export function standardLedger() {
 // Hand-computed constants for standardLedger()'s visible July rows.
 export const EXPECTED = {
   month: '2026-07',
-  spendTotal: 764.0,
+  // 2026-08-17: refund netting. c1c (−35, a credit-card refund) now COUNTS,
+  // negatively, so the total dropped 764.00 → 729.00. Nothing else moved —
+  // exactly one row changed verdict, and no money-OUT row was affected.
+  spendTotal: 729.0,
   groups: {
     'Travel and vacation': { amount: 220.0, count: 1 },
     Utilities: { amount: 120.0, count: 1 },
@@ -149,7 +153,10 @@ export const EXPECTED = {
     'Home maintenance and improvement': { amount: 75.0, count: 1 },
     'Dining out': { amount: 60.0, count: 1 },
     'Climbing Gym': { amount: 55.0, count: 1 },
-    Uncategorized: { amount: 33.0, count: 1 },
+    // chk9 (+33) and c1c (−35, the refund) — an untaught refund lands here
+    // until it is filed, which is the whole point of the change: the teach
+    // queue is where the user says which category it belongs to.
+    Uncategorized: { amount: -2.0, count: 2 },
     'Coffee and snacks': { amount: 6.5, count: 1 },
   },
   // Linked-boundary model (2026-08-03): after markInternalTransfers washes
@@ -157,7 +164,10 @@ export const EXPECTED = {
   // income = chk3 2500 + sav2 1.25 (unpaired depository inflows), and
   // cash spending IS sumSpending — one model. chk4 is excluded twice over
   // (washed AND card-payment veto); chk6 excluded; loan rows never count.
-  cash: { income: 2501.25, spending: 764.0 },
+  // c1b (−400, a card payment RECEIVED) is washed by the pairing AND held back
+  // by the card-side veto (isCardPaymentReceived) — the two independent guards
+  // that keep refund netting from ever subtracting a payment.
+  cash: { income: 2501.25, spending: 729.0 },
 };
 
 // Seeded LCG for the property tests (same pattern as test/cashFlow.test.js).

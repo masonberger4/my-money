@@ -23,7 +23,7 @@ import { displayBalance, isDebtAccount as isDebtType, balanceAsOf, BALANCE_STALE
 import { unhideConfirmMessage } from "../unhideConfirm.js";
 import { NAV_ITEMS, REFLECT_TABS, navForTab, pageTitle } from "../nav.js";
 import { groupByDay, longDate } from "../txList.js";
-import { TX_TYPES, TX_TYPE_LABELS, allowedUserTypes } from "../txType.js";
+import { TX_TYPES, TX_TYPE_LABELS, txTypeLabel, allowedUserTypes } from "../txType.js";
 import { breakdownSegments, incomeVsSpendingInsight, incomeSections } from "../reflect.js";
 import { createSheetHistory } from "../sheetHistory.js";
 import { runSync } from "../sync.js";
@@ -3190,7 +3190,13 @@ export default function Dashboard({ refreshTick = 0 }) {
   const tileAvail=tileAcct&&isSimpleFinAccount(tileAcct)&&!tileAcct.hidden&&typeof tileAcct.available==="number"
     ?tileAcct.available:null;
   // Donut slices are non-text marks on the card -> 3:1.
-  const donutData=cats.slice(0,7).map(c=>({label:getName(c.label),value:c.amount,color:markOn(getColor(c.label),surf.card)}));
+  // POSITIVE slices only. A pie has no way to draw a negative wedge — a
+  // negative sweep runs backwards and overlaps its neighbours — so a refunded
+  // category is simply absent from the ring rather than corrupting it. The
+  // Categories tab beside it still lists the category with its real negative
+  // total, which is where that money is accounted for.
+  const donutData=cats.filter(c=>c.amount>0).slice(0,7)
+    .map(c=>({label:getName(c.label),value:c.amount,color:markOn(getColor(c.label),surf.card)}));
 
   // The viewed month's transactions indexed by effective category — what the
   // drill-in sheet lists. Built from the rows already on hand (getTransactions
@@ -3216,7 +3222,8 @@ export default function Dashboard({ refreshTick = 0 }) {
   //  1. The three MECHANISM categories — Uncategorized, "Transfers and card
   //     payments", "Return" — are excluded from this list everywhere. They are
   //     internals the spending model reads (the card-payment veto, the
-  //     synthesised credit-card refund, the not-taught-yet state); the user
+  //     credit-card refund label (no longer synthesised), the not-taught-yet
+  //     state); the user
   //     cannot create, rename, retire or budget them (`isBudgetableCategory`),
   //     so they never appear in a picker. They DO still render where they
   //     describe real money: Uncategorized on the Categories tab (the size of
@@ -3367,7 +3374,12 @@ export default function Dashboard({ refreshTick = 0 }) {
     // status, not palette, but it needs the same treatment to stay
     // visible on a dark track — the stored hexes are untouched.
     const barColor=markOn(hasB?(ratio>=1?"#D85A30":ratio>=0.8?"#FAC775":getColor(c.label)):getColor(c.label),surf.track);
-    const barW=hasB?Math.min(ratio,1)*100:(c.amount/maxCatBar)*100;
+    // Clamped at 0: a category can be NEGATIVE now (refund netting), and a
+    // negative width is an INVALID CSS declaration — the browser drops it and
+    // .bar-fill falls back to width:auto, i.e. a FULL bar on a refunded
+    // category. An empty bar beside a green negative amount is the honest
+    // reading; the same clamp is applied at every bar site below.
+    const barW=Math.max(0,hasB?Math.min(ratio,1)*100:(c.amount/maxCatBar)*100);
     return (
     <div key={c.label} style={{marginBottom:14,animationDelay:i*.03+"s",
       ...(indent?{marginLeft:14,paddingLeft:10,borderLeft:"1px solid var(--border)"}:null)}}>
@@ -4060,6 +4072,17 @@ export default function Dashboard({ refreshTick = 0 }) {
                   <span style={{fontSize:13,fontFamily:"'DM Mono',monospace",color:"var(--muted)",flexShrink:0}}>{fmtX(s.amount)}</span>
                 </div>
               ))}
+              {/* The headline above is the month's NET spending; the bar and
+                  list carry the positive categories only, because a stacked bar
+                  cannot draw a negative slice. When refunds netted anything out
+                  this month, SAY so — otherwise the list visibly sums to more
+                  than the headline and nothing on the card explains the gap. */}
+              {bd.returned>0&&(
+                <div style={{display:"flex",justifyContent:"space-between",fontSize:12,color:"var(--muted)",marginTop:4}}>
+                  <span>Less returns</span>
+                  <span style={{fontFamily:"'DM Mono',monospace"}}>−{fmtX(bd.returned)}</span>
+                </div>
+              )}
               {!loading&&bd.segments.length===0&&(
                 <div style={{fontSize:12,color:"var(--muted)"}}>No spending this month yet.</div>
               )}
@@ -4250,7 +4273,8 @@ export default function Dashboard({ refreshTick = 0 }) {
                 // either number opens all of those rows together, so the list
                 // behind the number sums to the number that was tapped.
                 const open=openDrillGroup(g.name,kids);
-                const barW=maxCatBar>0?(roll.amount/maxCatBar)*100:0;
+                // Clamped at 0 — a rollup can be negative (refund netting).
+                const barW=maxCatBar>0?Math.max(0,(roll.amount/maxCatBar)*100):0;
                 return (
                 <div key={g.name} style={{marginBottom:14,animationDelay:gi*.03+"s"}}>
                   <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:5}}>
@@ -4273,7 +4297,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                   <div style={{display:"flex",alignItems:"center",gap:8}}>
                     <div className="bar-bg"><div className="bar-fill" style={{width:barW+"%",background:markOn(getColor(g.name),surf.track)}}/></div>
                     <span style={{fontSize:11,color:"var(--muted)",width:38,textAlign:"right",flexShrink:0}}>
-                      {roll.transaction_count?`${((roll.amount/(totalSpent||1))*100).toFixed(0)}%`:"—"}
+                      {roll.transaction_count?`${((roll.amount/(Math.abs(totalSpent)||1))*100).toFixed(0)}%`:"—"}
                     </span>
                   </div>
                   {/* The parent's OWN rows — money tagged straight to
@@ -5945,8 +5969,11 @@ export default function Dashboard({ refreshTick = 0 }) {
                 Tap a bar to see what it is made of.
               </div>
               {loading||trendsLoading?<Sk h={100}/>:cfPs.map((p,i)=>{
-                const sw=(p.spending.amount/maxFlow)*100;
-                const iw=(p.income.amount/maxFlow)*100;
+                // Clamped at 0: a month's spending can be NEGATIVE now (refunds
+                // outweighing purchases), and a negative width renders as a FULL
+                // bar rather than an empty one.
+                const sw=Math.max(0,(p.spending.amount/maxFlow)*100);
+                const iw=Math.max(0,(p.income.amount/maxFlow)*100);
                 const pStart=new Date(p.start);
                 // Each bar is now a real tap target rather than a 5px hairline:
                 // BAR_H + 11px of padding top and bottom makes every row a
@@ -6666,7 +6693,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                     style={{marginTop:10,display:"inline-flex",alignItems:"center",gap:6,background:"var(--bg)",
                       border:"1px solid var(--border)",borderRadius:18,padding:"7px 14px",fontSize:13,fontWeight:600,
                       color:"var(--text)",cursor:"pointer",fontFamily:"inherit"}}>
-                    {TX_TYPE_LABELS[selTx.tx_type]||selTx.tx_type}
+                    {txTypeLabel(selTx.tx_type,selTx.amount)}
                     <span aria-hidden="true" style={{fontSize:10,color:"var(--muted)"}}>▾</span>
                   </button>
                 )}
@@ -6695,7 +6722,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                           padding:"11px 16px",fontFamily:"inherit",fontSize:14,fontWeight:active?600:500,textAlign:"left",
                           color:"var(--text)",cursor:allowed?"pointer":"default",opacity:allowed?1:.45}}>
                         <span aria-hidden="true" style={{width:16,flexShrink:0,color:"var(--accent)"}}>{active?"✓":""}</span>
-                        {TX_TYPE_LABELS[ty]}
+                        {txTypeLabel(ty,selTx.amount)}
                       </button>
                       {!allowed&&(
                         <div style={{fontSize:10,color:"var(--muted)",padding:"0 16px 8px 42px",marginTop:-6}}>
@@ -6710,7 +6737,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                     style={{display:"block",width:"100%",background:"none",border:"none",borderTop:"1px solid var(--border)",
                       padding:"10px 16px",fontFamily:"inherit",fontSize:11,color:"var(--muted)",textDecoration:"underline",
                       cursor:"pointer",textAlign:"left"}}>
-                    Reset to automatic ({TX_TYPE_LABELS[selTx.auto_tx_type]||selTx.auto_tx_type})
+                    Reset to automatic ({txTypeLabel(selTx.auto_tx_type,selTx.amount)})
                   </button>
                 )}
               </div>
@@ -7123,7 +7150,7 @@ export default function Dashboard({ refreshTick = 0 }) {
       {addingCat&&(()=>{
         // One guard, shared with the tests: case-insensitive against the user's
         // own names AND the three mechanism internals (a hand-made "Return"
-        // would collide with the one applyAccountRules synthesises).
+        // would collide with the mechanism label stored rows may carry).
         const dup=isDuplicateCategoryName(newName,customCatNames);
         const canAdd=!!newName.trim()&&!dup;
         // A brand-new category has no children, so every top-level category is

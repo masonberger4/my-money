@@ -1,5 +1,4 @@
 import { getServiceClient } from './supabase.js';
-import { applyAccountRules } from '../../src/categoryMap.js';
 import { displayBalance } from '../../src/accountBalance.js';
 import { detectRecurring } from '../../src/recurring.js';
 // THE unified spending model (Mason, 2026-08-03). This module is the assistant's
@@ -232,9 +231,7 @@ export function formatSpendingContext(accounts, txs, extras = {}) {
       // markInternalTransfers' loan exclusion). Rows whose account is missing
       // read as non-loan/non-credit, the same convention isLoanAccount uses.
       accounts: { type: acctById.get(t.account_id)?.type },
-      mapped_category:
-        t.user_category ||
-        applyAccountRules(t.mapped_category, t.amount, acctById.get(t.account_id)?.type),
+      mapped_category: t.user_category || t.mapped_category,
     }));
 
   // Bucket by month BEFORE pairing, then pair WITHIN each month — because the
@@ -304,7 +301,11 @@ export function formatSpendingContext(accounts, txs, extras = {}) {
   // transfer-worded row is real spending and only the card-payment verdict
   // vetoes. The old wording told the model to drop the transfer category
   // wholesale, which is now wrong in both directions.
-  lines.push('Transaction amounts (unlike the balances above): positive is money out. These totals already apply the app\'s spending rule, the same one the dashboard uses: money in never counts (that includes "Return"), card payments never count, and a transfer counts UNLESS it was matched to an equal-amount opposite leg on another of the household\'s own visible accounts. Quote these totals rather than re-adding the transaction rows below.');
+  // 2026-08-17: the sentence also has to stop saying "money in never counts
+  // (that includes Return)". Refunds net now, so the model would otherwise be
+  // told the opposite of what the numbers beside it do — and it would have no
+  // way to explain a negative category line.
+  lines.push('Transaction amounts (unlike the balances above): positive is money out. These totals already apply the app\'s spending rule, the same one the dashboard uses: a REFUND on a credit card is negative and SUBTRACTS from its category (so a returned item nets to zero); money into a checking or savings account is income and never counts as spending; card payments never count; and a transfer counts UNLESS it was matched to an equal-amount opposite leg on another of the household\'s own visible accounts. A category total can therefore be negative when refunds outweighed purchases. Quote these totals rather than re-adding the transaction rows below.');
   if (partialMonth) {
     lines.push(
       `The window starts ${since}, so ${partialMonth} is INCOMPLETE: its lines below cover ${since} to the end of that month only, and its earlier days are missing. Say so if you quote them — never present ${partialMonth} as a full month's total.`

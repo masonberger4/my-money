@@ -65,10 +65,26 @@ test('hidden accounts appear nowhere', () => {
   assert.ok(!text.includes('9999'));
 });
 
-test('credit-card negatives read as Return and never enter the spending sums', () => {
+test('a credit-card refund nets in its own category, and the context SAYS it does', () => {
+  // REVERSED 2026-08-17: this used to assert the refund listed as "Return" and
+  // never reached the spending sums. It nets now, so two things have to hold
+  // together — the arithmetic AND the sentence that tells the model how to
+  // read it. A context that still said "money in never counts" beside a
+  // negative category line would make the Ask tab contradict the screen.
   const text = formatSpendingContext(clone(ACCOUNTS), clone(TXS));
-  assert.ok(text.includes('| Return |'), 'the refund lists as Return');
-  assert.ok(!text.includes('2026-07 Return'), 'no Return line in monthly spending (money in)');
+  assert.ok(!text.includes('| Return |'), 'nothing synthesises a Return category any more');
+  assert.ok(!/money in never counts/.test(text), 'the retired rule is not stated');
+  assert.ok(/SUBTRACTS from its category/.test(text), 'the netting rule IS stated');
+  // The −35 refund is the fixture's only Uncategorized row, so its bucket is
+  // the refund itself — NEGATIVE, and present rather than dropped. That is the
+  // whole change in one line: a month can now report a negative category, and
+  // the assistant has to be able to see and explain it.
+  assert.ok(text.includes('- 2026-07 Uncategorized: $-35.00'),
+    `the refund nets into its own category:\n${text}`);
+  // …and it still LISTS, unmarked: the "not counted as spending" suffix is for
+  // money-OUT rows the rule excludes, and this row is counted.
+  const row = text.split('\n').find(l => l.includes('RIVER GEAR REFUND'));
+  assert.ok(row && !row.includes('not counted as spending'), row);
 });
 
 // --- Recurring + envelope sections -----------------------------------------

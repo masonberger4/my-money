@@ -30,9 +30,23 @@ test('no All Others bucket when the list fits; zero/negative groups dropped', ()
 });
 
 test('empty/garbage input degrades to an empty bar, never throws', () => {
-  assert.deepEqual(breakdownSegments([]), { total: 0, segments: [] });
-  assert.deepEqual(breakdownSegments(null), { total: 0, segments: [] });
-  assert.deepEqual(breakdownSegments([g('Zero', 0)]), { total: 0, segments: [] });
+  assert.deepEqual(breakdownSegments([]), { total: 0, segments: [], returned: 0 });
+  assert.deepEqual(breakdownSegments(null), { total: 0, segments: [], returned: 0 });
+  assert.deepEqual(breakdownSegments([g('Zero', 0)]), { total: 0, segments: [], returned: 0 });
+});
+
+test('a refunded category leaves the bar but is REPORTED, so the card can show the subtraction', () => {
+  // Refund netting (2026-08-17): a stacked bar cannot draw a negative slice,
+  // so a net-negative category is not a segment — but the card's headline is
+  // the month's NET spending, and silently dropping the category would leave
+  // the bar summing to more than the headline with nothing explaining it.
+  const out = breakdownSegments([g('Groceries', 300), g('Shopping', -50), g('Gas', 100)], { max: 6 });
+  assert.deepEqual(out.segments.map(s => s.label), ['Groceries', 'Gas'], 'negatives are not slices');
+  assert.equal(out.total, 400, 'the bar carries the gross');
+  assert.equal(out.returned, 50, '…and the refunds are reported beside it');
+  // net = total − returned, which is what spendingGroups summed to.
+  assert.equal(out.total - out.returned, 350);
+  assert.ok(Math.abs(out.segments.reduce((s, x) => s + x.share, 0) - 1) < 1e-9, 'shares still sum to 1');
 });
 
 test('insight bands: less / about / more, ±10%', () => {

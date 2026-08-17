@@ -888,7 +888,7 @@ export function coverageShortfall(wantedStartMs, nowMs) {
 
 // Account-type inference. SimpleFIN sends no type/subtype, but the spending,
 // income and net-worth models all key off them at READ time (`isSpend` /
-// `isCardPaymentRow` in src/spending.js, `applyAccountRules` in
+// `isCardPaymentRow` in src/spending.js, the mechanism labels in
 // src/categoryMap.js, `displayBalance` in src/accountBalance.js), so a wrong
 // guess quietly distorts three different numbers. The name is all
 // there is to go on, so the guess is INSERT-ONLY: api/sync.js writes it when it

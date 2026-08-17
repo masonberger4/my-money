@@ -1,5 +1,4 @@
 import { supabase } from './supabaseClient.js';
-import { applyAccountRules } from './categoryMap.js';
 import { merchantKey, classifyDescription } from './txClassify.js';
 import { applyRuleToHistory, isRangeExhaustedError } from './ruleHistory.js';
 import { markInternalTransfers, isIncome, cashIncome, cashSpending } from './cashFlow.js';
@@ -164,9 +163,9 @@ const ACCOUNT_COLUMNS =
   'id, institution_id, plaid_account_id, name, official_name, nickname, color, mask, type, subtype, current_balance, available_balance, last_balance_at, hidden, created_at, institutions(name, display_name)';
 
 // The RAW range fetch: pagination + the entity-column fallback, NO
-// per-model pipeline (applyAccountRules / markInternalTransfers) — those
-// mutate rows in place, so they run in getTransactionsBetween on each
-// caller's own copies, never on rows the memo below might share.
+// per-model pipeline (markInternalTransfers) — it mutates rows in place, so it
+// runs in getTransactionsBetween on each caller's own copies, never on rows the
+// memo below might share.
 async function fetchRawBetween(start, end, columns) {
   // RLS scopes every query to the signed-in household automatically.
   // The inner join on accounts drops transactions belonging to hidden
@@ -255,10 +254,11 @@ async function getTransactionsBetween(start, end, { columns } = {}) {
   const rows = columns
     ? await fetchRawBetween(start, end, columns)
     : await rangeMemo.getCopy(start, end);
-  // Credit-card refunds become "Return" — not income, not spending.
-  for (const t of rows) {
-    t.mapped_category = applyAccountRules(t.mapped_category, t.amount, t.accounts?.type);
-  }
+  // NOTE (2026-08-17): the read-time "Return" synthesis that used to sit here
+  // is GONE. A credit-card negative now keeps whatever category the classifier
+  // gave it and SUBTRACTS from that category — see isSpend. Nothing rewrites a
+  // category on the way out any more; the only per-model pipeline step left is
+  // the pairing below.
   markInternalTransfers(rows);
   return rows;
 }
@@ -586,9 +586,6 @@ export async function getAccountTransactions(accountId, { limit = 500 } = {}) {
     ({ data, error } = await attempt(transactionsHaveEntity));
   }
   if (error) throw error;
-  for (const t of data) {
-    t.mapped_category = applyAccountRules(t.mapped_category, t.amount, t.accounts?.type);
-  }
   const hasMore = data.length > limit;
   return {
     transactions: data.slice(0, limit).map(toTxShape),
@@ -1002,7 +999,7 @@ export async function getEnvelopes({ year, month }) {
 // Last N months of transactions (oldest full month through the current
 // partial one) for client-side recurring detection (src/recurring.js).
 // Goes through getTransactionsBetween so hidden-account filtering and
-// account rules ("Return") apply. Detection itself stays out of the adapter.
+// Detection itself stays out of the adapter.
 // The window is CANDIDATE_WINDOW_MONTHS (~40 — was 6, then 25 on the faulty
 // "two full year-gaps" arithmetic, which kept an annual item detectable only
 // in its renewal month: the ≥3-charge floor needs the LAST three renewals in
@@ -1095,9 +1092,6 @@ export async function searchTransactions(query, { limit = 200, offset = 0, filte
     throw error;
   }
 
-  for (const t of data) {
-    t.mapped_category = applyAccountRules(t.mapped_category, t.amount, t.accounts?.type);
-  }
   const hasMore = data.length > limit;
   return { transactions: data.slice(0, limit).map(toTxShape), hasMore };
 }
@@ -1289,7 +1283,7 @@ export async function getRestoreRecord(institutionId) {
 // checking/savings are depository (and drive the Trends checking-vs-savings
 // split); 'credit' is a credit-card account, for a card whose statements are
 // only available as CSV/PDF — its purchases count as spending by category and
-// applyAccountRules turns its negatives into "Return" (never income), exactly
+// its negatives are refunds, which net against spending and are never income —
 // like a SimpleFIN-fed card. 'loan' is a hand-tracked debt (a private loan, a
 // servicer no feed reaches): its balance is typed by hand and its own ledger
 // rows never count as spending (isLoanAccount — the counted leg is the
@@ -1621,8 +1615,6 @@ export async function addManualTransaction(
   }
   if (error) throw error;
 
-  // Credit-card refunds become "Return" — same pipeline step every read runs.
-  data.mapped_category = applyAccountRules(data.mapped_category, data.amount, data.accounts?.type);
   invalidateEnvelopeSpending(); // a new row exists — every memoised read is stale
   return toTxShape(data);
 }
