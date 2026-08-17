@@ -10,8 +10,9 @@
 //
 // 1. It memoizes the RAW fetch only, and hands every caller PER-ROW SHALLOW
 //    COPIES (`getCopy`). The two per-model pipelines MUTATE rows in place —
-//    `applyAccountRules` writes `t.mapped_category` and `markInternalTransfers`
-//    writes `t._internal`, both TOP-LEVEL fields of a flat row object (the
+//    `markInternalTransfers` writes `t._internal`, a TOP-LEVEL field of a flat
+//    row object (the read-time category rewrite that used to mutate rows here
+//    retired with applyAccountRules, 2026-08-17; the
 //    nested `accounts` join object is read-only everywhere) — so a shallow
 //    per-row copy is exactly deep enough. Sharing the same row objects would
 //    let getCashFlow's transfer marks leak into the purchase-based model.

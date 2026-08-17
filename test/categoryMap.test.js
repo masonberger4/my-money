@@ -9,21 +9,25 @@ import {
   UNCATEGORIZED,
   FALLBACK_CATEGORY,
   isBudgetableCategory,
-  applyAccountRules,
 } from '../src/categoryMap.js';
+import * as categoryMap from '../src/categoryMap.js';
 
-test('applyAccountRules: a credit-card negative becomes Return; everything else is untouched', () => {
-  assert.equal(applyAccountRules('Groceries', -35, 'credit'), RETURN_CATEGORY);
-  assert.equal(applyAccountRules(UNCATEGORIZED, -0.01, 'credit'), RETURN_CATEGORY);
-  // Depository negatives are real deposits — never Return.
-  assert.equal(applyAccountRules('Groceries', -35, 'depository'), 'Groceries');
-  // Positives are untouched on every account type.
-  assert.equal(applyAccountRules('Groceries', 35, 'credit'), 'Groceries');
-  assert.equal(applyAccountRules('Groceries', 35, 'depository'), 'Groceries');
-  // Zero is not negative.
-  assert.equal(applyAccountRules('Groceries', 0, 'credit'), 'Groceries');
-  // Unknown account type passes through.
-  assert.equal(applyAccountRules('Groceries', -35, undefined), 'Groceries');
+// REGRESSION (2026-08-17, refund netting): the read-time "Return" synthesis is
+// GONE. applyAccountRules rewrote every credit-account negative's category to
+// the mechanism label 'Return', which is hidden from every picker — so a
+// refund could never be filed against the purchase it reverses, and it counted
+// in neither total. Mason's ruling made refunds categorizable and netting, and
+// this pins that nothing resurrects the rewrite: a second copy would silently
+// re-hide every refund on whichever read path called it.
+test('nothing synthesises Return any more — applyAccountRules is retired', () => {
+  assert.equal(categoryMap.applyAccountRules, undefined,
+    'applyAccountRules must stay deleted (tombstoned in categoryMap.js)');
+  // The LABEL survives on purpose: migration 20260805000001 spared stored
+  // 'Return' values from the category wipe, so any that remain must keep
+  // rendering as a mechanism category — unpickable and non-budgetable —
+  // rather than reappearing as a real one.
+  assert.equal(isBudgetableCategory(RETURN_CATEGORY), false);
+  assert.ok(ERA_CATEGORIES.includes(RETURN_CATEGORY));
 });
 
 test('isBudgetableCategory: the bookkeeping categories are not budgetable; real + custom ones are', () => {

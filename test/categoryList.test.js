@@ -64,8 +64,8 @@ test('duplicate guard is case-insensitive and also blocks the mechanism names', 
   assert.equal(isDuplicateCategoryName('groceries', ['Groceries']), true);
   assert.equal(isDuplicateCategoryName('  Groceries ', ['Groceries']), true);
   assert.equal(isDuplicateCategoryName('Groceries', ['Pets']), false);
-  // A hand-made "Return" would collide with the one applyAccountRules
-  // synthesises for every credit-card refund.
+  // A hand-made "Return" would collide with the retired mechanism label
+  // mechanism label that stored rows may still carry.
   assert.equal(isDuplicateCategoryName('return', []), true);
   assert.equal(isDuplicateCategoryName('UNCATEGORIZED', []), true);
   assert.equal(isDuplicateCategoryName('transfers and card payments', []), true);

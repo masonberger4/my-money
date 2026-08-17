@@ -19,8 +19,10 @@ export const ERA_CATEGORIES = [
   // Read by the linked-boundary spending model's card-payment veto
   // (`isCardPaymentRow`). Drop it and card payments count as spending.
   'Transfers and card payments',
-  // Synthesised by applyAccountRules() for credit-card negatives (refunds,
-  // statement credits, cashback): never spending, never income.
+  // WAS synthesised for credit-card negatives until 2026-08-17. Nothing
+  // writes it now — a refund keeps the classifier's category and nets against
+  // it (see the tombstone below) — but the label stays in this set so any
+  // value still STORED on a row keeps rendering as a mechanism category.
   'Return',
   // The "not taught yet" state, and this design needs it MORE than the old one
   // did — it is now where every transaction starts. It exists because the
@@ -50,9 +52,12 @@ export const UNCATEGORIZED = 'Uncategorized';
 export const FALLBACK_CATEGORY = UNCATEGORIZED;
 
 // Categories that exist for bookkeeping rather than budgeting. A budget on
-// "Uncategorized" would be a budget on the classifier's ignorance, and a
-// budget on "Return" would be an envelope whose Spent can never move —
-// Return rows are credit-card negatives, permanently excluded from spending.
+// "Uncategorized" would be a budget on the classifier's ignorance, and "Return"
+// is a retired mechanism label nothing writes any more — a household must not
+// be able to open an envelope on it. (The old reason given here — "an envelope
+// whose Spent can never move, since Return rows are permanently excluded from
+// spending" — died with refund netting on 2026-08-17: a refund DOES count now.
+// It simply carries a real category instead of this label.)
 export function isBudgetableCategory(category) {
   return (
     category !== UNCATEGORIZED && category !== TRANSFER_CATEGORY && category !== RETURN_CATEGORY
@@ -77,12 +82,21 @@ export function isBudgetableCategory(category) {
 // markInternalTransfers, and `isSpend()` (src/spending.js) is the ONE
 // predicate. The constants they wrapped — TRANSFER_CATEGORY / RETURN_CATEGORY
 // — are unchanged and still load-bearing (the card-payment veto reads the
-// first, applyAccountRules synthesises the second).
+// first; the second is a survival — see the tombstone below).
 
-// A negative amount on a credit-card account is a refund / statement credit /
-// cashback — not income, not spending. Surface it as its own "Return" line.
-// Depository negatives stay as-is (those are real deposits).
-export function applyAccountRules(category, amount, accountType) {
-  if (accountType === 'credit' && amount < 0) return RETURN_CATEGORY;
-  return category;
-}
+// TOMBSTONE — `applyAccountRules(category, amount, accountType)` lived here
+// until 2026-08-17. It rewrote the category of every credit-account negative
+// to RETURN_CATEGORY at READ time, which made refunds unpickable (a mechanism
+// category is hidden from every picker) and put them in neither total, so a
+// returned $200 jacket left $200 of phantom spending on the Categories bar
+// forever. Mason's ruling: a return keeps the classifier's category and
+// SUBTRACTS from it — a taught merchant's refund cancels its own purchase, an
+// untaught one lands in Uncategorized where the teach queue asks. The
+// synthesis had to go for the user to be able to answer that question at all.
+//
+// RETURN_CATEGORY itself STAYS in the mechanism set deliberately: nothing
+// writes it any more, but migration 20260805000001 spared stored 'Return'
+// values from the category wipe, so any that survive must keep rendering as
+// they do today — unpickable and non-budgetable — rather than reappearing as
+// a real, budgetable category. Retiring the constant is a separate decision.
+// See src/spending.js isSpend + isCardPaymentRow for what replaced it.

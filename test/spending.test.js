@@ -102,18 +102,47 @@ test('aggregateEnvelopeSpending equals getSpending’s buckets over the same row
 
 // --- Scenario 5: Return counts in NEITHER spending nor income ----------------
 
-test('Return rows count in neither spending nor income', () => {
+test('a credit-card refund NETS against its own category, and is still never income', () => {
+  // REVERSED 2026-08-17 (Mason). This test used to assert "Return rows count in
+  // neither spending nor income" — the design where a read-time rewrite forced
+  // every credit negative into the unpickable 'Return' bucket, so a returned
+  // item left its purchase counted forever and the user could not file the
+  // refund anywhere. Now the refund keeps the classifier's category and
+  // SUBTRACTS from it.
   const led = standardLedger();
   const visible = led.visibleRows();
-  // Fixture non-vacuity: the credit-card refund actually derived 'Return'
-  // through the read layer's applyAccountRules.
   const refund = visible.find(t => t.id === 'c1c');
-  assert.equal(refund.mapped_category, RETURN_CATEGORY);
+  // Fixture non-vacuity: nothing rewrites the category any more, so an untaught
+  // refund arrives Uncategorized — where the teach queue asks who it belongs to.
+  assert.equal(refund.mapped_category, UNCATEGORIZED);
+  assert.equal(byLabel(spendingGroups(visible))[RETURN_CATEGORY], undefined, 'nothing synthesises a Return bucket');
 
-  assert.equal(byLabel(spendingGroups(visible))[RETURN_CATEGORY], undefined, 'no Return spending bucket');
-  // Not income either: cash income is identical with the Return rows removed.
-  const noReturns = visible.filter(t => effectiveCategory(t) !== RETURN_CATEGORY);
-  assert.equal(cashIncome(visible), cashIncome(noReturns));
+  assert.equal(isSpend(refund), true, 'the refund counts…');
+  assert.ok(refund.amount < 0, '…negatively');
+  // It moves its own bucket by exactly its amount and moves nothing else.
+  const without = visible.filter(t => t.id !== 'c1c');
+  near(sumSpending(visible), sumSpending(without) + refund.amount);
+  near(byLabel(spendingGroups(visible))[UNCATEGORIZED].amount,
+       byLabel(spendingGroups(without))[UNCATEGORIZED].amount + refund.amount);
+
+  // Still NEVER income: income counts depository inflows only, unchanged.
+  assert.equal(cashIncome(visible), cashIncome(without));
+});
+
+test('Mason\'s jacket: buy on a card and return it, and the category nets to zero', () => {
+  // The scenario that settled the design. Same card, same category, so the
+  // purchase and its reversal cancel — and the two legs must NOT self-wash
+  // (markInternalTransfers refuses a same-account pair), or the netting would
+  // never happen.
+  const A = makeAccounts();
+  const rows = [
+    makeTx(A.card1, 'j1', '2026-07-04', 200.0, 'REI CO-OP SEATTLE', { user_category: 'Shopping and gear' }),
+    makeTx(A.card1, 'j2', '2026-07-19', -200.0, 'REI CO-OP SEATTLE', { user_category: 'Shopping and gear' }),
+  ];
+  markInternalTransfers(rows);
+  assert.ok(rows.every(t => !t._internal), 'a same-account purchase+refund never pairs');
+  near(sumSpending(rows), 0);
+  assert.equal(byLabel(spendingGroups(rows))['Shopping and gear'].amount, 0);
 });
 
 // --- Scenario 6: transfer/card-payment guards through the aggregation --------
@@ -268,7 +297,10 @@ test('an unpaired transfer-WORDED row DOES count — the category no longer excl
 test('Uncategorized rows count as spending and appear as a visible bucket', () => {
   const groups = byLabel(spendingGroups(standardLedger().visibleRows()));
   assert.ok(groups[UNCATEGORIZED], 'the unknown is visible');
-  near(groups[UNCATEGORIZED].amount, 33.0);
+  // chk9 (+33) and the untaught refund c1c (−35) — an unfiled refund lands
+  // here and nets, which is why the bucket is NEGATIVE (2026-08-17). The size
+  // of the unknown stays visible either way, which is the rule this pins.
+  near(groups[UNCATEGORIZED].amount, -2.0);
 });
 
 // --- Scenario 10: entities are a lens, not an exclusion ----------------------
@@ -438,7 +470,11 @@ test('biggestMovers excludes non-spend rows STRUCTURALLY: washed pairs, the card
     makeTx(A.savings, `${month}j1b`, `2026-${month}-13`, -300.0, 'ONLINE BANKING TRANSFER FROM CHECKING'),
     makeTx(A.checking, `${month}j2`, `2026-${month}-15`, 400.0, 'CAPITAL ONE AUTOPAY PYMT'),
     makeTx(A.mortgage, `${month}j3`, `2026-${month}-15`, 800.0, 'ESCROW DISBURSEMENT COUNTY TAX'),
-    makeTx(A.card1, `${month}j4`, `2026-${month}-20`, -50.0, 'RIVER GEAR RETURNS'), // → Return
+    // A card PAYMENT received, not a refund: the card-side veto holds it out.
+    // (A genuine refund would legitimately move its category now — refund
+    // netting, 2026-08-17 — so the junk row has to be a payment to keep
+    // pinning "non-spend rows move nothing".)
+    makeTx(A.card1, `${month}j4`, `2026-${month}-20`, -50.0, 'PAYMENT THANK YOU'),
     makeTx(A.checking, `${month}j5`, `2026-${month}-21`, 500.0, 'SAFEWAY 1467 EVERETT WA', { excluded: true }),
     makeTx(A.checking, `${month}j6`, `2026-${month}-01`, -2500.0, 'PAYROLL DIRECT DEP'), // money in
   ];

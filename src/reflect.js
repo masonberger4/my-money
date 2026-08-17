@@ -7,13 +7,23 @@
 
 // The Spending Breakdown card's stacked bar + top list: the biggest `max`
 // positive groups plus one "All Others" bucket carrying the rest, each with
-// its share of the total. Conservation by construction: the segments sum to
-// exactly the positive groups' total, so the bar can never show more or less
-// money than the month had (pinned in test/reflect.test.js).
+// its share of the GROSS total. Conservation by construction: the segments sum
+// to exactly the positive groups' total, so the bar can never show more or
+// less money than the month had (pinned in test/reflect.test.js).
+//
+// `returned` closes the gap refund netting opened (2026-08-17). A stacked bar
+// cannot draw a negative slice, so negative groups are excluded from the
+// segments — but the card's headline is the month's NET spending, and without
+// this the bar and the list would silently sum to more than the headline with
+// no row explaining the difference. Reporting it lets the card show the
+// subtraction (net = total − returned) instead of hiding it, which is the same
+// unknowns-stay-visible instinct as the tax worksheet's amber bucket.
 export function breakdownSegments(groups, { max = 6 } = {}) {
-  const positive = (groups || []).filter(g => g && Number(g.amount) > 0);
+  const all = (groups || []).filter(g => g && Number.isFinite(Number(g.amount)));
+  const positive = all.filter(g => Number(g.amount) > 0);
+  const returned = all.reduce((s, g) => (g.amount < 0 ? s - g.amount : s), 0);
   const total = positive.reduce((s, g) => s + g.amount, 0);
-  if (!total) return { total: 0, segments: [] };
+  if (!total) return { total: 0, segments: [], returned };
   const top = positive.slice(0, max);
   const rest = positive.slice(max);
   const segments = top.map(g => ({ label: g.label, amount: g.amount, share: g.amount / total, others: false }));
@@ -21,7 +31,7 @@ export function breakdownSegments(groups, { max = 6 } = {}) {
     const amount = rest.reduce((s, g) => s + g.amount, 0);
     segments.push({ label: 'All Others', amount, share: amount / total, others: true });
   }
-  return { total, segments };
+  return { total, segments, returned };
 }
 
 // The income drill-in's arrangement: getCashFlow's periods → NEWEST-FIRST

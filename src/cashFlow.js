@@ -177,7 +177,8 @@ export function cashSpending(txs) {
 // OUTSIDE the linked boundary: an unpaired depository inflow. Paired inflows
 // are the household's own money arriving from another linked account and were
 // washed by markInternalTransfers. Credit-account negatives are never income —
-// they are payments received or refunds ("Return" via applyAccountRules).
+// they are payments received, or refunds — and since 2026-08-17 a refund is
+// negative SPENDING (isSpend), so it lands in the spending total, not here.
 //
 // Extracted from cashIncome's fold (2026-08-16) for the Reflect hub's income
 // drill-in, which has to LIST the rows behind the number: a drill-in that

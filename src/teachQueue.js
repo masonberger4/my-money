@@ -92,7 +92,13 @@ export function teachQueueGroups(rows, keyOf) {
     if (t.counted) {
       g.spendCount += 1;
       g.spent += amount;
-      if (newer(t, g.spendTx)) g.spendTx = t;
+      // MONEY-OUT counted rows only. Since refund netting (2026-08-17) a
+      // credit-card refund is `counted` too, and it is the LATER row of the
+      // pair — so without this sign test the group would open its own refund
+      // and the learn sheet's amount-scoped option would read "Only −$200.00",
+      // teaching a rule that fires on returns and nothing else. Teach from the
+      // purchase, which is what the header comment has always promised.
+      if (amount > 0 && newer(t, g.spendTx)) g.spendTx = t;
     } else {
       g.otherCount += 1;
       if (amount < 0) g.moneyIn += -amount;
@@ -119,7 +125,11 @@ export function teachQueueGroups(rows, keyOf) {
   // moves between renders.
   const spending = all
     .filter((g) => g.spendCount > 0)
-    .sort((a, b) => b.spendCount - a.spendCount || b.spent - a.spent || a.key.localeCompare(b.key));
+    // Tiebreak on MAGNITUDE: `spent` can be negative now (a merchant whose
+    // refunds outweighed its purchases this month), and a raw descending sort
+    // would rank that merchant below every $0.01 one despite being a big,
+    // untaught mover.
+    .sort((a, b) => b.spendCount - a.spendCount || Math.abs(b.spent) - Math.abs(a.spent) || a.key.localeCompare(b.key));
   const other = all
     .filter((g) => g.spendCount === 0)
     .sort(
@@ -149,9 +159,13 @@ export function categorizedShare(groups, uncategorizedLabel) {
     if (g.label === uncategorizedLabel) uncat += amount;
   }
   if (!(total > 0)) return null;
-  // Clamp: a negative-net group (refunds exceeding spend under one label) can
-  // push the raw ratio outside [0,1]; the meter stays a fraction.
-  return Math.min(1, Math.max(0, 1 - uncat / total));
+  // The untaught share is measured by MAGNITUDE (refund netting, 2026-08-17).
+  // An untaught refund makes `uncat` NEGATIVE, and `1 - uncat/total` then
+  // exceeds 1 — which the clamp turned into exactly 1, i.e. "100% categorized"
+  // printed above a queue still listing merchants to teach. Untaught money is
+  // untaught whichever direction it points, so the meter reads its size, not
+  // its sign, and only a genuinely empty Uncategorized bucket reaches 100%.
+  return Math.min(1, Math.max(0, 1 - Math.abs(uncat) / total));
 }
 
 // The label a non-spending group renders INSTEAD of a dollar total — the fix

@@ -18,7 +18,7 @@
 // treated as non-loan — every caller of toTxShape selects accounts.type.
 
 import { UNCATEGORIZED, TRANSFER_CATEGORY } from './categoryMap.js';
-import { isCardPaymentDescriptor } from './txClassify.js';
+import { isCardPaymentDescriptor, isCardPaymentReceived } from './txClassify.js';
 
 // User override wins over the classifier's answer.
 export function effectiveCategory(t) {
@@ -68,7 +68,20 @@ export function isLoanAccount(t) {
 // a new consumer, not a second predicate.
 export function isCardPaymentRow(t) {
   if (t.user_category) return t.user_category === TRANSFER_CATEGORY;
-  if (t.accounts?.type === 'credit') return false;
+  if (t.accounts?.type === 'credit') {
+    // SIGN-scoped, not type-scoped (the 2026-08-17 correction, and the guard
+    // refund netting is built on). The blanket `return false` above was written
+    // for POSITIVES — its own justification is "a positive on a card is a
+    // purchase" — but it was keyed on the account type, so it silently
+    // exempted card NEGATIVES too. That was harmless only while isSpend
+    // short-circuited every negative before reaching here. Now that a card
+    // negative can net, this branch is what keeps a four-figure payment from
+    // subtracting itself from a category: it reads the CARD-SIDE test
+    // (isCardPaymentReceived), because the payer-side issuer co-occurrence
+    // never fires on a card's own "PAYMENT THANK YOU".
+    if (t.amount >= 0) return false;
+    return isCardPaymentReceived(t.description) || isCardPaymentReceived(t.merchant_name);
+  }
   return isCardPaymentDescriptor(t.description) || isCardPaymentDescriptor(t.merchant_name);
 }
 
@@ -104,7 +117,39 @@ export function isCardPaymentRow(t) {
 // check staying first is harmless and keeps unpaired lists honest.
 export function isSpend(t) {
   if (t.excluded || t._internal || isLoanAccount(t)) return false;
-  if (t.amount <= 0) return false;
+  if (!t.amount) return false;
+  // MONEY IN. Refund netting (Mason, 2026-08-17) — this REPLACES the blanket
+  // `amount <= 0 -> false` that stood here. A return is money coming back on a
+  // purchase that was counted, so it SUBTRACTS from its own category: buy a
+  // $200 jacket and return it and Shopping and gear reads $0, which is the
+  // truth. It nets in whatever category it carries, so a taught merchant's
+  // refund cancels its own purchase and an untaught one lands in Uncategorized
+  // where the teach queue asks who it belongs to.
+  //
+  // Only a CREDIT-account negative can net, and that account gate outranks the
+  // override on purpose. On a card, money in is either a refund or a payment
+  // the household sent — both reversals of the card's own balance, never
+  // outside money. On a DEPOSITORY account money in is income (a paycheck),
+  // and honoring 'spending' there would subtract a $2,200 paycheck from
+  // household spending — the disaster the old sign guard was written for, and
+  // still guarded. Netting a debit-card refund is deliberately NOT built:
+  // nothing structurally separates it from a paycheck (see CLAUDE.md).
+  if (t.amount < 0) {
+    // An EXPLICIT verdict answers first, on either account type (Mason,
+    // 2026-08-17b): 'spending' on a money-in row means "this is a refund, net
+    // it", and that is the only way a DEBIT-card refund can ever net. It has
+    // to be explicit because nothing structural separates a debit refund from
+    // a paycheck — both are unpaired depository inflows, and an automatic rule
+    // that got one wrong would subtract a salary from household spending and
+    // erase it from the Budget tab's measured income at the same time. A
+    // human saying so is the discriminator the data does not carry.
+    if (t.user_type) return t.user_type === 'spending';
+    // No override: only a CREDIT negative nets automatically (a card's money
+    // in is a refund or a payment, never outside money). A depository inflow
+    // defaults to income.
+    if (t.accounts?.type !== 'credit') return false;
+    return !isCardPaymentRow(t);
+  }
   if (t.user_type) return t.user_type === 'spending';
   return !isCardPaymentRow(t);
 }
@@ -155,6 +200,13 @@ export function deriveTxType(t) {
       ? 'card_payment' : 'transfer';
   }
   if (t.amount > 0) return isCardPaymentRow(t) ? 'card_payment' : 'spending';
+  // Money in on a CREDIT account is a refund or a payment/reward, never
+  // outside money — and since 2026-08-17 a refund NETS, so it has to derive
+  // 'spending' or the rendered type would contradict the total it moves (the
+  // agreement property test). The sheet labels that case "Refund" rather than
+  // "Spending"; the vocabulary stays four values (src/txType.js), the same
+  // display-only trick 'loan' already uses.
+  if (t.accounts?.type === 'credit') return isCardPaymentRow(t) ? 'card_payment' : 'spending';
   return 'inflow';
 }
 
@@ -222,7 +274,14 @@ export function spendingGroups(txs) {
       label,
       amount: b.amount,
       transaction_count: b.count,
-      percent_of_total: total ? (b.amount / total) * 100 : 0,
+      // Divided by the MAGNITUDE of the total, not the signed total (refund
+      // netting, 2026-08-17). A category can now be negative, and so can a
+      // month — and dividing by a negative total would flip the sign of every
+      // ORDINARY category's share, so a $200 grocery bill would read "−18%"
+      // in a month where returns happened to outweigh purchases. Against
+      // |total| each share keeps the sign of its own amount, which is the
+      // honest reading, and nothing changes at all in a normal month.
+      percent_of_total: total ? (b.amount / Math.abs(total)) * 100 : 0,
     }))
     .sort((a, b) => b.amount - a.amount);
 }

@@ -4,7 +4,7 @@
 // stayed invisible: every part of it looks reasonable read one line at a time.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { merchantKey, matchLearnedRule, guessCategory, isCardPaymentDescriptor, isKeyPrefix } from '../src/txClassify.js';
+import { merchantKey, matchLearnedRule, guessCategory, isCardPaymentDescriptor, isCardPaymentReceived, isKeyPrefix } from '../src/txClassify.js';
 
 // --- merchantKey: what collapses and what stays distinct --------------------
 
@@ -364,4 +364,83 @@ test('a trimmed key is teachable as-is and matches the long descriptors it came 
   assert.equal(matchLearnedRule('COSTCO GAS #0552 TUKWILA WA', rules), 'Transportation');
   // …without swallowing the sibling merchant (the deliberate no-stemming rule).
   assert.equal(matchLearnedRule('COSTCO WHSE #0117 SEATTLE WA', rules), null);
+});
+
+// --- isCardPaymentReceived: the card-side veto, against REAL data -------------
+//
+// Refund netting (2026-08-17) turned credit-account money-in into something
+// that MOVES a total, so the line between "refund" and "payment I sent" became
+// load-bearing in a way it never was. These are the household's actual
+// credit-account money-in descriptors, pulled from prod — the same discipline
+// as the $1,109.57 BofA/Wells Fargo miss pinned by name in spending.test.js.
+//
+// The asymmetry to keep in mind when editing the regex: a MISSED payment
+// subtracts four figures from a category and manufactures that much phantom
+// envelope Available, while a false positive merely fails to net (today's
+// behaviour). Conservative side up — but not so conservative that it eats
+// merchant descriptors, which is exactly what happened below.
+
+const REAL_CARD_PAYMENTS = [
+  'CAPITAL ONE MOBILE PYMT',            // $26,238 across 10 rows — the big one
+  'ELECTRONIC PAYMENT',
+  'BA ELECTRONIC PAYMENT',
+  'ONLINE/MOBILE PAYMENT CONF#M02191706971',
+  'ONLINE ACH PAYMENT THANK YOU',
+  'ONLINE/MOBILE PAYMENT CONF#18tdwqgat',
+  'INTERNET PAYMENT - THANKYOU',
+  'CAPITAL ONE AUTOPAY PYMT',
+  // Wordings from Mason's statements that predate the feed (see pdfImport):
+  'PAYMENT THANK YOU',
+  'PAYMENT RECEIVED',
+];
+
+const REAL_CARD_REFUNDS = [
+  'AMAZON MKTPLACE PMTS',               // the REGRESSION — see below
+  'SEATTLE CC NORTH WEBSEATTLEWA',
+  'SP EVERLANE',
+  'WALMART.COMWALMART.COMAR',
+  'TARGET STORE T3275',
+  'LOWES #00004*SEATTLEWA',
+  'IKEA 491768525888-434-4532MD',
+  'SABAI DESIG',
+  'ALASKA AIR 0272130549534SEATTLEWA TK#: 0272130549534 PSGR: BERGER/MASON',
+  'COSTCO WHSE #0001',
+  'GAP.COM                  800-427-7895 CA',
+  'MICHAELS STORES 8403BELLEVUEWA',
+  'Build-A-Bear 1330TukwilaWA',
+  'TARGET PLUS',
+  'JCPENNEY 0696TUKWILAWA',
+  'QFC #5826BELLEVUEWA',
+  'IBI*FABLETICS.COM844-3225384CA',
+  'AMERICAN HEALTH TRAIN',
+  'GAMESTOPGRAPEVINETX',
+];
+
+test('isCardPaymentReceived holds back every real card payment', () => {
+  for (const d of REAL_CARD_PAYMENTS) {
+    assert.equal(isCardPaymentReceived(d), true, `must be vetoed: ${d}`);
+  }
+  // …and note WHY this predicate exists at all: the payer-side test misses
+  // almost all of them, because a card statement never prints its own issuer.
+  const bare = ['PAYMENT THANK YOU', 'PAYMENT RECEIVED', 'ELECTRONIC PAYMENT', 'INTERNET PAYMENT - THANKYOU'];
+  for (const d of bare) {
+    assert.equal(isCardPaymentDescriptor(d), false, `isCardPaymentDescriptor cannot do this job: ${d}`);
+  }
+});
+
+test('isCardPaymentReceived lets every real merchant refund through', () => {
+  for (const d of REAL_CARD_REFUNDS) {
+    assert.equal(isCardPaymentReceived(d), false, `must NOT be vetoed: ${d}`);
+  }
+});
+
+test('REGRESSION: "AMAZON MKTPLACE PMTS" is a merchant, not a payment', () => {
+  // The regex was a bare alternation with no word boundaries, so `PMT` matched
+  // inside `PMTS` — Amazon's own descriptor — and 18 genuine marketplace
+  // refunds ($836.09 of Mason's real history) were vetoed and silently failed
+  // to net. The boundaries are what fix it, and `PMT` must stay SINGULAR:
+  // adding the plural re-breaks this exact row.
+  assert.equal(isCardPaymentReceived('AMAZON MKTPLACE PMTS'), false);
+  assert.equal(isCardPaymentReceived('CAPITAL ONE MOBILE PYMT'), true, 'the singular forms still veto');
+  assert.equal(isCardPaymentReceived('PMT'), true);
 });

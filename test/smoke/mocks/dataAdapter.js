@@ -61,6 +61,14 @@ const AUG = [
   raw('2026-08-01', 129.00, 'CITY UTILITIES', 'Utilities', 'a1'),
   raw('2026-08-01', -2400.00, 'TRANSFER FROM PERSONAL', 'Transfers and card payments', 'a1', { raw_category: 'TRANSFER_IN' }),
   raw('2026-08-02', 950.00, 'CAPITAL ONE CARD PAYMENT', 'Transfers and card payments', 'a1'),
+  // Refund netting (2026-08-17): the harness had ZERO credit-account negatives,
+  // so every surface this change touches — a negative category bar, the
+  // breakdown card's "Less returns" line, the sheet's Refund label — rendered
+  // untested. These two are the pair that matters: a REFUND (nets against
+  // Groceries, taking it below the Safeway charge) and a PAYMENT RECEIVED on
+  // the same card, which must NOT net and which no issuer name appears in.
+  raw('2026-08-04', -30.00, 'SAFEWAY #1234 SEATTLE WA', 'Groceries', 'a3'),
+  raw('2026-08-05', -600.00, 'PAYMENT THANK YOU', null, 'a3'),
 ];
 const JUL = [
   raw('2026-07-28', 92.10, 'SAFEWAY #1234 SEATTLE WA', 'Groceries', 'a3'),

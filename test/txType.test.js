@@ -18,6 +18,7 @@ import {
   deriveTxType,
   effectiveTxType,
   allowedUserTypes,
+  txTypeLabel,
 } from '../src/txType.js';
 import { isSpend, toTxShape } from '../src/spending.js';
 import { markInternalTransfers, cashIncome } from '../src/cashFlow.js';
@@ -38,10 +39,25 @@ test('derivation matrix: the four structural cases + loan', () => {
     deriveTxType(makeTx(A.checking, 'd3', '2026-07-05', 60, 'SAFEWAY 1467', { user_category: TRANSFER_CATEGORY })),
     'card_payment'
   );
-  // Any negative displays Inflow — a depository negative is income…
+  // A DEPOSITORY negative is income, and displays Inflow.
   assert.equal(deriveTxType(makeTx(A.checking, 'd4', '2026-07-05', -2500, 'PAYROLL DIRECT DEP')), 'inflow');
-  // …and a credit negative is Return: never income, but it DISPLAYS as Inflow.
-  assert.equal(deriveTxType(makeTx(A.card1, 'd5', '2026-07-05', -25, 'SOME STORE REFUND')), 'inflow');
+  // A CREDIT negative splits (2026-08-17, refund netting — this case used to
+  // derive 'inflow' for both halves, back when every credit negative was a
+  // 'Return' that counted in nothing). A refund NETS, so it must derive
+  // 'spending' or the rendered type would contradict the total it moves…
+  const refund = makeTx(A.card1, 'd5', '2026-07-05', -25, 'SOME STORE REFUND');
+  assert.equal(deriveTxType(refund), 'spending');
+  assert.equal(isSpend(refund), true, 'and it really does count');
+  // …while it LABELS as Refund, so nothing prints "Spending" on money coming
+  // back. Display-only, like 'loan' — TX_TYPES stays four values.
+  assert.equal(txTypeLabel(deriveTxType(refund), refund.amount), 'Refund');
+  assert.equal(txTypeLabel('spending', 50), 'Spending');
+  // A payment RECEIVED on the card is the other half, and the card-side veto
+  // is what separates them — note it carries no issuer name, which is exactly
+  // why isCardPaymentDescriptor cannot do this job.
+  const payment = makeTx(A.card1, 'd5b', '2026-07-05', -2148.33, 'PAYMENT THANK YOU');
+  assert.equal(deriveTxType(payment), 'card_payment');
+  assert.equal(isSpend(payment), false, 'a payment never nets');
   // Loan-account rows are the display-only fifth value.
   assert.equal(deriveTxType(makeTx(A.mortgage, 'd6', '2026-07-05', 500, 'SUSPENSE POSTING')), 'loan');
 });
@@ -88,11 +104,17 @@ test('every storable type has a label; loan has the display-only fifth', () => {
 
 // --- allowedUserTypes (the selector policy) ------------------------------------
 
-test('allowedUserTypes mirrors the sign guards: no inert option is ever offered', () => {
+test('allowedUserTypes mirrors the model: no inert option is ever offered', () => {
   const out = makeTx(A.checking, 'a1', '2026-07-05', 50, 'SAFEWAY 1467');
   const inn = makeTx(A.checking, 'a2', '2026-07-05', -50, 'REFUND');
   assert.deepEqual(allowedUserTypes(out), ['spending', 'transfer', 'card_payment']);
-  assert.deepEqual(allowedUserTypes(inn), ['inflow', 'transfer', 'card_payment']);
+  // Money-in rows are offered 'spending' too since 2026-08-17b (Mason): on a
+  // DEPOSITORY row it is the only way a debit-card refund can ever net,
+  // because nothing structural separates one from a paycheck. It is no longer
+  // inert, so withholding it would hide a real verdict rather than protect one.
+  assert.deepEqual(allowedUserTypes(inn), ['spending', 'inflow', 'transfer', 'card_payment']);
+  assert.equal(isSpend({ ...inn, user_type: 'spending' }), true, "…and it really nets");
+  assert.equal(isSpend(inn), false, 'while the default for a depository inflow is still income');
   assert.deepEqual(allowedUserTypes(makeTx(A.mortgage, 'a3', '2026-07-05', 50, 'X')), [], 'loan rows get no selector');
   // Policy honesty: every offered override actually changes/holds the row's
   // effective type — none is inert under the model.
@@ -139,10 +161,34 @@ test('AGREEMENT: over a random overridden ledger, tx_type and the totals never d
       const ty = shaped.tx_type;
       assert.equal(ty, effectiveTxType(t), `seed ${seed}: shape carries the effective type`);
       if (t.excluded) continue; // excluded wins over everything — no type claim
+      // THE invariant, restated for refund netting (2026-08-17): a rendered
+      // Spending row counts as spending, full stop. It used to read
+      // `isSpend(t) === (t.amount > 0)` — correct only while spending was
+      // money-out by definition. Now a credit-card refund is a Spending row
+      // with a NEGATIVE amount (labelled "Refund"), so tying the guarantee to
+      // the sign would forbid the very thing Mason asked for while still
+      // sounding like an agreement check.
       if (ty === 'spending') {
-        assert.ok(isSpend(t) === (t.amount > 0), `seed ${seed}: a rendered Spending row counts iff money-out`);
+        assert.ok(isSpend(t), `seed ${seed}: a rendered Spending row counts as spending`);
       } else {
         assert.ok(!isSpend(t), `seed ${seed}: a non-Spending row never counts as spending (${ty})`);
+      }
+      // …and the direction stays legible, which is what keeps the relaxed
+      // assertion above from hiding a paycheck being subtracted from spending.
+      // A counted money-IN row is EITHER a card refund (automatic, credit only)
+      // OR a row a human explicitly typed 'spending' — the debit-refund verdict
+      // (2026-08-17b). It is never both counted and income, and it never
+      // renders the word "Spending".
+      if (ty === 'spending' && t.amount < 0) {
+        assert.ok(t.accounts?.type === 'credit' || t.user_type === 'spending',
+          `seed ${seed}: a money-in row counts only as a card refund or by explicit verdict`);
+        assert.ok(!incomeRows.has(t), `seed ${seed}: a netting refund is never also income`);
+        assert.equal(txTypeLabel(ty, t.amount), 'Refund', `seed ${seed}: it renders as Refund`);
+      }
+      // The paycheck guard, stated positively: with NO override, a depository
+      // inflow is income and never spending, whatever its wording.
+      if (t.accounts?.type === 'depository' && t.amount < 0 && !t.user_type && !t._internal) {
+        assert.ok(!isSpend(t), `seed ${seed}: an un-overridden depository inflow is never spending`);
       }
       if (ty === 'transfer' || ty === 'card_payment' || ty === 'loan') {
         assert.ok(!incomeRows.has(t), `seed ${seed}: a ${ty} row is never income`);
