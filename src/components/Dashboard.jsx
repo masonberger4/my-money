@@ -1127,8 +1127,11 @@ function IncomeSheet({report,when,busy,surf,acctById,acctLabel,acctColor,onPick,
           {/* The window total is the honest headline for a list of rows, but
               the number TAPPED to get here was the monthly rate — so quote it
               back, from incomeSections' own arithmetic, rather than leaving
-              the reader to divide by six. */}
-          {pending?"Recalculating…":<>{when} · {report.count} transaction{report.count!==1?"s":""} · {fmt(report.average)}/mo</>}
+              the reader to divide by six. Suppressed for a ONE-month sheet
+              (opened from a Trends bar), where the rate and the total are the
+              same figure and printing both twice reads as a mistake. */}
+          {pending?"Recalculating…":<>{when} · {report.count} transaction{report.count!==1?"s":""}
+            {report.sections.length>1&&<> · {fmt(report.average)}/mo</>}</>}
         </div>
         <div style={{fontSize:10,color:"var(--muted)",lineHeight:1.5,marginBottom:14}}>
           Money arriving in a checking or savings account from outside your linked accounts.
@@ -1511,9 +1514,15 @@ export default function Dashboard({ refreshTick = 0 }) {
   // invalidateTrends() (epoch-bumped, the taxEpoch pattern — never a bare
   // null sentinel, the setState(null) gotcha).
   const [cashFlow,setCashFlow]=useState(null);
-  // The Reflect hub's income drill-in. Declared here — well above the
-  // anySheetOpen line it feeds — per the TDZ rule recorded there.
-  const [incomeDrill,setIncomeDrill]=useState(false);
+  // The income drill-in. Two scopes, because it is opened from two places
+  // that mean different questions: `'all'` (the Reflect hub's per-month rate —
+  // "what is this average made of?") and a period's `start` string (a Trends
+  // month bar — "what was July's income?"). Both render the SAME sheet over
+  // the SAME rows; only the slice of getCashFlow's periods differs, so a
+  // month opened from Trends can never disagree with the window it belongs to.
+  // Declared here — well above the anySheetOpen line it feeds — per the TDZ
+  // rule recorded there.
+  const [incomeDrill,setIncomeDrill]=useState(null);
   // The rows behind each income bar, arranged newest-first by the pure core.
   // Derived in render with no cache of its own (the teach-queue precedent):
   // cashFlow IS the cached lazy load, so there is nothing here to invalidate.
@@ -2665,7 +2674,7 @@ export default function Dashboard({ refreshTick = 0 }) {
     });
   }
   const closeAllSheets=useCallback(()=>{
-    setSelTx(null);setCatDrill(null);setIncomeDrill(false);setTaxDrill(null);setSchedDebtId(null);setMonthPicker(false);
+    setSelTx(null);setCatDrill(null);setIncomeDrill(null);setTaxDrill(null);setSchedDebtId(null);setMonthPicker(false);
     setImporting(false);setConnectingSfin(false);setQuickAdd(false);
     setTargetEdit(null);setMoveFrom(null);setPickingCat(false);setAddingCat(false);setRulesOpen(false);
   },[]);
@@ -3132,6 +3141,16 @@ export default function Dashboard({ refreshTick = 0 }) {
   const cfPs=cashFlow?.periods||[];
   const maxCat=cats[0]?.amount||1;
   const maxSpend=Math.max(...cfPs.map(p=>p.spending?.amount||0),1);
+  // The Income-vs-spending card scales BOTH rows against the larger of the
+  // two, not against maxSpend. Scaled to spending alone, any month whose
+  // income exceeds the biggest spending month computes past 100% and is
+  // clipped to full width by .bar-bg's overflow — so for a household that
+  // out-earns its spending EVERY income bar rendered identical and full, and
+  // the card compared nothing. Invisible while the bars were 5px hairlines;
+  // obvious the moment they became tap targets. (The Reflect hub's mini chart
+  // already did it this way — this makes Trends agree with it.) The 6-month
+  // SPENDING card above keeps maxSpend: there, spending is the only series.
+  const maxFlow=Math.max(...cfPs.map(p=>Math.max(p.spending?.amount||0,p.income?.amount||0)),1);
   const totalSpent=cats.reduce((s,c)=>s+c.amount,0);
   // Debts read negative (see src/accountBalance.js). getOverview orders credit
   // accounts first, so this headline is usually a card — and it carries `type`.
@@ -3995,7 +4014,7 @@ export default function Dashboard({ refreshTick = 0 }) {
           // Only offer the drill-in when there is something behind the number
           // (openDrill's rule) — a null onClick makes DrillNum plain text, so
           // a still-loading card never invites a tap into an empty sheet.
-          const openIncomeDrill=incomeReport.count?()=>setIncomeDrill(true):null;
+          const openIncomeDrill=incomeReport.count?()=>setIncomeDrill("all"):null;
           // Data marks go through markOn even for the track grey: --light-track
           // (#E4E2DC) is a 1.30:1 hairline on the white card — invisible as a
           // bar fill — while markOn lifts it to the 3:1 mark floor and leaves
@@ -5922,22 +5941,62 @@ export default function Dashboard({ refreshTick = 0 }) {
             </div>
             <div className="card">
               <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em",marginBottom:14}}>Income vs spending</div>
+              <div style={{fontSize:11,color:"var(--muted)",marginBottom:14}}>
+                Tap a bar to see what it is made of.
+              </div>
               {loading||trendsLoading?<Sk h={100}/>:cfPs.map((p,i)=>{
-                const sw=maxSpend?(p.spending.amount/maxSpend)*100:0;
-                const iw=maxSpend?(p.income.amount/maxSpend)*100:0;
+                const sw=(p.spending.amount/maxFlow)*100;
+                const iw=(p.income.amount/maxFlow)*100;
+                const pStart=new Date(p.start);
+                // Each bar is now a real tap target rather than a 5px hairline:
+                // BAR_H + 11px of padding top and bottom makes every row a
+                // MEASURED 316x44 at 390px (checked in the browser, not
+                // eyeballed) — the 44px a thumb actually needs. That is the
+                // whole reason these got bigger; an affordance you can't hit
+                // isn't one.
+                // Where each goes: Income opens THIS MONTH's income rows (the
+                // same sheet the Reflect hub opens, sliced to one period);
+                // Spend opens that month's Categories report, which is the
+                // spending breakdown and where the per-category drill-ins
+                // already live. The bars stay proportional to ONE scale
+                // (maxSpend) across both rows and all six months, so their
+                // lengths remain comparable — the tap target grew, the
+                // arithmetic did not change.
+                const BAR_H=22;
+                const rows=[
+                  {key:"Spend",w:sw,color:markOn(OVER_MONEY,surf.track),val:p.spending.amount,
+                   onTap:()=>{setYear(pStart.getFullYear());setMonth(pStart.getMonth()+1);setTab("categories");},
+                   title:`See what ${p.label} was spent on`},
+                  {key:"Income",w:iw,color:markOn(OK_MONEY,surf.track),val:p.income.amount,
+                   // Nothing measured that month means nothing to open — the
+                   // openDrill rule, so a dead tap is never offered.
+                   onTap:p.income.transactions?.length?()=>setIncomeDrill(p.start):null,
+                   title:`See the transactions counted as income in ${p.label}`},
+                ];
                 return (
-                  <div key={i} style={{marginBottom:14}}>
-                    <div style={{fontSize:12,fontWeight:500,marginBottom:5}}>{p.label}</div>
+                  <div key={i} style={{marginBottom:16}}>
+                    <div style={{fontSize:12,fontWeight:600,marginBottom:6}}>{p.label}</div>
                     {/* Bar fills sit on the --track, so that is what they are
                         contrasted against — not the card. */}
-                    {[{label:"Spend",w:sw,color:markOn("#D85A30",surf.track),val:p.spending.amount},
-                      {label:"Income",w:iw,color:markOn("#1D9E75",surf.track),val:p.income.amount}].map(row=>(
-                      <div key={row.label} style={{display:"flex",gap:6,alignItems:"center",marginBottom:3}}>
-                        <span style={{fontSize:11,color:"var(--muted)",width:44}}>{row.label}</span>
-                        <div className="bar-bg"><div className="bar-fill" style={{width:row.w+"%",background:row.color}}/></div>
-                        <span style={{fontSize:11,fontFamily:"'DM Mono',monospace",color:"var(--muted)",width:54,textAlign:"right"}}>{fmt(row.val)}</span>
-                      </div>
-                    ))}
+                    {rows.map(row=>{
+                      const inner=(<>
+                        <span style={{fontSize:12,color:"var(--muted)",width:52,flexShrink:0,textAlign:"left"}}>{row.key}</span>
+                        <div className="bar-bg" style={{height:BAR_H,borderRadius:BAR_H/2}}>
+                          <div className="bar-fill" style={{width:row.w+"%",background:row.color,borderRadius:BAR_H/2}}/>
+                        </div>
+                        <span style={{fontSize:12,fontFamily:"'DM Mono',monospace",fontWeight:500,color:"var(--text)",
+                          width:62,flexShrink:0,textAlign:"right"}}>{fmt(row.val)}</span>
+                      </>);
+                      const shell={display:"flex",gap:8,alignItems:"center",width:"100%",padding:"11px 0",
+                        background:"none",border:"none",font:"inherit",color:"var(--text)",textAlign:"left"};
+                      return row.onTap?(
+                        <button key={row.key} onClick={row.onTap} title={row.title} style={{...shell,cursor:"pointer"}}>
+                          {inner}
+                        </button>
+                      ):(
+                        <div key={row.key} style={shell}>{inner}</div>
+                      );
+                    })}
                   </div>
                 );
               })}
@@ -6519,15 +6578,20 @@ export default function Dashboard({ refreshTick = 0 }) {
           cash-flow window (anchored on the CURRENT month, not the viewed one),
           so the header states the range rather than leaving it implied. */}
       {incomeDrill&&(()=>{
-        const ss=incomeReport.sections;
+        // One month or the whole window — the same pure core either way, run
+        // over a slice of the SAME periods, so a single-month sheet's total is
+        // still the bar's own number.
+        const report=incomeDrill==="all"?incomeReport
+          :incomeSections((cashFlow?.periods||[]).filter(p=>p.start===incomeDrill));
+        const ss=report.sections;
         const when=ss.length===0?"No months measured"
           :ss.length===1?ss[0].label
           // sections are newest-first, so the range reads oldest → newest.
           :`${ss[ss.length-1].label} – ${ss[0].label}`;
         return (
-          <IncomeSheet report={incomeReport} when={when} busy={trendsLoading||!cashFlow} surf={surf}
+          <IncomeSheet report={report} when={when} busy={trendsLoading||!cashFlow} surf={surf}
             acctById={acctById} acctLabel={acctLabel} acctColor={acctColor}
-            onPick={t=>openTx(t)} onClose={()=>setIncomeDrill(false)}/>
+            onPick={t=>openTx(t)} onClose={()=>setIncomeDrill(null)}/>
         );
       })()}
 
