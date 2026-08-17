@@ -104,11 +104,17 @@ test('every storable type has a label; loan has the display-only fifth', () => {
 
 // --- allowedUserTypes (the selector policy) ------------------------------------
 
-test('allowedUserTypes mirrors the sign guards: no inert option is ever offered', () => {
+test('allowedUserTypes mirrors the model: no inert option is ever offered', () => {
   const out = makeTx(A.checking, 'a1', '2026-07-05', 50, 'SAFEWAY 1467');
   const inn = makeTx(A.checking, 'a2', '2026-07-05', -50, 'REFUND');
   assert.deepEqual(allowedUserTypes(out), ['spending', 'transfer', 'card_payment']);
-  assert.deepEqual(allowedUserTypes(inn), ['inflow', 'transfer', 'card_payment']);
+  // Money-in rows are offered 'spending' too since 2026-08-17b (Mason): on a
+  // DEPOSITORY row it is the only way a debit-card refund can ever net,
+  // because nothing structural separates one from a paycheck. It is no longer
+  // inert, so withholding it would hide a real verdict rather than protect one.
+  assert.deepEqual(allowedUserTypes(inn), ['spending', 'inflow', 'transfer', 'card_payment']);
+  assert.equal(isSpend({ ...inn, user_type: 'spending' }), true, "…and it really nets");
+  assert.equal(isSpend(inn), false, 'while the default for a depository inflow is still income');
   assert.deepEqual(allowedUserTypes(makeTx(A.mortgage, 'a3', '2026-07-05', 50, 'X')), [], 'loan rows get no selector');
   // Policy honesty: every offered override actually changes/holds the row's
   // effective type — none is inert under the model.
@@ -167,14 +173,22 @@ test('AGREEMENT: over a random overridden ledger, tx_type and the totals never d
       } else {
         assert.ok(!isSpend(t), `seed ${seed}: a non-Spending row never counts as spending (${ty})`);
       }
-      // …and the direction is still legible to a reader: a counted money-IN row
-      // is a refund on a CREDIT account, never a depository inflow. This is
-      // what keeps the relaxed assertion above from hiding a paycheck being
-      // subtracted from household spending.
+      // …and the direction stays legible, which is what keeps the relaxed
+      // assertion above from hiding a paycheck being subtracted from spending.
+      // A counted money-IN row is EITHER a card refund (automatic, credit only)
+      // OR a row a human explicitly typed 'spending' — the debit-refund verdict
+      // (2026-08-17b). It is never both counted and income, and it never
+      // renders the word "Spending".
       if (ty === 'spending' && t.amount < 0) {
-        assert.equal(t.accounts?.type, 'credit', `seed ${seed}: only a card refund counts negatively`);
+        assert.ok(t.accounts?.type === 'credit' || t.user_type === 'spending',
+          `seed ${seed}: a money-in row counts only as a card refund or by explicit verdict`);
         assert.ok(!incomeRows.has(t), `seed ${seed}: a netting refund is never also income`);
         assert.equal(txTypeLabel(ty, t.amount), 'Refund', `seed ${seed}: it renders as Refund`);
+      }
+      // The paycheck guard, stated positively: with NO override, a depository
+      // inflow is income and never spending, whatever its wording.
+      if (t.accounts?.type === 'depository' && t.amount < 0 && !t.user_type && !t._internal) {
+        assert.ok(!isSpend(t), `seed ${seed}: an un-overridden depository inflow is never spending`);
       }
       if (ty === 'transfer' || ty === 'card_payment' || ty === 'loan') {
         assert.ok(!incomeRows.has(t), `seed ${seed}: a ${ty} row is never income`);

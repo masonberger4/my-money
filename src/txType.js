@@ -38,17 +38,17 @@ export function txTypeLabel(type, amount) {
 // model's precedence, so the menu can never offer a verdict the totals would
 // silently ignore:
 //   money-out rows: 'inflow' is inert   -> not offered;
-//   money-in on a CREDIT account: every verdict lands ('spending' means "this
-//     is a refund, net it"; the others keep it out of both totals);
-//   money-in on a DEPOSITORY account: 'spending' is inert -> not offered. The
-//     account gate in isSpend outranks the override there, because honoring it
-//     would subtract a paycheck from household spending;
+//   money-in rows: every verdict lands. 'spending' means "this is a refund,
+//     net it" — automatic on a credit negative, and on a DEPOSITORY one it is
+//     the only way a debit-card refund can ever net (Mason, 2026-08-17b),
+//     because nothing structural tells a debit refund from a paycheck. That
+//     makes it the one option a mis-tap could use to subtract a salary from
+//     spending, so the sheet must keep labelling it "Refund" (txTypeLabel)
+//     rather than "Spending" — the label is what makes the choice legible;
 //   loan rows: the model ignores user_type entirely -> nothing offered.
 // The sheet renders the missing option disabled with a one-line reason.
 export function allowedUserTypes(t) {
   if (isLoanAccount(t)) return [];
   if (t.amount > 0) return ['spending', 'transfer', 'card_payment'];
-  return t.accounts?.type === 'credit'
-    ? ['spending', 'inflow', 'transfer', 'card_payment']
-    : ['inflow', 'transfer', 'card_payment'];
+  return ['spending', 'inflow', 'transfer', 'card_payment'];
 }

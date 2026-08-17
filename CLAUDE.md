@@ -469,10 +469,15 @@ Screenshot new UI before pushing. Tests (checked in, not gitignored):
   Uncategorized where the teach queue asks. It is still NEVER income (income
   counts depository inflows only). The row that must not net is money the
   household SENT the card — structural pairing washes the linked case, and
-  `isCardPaymentReceived` (`txClassify.js`) vetoes the unpaired one. Netting a
-  DEBIT-card refund is deliberately not built: nothing structurally separates
-  it from a paycheck, so it would be the one shape that can subtract $2,200 of
-  income from spending. "Transfers and card
+  `isCardPaymentReceived` (`txClassify.js`) vetoes the unpaired one. A
+  DEBIT-card refund nets too, but ONLY through an explicit `user_type` of
+  `'spending'` (Mason, 2026-08-17b) — never automatically, because nothing
+  structural separates one from a paycheck (both are unpaired depository
+  inflows) and an automatic rule that guessed wrong would subtract a salary
+  from spending AND erase it from the Budget tab's measured income in the same
+  pass. The human saying so is the discriminator the data does not carry;
+  `allowedUserTypes` offers it and `txTypeLabel` renders it "Refund", which is
+  what makes the choice legible rather than a mis-tap. "Transfers and card
   payments" is NO LONGER a blanket spending exclusion (2026-08-03): internal
   is decided by STRUCTURE (the pairing), and the category's only remaining
   totals role is the card-payment veto — see the linked-boundary model below.
@@ -645,18 +650,19 @@ Categories agree on spending by construction.
   `cashIncome` read the column directly (NOT via an `_internal` stamp —
   `_internal` only exists on row sets that went through pairing, and the
   account sheet / search never pair). Precedence: `excluded` > loan > SIGN >
-  ACCOUNT GATE > `user_type` > structure. On money-in the sign no longer
-  ANSWERS, it ROUTES (2026-08-17): the account gate decides, so `'spending'` is
-  honored on a CREDIT negative — that IS refund netting — and stays inert on a
-  depository one, where honoring it would subtract a paycheck from
-  `sumSpending`. (The wording here used to read "the sign guards outrank the
-  override, `'spending'` on money-in is never honored"; that is now true only
-  of the depository half.) Loan rows ignore the override entirely (a later
-  retype to loan must not resurrect it), and a non-null override beats BOTH
-  card-payment vetoes. Income stays depository-only: `'inflow'` on a credit
-  negative keeps it out of both totals — the override's way of saying "this is
-  not a refund". `allowedUserTypes` moves in lockstep, offering all four on a
-  credit negative and withholding `'spending'` on a depository one. Display: derived type restates these verdicts
+  `user_type` > structure. On money-in the sign no longer ANSWERS, it ROUTES
+  (2026-08-17): an EXPLICIT verdict decides first, so `'spending'` on a
+  money-in row means "this is a refund, net it" on EITHER account type — and
+  on a depository row that override is the ONLY way a debit-card refund can
+  ever net (Mason, 2026-08-17b). Without an override, only a CREDIT negative
+  nets automatically; a depository inflow defaults to income. (The wording here
+  used to read "the sign guards outrank the override, `'spending'` on money-in
+  is never honored"; both halves of that are now retired.) Loan rows ignore the
+  override entirely (a later retype to loan must not resurrect it), and a
+  non-null override beats BOTH card-payment vetoes. Income stays
+  depository-only: `'inflow'` on a credit negative keeps it out of both totals
+  — the override's way of saying "this is not a refund". `allowedUserTypes`
+  moves in lockstep, offering all four on every money-in row. Display: derived type restates these verdicts
   (`deriveTxType`), with one refinement — a PAIRED leg on a credit account or
   with payment wording displays Card payment, not Transfer (display-only;
   totals identical). `user_type` is user-owned (sync-omit Convention) and

@@ -135,8 +135,19 @@ export function isSpend(t) {
   // still guarded. Netting a debit-card refund is deliberately NOT built:
   // nothing structurally separates it from a paycheck (see CLAUDE.md).
   if (t.amount < 0) {
-    if (t.accounts?.type !== 'credit') return false;
+    // An EXPLICIT verdict answers first, on either account type (Mason,
+    // 2026-08-17b): 'spending' on a money-in row means "this is a refund, net
+    // it", and that is the only way a DEBIT-card refund can ever net. It has
+    // to be explicit because nothing structural separates a debit refund from
+    // a paycheck — both are unpaired depository inflows, and an automatic rule
+    // that got one wrong would subtract a salary from household spending and
+    // erase it from the Budget tab's measured income at the same time. A
+    // human saying so is the discriminator the data does not carry.
     if (t.user_type) return t.user_type === 'spending';
+    // No override: only a CREDIT negative nets automatically (a card's money
+    // in is a refund or a payment, never outside money). A depository inflow
+    // defaults to income.
+    if (t.accounts?.type !== 'credit') return false;
     return !isCardPaymentRow(t);
   }
   if (t.user_type) return t.user_type === 'spending';

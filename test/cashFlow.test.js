@@ -279,16 +279,27 @@ test("cashIncome: any non-'inflow' override vetoes income; 'inflow' on credit st
   assert.equal(cashIncome(rows), 500);
 });
 
-test("sign guard outranks the override: 'inflow' on money-out and 'spending' on money-in are inert", () => {
-  const rows = [
-    { accounts: CHK, amount: 80, user_type: 'inflow' }, // money out: not income…
-    { accounts: CHK, amount: -90, user_type: 'spending' }, // money in: not spending…
-  ];
-  assert.equal(cashIncome(rows), 0, "money-out 'inflow' never counts as income");
-  // …and the money-out 'inflow' row is not spending either (isSpend returns
-  // user_type === 'spending'), so an inert override removes the row from both
-  // totals rather than corrupting one — pinned in spending.test.js too.
-  assert.equal(cashSpending(rows), 0);
+test("the sign guard on money-OUT is unchanged; 'spending' on money-IN now nets (the refund verdict)", () => {
+  // 'inflow' on a money-out row stays inert in both directions — it is not
+  // income (money out never is) and isSpend returns false for a non-'spending'
+  // override, so the row leaves both totals rather than corrupting one.
+  const out80 = { accounts: CHK, amount: 80, user_type: 'inflow' };
+  assert.equal(cashIncome([out80]), 0, "money-out 'inflow' never counts as income");
+  assert.equal(cashSpending([out80]), 0);
+
+  // REVERSED 2026-08-17b (Mason): 'spending' on a DEPOSITORY money-in row used
+  // to be inert, guarded on the reasoning that honoring it "would ADD a
+  // negative to sumSpending". Netting is now the point — it is how a
+  // debit-card refund is filed, and the only way, since nothing structural
+  // tells one from a paycheck. It leaves income by the same act.
+  const debitRefund = { accounts: CHK, amount: -90, user_type: 'spending' };
+  assert.equal(cashSpending([debitRefund]), -90, 'the refund nets');
+  assert.equal(cashIncome([debitRefund]), 0, 'and is not income');
+  // The default is untouched: an un-overridden depository inflow is income and
+  // never spending. This is the line that protects every paycheck.
+  const paycheck = { accounts: CHK, amount: -2200, description: 'PAYROLL DIRECT DEP' };
+  assert.equal(cashIncome([paycheck]), 2200);
+  assert.equal(cashSpending([paycheck]), 0);
 });
 
 // --- isIncome: the ONE income predicate --------------------------------------
