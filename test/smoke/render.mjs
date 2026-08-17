@@ -91,6 +91,9 @@ const WALK = [
   ['home', '[data-mm-nav=home]'],
   ['plan', '[data-mm-nav=plan]'],
   ['spending', '[data-mm-nav=spending]'],
+  // The Spending search panel is collapsed behind the magnifier, so its input
+  // and filter row render for nobody unless we open it. Not a view of its own.
+  [null, '[data-mm-search-toggle]', 'opening the spending search panel'],
   ['accounts', '[data-mm-nav=accounts]'],
   ['debt', '[data-mm-seg=debt]'],
   ['reflect', '[data-mm-nav=reflect]'],
@@ -104,8 +107,8 @@ for (const report of ['categories', 'trends', 'recurring', 'tax', 'ask']) {
 
 const visited = [];
 if (!gotoError && navCount >= EXPECTED_NAV_ITEMS) {
-  for (const [view, selector] of WALK) {
-    where = view ? `view: ${view}` : 'returning to reflect';
+  for (const [view, selector, label] of WALK) {
+    where = view ? `view: ${view}` : label || 'returning to reflect';
     const el = await page.$(selector);
     if (!el) {
       await browser.close();

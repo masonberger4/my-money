@@ -4,7 +4,7 @@ import { detectRecurring } from '../../src/recurring.js';
 // THE unified spending model (Mason, 2026-08-03). This module is the assistant's
 // only spending figure, so it reads the SAME pure core every screen reads —
 // never a private fold. See the fold below for why that is load-bearing.
-import { aggregateEnvelopeSpending, isSpend, spendingGroups } from '../../src/spending.js';
+import { aggregateEnvelopeSpending, displayCategory, isSpend, spendingGroups } from '../../src/spending.js';
 import { markInternalTransfers } from '../../src/cashFlow.js';
 import { walkEnvelopes, shiftMonthKey } from '../../src/envelopes.js';
 import { isRangeExhaustedError } from '../../src/ruleHistory.js';
@@ -351,7 +351,12 @@ export function formatSpendingContext(accounts, txs, extras = {}) {
       description: t.description,
       transaction_date: t.date,
       amount: Number(t.amount),
-      category: t.mapped_category,
+      // The type-locked category, which detectRecurring's own transfer
+      // exclusion reads. It MUST be computed here rather than on the `usable`
+      // copies above: those are minted before the per-month pairing loop, so
+      // effectiveTxType would see no `_internal` there and every structurally
+      // washed sweep would read as an ordinary recurring charge.
+      category: displayCategory(t),
       account_id: t.account_id,
     })),
     maxDate || null
@@ -434,7 +439,7 @@ export function formatSpendingContext(accounts, txs, extras = {}) {
     const name = t.user_description || t.merchant_name || t.description || 'Card transaction';
     const skipped = Number(t.amount) > 0 && !isSpend(t);
     lines.push(
-      `${t.date} | ${acctLabel} | ${name} | ${t.mapped_category || 'Uncategorized'} | $${Number(t.amount).toFixed(2)}${skipped ? ' | not counted as spending' : ''}`
+      `${t.date} | ${acctLabel} | ${name} | ${displayCategory(t)} | $${Number(t.amount).toFixed(2)}${skipped ? ' | not counted as spending' : ''}`
     );
   }
 

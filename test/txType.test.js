@@ -39,7 +39,7 @@ test('derivation matrix: the four structural cases + loan', () => {
     deriveTxType(makeTx(A.checking, 'd3', '2026-07-05', 60, 'SAFEWAY 1467', { user_category: TRANSFER_CATEGORY })),
     'card_payment'
   );
-  // A DEPOSITORY negative is income, and displays Inflow.
+  // A DEPOSITORY negative is income, and displays "Income".
   assert.equal(deriveTxType(makeTx(A.checking, 'd4', '2026-07-05', -2500, 'PAYROLL DIRECT DEP')), 'inflow');
   // A CREDIT negative splits (2026-08-17, refund netting — this case used to
   // derive 'inflow' for both halves, back when every credit negative was a
@@ -100,6 +100,33 @@ test('every storable type has a label; loan has the display-only fifth', () => {
   assert.ok(TX_TYPE_LABELS.loan);
   assert.equal(TX_TYPES.length, 4, 'exactly four storable types');
   assert.ok(!TX_TYPES.includes('loan'), "'loan' is never storable");
+});
+
+// The labels are pinned BYTE-EXACT (thresholds-as-documentation): 'inflow' was
+// relabeled "Income" 2026-08-17 (Mason) as a DISPLAY-only change, and nothing
+// else in the suite reads a label string — so without this pin a half-done
+// rename, or a revert of one site, ships green. The STORED value stays
+// 'inflow' (the DB CHECK), which the derivation tests above assert.
+test('the display vocabulary is exactly this — a partial rename must go red', () => {
+  assert.deepEqual(TX_TYPE_LABELS, {
+    spending: 'Spending',
+    inflow: 'Income',
+    transfer: 'Transfer',
+    card_payment: 'Credit Card Payment',
+    loan: 'Loan',
+  });
+  // The one relabel on top: money-IN that counts as spending is a Refund.
+  assert.equal(txTypeLabel('spending', -25), 'Refund');
+  assert.equal(txTypeLabel('spending', 25), 'Spending');
+  assert.equal(txTypeLabel('inflow', -2500), 'Income');
+});
+
+// The Dashboard's disabled-option reason is a hardcoded string, not read from
+// TX_TYPE_LABELS — the one site a label rename can silently leave behind.
+test('source scan: the type menu\'s disabled reason uses the current vocabulary', () => {
+  const src = readFileSync(new URL('../src/components/Dashboard.jsx', import.meta.url), 'utf8');
+  assert.ok(src.includes("Money-out rows can't be Income."), 'the reason line names the label the menu shows');
+  assert.ok(!src.includes('Inflow'), 'no stale "Inflow" wording survives in the UI');
 });
 
 // --- allowedUserTypes (the selector policy) ------------------------------------
@@ -194,7 +221,7 @@ test('AGREEMENT: over a random overridden ledger, tx_type and the totals never d
         assert.ok(!incomeRows.has(t), `seed ${seed}: a ${ty} row is never income`);
       }
       if (ty === 'inflow' && t.accounts?.type === 'depository' && !t._internal) {
-        assert.ok(incomeRows.has(t), `seed ${seed}: a depository Inflow row IS income`);
+        assert.ok(incomeRows.has(t), `seed ${seed}: a depository Income row IS income`);
       }
     }
   }
