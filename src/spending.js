@@ -98,20 +98,26 @@ export function isCardPaymentRow(t) {
 // counter-leg exists on another visible linked account; run the pairing before
 // aggregating, or boundary-internal transfers will count), card payments
 // (isCardPaymentRow, paired or not), loan accounts' own ledger rows, excluded
-// rows, and money in (which is where "Return" lands — credit negatives are
-// never spending or income). NOTE the narrowed meaning of "Transfers and card
-// payments": the CATEGORY no longer excludes a row — internal is decided by
+// rows, and money in that is neither a card refund nor explicitly typed
+// "Refund" (see the money-in branch below — that clause used to read "money in,
+// which is where 'Return' lands, credit negatives are never spending or
+// income", and BOTH halves died on 2026-08-17). NOTE the narrowed meaning of
+// "Transfers and card payments": the CATEGORY no longer excludes a row — internal is decided by
 // structure, and only the card-payment verdict vetoes an unpaired row. An
 // unpaired transfer-worded row crossed the boundary and counts (it shows in
 // Categories under the transfer label — visible, like Uncategorized).
 //
-// The 4-type override (transactions.user_type, 2026-08-15) reads FOURTH, by
-// design — precedence is excluded > loan > sign > user_type > structure:
+// The 4-type override (transactions.user_type, 2026-08-15) — precedence is
+// excluded > loan > sign-ROUTING > user_type > structure:
 //   - excluded still wins overall (the existing full-exclusion escape);
 //   - loan rows IGNORE the override (Mason's rule: loan ledger rows never
 //     count — and an account retyped to loan later must not resurrect one);
-//   - the SIGN guard outranks it: 'spending' on a money-in row is inert
-//     (honoring it would ADD a negative and silently shrink sumSpending);
+//   - the SIGN no longer ANSWERS on money-in, it ROUTES to the branch below,
+//     where an explicit verdict is read FIRST (2026-08-17b). The retired
+//     wording — "the SIGN guard outranks it: 'spending' on a money-in row is
+//     inert, honoring it would ADD a negative and silently shrink
+//     sumSpending" — described the design refund netting replaced: adding a
+//     negative IS the feature now;
 //   - a non-null override then beats structure, INCLUDING both card-payment
 //     vetoes — an explicit 'spending' on a payment-worded row counts.
 // Overridden rows never enter markInternalTransfers' candidate pool, so
@@ -128,14 +134,10 @@ export function isSpend(t) {
   // refund cancels its own purchase and an untaught one lands in Uncategorized
   // where the teach queue asks who it belongs to.
   //
-  // Only a CREDIT-account negative can net, and that account gate outranks the
-  // override on purpose. On a card, money in is either a refund or a payment
-  // the household sent — both reversals of the card's own balance, never
-  // outside money. On a DEPOSITORY account money in is income (a paycheck),
-  // and honoring 'spending' there would subtract a $2,200 paycheck from
-  // household spending — the disaster the old sign guard was written for, and
-  // still guarded. Netting a debit-card refund is deliberately NOT built:
-  // nothing structurally separates it from a paycheck (see CLAUDE.md).
+  // (A paragraph here claimed "only a CREDIT-account negative can net, and that
+  // account gate outranks the override — netting a debit-card refund is
+  // deliberately NOT built". That was true for a few hours on 2026-08-17 and
+  // Mason reversed it the same day; the branch below is the shipped rule.)
   if (t.amount < 0) {
     // An EXPLICIT verdict answers first, on either account type (Mason,
     // 2026-08-17b): 'spending' on a money-in row means "this is a refund, net
@@ -183,9 +185,15 @@ export const TX_TYPES = ['spending', 'inflow', 'transfer', 'card_payment'];
 //                            legs would contradict the YNAB vocabulary this
 //                            exists to adopt; display-only, totals identical);
 //   unpaired positive     -> 'spending', or 'card_payment' via the veto;
-//   any negative          -> 'inflow' (a depository negative is income; it
-//                            DISPLAYS as "Income" — the stored value keeps its
-//                            original name, see src/txType.js);
+//   negative on a card    -> 'spending' (a refund — it NETS, so the rendered
+//                            type has to agree with the total it moves; the
+//                            sheet labels that case "Refund", txType.js), or
+//                            'card_payment' via the card-side veto;
+//   negative elsewhere    -> 'inflow' (a depository negative is income unless
+//                            a human typed it 'spending', which effectiveTxType
+//                            honours above this derivation); it DISPLAYS as
+//                            "Income" — the stored value keeps its original
+//                            name, see src/txType.js;
 //   loan-account rows     -> 'loan' first: they never count (isLoanAccount)
 //                            and IGNORE user_type — an account retyped to
 //                            loan must not resurrect an old override.

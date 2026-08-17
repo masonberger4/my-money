@@ -56,8 +56,11 @@ nothing below relitigates a decided item.
      account-type Convention refutes it in as many words: `isSpend` needs only
      `amount > 0` on a non-loan account, so a card's purchases count either
      way). The retype still mattered, for the three reasons that Convention
-     enumerates: refunds become income, card-payment-worded purchases get
-     vetoed, and the balance lands positive as an asset.
+     enumerates: refunds become income instead of NETTING (2026-08-17 —
+     the wording here said "become income" back when a credit negative was a
+     `Return` counting in nothing; the failure is the same, the mechanism
+     moved), card-payment-worded purchases get vetoed, and the balance lands
+     positive as an asset.
      **Mason's hypothesis, plausible and worth confirming: Capital One
      acquired Discover, so SimpleFIN pulling both the Capital One and
      Discover logins can surface the SAME card under two orgs.** Each row
@@ -335,10 +338,13 @@ prior backlog. Both are S/M with no blockers and no migration.*
    **The structural catch — three built-ins are MECHANISM, not taste, and must
    survive as internals hidden from the picker:** `Transfers and card
    payments` (the card-payment veto in `isCardPaymentRow` reads it — dropping
-   it lets card payments count as spending), `Return` (synthesised by
-   `applyAccountRules` for credit-card negatives; never spending, never
-   income), and `Uncategorized` (the "not taught yet" state — this design
-   needs it MORE, not less). Only the ~18 taste categories go.
+   it lets card payments count as spending), `Return` (**historical, as of
+   2026-08-17**: it WAS synthesised by `applyAccountRules` for credit-card
+   negatives and counted in neither total. That synthesis is deleted — a
+   refund now keeps the classifier's category and SUBTRACTS from it — and the
+   label survives in the mechanism set only so stored values stay inert), and
+   `Uncategorized` (the "not taught yet" state — this design needs it MORE,
+   not less). Only the ~18 taste categories go.
 
    **Surface to change:** `ERA_CATEGORIES` in `src/categoryMap.js` (5
    importers: Dashboard.jsx, txClassify.js, categoryMap.js + 2 tests); the
