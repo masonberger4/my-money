@@ -1187,12 +1187,19 @@ function IncomeSheet({report,when,busy,surf,acctById,acctLabel,acctColor,onPick,
                       {a&&<Pill label={acctLabel(a)} color={acctColor(a)} surface={surf.card}/>}
                     </div>
                   </div>
-                  {/* Every row here is money IN, so the row-level directional
-                      rule (PR C) renders it green and signed. Stored amounts
-                      are negative for money in; the sign is presentation. */}
-                  <div style={{fontSize:13,fontFamily:"'DM Mono',monospace",fontWeight:500,flexShrink:0,color:green}}>
-                    +{fmtX(Math.abs(t.amount))}
-                  </div>
+                  {/* Signed by CONTRIBUTION, not by assumption. Stored
+                      positive is money out, so `-amount` is what this row adds
+                      to the month's income — positive for an ordinary inflow,
+                      NEGATIVE for returned income (money that arrived and was
+                      sent back, 2026-08-19). A returned row printed green and
+                      "+" would claim the opposite of what it does to the total
+                      above it. */}
+                  {(()=>{const c=-t.amount;return (
+                    <div style={{fontSize:13,fontFamily:"'DM Mono',monospace",fontWeight:500,flexShrink:0,
+                      color:c<0?"var(--muted)":green}}>
+                      {c<0?"−":"+"}{fmtX(Math.abs(c))}
+                    </div>
+                  );})()}
                 </div>
               );
             })}
@@ -3156,16 +3163,22 @@ export default function Dashboard({ refreshTick = 0 }) {
   // category chip rows join the search box there, so the default list is the
   // month's transactions and nothing else.
   //
-  // The two extra terms are not optional. An ACTIVE chip filter forces the
-  // rows back on screen even while the panel is shut, because the chips are
-  // the ONLY way to clear one — the load-bearing half of the chips rule
-  // ("a selection must not erase the chips that clear it"), which hiding them
-  // would break far more thoroughly than a set filter erasing its own chip.
-  // It is also reachable without ever opening the panel: the Review banner
-  // sets txCatFilter directly. Same shape as the search panel's own
-  // `searchOpen||searchActive` gate, and the reason is the same — never strand
-  // a narrowed list with no visible control that explains it.
-  const refineOpen=searchOpen||searchActive||!!txAcctFilter||!!txCatFilter;
+  // BEHIND THE TOGGLE, FULL STOP (Mason, 2026-08-19: "the accounts and
+  // categories are still showing"). The first cut let an ACTIVE chip filter
+  // force its row back on screen, on the reasoning that the chips are the only
+  // way to clear one — but the Review banner sets txCatFilter without the
+  // panel, so in practice the rows reappeared during the single most common
+  // flow on the tab and the toggle looked broken. They are gated on
+  // `searchOpen` alone now.
+  //
+  // What replaces that safety net: `refineDirty` lights the magnifier itself
+  // (accent border, full-colour) whenever a filter is set, so a narrowed list
+  // always has a visible tell one tap from the control that clears it. The
+  // Review banner keeps its own "Show all" for the case it created. Closing
+  // still never DISCARDS a chip filter — that would lose the selection rather
+  // than hide it.
+  const refineOpen=searchOpen;
+  const refineDirty=!!txAcctFilter||!!txCatFilter;
   const searchTxs=searchRes?.transactions||[];
   // Account first, category second, so the category chips can be derived from
   // the account-filtered rows WITHOUT being narrowed by the category filter —
@@ -3217,17 +3230,14 @@ export default function Dashboard({ refreshTick = 0 }) {
   const lastToDate=overview?.last_month?.spending_to_date?.amount;
   const cmpBase=isCurrent&&lastToDate!=null?lastToDate:lastSpent;
   const delta=cmpBase!=null?totalSpent-cmpBase:null;
-  // Available credit on the card tile. NEVER through displayBalance — for a
-  // card this is available CREDIT, not a debt (the normalizeAvailableBalance
-  // key row) — and only for a SimpleFIN-fed row, because a never-re-pulled
-  // account can still hold an old two-convention value that must not be
-  // trusted. Null means the bank didn't send it: say nothing.
-  // getOverview already filters hidden=false, so a removed bank's rows can't
-  // reach this tile — but the gate is written out anyway so both display
-  // sites read the same, and so a future change to that query can't quietly
-  // start trusting a value no pull will ever restate.
-  const tileAvail=tileAcct&&isSimpleFinAccount(tileAcct)&&!tileAcct.hidden&&typeof tileAcct.available==="number"
-    ?tileAcct.available:null;
+  // TOMBSTONE — `tileAvail` lived here until 2026-08-19. It put the card's
+  // available CREDIT on the Overview tile's sub line, which is why that tile
+  // never named its account: the two facts shared one line and the number won.
+  // Mason's call is that the tile answers "which card, and what is on it", so
+  // the sub names the account and available credit stays on the ACCOUNT SHEET,
+  // which still renders it under the same rules (SimpleFIN-fed rows only,
+  // never through displayBalance — see the normalizeAvailableBalance key row).
+  // Don't reinstate it here without a second line to put it on.
   // Donut slices are non-text marks on the card -> 3:1.
   // POSITIVE slices only. A pie has no way to draw a negative wedge — a
   // negative sweep runs backwards and overlaps its neighbours — so a refunded
@@ -4020,11 +4030,20 @@ export default function Dashboard({ refreshTick = 0 }) {
             // Cycles through unhidden credit accounts: click/tap advances,
             // horizontal swipe goes either way (with an intent threshold so it
             // never claims a vertical page scroll). Selection is a device pref.
-            // The sub names the account, or — when the feed sent it — the room
-            // left on the card, which is the question actually being asked at
-            // a checkout ("can this go on this card?"). The name is still one
-            // tap away in the Accounts tab; the number isn't anywhere else.
-            {label:"Card balance",val:loading?null:fmt(balance),sub:loading?tileAcct?.name||"Linked account":tileAvail!=null?`${fmt(tileAvail)} left`:tileAcct?.name||"Linked account",cycle:!loading&&creditAccts.length>1},
+            // The tile answers two questions and only two (Mason, 2026-08-19):
+            // WHICH card, and what is on it. The value is the balance; the sub
+            // names the account, always. It used to show the name OR the
+            // available credit, so a SimpleFIN-fed card — the common case —
+            // never said which card it was, and the cycle dots tell you only
+            // that there are others, not which one you are on. Available
+            // credit was tried on a second line here and cut: it is a
+            // different question ("can this go on this card?") and it still
+            // lives on the account sheet. The name reads through the shared
+            // acctLabel, so the tile calls the card whatever the Accounts tab
+            // calls it — which needs `nickname` on getOverview's rows.
+            {label:"Card balance",val:loading?null:fmt(balance),
+             sub:acctLabel(tileAcct)||"Linked account",
+             cycle:!loading&&creditAccts.length>1},
             // Same-point comparison while the month is in progress (see cmpBase)
             // — the sub says which, so the number is never ambiguous.
             {label:"vs last month",val:loading||delta==null?null:`${delta>=0?"+":""}${fmt(delta)}`,sub:delta==null?"—":`${delta>=0?"↑ more":"↓ less"}${isCurrent&&lastToDate!=null?" so far":" spending"}`,clr:delta==null?"var(--muted)":inkOn(delta>=0?"#D85A30":"#1D9E75",surf.card)},
@@ -4896,8 +4915,8 @@ export default function Dashboard({ refreshTick = 0 }) {
                     what the smoke WALK clicks — this JSX is collapsed by
                     default and would otherwise never render in CI. */}
                 <button className="nbtn" data-mm-search-toggle=""
-                  title={searchOpen?"Close search and filters":"Search and filter transactions"}
-                  aria-label={searchOpen?"Close search and filters":"Search and filter transactions"}
+                  title={searchOpen?"Close search and filters":refineDirty?"Filters are on — tap to change them":"Search and filter transactions"}
+                  aria-label={searchOpen?"Close search and filters":refineDirty?"Filters are on — tap to change them":"Search and filter transactions"}
                   aria-expanded={searchOpen}
                   onClick={()=>{
                     if(searchOpen){
@@ -4905,9 +4924,9 @@ export default function Dashboard({ refreshTick = 0 }) {
                       setSearchOpen(false);
                     }else setSearchOpen(true);
                   }}
-                  style={{width:32,height:32,flexShrink:0,...(searchOpen?{borderColor:"var(--accent)"}:{})}}>
+                  style={{width:32,height:32,flexShrink:0,...(searchOpen||refineDirty?{borderColor:"var(--accent)"}:{})}}>
                   <span aria-hidden="true" style={{fontSize:15,lineHeight:1,
-                    filter:searchOpen?"none":"grayscale(1)",opacity:searchOpen?1:.75}}>🔍</span>
+                    filter:searchOpen||refineDirty?"none":"grayscale(1)",opacity:searchOpen||refineDirty?1:.75}}>🔍</span>
                 </button>
               </div>
             </div>

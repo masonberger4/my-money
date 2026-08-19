@@ -189,12 +189,23 @@ export function cashSpending(txs) {
 // verdict per row asks here. Behaviour is unchanged.
 export function isIncome(t) {
   if (t.excluded || t._internal) return false;
-  if (t.accounts?.type !== 'depository' || t.amount >= 0) return false;
-  // The 4-type override: any non-'inflow' verdict vetoes income; 'inflow'
-  // (which also pulled the row out of the pairing pool) forces a
-  // falsely-washed paycheck to count. The depository-only gate above stays
-  // OUTSIDE the override — income counts depository inflows ONLY, so
-  // 'inflow' on a credit negative behaves like Return: in neither total.
+  // Income is DEPOSITORY-only, in both directions. A credit-account row is
+  // never income: its negatives are refunds (negative SPENDING since
+  // 2026-08-17) or payments received.
+  if (t.accounts?.type !== 'depository') return false;
+  // MONEY OUT counts as income ONLY on an explicit 'inflow' verdict, and it
+  // counts NEGATIVELY (Mason, 2026-08-19: money that arrived as income and was
+  // sent back — an overpayment returned to its sender — "should lower my
+  // income for the month rather than treating the transaction as spending").
+  // This is the mirror of refund netting on the income side, and it needs the
+  // same explicit verdict for the same reason: nothing structural separates a
+  // returned payment from an ordinary outflow, so guessing would silently move
+  // real spending into the income line.
+  if (t.amount > 0) return t.user_type === 'inflow';
+  if (!t.amount) return false;
+  // Money in. The 4-type override: any non-'inflow' verdict vetoes income;
+  // 'inflow' (which also pulled the row out of the pairing pool) forces a
+  // falsely-washed paycheck to count.
   if (t.user_type && t.user_type !== 'inflow') return false;
   return true;
 }
@@ -202,8 +213,14 @@ export function isIncome(t) {
 // Exported for the CSV-import dry-run harness (see markInternalTransfers).
 export function cashIncome(txs) {
   let total = 0;
+  // `-t.amount`, not `Math.abs(t.amount)`: stored positive is money OUT, so
+  // negating turns an ordinary inflow (stored negative) into a positive
+  // contribution and a RETURNED one (stored positive) into the subtraction it
+  // is. Identical arithmetic to the old fold for every row that could reach it
+  // before — every admitted row was negative — and the only thing that makes
+  // the returned-income verdict actually lower the month's income.
   for (const t of txs) {
-    if (isIncome(t)) total += Math.abs(t.amount);
+    if (isIncome(t)) total += -t.amount;
   }
   return total;
 }

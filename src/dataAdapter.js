@@ -296,7 +296,7 @@ export async function getOverview() {
     // normalizeAvailableBalance key row). plaid_account_id rides along so the
     // tile can tell a SimpleFIN-fed row (whose value this pull restated) from
     // a never-re-pulled one that may still hold an old two-convention value.
-    .select('id, name, mask, type, current_balance, available_balance, plaid_account_id, last_balance_at')
+    .select('id, nickname, name, mask, type, current_balance, available_balance, plaid_account_id, last_balance_at')
     .eq('hidden', false);
   if (error) throw error;
 
@@ -316,6 +316,12 @@ export async function getOverview() {
       available: a.available_balance ?? null,
       plaid_account_id: a.plaid_account_id,
       last_balance_at: a.last_balance_at ?? null,
+      // nickname rides along (additive, the `id` precedent) so the Overview
+      // card tile can name its account through the SAME acctLabel() every
+      // other surface uses — without it the tile would print the raw bank
+      // name while the Accounts tab shows the household's own label for the
+      // same card.
+      nickname: a.nickname,
       name: a.name,
       mask: a.mask,
       type: a.type,

@@ -280,12 +280,22 @@ test("cashIncome: any non-'inflow' override vetoes income; 'inflow' on credit st
 });
 
 test("the sign guard on money-OUT is unchanged; 'spending' on money-IN now nets (the refund verdict)", () => {
-  // 'inflow' on a money-out row stays inert in both directions — it is not
-  // income (money out never is) and isSpend returns false for a non-'spending'
-  // override, so the row leaves both totals rather than corrupting one.
-  const out80 = { accounts: CHK, amount: 80, user_type: 'inflow' };
-  assert.equal(cashIncome([out80]), 0, "money-out 'inflow' never counts as income");
-  assert.equal(cashSpending([out80]), 0);
+  // REVERSED 2026-08-19 (Mason): 'inflow' on a money-OUT row used to be inert
+  // in both directions. It is now the RETURNED-INCOME verdict — income that
+  // arrived and was sent back (an overpayment returned to its sender) — so it
+  // SUBTRACTS from the month's income instead of counting as spending.
+  const returned = { accounts: CHK, amount: 960, user_type: 'inflow' };
+  assert.equal(cashIncome([returned]), -960, 'returned income lowers income');
+  assert.equal(cashSpending([returned]), 0, 'and never becomes spending');
+  // The pair it exists for cancels exactly: $960 in, $960 back out.
+  assert.equal(cashIncome([{ accounts: CHK, amount: -960 }, returned]), 0);
+  // Still requires the EXPLICIT verdict — an ordinary outflow is spending.
+  const plain = { accounts: CHK, amount: 960, description: 'ZELLE TO SOMEONE' };
+  assert.equal(cashIncome([plain]), 0, 'no verdict, no income');
+  assert.equal(cashSpending([plain]), 960);
+  // Income stays DEPOSITORY-only in both directions: the same verdict on a
+  // credit row is not income (its money-in is a refund or a payment).
+  assert.equal(cashIncome([{ accounts: CC, amount: 960, user_type: 'inflow' }]), 0);
 
   // REVERSED 2026-08-17b (Mason): 'spending' on a DEPOSITORY money-in row used
   // to be inert, guarded on the reasoning that honoring it "would ADD a
