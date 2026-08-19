@@ -79,6 +79,14 @@ const AUG = [
   // and the lock's precedence over a real user_category render untested.
   raw('2026-08-06', 300.00, 'ZELLE TO CONTRACTOR', 'Home maintenance and improvement', 'a1',
     { user_type: 'transfer', user_category: 'Home maintenance and improvement' }),
+  // Returned income (2026-08-19, Mason's own case): money OUT of a depository
+  // account that the household typed 'inflow' — income arriving and being sent
+  // straight back, which LOWERS the month's income instead of counting as
+  // spending. The harness had no money-out 'inflow' at all, so the one row
+  // shape whose pill label the 2026-08-19 revert is about (plain "Income", not
+  // "Returned income") rendered for nobody. $960 is deliberately unmatched by
+  // any negative here, so the pairing can't wash it and hide the case.
+  raw('2026-08-07', 960.00, 'ZELLE TRANSFER', null, 'a1', { user_type: 'inflow' }),
 ];
 const JUL = [
   raw('2026-07-28', 92.10, 'SAFEWAY #1234 SEATTLE WA', 'Groceries', 'a3'),
