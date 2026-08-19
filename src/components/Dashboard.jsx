@@ -3150,6 +3150,22 @@ export default function Dashboard({ refreshTick = 0 }) {
   // months instead of the selected month; the account and category chips still
   // filter them.
   const searchActive=searchIsActive(searchQ,buildSearchFilters(searchFilters));
+  // Everything that NARROWS the Spending list lives behind the magnifier
+  // (Mason, 2026-08-17: "the accounts and categories toggles under spending
+  // should also live behind the magnifying glass toggle"). The account and
+  // category chip rows join the search box there, so the default list is the
+  // month's transactions and nothing else.
+  //
+  // The two extra terms are not optional. An ACTIVE chip filter forces the
+  // rows back on screen even while the panel is shut, because the chips are
+  // the ONLY way to clear one — the load-bearing half of the chips rule
+  // ("a selection must not erase the chips that clear it"), which hiding them
+  // would break far more thoroughly than a set filter erasing its own chip.
+  // It is also reachable without ever opening the panel: the Review banner
+  // sets txCatFilter directly. Same shape as the search panel's own
+  // `searchOpen||searchActive` gate, and the reason is the same — never strand
+  // a narrowed list with no visible control that explains it.
+  const refineOpen=searchOpen||searchActive||!!txAcctFilter||!!txCatFilter;
   const searchTxs=searchRes?.transactions||[];
   // Account first, category second, so the category chips can be derived from
   // the account-filtered rows WITHOUT being narrowed by the category filter —
@@ -4862,17 +4878,26 @@ export default function Dashboard({ refreshTick = 0 }) {
                     ?(searching?"searching…":`${shownSearch.length} match${shownSearch.length!==1?"es":""}`)
                     :`${shownTxs.length} transaction${shownTxs.length!==1?"s":""}`}
                 </span>
-                {/* Search disclosure toggle. Closing CLEARS the query AND the
-                    filters — collapsed ⇒ search inactive (the searchOpen
-                    invariant), so the list can never sit on cross-month results
-                    with no visible input. The emoji takes the .bnav-ico
-                    treatment (emoji ignore CSS color) so it reads monochrome
-                    idle and full-colour + accent-bordered while open. The
-                    data hook is what the smoke WALK clicks — this JSX is
-                    collapsed by default and would otherwise never render in CI. */}
+                {/* The refine disclosure — search box, amount/date filters AND
+                    (since 2026-08-17) the account and category chip rows.
+                    Closing CLEARS the query and the search filters: collapsed ⇒
+                    search inactive (the searchOpen invariant), so the list can
+                    never sit on cross-month results with no visible input.
+                    It deliberately does NOT clear the CHIP filters. They are
+                    month-browse state, not search state, and a user who filters
+                    to Groceries and then collapses the panel to get the screen
+                    back wants the filter kept — so `refineOpen` keeps the chips
+                    on screen while one is set, rather than the toggle throwing
+                    the selection away. Every narrowing control is therefore
+                    either visible or inactive, which is the invariant that
+                    actually matters. The emoji takes the .bnav-ico treatment
+                    (emoji ignore CSS color) so it reads monochrome idle and
+                    full-colour + accent-bordered while open. The data hook is
+                    what the smoke WALK clicks — this JSX is collapsed by
+                    default and would otherwise never render in CI. */}
                 <button className="nbtn" data-mm-search-toggle=""
-                  title={searchOpen?"Close search":"Search transactions"}
-                  aria-label={searchOpen?"Close search":"Search transactions"}
+                  title={searchOpen?"Close search and filters":"Search and filter transactions"}
+                  aria-label={searchOpen?"Close search and filters":"Search and filter transactions"}
                   aria-expanded={searchOpen}
                   onClick={()=>{
                     if(searchOpen){
@@ -4949,7 +4974,7 @@ export default function Dashboard({ refreshTick = 0 }) {
               );
             })()}
             </>)}
-            {accounts.filter(a=>!a.hidden).length>1&&(
+            {refineOpen&&accounts.filter(a=>!a.hidden).length>1&&(
               <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:12}}>
                 {/* "All accounts" has no palette colour of its own — it stays on
                     tokens (it used to ask for `var(--muted)22`, which is not a
@@ -4981,7 +5006,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                 The `||txCatFilter` in the guard is load-bearing — without it a
                 pool that collapses to one category unmounts the row while the
                 filter is still applied, taking "All categories" with it. */}
-            {(catChips.length>1||txCatFilter)&&(
+            {refineOpen&&(catChips.length>1||txCatFilter)&&(
               <div style={{display:"flex",gap:6,flexWrap:"nowrap",overflowX:"auto",overflowY:"hidden",
                 marginBottom:12,paddingBottom:2,scrollbarWidth:"none",WebkitOverflowScrolling:"touch"}}>
                 {[{cat:null,label:"All categories",color:null},...catChips.map(c=>({cat:c,label:getName(c),color:getColor(c)}))].map(c=>{
