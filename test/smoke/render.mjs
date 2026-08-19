@@ -91,8 +91,9 @@ const WALK = [
   ['home', '[data-mm-nav=home]'],
   ['plan', '[data-mm-nav=plan]'],
   ['spending', '[data-mm-nav=spending]'],
-  // The Spending search panel is collapsed behind the magnifier, so its input
-  // and filter row render for nobody unless we open it. Not a view of its own.
+  // The Spending refine panel is collapsed behind the magnifier, so its input,
+  // filter row AND (since 2026-08-17) the account + category chip rows render
+  // for nobody unless we open it. Not a view of its own.
   [null, '[data-mm-search-toggle]', 'opening the spending search panel'],
   ['accounts', '[data-mm-nav=accounts]'],
   ['debt', '[data-mm-seg=debt]'],
