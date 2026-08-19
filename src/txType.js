@@ -44,6 +44,12 @@ export const TX_TYPE_LABELS = {
 // vocabulary stays the four TX_TYPES.
 export function txTypeLabel(type, amount) {
   if (type === 'spending' && amount < 0) return 'Refund';
+  // The mirror case (2026-08-19): money OUT that counts as income is income
+  // being GIVEN BACK — an overpayment returned to its sender. It has to store
+  // 'inflow' so the model subtracts it from the month's income, but printing
+  // "Income" on money leaving reads as a bug, exactly as "Spending" does on
+  // money coming back.
+  if (type === 'inflow' && amount > 0) return 'Returned income';
   return TX_TYPE_LABELS[type] || type;
 }
 
@@ -62,6 +68,10 @@ export function txTypeLabel(type, amount) {
 // The sheet renders the missing option disabled with a one-line reason.
 export function allowedUserTypes(t) {
   if (isLoanAccount(t)) return [];
-  if (t.amount > 0) return ['spending', 'transfer', 'card_payment'];
+  // All four on EITHER direction since 2026-08-19. 'inflow' on a money-OUT row
+  // used to be withheld as inert; it is now the returned-income verdict, which
+  // subtracts from the month's income instead of counting as spending — the
+  // mirror of 'spending' on a money-in row meaning "refund, net it". Both are
+  // relabelled by txTypeLabel so neither reads as its own opposite.
   return ['spending', 'inflow', 'transfer', 'card_payment'];
 }

@@ -134,7 +134,12 @@ test('source scan: the type menu\'s disabled reason uses the current vocabulary'
 test('allowedUserTypes mirrors the model: no inert option is ever offered', () => {
   const out = makeTx(A.checking, 'a1', '2026-07-05', 50, 'SAFEWAY 1467');
   const inn = makeTx(A.checking, 'a2', '2026-07-05', -50, 'REFUND');
-  assert.deepEqual(allowedUserTypes(out), ['spending', 'transfer', 'card_payment']);
+  // Money-out rows are offered 'inflow' too since 2026-08-19 — the
+  // returned-income verdict, which subtracts from the month's income rather
+  // than counting as spending. It is no longer inert, so withholding it would
+  // hide a real verdict.
+  assert.deepEqual(allowedUserTypes(out), ['spending', 'inflow', 'transfer', 'card_payment']);
+  assert.equal(txTypeLabel('inflow', 960), 'Returned income', 'and it never reads plain "Income" on money out');
   // Money-in rows are offered 'spending' too since 2026-08-17b (Mason): on a
   // DEPOSITORY row it is the only way a debit-card refund can ever net,
   // because nothing structural separates one from a paycheck. It is no longer
@@ -174,13 +179,18 @@ test('AGREEMENT: over a random overridden ledger, tx_type and the totals never d
     const incomeRows = new Set();
     for (const t of rows) {
       if (t.excluded || t._internal) continue;
-      if (t.accounts?.type === 'depository' && t.amount < 0 && (!t.user_type || t.user_type === 'inflow')) {
+      // Money IN with no veto, OR money OUT carrying the explicit
+      // returned-income verdict (2026-08-19) — the decomposition has to cover
+      // both or it stops matching the fold.
+      if (t.accounts?.type === 'depository'
+        && (t.amount < 0 ? (!t.user_type || t.user_type === 'inflow') : t.user_type === 'inflow')) {
         incomeRows.add(t);
       }
     }
     const income = cashIncome(rows);
     let incomeSum = 0;
-    for (const t of incomeRows) incomeSum += Math.abs(t.amount);
+    // Signed, like the fold: a returned-income row (stored positive) subtracts.
+    for (const t of incomeRows) incomeSum += -t.amount;
     assert.ok(Math.abs(income - incomeSum) < 0.01, `seed ${seed}: income decomposition`);
 
     for (const t of rows) {
