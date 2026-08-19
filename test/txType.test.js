@@ -119,14 +119,28 @@ test('the display vocabulary is exactly this — a partial rename must go red', 
   assert.equal(txTypeLabel('spending', -25), 'Refund');
   assert.equal(txTypeLabel('spending', 25), 'Spending');
   assert.equal(txTypeLabel('inflow', -2500), 'Income');
+  // And it is the ONLY one. A "Returned income" relabel for the mirror case
+  // shipped and was reverted the same day (Mason, 2026-08-19: "this should be
+  // just income, not returned income. the negative value is what informs if
+  // the income is increasing or decreasing") — the row renders its amount
+  // signed, so the direction is already on screen and a second name for the
+  // same verdict makes the menu read as five types.
+  assert.equal(txTypeLabel('inflow', 960), 'Income');
 });
 
-// The Dashboard's disabled-option reason is a hardcoded string, not read from
-// TX_TYPE_LABELS — the one site a label rename can silently leave behind.
-test('source scan: the type menu\'s disabled reason uses the current vocabulary', () => {
+// Type labels reach the UI through txTypeLabel/TX_TYPE_LABELS, so a rename is
+// covered by the byte-exact pin above — EXCEPT at any site that hardcodes a
+// label in prose. Two such sites have existed and both are now retired; this
+// scan keeps them retired, since a hardcoded string is exactly what a rename
+// (or, here, a REVERTED rename) leaves behind.
+test('source scan: no retired type vocabulary survives in the UI', () => {
   const src = readFileSync(new URL('../src/components/Dashboard.jsx', import.meta.url), 'utf8');
-  assert.ok(src.includes("Money-out rows can't be Income."), 'the reason line names the label the menu shows');
   assert.ok(!src.includes('Inflow'), 'no stale "Inflow" wording survives in the UI');
+  assert.ok(!src.includes('Returned income'), 'the reverted relabel never comes back hardcoded');
+  // The menu's disabled-option reason named the one verdict the policy used to
+  // withhold ('inflow' on money out). That withholding ended 2026-08-19, which
+  // made both the branch unreachable and the sentence false.
+  assert.ok(!src.includes("Money-out rows can't be Income."), 'the dead disabled reason is gone');
 });
 
 // --- allowedUserTypes (the selector policy) ------------------------------------
@@ -139,7 +153,7 @@ test('allowedUserTypes mirrors the model: no inert option is ever offered', () =
   // than counting as spending. It is no longer inert, so withholding it would
   // hide a real verdict.
   assert.deepEqual(allowedUserTypes(out), ['spending', 'inflow', 'transfer', 'card_payment']);
-  assert.equal(txTypeLabel('inflow', 960), 'Returned income', 'and it never reads plain "Income" on money out');
+  assert.equal(cashIncome([{ ...out, user_type: 'inflow' }]), -50, '…and it really subtracts');
   // Money-in rows are offered 'spending' too since 2026-08-17b (Mason): on a
   // DEPOSITORY row it is the only way a debit-card refund can ever net,
   // because nothing structural separates one from a paycheck. It is no longer

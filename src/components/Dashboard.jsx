@@ -6822,11 +6822,16 @@ export default function Dashboard({ refreshTick = 0 }) {
               </div>
             </div>
             <div style={{padding:"14px 16px 24px",display:"flex",flexDirection:"column",gap:12,maxWidth:560,margin:"0 auto",width:"100%"}}>
-            {/* The four-type menu. All four render; a sign-incompatible one is
-                DISABLED with the reason — the UI mirror of the model's sign
-                guards, so the menu can never offer a verdict the totals would
-                ignore (allowedUserTypes). Selecting the structural answer
-                stores null (the user_category null-equals-automatic shape). */}
+            {/* The four-type menu, mirroring allowedUserTypes so it can never
+                offer a verdict the totals would ignore. Every row that reaches
+                here is offered ALL FOUR: money-in rows since refund netting
+                (2026-08-17), money-out rows since returned income (2026-08-19),
+                and loan rows — the only shape the policy withholds anything
+                for — get the static label above instead of a menu. The
+                `disabled` guard stays as the mirror's enforcement, so a future
+                narrowing dims the option rather than silently offering an inert
+                one. Selecting the structural answer stores null (the
+                user_category null-equals-automatic shape). */}
             {menuOpen&&(
               <div className="card" style={{padding:"6px 0"}}>
                 {TX_TYPES.map(ty=>{
@@ -6851,15 +6856,6 @@ export default function Dashboard({ refreshTick = 0 }) {
                         <span aria-hidden="true" style={{width:16,flexShrink:0,color:"var(--accent)"}}>{active?"✓":""}</span>
                         {txTypeLabel(ty,selTx.amount)}
                       </button>
-                      {!allowed&&(
-                        <div style={{fontSize:10,color:"var(--muted)",padding:"0 16px 8px 42px",marginTop:-6}}>
-                          {/* The only option allowedUserTypes ever withholds:
-                              'inflow' on a money-out row (money-in rows are
-                              offered all four since refund netting, and loan
-                              rows never open this menu). */}
-                          Money-out rows can't be Income.
-                        </div>
-                      )}
                     </div>
                   );
                 })}
