@@ -1149,9 +1149,10 @@ function IncomeSheet({report,when,busy,surf,acctById,acctLabel,acctColor,onPick,
             {report.sections.length>1&&<> · {fmt(report.average)}/mo</>}</>}
         </div>
         <div style={{fontSize:10,color:"var(--muted)",lineHeight:1.5,marginBottom:14}}>
-          Money arriving in a checking or savings account from outside your linked accounts.
-          Moves between your own accounts are matched up and left out, and money back on a credit
-          card is a refund, not income.
+          Money arriving from outside your linked accounts — counted automatically for checking
+          and savings, and anywhere you marked a transaction Income yourself. Moves between your
+          own accounts are matched up and left out, money back on a credit card is a refund unless
+          you say otherwise, and income you sent back subtracts.
         </div>
 
         {pending?<Sk h={90}/>:report.sections.length===0?(
