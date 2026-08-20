@@ -87,6 +87,13 @@ const AUG = [
   // "Returned income") rendered for nobody. $960 is deliberately unmatched by
   // any negative here, so the pairing can't wash it and hide the case.
   raw('2026-08-07', 960.00, 'ZELLE TRANSFER', null, 'a1', { user_type: 'inflow' }),
+  // Income on a CREDIT account (2026-08-19b): a rebate credited straight to the
+  // card, which the household typed Income. Before that change this row
+  // rendered the word "Income" and contributed to no total at all — the
+  // label/total disagreement the agreement property test could not see, because
+  // its income decomposition exempted credit rows. It belongs in the harness so
+  // an income row sourced from a card actually renders somewhere in CI.
+  raw('2026-08-08', -140.00, 'MANUFACTURER REBATE', null, 'a3', { user_type: 'inflow' }),
 ];
 const JUL = [
   raw('2026-07-28', 92.10, 'SAFEWAY #1234 SEATTLE WA', 'Groceries', 'a3'),

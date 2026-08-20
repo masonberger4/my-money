@@ -20,6 +20,7 @@ const day = isoStr => {
 const CHK = { type: 'depository', subtype: 'checking' };
 const SAV = { type: 'depository', subtype: 'savings' };
 const CC = { type: 'credit', subtype: 'credit card' };
+const LOAN = { type: 'loan', subtype: 'mortgage' };
 
 let seq = 0;
 function out(amount, dayOffset, account_id = 'acc-chk', accounts = CHK) {
@@ -268,15 +269,21 @@ test("user_type 'transfer' lands a row in neither total, paired or not", () => {
   assert.equal(cashIncome([o, i]), 0);
 });
 
-test("cashIncome: any non-'inflow' override vetoes income; 'inflow' on credit stays non-income (Return)", () => {
+test("cashIncome: any non-'inflow' override vetoes income; 'inflow' counts on ANY non-loan account", () => {
   const rows = [
     { accounts: CHK, amount: -500, user_type: 'transfer' }, // vetoed
     { accounts: CHK, amount: -400, user_type: 'card_payment' }, // vetoed
     { accounts: CHK, amount: -300, user_type: 'inflow' }, // counts
     { accounts: CHK, amount: -200 }, // structural income, still counts
-    { accounts: CC, amount: -100, user_type: 'inflow' }, // credit: NEVER income
+    // REVERSED 2026-08-19b (Mason: "Why is income depository only? Income is
+    // simply a category name that tracks transactions as 'income'"). This row
+    // used to be pinned at 0 under the name "(Return)" — the depository gate
+    // ran before isIncome ever read user_type, so it overruled the human, not
+    // just the guess. An explicit verdict now lands on any non-loan account.
+    { accounts: CC, amount: -100, user_type: 'inflow' }, // credit + explicit verdict: counts
+    { accounts: LOAN, amount: -900, user_type: 'inflow' }, // loan rows still ignore user_type
   ];
-  assert.equal(cashIncome(rows), 500);
+  assert.equal(cashIncome(rows), 600);
 });
 
 test("the sign guard on money-OUT is unchanged; 'spending' on money-IN now nets (the refund verdict)", () => {
@@ -293,9 +300,16 @@ test("the sign guard on money-OUT is unchanged; 'spending' on money-IN now nets 
   const plain = { accounts: CHK, amount: 960, description: 'ZELLE TO SOMEONE' };
   assert.equal(cashIncome([plain]), 0, 'no verdict, no income');
   assert.equal(cashSpending([plain]), 960);
-  // Income stays DEPOSITORY-only in both directions: the same verdict on a
-  // credit row is not income (its money-in is a refund or a payment).
-  assert.equal(cashIncome([{ accounts: CC, amount: 960, user_type: 'inflow' }]), 0);
+  // The verdict is SYMMETRIC across account types too (2026-08-19b) — the same
+  // returned-income shape on a credit account subtracts identically. Money that
+  // arrived as income and went back lowers income wherever it landed; only the
+  // AUTOMATIC path is depository-only.
+  assert.equal(cashIncome([{ accounts: CC, amount: 960, user_type: 'inflow' }]), -960);
+  assert.equal(cashSpending([{ accounts: CC, amount: 960, user_type: 'inflow' }]), 0,
+    'and it is not spending either — no row is ever in both totals');
+  // Loan rows are the one shape the override cannot reach, in either direction.
+  assert.equal(cashIncome([{ accounts: LOAN, amount: 960, user_type: 'inflow' }]), 0);
+  assert.equal(cashIncome([{ accounts: LOAN, amount: -960, user_type: 'inflow' }]), 0);
 
   // REVERSED 2026-08-17b (Mason): 'spending' on a DEPOSITORY money-in row used
   // to be inert, guarded on the reasoning that honoring it "would ADD a
@@ -326,7 +340,7 @@ test('isIncome is exactly what cashIncome sums — same rows, same answer', () =
     { accounts: CHK, amount: -1000 }, // checking inflow → income
     { accounts: SAV, amount: -250 }, // savings inflow → income
     { accounts: { type: 'depository', subtype: null }, amount: -15 }, // lenient subtype
-    { accounts: CC, amount: -25 }, // credit refund → nets against spending, never income
+    { accounts: CC, amount: -25 }, // credit refund, NO override → nets against spending, never income
     { accounts: { type: 'loan', subtype: null }, amount: -500 }, // loan row → never income
     { accounts: CHK, amount: 50 }, // money out → not income
     { accounts: CHK, amount: 0 }, // a zero row is neither
@@ -334,19 +348,27 @@ test('isIncome is exactly what cashIncome sums — same rows, same answer', () =
     { accounts: CHK, amount: -40, excluded: true }, // hand-excluded
     { accounts: CHK, amount: -500, user_type: 'transfer' }, // override vetoes
     { accounts: CHK, amount: -300, user_type: 'inflow' }, // override forces
-    { accounts: CC, amount: -100, user_type: 'inflow' }, // credit stays out
-    { amount: -60 }, // no accounts join at all → not depository, not income
+    { accounts: CC, amount: -100, user_type: 'inflow' }, // credit + EXPLICIT verdict → income (2026-08-19b)
+    { accounts: CC, amount: 80, user_type: 'inflow' }, // …and the money-OUT mirror SUBTRACTS
+    { accounts: { type: 'loan', subtype: null }, amount: -700, user_type: 'inflow' }, // loan ignores the override
+    { amount: -60, user_type: 'inflow' }, // no accounts join at all → fails CLOSED, never income
   ];
   const admitted = rows.filter(isIncome);
   assert.deepEqual(
     admitted.map(r => r.amount),
-    [-1000, -250, -15, -300],
-    'exactly the four unpaired, un-vetoed depository inflows'
+    [-1000, -250, -15, -300, -100, 80],
+    'the four structural depository inflows plus both directions of the explicit verdict'
   );
   // The delegation invariant, stated both ways.
-  assert.equal(cashIncome(rows), 1565);
+  assert.equal(cashIncome(rows), 1585);
   assert.equal(
-    admitted.reduce((s, r) => s + Math.abs(r.amount), 0),
+    // `-r.amount`, NOT Math.abs: the fold signs itself, so a money-OUT row that
+    // counts as income SUBTRACTS. The old Math.abs form agreed with cashIncome
+    // only because this fixture happened to hold no money-out 'inflow' row —
+    // it had silently contradicted the fold since returned income shipped
+    // (2026-08-19), leaving the drill-in's can't-disagree guarantee unproven
+    // for exactly the rows that can go negative.
+    admitted.reduce((s, r) => s + -r.amount, 0),
     cashIncome(rows),
     'summing the admitted rows reproduces the fold — a drill-in listing them cannot disagree with the bar'
   );

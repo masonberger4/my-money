@@ -21,7 +21,7 @@
 // Hidden accounts are excluded at the QUERY level, so their legs never enter
 // pairing — a transfer to a hidden account is unpaired and counts as spending
 // (hidden = outside the linked boundary, by decision).
-import { sumSpending } from './spending.js';
+import { sumSpending, isLoanAccount } from './spending.js';
 
 const INTERNAL_MATCH_WINDOW_DAYS = 4;
 
@@ -189,25 +189,48 @@ export function cashSpending(txs) {
 // verdict per row asks here. Behaviour is unchanged.
 export function isIncome(t) {
   if (t.excluded || t._internal) return false;
-  // Income is DEPOSITORY-only, in both directions. A credit-account row is
-  // never income: its negatives are refunds (negative SPENDING since
-  // 2026-08-17) or payments received.
-  if (t.accounts?.type !== 'depository') return false;
-  // MONEY OUT counts as income ONLY on an explicit 'inflow' verdict, and it
-  // counts NEGATIVELY (Mason, 2026-08-19: money that arrived as income and was
-  // sent back — an overpayment returned to its sender — "should lower my
-  // income for the month rather than treating the transaction as spending").
-  // This is the mirror of refund netting on the income side, and it needs the
-  // same explicit verdict for the same reason: nothing structural separates a
-  // returned payment from an ordinary outflow, so guessing would silently move
-  // real spending into the income line.
-  if (t.amount > 0) return t.user_type === 'inflow';
+  // No accounts join, no verdict. Every real caller selects accounts.type
+  // (TX_COLUMNS / SPEND_TX_COLUMNS), so this is unreachable in production — it
+  // is here because the explicit branch below no longer passes through the
+  // depository check, which used to reject a joinless row as a side effect.
+  // Failing CLOSED is the conservative direction: a missing join must never
+  // manufacture income.
+  if (!t.accounts?.type) return false;
+  // Loan rows ignore user_type entirely (the linked-boundary Convention): the
+  // counted leg of a loan payment is the depository side, and a later retype
+  // must not resurrect the loan's own ledger row. This guard has to be
+  // EXPLICIT now — until 2026-08-19b the depository check below was the only
+  // thing keeping loan rows out, and the explicit branch would otherwise reach
+  // past it.
+  if (isLoanAccount(t)) return false;
   if (!t.amount) return false;
-  // Money in. The 4-type override: any non-'inflow' verdict vetoes income;
-  // 'inflow' (which also pulled the row out of the pairing pool) forces a
-  // falsely-washed paycheck to count.
-  if (t.user_type && t.user_type !== 'inflow') return false;
-  return true;
+  // AN EXPLICIT VERDICT ANSWERS ON ANY ACCOUNT TYPE (Mason, 2026-08-19b: "Why
+  // is income depository only? Income is simply a category name that tracks
+  // transactions as 'income'. If there is ever income that wasn't supposed to
+  // be received and needs to go back to the sender, then we want income
+  // reduced, not spending increased.")
+  //
+  // The depository gate below predates this feature by twelve days — it landed
+  // with the unified model (2026-08-03) and `user_type` did not exist until
+  // 2026-08-15, so the override was threaded in UNDERNEATH it rather than
+  // above. That ordering was never a decision about explicit verdicts, and it
+  // made income the ONE type where saying so out loud did not work: every
+  // other verdict lands on any non-loan row, and deriveTxType has no account
+  // gate at all — so a credit row typed Income rendered the word "Income" and
+  // contributed to nothing. Same precedent as the debit refund (2026-08-17b)
+  // and returned income (2026-08-19): where nothing structural separates the
+  // cases, the human is the discriminator.
+  //
+  // Both directions, by the same fold: money in adds, money out (income given
+  // back) subtracts, because cashIncome sums -t.amount.
+  if (t.user_type) return t.user_type === 'inflow';
+  // THE AUTOMATIC PATH IS UNCHANGED and stays DEPOSITORY-only, which is the
+  // half the original reason actually defends: with no override, a credit
+  // account's money-in is exhaustively {payment received, merchant refund} and
+  // neither is income — guessing otherwise would put $31k of card payments
+  // into the income line. Money out is never automatically income either.
+  if (t.accounts.type !== 'depository') return false;
+  return t.amount < 0;
 }
 
 // Exported for the CSV-import dry-run harness (see markInternalTransfers).

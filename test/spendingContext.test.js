@@ -102,6 +102,17 @@ test('a DEBIT-card refund nets once marked, and the context says that too', () =
   assert.ok(text.includes('- 2026-07 Groceries: $35.50'), `the debit refund nets:\n${text}`);
   assert.ok(!/never counts as spending/.test(text), 'the retired absolute is gone');
   assert.ok(/marked that row a Refund/.test(text), 'the exception IS stated');
+  // The INCOME half of the same sentence, pinned for the first time
+  // (2026-08-19b). It was the only clause here nothing asserted, and it had
+  // just been made false by moving the depository gate below the explicit
+  // verdict: the prompt would have kept telling the model income is
+  // checking/savings-only while a card row the household typed Income moved
+  // the figure the Trends card shows. Fragment-matched, like the clause above,
+  // so a rewording stays free but a reverted RULE goes red.
+  assert.ok(/marked Income counts as income whatever account it sits on/.test(text),
+    'the explicit Income verdict is stated as account-agnostic');
+  assert.ok(/only checking and savings are counted as income automatically/.test(text),
+    '…while the AUTOMATIC path is still stated as depository-only');
 });
 
 // --- Recurring + envelope sections -----------------------------------------

@@ -193,11 +193,17 @@ test('AGREEMENT: over a random overridden ledger, tx_type and the totals never d
     const incomeRows = new Set();
     for (const t of rows) {
       if (t.excluded || t._internal) continue;
-      // Money IN with no veto, OR money OUT carrying the explicit
-      // returned-income verdict (2026-08-19) — the decomposition has to cover
-      // both or it stops matching the fold.
-      if (t.accounts?.type === 'depository'
-        && (t.amount < 0 ? (!t.user_type || t.user_type === 'inflow') : t.user_type === 'inflow')) {
+      if (!t.accounts?.type || t.accounts.type === 'loan' || !t.amount) continue;
+      // Mirrors isIncome since 2026-08-19b: an EXPLICIT verdict answers on any
+      // non-loan account and in either direction (money out subtracts); with no
+      // override the automatic path is still depository money-in only. The old
+      // form hardcoded the depository gate ABOVE the override, which made this
+      // decomposition a shadow copy of the retired rule rather than of the
+      // predicate — and, worse, exempted every credit row from the invariants
+      // below, which is exactly why the credit-Income label/total disagreement
+      // went unnoticed for four days.
+      if (t.user_type ? t.user_type === 'inflow'
+        : (t.accounts.type === 'depository' && t.amount < 0)) {
         incomeRows.add(t);
       }
     }
@@ -244,8 +250,13 @@ test('AGREEMENT: over a random overridden ledger, tx_type and the totals never d
       if (ty === 'transfer' || ty === 'card_payment' || ty === 'loan') {
         assert.ok(!incomeRows.has(t), `seed ${seed}: a ${ty} row is never income`);
       }
-      if (ty === 'inflow' && t.accounts?.type === 'depository' && !t._internal) {
-        assert.ok(incomeRows.has(t), `seed ${seed}: a depository Income row IS income`);
+      // WIDENED 2026-08-19b from `=== 'depository'` to every non-loan account.
+      // Under the old scope a credit row could render the word "Income" and be
+      // in no total at all without this test noticing — the guarantee it exists
+      // to enforce was simply not asserted where it was being broken. Loan rows
+      // stay out: they render "Loan", never "Income".
+      if (ty === 'inflow' && t.accounts?.type !== 'loan' && t.amount && !t._internal) {
+        assert.ok(incomeRows.has(t), `seed ${seed}: a row rendering Income IS income (${t.accounts?.type})`);
       }
     }
   }
