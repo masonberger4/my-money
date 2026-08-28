@@ -56,8 +56,16 @@ All in `src/components/Dashboard.jsx` (plus one smoke-mock fidelity fix).
   `stopPropagation` wrapper swallowed single taps across the widest part of the
   row — the exact spot a thumb lands. Caught by the screenshot harness, whose
   centre-of-element click did nothing. The two gestures cannot share the row
-  either: a double-click's first click would navigate away. Rename and `Swatch`
-  moved to the account page's header, where nothing competes for the tap.
+  either: a double-click's first click would navigate away. Rename and the
+  editable `Swatch` moved to the account page's header, where nothing competes
+  for the tap; the tile's colour chip became the static `markOn` mark the Debt
+  tab already uses. **The first cut of this commit left the Swatch on the tile**
+  — an adversarial review of the diff caught it, four separate prose sites
+  (comment, commit message, CLAUDE.md, this doc) already claiming it had moved
+  while the code kept a 14px zone that swallowed the navigation tap and wrote a
+  colour to the database on a mis-tap. The lesson is the enforceable phrasing:
+  "wholly navigational" means the tile has NO interactive child, which is a
+  thing you can check, unlike "the tap area is big".
 - **Feed badges came off the tile.** `acctInst` already prints "Imported" or the
   bank's name on the line below, and a hidden account only ever renders inside the
   Hidden section at half opacity — so the badges were duplicating information

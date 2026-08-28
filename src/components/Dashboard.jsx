@@ -5206,17 +5206,20 @@ export default function Dashboard({ refreshTick = 0 }) {
               let ri=0;
               // A TILE (Mason, 2026-08-28: "tiles for each account that make a
               // large clickable rectangular area"): the whole row opens the
-              // account page. The two inner controls that are NOT navigation —
-              // the colour Swatch and the double-click-to-rename EditName —
-              // keep their stopPropagation wrappers, or editing a nickname
-              // would navigate away mid-edit.
+              // account page and holds NO interactive child, so no tap on it
+              // can land anywhere but navigation. The colour chip here is the
+              // STATIC `markOn` mark (the Debt tab's anatomy) — the editable
+              // Swatch and the double-click rename both live on the account
+              // page's header now. An editable swatch on the tile would be a
+              // 14px zone that swallows the navigation tap and writes a colour
+              // to the database on a mis-tap, on the one surface this restyle
+              // promises is navigation-only.
               const renderTile=a=>{const i=ri++;const bal=displayBalance(a.current_balance,a.type);return (
                 <div key={a.id} className="tx" style={{cursor:"pointer",padding:"13px 0",gap:10,
                   animationDelay:i*.03+"s",opacity:a.hidden?.5:1}}
                   onClick={()=>setSelAcct(a)}>
-                  <div onClick={e=>e.stopPropagation()} style={{display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
-                    <Swatch color={acctColor(a)} onChange={hex=>saveAccount(a.id,{color:hex})}/>
-                  </div>
+                  <span aria-hidden="true" style={{width:10,height:10,borderRadius:3,flexShrink:0,
+                    background:markOn(acctColor(a),surf.card)}}/>
                   <div style={{flex:1,minWidth:0}}>
                     {/* The name is PLAIN TEXT here and the rename moved to the
                         account's own page (2026-08-28). EditName opens on
