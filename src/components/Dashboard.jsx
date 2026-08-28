@@ -1769,6 +1769,22 @@ export default function Dashboard({ refreshTick = 0 }) {
   // (Safari private mode throws on ACCESS).
   const [cardTileId,setCardTileId]=useState(()=>{try{return localStorage.getItem("mm:cardTile")||null;}catch{return null;}});
   const cardSwipe=useRef(null);
+  // Accounts-tab section collapse (Mason, 2026-08-28: "open and closable
+  // carrots"): the list of COLLAPSED section labels, so the default is every
+  // section open — which is also what keeps the tiles rendering in CI's smoke
+  // walk (collapsed-by-default JSX renders for nobody there, the searchOpen
+  // lesson). DEVICE pref (localStorage, the mm:cardTile precedent — a
+  // settings-table pref would fold sections on the other phone); a stale label
+  // in storage never matches a rendered section and is harmless.
+  const [acctCollapsed,setAcctCollapsed]=useState(()=>{try{
+    const v=JSON.parse(localStorage.getItem("mm:acctCollapsed")||"[]");
+    return Array.isArray(v)?v.filter(x=>typeof x==="string"):[];
+  }catch{return [];}});
+  const toggleAcctSection=useCallback(label=>setAcctCollapsed(prev=>{
+    const next=prev.includes(label)?prev.filter(l=>l!==label):[...prev,label];
+    try{localStorage.setItem("mm:acctCollapsed",JSON.stringify(next));}catch{/* private mode: session-only */}
+    return next;
+  }),[]);
   // Hydrated from sessionStorage on mount, written back on change (see
   // CHAT_SS_KEY above) — scrollback survives a same-tab reload, not tab close.
   const [chatMsgs,setChatMsgs]=useState(readStoredChat);
@@ -5145,19 +5161,7 @@ export default function Dashboard({ refreshTick = 0 }) {
 
         {/* ACCOUNTS */}
         {tab==="accounts"&&!selAcct&&(
-          <div className="card">
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:10,marginBottom:4}}>
-              <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em"}}>Accounts</div>
-              <div style={{display:"flex",gap:6,flexWrap:"wrap",justifyContent:"flex-end"}}>
-                <button className="ibtn" style={{fontSize:11}} onClick={()=>setConnectingSfin(true)}>+ Add bank</button>
-                <button className="ibtn" style={{fontSize:11}} onClick={()=>setImporting(true)}>⤓ Import statement</button>
-              </div>
-            </div>
-            <div style={{fontSize:11,color:"var(--muted)",marginBottom:14}}>
-              Give each account a nickname and color — they tag every transaction across the app.
-              Connect banks through SimpleFIN, or import a statement (CSV or PDF) for history a
-              feed doesn't reach.
-            </div>
+          <div>
             {/* Removing the "Imported" institution soft-hides it (Mason,
                 2026-08-13) — this is its Restore, the counterpart of the one
                 in the SimpleFIN modal. It can't key on a disabled status the
@@ -5169,8 +5173,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                 The count is what the tap will actually unhide: ids still
                 present AND still hidden, so it can never over-promise. */}
             {restorable&&(
-              <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",marginBottom:14,
-                background:"var(--bg)",borderRadius:8,padding:"10px 12px"}}>
+              <div className="card" style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",marginBottom:12,padding:"12px 16px"}}>
                 <div style={{fontSize:11,color:"var(--muted)",flex:"1 1 160px",minWidth:0,lineHeight:1.5}}>
                   {restorable.length} imported account{restorable.length!==1?"s":""} removed from view.
                   Nothing was deleted — the transactions are still here.
@@ -5181,15 +5184,16 @@ export default function Dashboard({ refreshTick = 0 }) {
                 </button>
               </div>
             )}
-            {loading&&accounts.length===0?[1,2,3].map(i=><div key={i} style={{marginBottom:12}}><Sk h={40}/></div>):
+            {loading&&accounts.length===0?<div className="card">{[1,2,3].map(i=><div key={i} style={{marginBottom:12}}><Sk h={40}/></div>)}</div>:
               (()=>{
-              // Grouped sections (PR F, the YNAB accounts anatomy): Cash
-              // (every non-debt kind), Credit, Loans — each with a section
-              // total over its VISIBLE members' displayBalance (positive
-              // green, owed plain with the minus) — and hidden accounts sunk
-              // into a Hidden section at the bottom (their type is an
-              // unconfirmed guess; their balances stay out of every total,
-              // consistent with the query-level rule).
+              // Grouped sections (PR F, the YNAB accounts anatomy; COLLAPSIBLE
+              // since 2026-08-28): Cash (every non-debt kind), Credit, Loans —
+              // each with a section total over its VISIBLE members'
+              // displayBalance (positive green, owed plain with the minus) —
+              // and hidden accounts sunk into a Hidden section at the bottom
+              // (their type is an unconfirmed guess; their balances stay out of
+              // every total, consistent with the query-level rule, which is
+              // also why the Hidden header carries no figure).
               const visible=accounts.filter(a=>!a.hidden);
               const sections=[
                 ["Cash",visible.filter(a=>!isDebtType(a.type))],
@@ -5197,74 +5201,132 @@ export default function Dashboard({ refreshTick = 0 }) {
                 ["Loans",visible.filter(a=>a.type==="loan")],
               ].filter(([,list])=>list.length>0);
               const hiddenList=accounts.filter(a=>a.hidden);
+              // One animation-delay counter across every section, so the tiles
+              // cascade down the page rather than restarting per section.
               let ri=0;
-              const renderRow=a=>{const i=ri++;return (
-                <div key={a.id} className="tx" style={{cursor:"pointer",animationDelay:i*.03+"s",opacity:a.hidden?.5:1}}
+              // A TILE (Mason, 2026-08-28: "tiles for each account that make a
+              // large clickable rectangular area"): the whole row opens the
+              // account page. The two inner controls that are NOT navigation —
+              // the colour Swatch and the double-click-to-rename EditName —
+              // keep their stopPropagation wrappers, or editing a nickname
+              // would navigate away mid-edit.
+              const renderTile=a=>{const i=ri++;const bal=displayBalance(a.current_balance,a.type);return (
+                <div key={a.id} className="tx" style={{cursor:"pointer",padding:"13px 0",gap:10,
+                  animationDelay:i*.03+"s",opacity:a.hidden?.5:1}}
                   onClick={()=>setSelAcct(a)}>
                   <div onClick={e=>e.stopPropagation()} style={{display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
                     <Swatch color={acctColor(a)} onChange={hex=>saveAccount(a.id,{color:hex})}/>
                   </div>
                   <div style={{flex:1,minWidth:0}}>
-                    {/* Wraps, and the name keeps a flex-basis: a SimpleFIN
-                        account carries two badges, and EditName is flex:1
-                        minWidth:0, so without a basis it would shrink to
-                        "Member…" rather than letting the badges wrap. */}
-                    <div onClick={e=>e.stopPropagation()} style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
-                      <span style={{display:"flex",flex:"1 1 150px",minWidth:0}}>
-                        <EditName name={acctLabel(a)} onSave={v=>saveAccount(a.id,{nickname:v})}/>
-                      </span>
-                      {isManualAccount(a)&&<Pill label="Imported" color="#7F77DD" surface={surf.card}/>}
-                      {isSimpleFinAccount(a)&&<Pill label="SimpleFIN" color="#378ADD" surface={surf.card}/>}
-                      {a.hidden&&<Pill label="Hidden" color="#888780" surface={surf.card}/>}
-                    </div>
-                    <div style={{fontSize:11,color:"var(--muted)",marginTop:2}}>
+                    {/* The name is PLAIN TEXT here and the rename moved to the
+                        account's own page (2026-08-28). EditName opens on
+                        DOUBLE-click, so its stopPropagation wrapper used to
+                        swallow single taps across the widest part of the row —
+                        the one spot a thumb naturally lands — and a tile whose
+                        middle does nothing is not the "large clickable
+                        rectangular area" this restyle is for. The two gestures
+                        can't share the row either: the first click of a
+                        double-click would navigate away.
+                        The feed badges (Imported / SimpleFIN / Hidden) came off
+                        the tile with it, and lose nothing: a manual account's
+                        acctInst IS "Imported" and a fed one names its bank, both
+                        on the line below, while a hidden account is only ever
+                        rendered inside the Hidden section at half opacity. What
+                        they cost was a wrapped second line on every account
+                        whose name plus a badge overflowed 390px — the tiles are
+                        one name, one line again. The detail page still carries
+                        the full provenance. */}
+                    <div style={{fontSize:14,fontWeight:600,color:"var(--text)",
+                      whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{acctLabel(a)}</div>
+                    <div style={{fontSize:11,color:"var(--muted)",marginTop:3,
+                      whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
                       {[acctInst(a),`${a.name}${a.mask?` ··${a.mask}`:""}`,a.subtype||a.type].filter(Boolean).join(" · ")}
                     </div>
                   </div>
                   <div style={{textAlign:"right",flexShrink:0}}>
-                    <div style={{fontSize:13,fontFamily:"'DM Mono',monospace",fontWeight:500}}>{fmtX(displayBalance(a.current_balance,a.type))}</div>
+                    {/* Money-in green on the row itself, matching the section
+                        total above it and the reference: a positive
+                        displayBalance is cash on hand, a debt already carries
+                        its minus from displayBalance. */}
+                    <div style={{fontSize:14,fontFamily:"'DM Mono',monospace",fontWeight:600,
+                      color:bal>0?inkOn(OK_MONEY,surf.card):"var(--text)"}}>{fmtX(bal)}</div>
                     {/* An age only once it is worth knowing (BALANCE_STALE_DAYS),
                         and MUTED, never amber: a stale balance is a known limit
                         — a quiet feed, or a manual figure nobody has retyped —
                         not a fault, and amber has to keep meaning broken. Below
                         the threshold, and when nothing was ever stamped, this
-                        says nothing at all. */}
+                        says nothing at all: the chevron is the tap affordance
+                        now, so there is no filler line to keep. */}
                     {(()=>{
                       const asOf=balanceAsOf(a,now);
-                      if(!asOf||asOf.staleDays<BALANCE_STALE_DAYS)
-                        return <div style={{fontSize:10,color:"var(--muted)",marginTop:2}}>tap to view →</div>;
-                      return <div style={{fontSize:10,color:"var(--muted)",marginTop:2}}>as of {localShortDate(asOf.date)} →</div>;
+                      if(!asOf||asOf.staleDays<BALANCE_STALE_DAYS)return null;
+                      return <div style={{fontSize:10,color:"var(--muted)",marginTop:2}}>as of {localShortDate(asOf.date)}</div>;
                     })()}
                   </div>
+                  <span aria-hidden="true" style={{flexShrink:0,fontSize:18,lineHeight:1,color:"var(--muted)"}}>›</span>
                 </div>
               );};
-              return (<>
-                {sections.map(([label,list])=>{
-                  const total=list.reduce((s,a)=>s+displayBalance(Number(a.current_balance)||0,a.type),0);
-                  return (
-                    <div key={label}>
-                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 0 4px"}}>
-                        <span style={{fontSize:11,fontWeight:600,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em"}}>{label}</span>
-                        <span style={{fontSize:13,fontWeight:600,fontFamily:"'DM Mono',monospace",
-                          color:total>0?inkOn(OK_MONEY,surf.card):"var(--text)"}}>{fmtX(total)}</span>
-                      </div>
-                      {list.map(renderRow)}
-                    </div>
-                  );
-                })}
-                {hiddenList.length>0&&(
-                  <div>
-                    <div style={{padding:"10px 0 4px",fontSize:11,fontWeight:600,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em"}}>Hidden</div>
-                    {hiddenList.map(renderRow)}
+              // Header + body of one collapsible section. The header is a real
+              // <button> with aria-expanded (every other disclosure in here is
+              // a div; this one is the primary control of the screen), and the
+              // caret is the app's existing ▾/▸ vocabulary. Collapse state is
+              // a DEVICE pref keyed by label — see acctCollapsed.
+              const renderSection=(label,list,total)=>{
+                const open=!acctCollapsed.includes(label);
+                return (
+                  <div key={label} style={{marginBottom:open?14:2}}>
+                    <button type="button" aria-expanded={open} onClick={()=>toggleAcctSection(label)}
+                      style={{display:"flex",alignItems:"center",gap:8,width:"100%",background:"none",border:"none",
+                        padding:"12px 4px 10px",fontFamily:"inherit",cursor:"pointer",textAlign:"left"}}>
+                      <span aria-hidden="true" style={{fontSize:13,color:"var(--muted)",width:12,flexShrink:0}}>{open?"▾":"▸"}</span>
+                      <span style={{fontSize:17,fontWeight:700,color:"var(--text)",letterSpacing:"-.01em"}}>{label}</span>
+                      {total!==null&&(
+                        <span style={{marginLeft:"auto",fontSize:15,fontWeight:600,fontFamily:"'DM Mono',monospace",
+                          color:total>0?inkOn(OK_MONEY,surf.bg):"var(--text)"}}>{fmtX(total)}</span>
+                      )}
+                      {total===null&&(
+                        <span style={{marginLeft:"auto",fontSize:12,color:"var(--muted)"}}>{list.length}</span>
+                      )}
+                    </button>
+                    {open&&<div className="card" style={{padding:"2px 16px"}}>{list.map(renderTile)}</div>}
                   </div>
-                )}
+                );
+              };
+              return (<>
+                {sections.map(([label,list])=>renderSection(label,list,
+                  list.reduce((s,a)=>s+displayBalance(Number(a.current_balance)||0,a.type),0)))}
+                {hiddenList.length>0&&renderSection("Hidden",hiddenList,null)}
               </>);
               })()}
             {!loading&&accounts.length===0&&(
-              <div style={{textAlign:"center",padding:"30px 0",color:"var(--muted)",fontSize:14}}>No accounts yet. Link one to get started.</div>
+              <div className="card" style={{textAlign:"center",padding:"30px 16px",color:"var(--muted)",fontSize:14}}>No accounts yet. Link one to get started.</div>
             )}
-            <div style={{marginTop:14,fontSize:11,color:"var(--muted)",background:"var(--bg)",borderRadius:8,padding:"8px 12px"}}>
-              Double-click a name to set a nickname · Click a swatch to change the badge color
+            {/* Page actions, at the BOTTOM (Mason, 2026-08-28: "the add account
+                and manage connections lives at the bottom of the accounts
+                page, same as what is in the picture"). Import Statement is the
+                third pill rather than a quieter link: it is the ONLY way to
+                reach history older than the feed's ~88-day window, so it can't
+                be the one that is hard to find. Add Account and Manage Bank
+                Connections open the SAME modal on purpose — SimpleFinConnect is
+                both the link flow and the connection-status/disconnect/Restore
+                surface — but they are two rows because they are two errands. */}
+            <div style={{display:"flex",flexDirection:"column",gap:10,marginTop:18}}>
+              {[
+                ["＋","Add Account",()=>setConnectingSfin(true)],
+                ["⤓","Import Statement",()=>setImporting(true)],
+                ["🏛","Manage Bank Connections",()=>setConnectingSfin(true)],
+              ].map(([icon,label,onClick])=>(
+                <button key={label} type="button" onClick={onClick}
+                  style={{display:"flex",alignItems:"center",justifyContent:"center",gap:8,width:"100%",
+                    padding:"15px 0",borderRadius:14,border:"1px solid var(--border)",background:"var(--card)",
+                    color:"var(--accent)",fontFamily:"inherit",fontSize:15,fontWeight:600,cursor:"pointer"}}>
+                  <span aria-hidden="true">{icon}</span>{label}
+                </button>
+              ))}
+            </div>
+            <div style={{marginTop:12,fontSize:11,color:"var(--muted)",lineHeight:1.5,padding:"0 4px"}}>
+              Tap an account to see its transactions and rename it ·
+              Tap a section heading to fold it away
             </div>
           </div>
         )}
@@ -5369,16 +5431,29 @@ export default function Dashboard({ refreshTick = 0 }) {
             <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:4}}>
               <button className="nbtn" onClick={()=>setSelAcct(null)} title="Back to accounts">‹</button>
               <div style={{flex:1,minWidth:0}}>
+                {/* The account's naming controls live HERE since 2026-08-28 —
+                    the list's tiles became pure navigation, so the swatch (tap
+                    to recolor) and the double-click rename moved to the page
+                    the tile opens. Nothing competes with a tap on this screen,
+                    which is what the list row could no longer say. */}
                 <div style={{display:"flex",alignItems:"center",gap:8}}>
-                  <span style={{width:10,height:10,borderRadius:3,background:markOn(acctColor(selAcct),surf.card),flexShrink:0}}/>
-                  <span style={{fontSize:15,fontWeight:600,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{acctLabel(selAcct)}</span>
+                  <Swatch color={acctColor(selAcct)} onChange={hex=>saveAccount(selAcct.id,{color:hex})}/>
+                  <span style={{display:"flex",flex:1,minWidth:0,fontSize:15,fontWeight:600}}>
+                    <EditName name={acctLabel(selAcct)} onSave={v=>saveAccount(selAcct.id,{nickname:v})}/>
+                  </span>
                 </div>
                 <div style={{fontSize:11,color:"var(--muted)",marginTop:2}}>
                   {[acctInst(selAcct),`${selAcct.name}${selAcct.mask?` ··${selAcct.mask}`:""}`,selAcct.subtype||selAcct.type].filter(Boolean).join(" · ")}
                 </div>
               </div>
               <div style={{textAlign:"right",flexShrink:0}}>
-                <div style={{fontSize:15,fontFamily:"'DM Mono',monospace",fontWeight:600}}>{fmtX(displayBalance(selAcct.current_balance,selAcct.type))}</div>
+                {/* Same green-when-positive rule as the tile that opened this
+                    page and the section total above it — one number, one
+                    colour, whichever screen it is read on. */}
+                {(()=>{const bal=displayBalance(selAcct.current_balance,selAcct.type);return (
+                  <div style={{fontSize:15,fontFamily:"'DM Mono',monospace",fontWeight:600,
+                    color:bal>0?inkOn(OK_MONEY,surf.card):"var(--text)"}}>{fmtX(bal)}</div>
+                );})()}
                 {/* What the balance is worth knowing beside it. Both lines are
                     honest-absence by default: available_balance is null when
                     the bank didn't send it, and last_balance_at is null on a
@@ -5540,22 +5615,44 @@ export default function Dashboard({ refreshTick = 0 }) {
               <div style={{textAlign:"center",padding:"30px 0",color:"var(--muted)",fontSize:14}}>No transactions for this account yet.</div>
             ):(
               <>
-                {acctTxs.map((t,i)=>(
-                  <div key={t.plaid_tx_id||i} className="tx" onClick={()=>openTx(t)} style={{animationDelay:Math.min(i,20)*.015+"s",cursor:"pointer",opacity:t.excluded?.5:1}}>
-                    <div style={{width:34,height:34,borderRadius:10,background:"var(--bg)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:15,flexShrink:0}}>{TX_ICONS[t.category]||"🛍"}</div>
-                    <div style={{flex:1,minWidth:0}}>
-                      <div style={{fontSize:13,fontWeight:500,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{t.merchant_name||t.description}</div>
-                      <div style={{fontSize:11,color:"var(--muted)",marginTop:3,display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
-                        <span>{t.transaction_date}</span>
-                        <span>·</span>
-                        <Pill label={TYPE_PILL[t.tx_type]||getName(t.category)} color={TYPE_PILL[t.tx_type]?"#888780":getColor(t.category)} surface={surf.card}/>
-                        {entPill(t.entity_id)}
-                        {t.excluded&&<Pill label="Excluded" color="#888780" surface={surf.card}/>}
+                {/* DAY-GROUPED, like the Spending list (2026-08-28) — the same
+                    groupByDay/longDate core, so this page and that one read the
+                    same way. getAccountTransactions orders date desc and the
+                    fold preserves that order, so sections come out newest
+                    first; the header carries the date, which is why the row
+                    subline dropped its own copy. */}
+                {(()=>{let ri=0;return groupByDay(acctTxs).map(sec=>(
+                  <div key={sec.date||"nodate"}>
+                    <div style={{fontSize:11,fontWeight:600,color:"var(--muted)",textTransform:"uppercase",
+                      letterSpacing:".05em",padding:"10px 0 5px"}}>{longDate(sec.date)}</div>
+                    {sec.rows.map(t=>{
+                      const i=ri++;
+                      // Row-level signed amounts, the Spending list's rule:
+                      // money out reads "−$X" and money in green "+$X". The
+                      // stored sign is the app's positive=money-out
+                      // convention, so the glyph is chosen off it and the
+                      // magnitude printed absolute — no aggregate is re-signed.
+                      const sign=t.amount===0?"":t.amount<0?"+":"−";
+                      return (
+                      <div key={t.plaid_tx_id||i} className="tx" onClick={()=>openTx(t)} style={{animationDelay:Math.min(i,20)*.015+"s",cursor:"pointer",opacity:t.excluded?.5:1}}>
+                        <div style={{width:34,height:34,borderRadius:10,background:"var(--bg)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:15,flexShrink:0}}>{TX_ICONS[t.category]||"🛍"}</div>
+                        <div style={{flex:1,minWidth:0}}>
+                          <div style={{fontSize:13,fontWeight:500,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{t.merchant_name||t.description}</div>
+                          <div style={{fontSize:11,color:"var(--muted)",marginTop:3,display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
+                            <Pill label={TYPE_PILL[t.tx_type]||getName(t.category)} color={TYPE_PILL[t.tx_type]?"#888780":getColor(t.category)} surface={surf.card}/>
+                            {entPill(t.entity_id)}
+                            {t.excluded&&<Pill label="Excluded" color="#888780" surface={surf.card}/>}
+                          </div>
+                        </div>
+                        <div style={{fontSize:13,fontFamily:"'DM Mono',monospace",fontWeight:500,flexShrink:0,
+                          color:t.amount<0?inkOn(OK_MONEY,surf.card):"var(--text)"}}>
+                          {sign}{fmtX(Math.abs(t.amount))}
+                        </div>
                       </div>
-                    </div>
-                    <div style={{fontSize:13,fontFamily:"'DM Mono',monospace",fontWeight:500,flexShrink:0}}>{fmtX(t.amount)}</div>
+                      );
+                    })}
                   </div>
-                ))}
+                ));})()}
                 {acctHasMore&&(
                   <div style={{textAlign:"center",marginTop:12,fontSize:11,color:"var(--muted)"}}>
                     Showing the most recent 500 transactions.
