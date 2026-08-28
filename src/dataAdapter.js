@@ -13,6 +13,7 @@ import { getSettings } from './db.js';
 import { unlinkSettingsKey, parseRestoreIds } from './unlinkRestore.js';
 import { aggregateCoverage, feedCoverageGaps, FEED_REACH_DAYS } from './coverage.js';
 import { netWorthSeries, clampSeries } from './netWorth.js';
+import { buildReconciliation, reconciliationScope } from './reconciliation.js';
 import {
   pad2,
   monthBounds,
@@ -1768,6 +1769,78 @@ export async function getFeedCoverageGaps(accounts) {
       reachDays: FEED_REACH_DAYS,
       truncated: fed.length > scan.length,
     };
+  } catch {
+    return empty;
+  }
+}
+
+// Does the ledger add up against the bank's own balances? (Mason, 2026-08-28.)
+// Per month: the shared model's income and spending, the observed change in
+// balances across the cash boundary, the named buckets that explain the gap,
+// and whatever is left — see src/reconciliation.js for the identity and why
+// each bucket exists.
+//
+// NEVER THROWS (the getFeedCoverageGaps mold): any failure resolves to
+// { ok:false } with an empty month list, because a WRONG reconciliation is
+// worse than a missing one — this panel's whole job is telling the household
+// whether to trust its own totals, and a half-read that renders a fake
+// residual would send someone hunting a duplicate that does not exist.
+// Degrades cleanly pre-migration too: getBalanceSnapshots returns [] when the
+// table is not installed, which surfaces as months with no balance coverage
+// rather than an error.
+export async function getReconciliation({ maxMonths = 12 } = {}) {
+  const empty = { ok: false, months: [], coverage: { earliestSnapshot: null, latestSnapshot: null } };
+  try {
+    const { data, error } = await supabase.from('accounts').select('id, type, hidden');
+    if (error) throw error;
+    // Hidden accounts are out on BOTH sides — their rows are already dropped at
+    // the query level, so excluding their balances here is what keeps the two
+    // halves describing the same set of accounts.
+    const visible = (data || []).filter(a => !a.hidden);
+    const scope = reconciliationScope(visible);
+
+    // FULL history, always. sinceDate is a display clamp and never a fetch
+    // window: snapshots are written on balance CHANGE only, so an account that
+    // has not moved inside a window has no rows in it — and here that absence
+    // would read as "unknown" and null out every month's balance comparison.
+    const snapshots = await getBalanceSnapshots(scope.map(a => a.id), null);
+
+    const now = new Date();
+    const curY = now.getFullYear();
+    const curM = now.getMonth() + 1;
+    // Start at the month the balance history begins, so every month that CAN
+    // be reconciled is offered — bounded both ways: at least 3 months so the
+    // rows-side decomposition is still useful before any snapshots exist, at
+    // most maxMonths so the panel can't fan out into a year-long fetch.
+    const earliest = snapshots[0]?.captured_on;
+    let span = 3;
+    if (earliest) {
+      const ey = Number(earliest.slice(0, 4));
+      const em = Number(earliest.slice(5, 7));
+      span = (curY - ey) * 12 + (curM - em) + 1;
+    }
+    span = Math.max(3, Math.min(maxMonths, span));
+
+    const months = [];
+    for (let i = span - 1; i >= 0; i--) months.push(shiftMonth(curY, curM, -i));
+
+    // ONE FETCH PER CALENDAR MONTH, deliberately: getMonthTransactions pairs
+    // internal transfers over that same month window, which is exactly what
+    // Overview, Categories and the Spending list do. A single range fetch
+    // would pair across the whole span the way getCashFlow does, wash a
+    // different set of rows, and leave this panel quietly disagreeing with the
+    // very numbers it exists to audit. Warm months come from the range memo.
+    const monthsRows = await Promise.all(
+      months.map(async ({ year, month }) => ({
+        month: `${year}-${pad2(month)}`,
+        label: monthLabel(year, month),
+        rows: await getMonthTransactions(year, month),
+      }))
+    );
+
+    const today = `${now.getFullYear()}-${pad2(curM)}-${pad2(now.getDate())}`;
+    const built = buildReconciliation({ monthsRows, snapshots, accounts: visible, today });
+    return { ok: true, ...built, scopeCount: scope.length };
   } catch {
     return empty;
   }
