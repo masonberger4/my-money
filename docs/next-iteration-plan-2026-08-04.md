@@ -375,7 +375,13 @@ prior backlog. Both are S/M with no blockers and no migration.*
    envelope Conventions. Consequence: Age of Money (Roadmap: "wants real
    *measured* income") is now buildable as its own decision.
 
-3. **Reconciliation** — spec open (Roadmap). Half the build exists:
+3. **Reconciliation** — spec open (Roadmap). **PARTLY SHIPPED 2026-08-28**:
+   the balance-vs-ledger CHECK is built (`src/reconciliation.js`, the Accounts
+   tab's "Does it add up?" panel) after Mason asked whether the monthly
+   spending/income totals match the money in the linked accounts. That answers
+   "do the totals add up", NOT this item's question — what to DO about a
+   mismatch is still unspecified, so the item stays open as written below.
+   Half the build exists:
    `reconcileCsv` (`src/csvImport.js`) already max-matches statement rows
    against the ledger and CsvImport.jsx renders the comparison. The open
    half is what to DO with a mismatch: a missing-row insert path (dangerous —

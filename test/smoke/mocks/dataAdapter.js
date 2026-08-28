@@ -541,6 +541,48 @@ export async function getFeedCoverageGaps() {
     truncated: false,
   };
 }
+
+// Ledger-vs-balance reconciliation. Shaped exactly like the real return so the
+// panel renders what it would in the app: one month WITH balance coverage
+// (buckets + a small honest residual — interest and timing, not miscounting),
+// and one month WITHOUT (snapshots only start 2026-08-01, so July has no
+// starting balance and says so instead of guessing).
+export async function getReconciliation() {
+  return {
+    ok: true,
+    scopeCount: 5,
+    coverage: { earliestSnapshot: '2026-08-01', latestSnapshot: '2026-08-03' },
+    months: [
+      {
+        month: '2026-08', label: 'August 2026', partial: true,
+        income: 6420.00, spending: 4180.55, net: 2239.45,
+        deltaLedger: 1379.45,
+        buckets: [
+          { key: 'transfer', label: 'Transfers between linked accounts', impact: 0, moneyOut: 900, moneyIn: 900, count: 2 },
+          { key: 'cardPayment', label: 'Card payments', impact: -820, moneyOut: 820, moneyIn: 0, count: 1 },
+          { key: 'excluded', label: 'Excluded by hand', impact: -40, moneyOut: 40, moneyIn: 0, count: 1 },
+        ],
+        balanceStart: { date: '2026-07-31', total: 17391.23, missing: [] },
+        balanceEnd: { date: '2026-08-03', total: 18774.05, missing: [] },
+        deltaObserved: 1382.82,
+        unexplained: 3.37,
+      },
+      {
+        month: '2026-07', label: 'July 2026', partial: false,
+        income: 7100.00, spending: 5290.12, net: 1809.88,
+        deltaLedger: 1109.88,
+        buckets: [
+          { key: 'transfer', label: 'Transfers between linked accounts', impact: 0, moneyOut: 1200, moneyIn: 1200, count: 2 },
+          { key: 'cardPayment', label: 'Card payments', impact: -700, moneyOut: 700, moneyIn: 0, count: 1 },
+        ],
+        balanceStart: null,
+        balanceEnd: null,
+        deltaObserved: null,
+        unexplained: null,
+      },
+    ],
+  };
+}
 export async function signOut() {}
 export async function findOrCreateManualInstitution() { return { id: 'im' }; }
 

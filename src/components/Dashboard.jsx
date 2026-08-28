@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from "react";
-import { getOverview, getSpending, getBiggestMovers, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES, ACCOUNT_SUBTYPES, setCategoryRule, applyCategoryRuleToHistory, listCategoryRules, countCategoryRuleMatches, deleteCategoryRule, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, getActualIncome, resolveBudgetIncome, invalidateEnvelopeSpending, isEnvelopeSchemaMissing, targetNeed, readyToAssign, envelopePace, setEnvPace as persistEnvPace, updateRecIgnore, getStartupSettings, monthKey, getEntities, createEntity, updateEntity, getTaxYearTransactions, getMileage, addMileage, deleteMileage, getReceiptTxIds, getDebts, getBalanceSnapshots, getNetWorthSeries, addManualTransaction, createManualAccount, updateManualBalance, getDataCoverage, getFeedCoverageGaps, FEED_GAP_SCAN_CAP, getRestoreRecord, signOut, autoFillMonth, setTargetOverride, effectiveTarget, getExpectedTransactions, addExpected, dismissExpected, matchExpectedManually, getSavedChats, saveChatToApp, deleteSavedChat, addRegistryEntry, updateRegistryParent, removeRegistryEntry, updateCategoryColor, updateCategoryAlias } from "../dataAdapter.js";
+import { getOverview, getSpending, getBiggestMovers, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES, ACCOUNT_SUBTYPES, setCategoryRule, applyCategoryRuleToHistory, listCategoryRules, countCategoryRuleMatches, deleteCategoryRule, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, getActualIncome, resolveBudgetIncome, invalidateEnvelopeSpending, isEnvelopeSchemaMissing, targetNeed, readyToAssign, envelopePace, setEnvPace as persistEnvPace, updateRecIgnore, getStartupSettings, monthKey, getEntities, createEntity, updateEntity, getTaxYearTransactions, getMileage, addMileage, deleteMileage, getReceiptTxIds, getDebts, getBalanceSnapshots, getNetWorthSeries, addManualTransaction, createManualAccount, updateManualBalance, getDataCoverage, getFeedCoverageGaps, FEED_GAP_SCAN_CAP, getReconciliation, getRestoreRecord, signOut, autoFillMonth, setTargetOverride, effectiveTarget, getExpectedTransactions, addExpected, dismissExpected, matchExpectedManually, getSavedChats, saveChatToApp, deleteSavedChat, addRegistryEntry, updateRegistryParent, removeRegistryEntry, updateCategoryColor, updateCategoryAlias } from "../dataAdapter.js";
 // Pure cores imported directly (never Supabase — the mock-harness alias rule
 // only covers dataAdapter/sync/db/apiClient; pure modules are safe).
 import { planAutoFill } from "../envelopes.js";
@@ -1765,6 +1765,18 @@ export default function Dashboard({ refreshTick = 0 }) {
   // --- Data coverage panel (troubleshooting aid, ruled KEEP by Mason 2026-08-13; Accounts tab) ---
   // Lazy: the query pages the whole transactions table, so nothing is fetched
   // until the card is first expanded.
+  // --- Reconciliation panel (Mason, 2026-08-28: "does the spending and income
+  // totals for each month match the total amount of money in the observable
+  // accounts?"). Same shape as the coverage panel above: collapsed, fetched on
+  // first expand only (it reads a month of rows per month shown), and no error
+  // state because getReconciliation never throws — an ok:false renders one
+  // muted line. Staleness across later edits is accepted, exactly like covData.
+  const [reconOpen,setReconOpen]=useState(false);
+  const [reconData,setReconData]=useState(null);   // null = not fetched
+  const openRecon=async()=>{
+    const next=!reconOpen; setReconOpen(next);
+    if(next&&reconData===null) setReconData(await getReconciliation());
+  };
   const [covOpen,setCovOpen]=useState(false);
   const [covData,setCovData]=useState(null);   // null = not fetched; object keyed by account_id
   const [covErr,setCovErr]=useState(null);
@@ -5545,6 +5557,110 @@ export default function Dashboard({ refreshTick = 0 }) {
                 <div style={{marginTop:8,fontSize:10,color:"var(--muted)"}}>
                   Troubleshooting view — counts every stored row per account by feed source.
                 </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* RECONCILIATION — Mason, 2026-08-28: "does the spending and income
+            totals for each month match the total amount of money in the
+            observable accounts linked to the app? I'm worried spending or
+            income may be over-counted." They do NOT match, and this says why
+            in named lines rather than leaving a gap nobody can account for:
+            income − spending, the observed balance change, the buckets that
+            explain the difference (transfers, card payments, excluded rows),
+            and what is left over. The residual is the answer to his question —
+            near zero means the totals are sound. Collapsed by default; the
+            per-month fetch only runs on first expand. NEUTRAL styling
+            throughout, never amber: amber means the feed is broken, and a
+            residual is an ordinary fact of how money moves. */}
+        {tab==="accounts"&&!selAcct&&(
+          <div className="card" style={{marginTop:14}}>
+            <div onClick={openRecon} style={{display:"flex",justifyContent:"space-between",alignItems:"center",cursor:"pointer"}}>
+              <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em"}}>Does it add up?</div>
+              <span style={{fontSize:12,color:"var(--muted)"}}>{reconOpen?"▾":"▸"}</span>
+            </div>
+            {reconOpen&&(
+              <div style={{marginTop:10}}>
+                {reconData===null&&<div style={{marginBottom:8}}><Sk h={64}/><div style={{height:8}}/><Sk h={64}/></div>}
+                {reconData&&!reconData.ok&&(
+                  <div style={{fontSize:12,color:"var(--muted)"}}>Couldn't load this right now — try Refresh.</div>
+                )}
+                {reconData&&reconData.ok&&reconData.months.length===0&&(
+                  <div style={{fontSize:12,color:"var(--muted)"}}>No months to check yet.</div>
+                )}
+                {reconData&&reconData.ok&&reconData.months.map(m=>(
+                  <div key={m.month} style={{padding:"10px 0",borderBottom:"1px solid var(--border)"}}>
+                    <div style={{fontSize:12,fontWeight:600,color:"var(--text)"}}>
+                      {m.label}{m.partial&&m.balanceEnd?` so far (through ${m.balanceEnd.date})`:m.partial?" so far":""}
+                    </div>
+                    {/* Label left, number right — the same two-column shape as
+                        the bucket rows below, so the month reads as one column
+                        of figures. Written as prose it wrapped mid-expression
+                        at 390px and the totals stopped lining up. */}
+                    <div style={{display:"flex",justifyContent:"space-between",gap:8,marginTop:5,fontSize:11,color:"var(--muted)"}}>
+                      <span style={{minWidth:0}}>Income {fmtAuto(m.income)} − Spending {fmtAuto(m.spending)}</span>
+                      <span style={{fontFamily:"'DM Mono',monospace",color:"var(--text)",flexShrink:0}}>{signed(m.net)}</span>
+                    </div>
+                    {m.deltaObserved===null?(
+                      // Three different reasons a month can't be checked, and
+                      // saying the wrong one sends someone looking in the wrong
+                      // place: no snapshots at all, none yet THIS month (the
+                      // app hasn't been opened since it started), or an account
+                      // with no reading at one of the edges.
+                      <div style={{fontSize:11,color:"var(--muted)",marginTop:6,lineHeight:1.5}}>
+                        {!reconData.coverage.earliestSnapshot
+                          ?"No balance history yet — balances are recorded as the app syncs."
+                          :m.partial
+                            ?`No balance reading yet this month — the last one was ${reconData.coverage.latestSnapshot}.`
+                            :`Not enough balance history to check this month — recording started ${reconData.coverage.earliestSnapshot}.`}
+                      </div>
+                    ):(
+                      <>
+                        <div style={{display:"flex",justifyContent:"space-between",gap:8,marginTop:3,fontSize:11,color:"var(--muted)"}}>
+                          <span style={{minWidth:0}}>
+                            Balance change
+                            <span style={{fontFamily:"'DM Mono',monospace",opacity:.7,marginLeft:5}}>
+                              {m.balanceStart.date} → {m.balanceEnd.date}
+                            </span>
+                          </span>
+                          <span style={{fontFamily:"'DM Mono',monospace",color:"var(--text)",flexShrink:0}}>{signed(m.deltaObserved)}</span>
+                        </div>
+                        {/* A hairline under the two headline figures: the lines
+                            below EXPLAIN the gap between them, and without a
+                            break they read as four peers. */}
+                        <div style={{height:1,background:"var(--border)",margin:"7px 0 5px"}}/>
+                        {m.buckets.map(b=>(
+                          <div key={b.key} style={{display:"flex",justifyContent:"space-between",gap:8,marginTop:4,fontSize:11,color:"var(--muted)"}}>
+                            <span style={{minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                              {b.label} <span style={{opacity:.7}}>· {b.count} row{b.count===1?"":"s"}</span>
+                            </span>
+                            <span style={{fontFamily:"'DM Mono',monospace",flexShrink:0}}>{signed(b.impact)}</span>
+                          </div>
+                        ))}
+                        <div style={{display:"flex",justifyContent:"space-between",gap:8,marginTop:6,
+                          fontSize:11,fontWeight:600,color:"var(--text)"}}>
+                          <span>Unexplained</span>
+                          <span style={{fontFamily:"'DM Mono',monospace"}}>{signed(m.unexplained)}</span>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                ))}
+                {reconData&&reconData.ok&&(
+                  <div style={{marginTop:8,fontSize:10,color:"var(--muted)",lineHeight:1.5}}>
+                    {/* The honest framing. "Small residuals are normal" is doing
+                        real work: without it a $3 line reads as a bug and the
+                        panel trains its reader to ignore the number that
+                        matters. */}
+                    Troubleshooting view — compares counted income and spending against the balances
+                    on checking, savings and cards. Transfers, card payments and excluded rows move
+                    money without counting, so they're listed separately; loans are left out of both
+                    sides. <b>Unexplained</b> is what's left: interest, bank fees the feed only shows
+                    in the balance, pending timing, and the day or two of drift in when balances were
+                    recorded. Small amounts are normal — a large one on an ordinary month is worth a look.
+                  </div>
+                )}
               </div>
             )}
           </div>
