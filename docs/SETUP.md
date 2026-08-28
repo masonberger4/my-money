@@ -219,7 +219,7 @@ Note if you use Preview deploys: they share your **production** Supabase databas
 
 ## 6. Connect your banks (SimpleFIN)
 
-There is no SDK popup. The flow, from the app's Accounts tab (or the empty-state CTA), via "+ Add bank":
+There is no SDK popup. The flow, from the app's Accounts tab via the "Add Account" pill at the bottom of the page (or the empty-state CTA's "+ Add bank"):
 
 1. Sign up at https://bridge.simplefin.org/ (~$15/yr) and link your banks there.
 2. Bridge prints a **setup token** — copy it, paste it into the app's connect modal. Tokens are single-use; a spent one needs a fresh token from Bridge.
