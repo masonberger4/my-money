@@ -45,7 +45,7 @@ Steps 1–2 are shared by both paths. Then use **Path A** (Supabase CLI — the 
 
 ### Path A — Supabase CLI (verified end-to-end 2026-08-13 — the default)
 
-> **Rehearsed end-to-end (2026-08-13).** On a fresh-provisioned HOSTED project (Postgres 17, real auth/storage schemas), CLI v2.114.0 via `npx`: `login` → `link` (no version-mismatch warning) → `db push` applied all 18 migrations cleanly, `bootstrap_household.sql`'s verification booleans all read true, and the receipts storage policy was created by the migration itself (the hand-creation fallback below wasn't needed on that run — still check it; grants can differ between projects). An earlier local rehearsal (2026-08-12, `db push --db-url`, v2.113.0) proved the same replay on a local PG16 cluster. Fall back to Path B if anything here errors.
+> **Rehearsed end-to-end (2026-08-13).** On a fresh-provisioned HOSTED project (Postgres 17, real auth/storage schemas), CLI v2.114.0 via `npx`: `login` → `link` (no version-mismatch warning) → `db push` applied all 18 migrations cleanly (18 was the count THAT DAY — a fresh install replays whatever `supabase/migrations/` holds now, so count the directory rather than this sentence), `bootstrap_household.sql`'s verification booleans all read true, and the receipts storage policy was created by the migration itself (the hand-creation fallback below wasn't needed on that run — still check it; grants can differ between projects). An earlier local rehearsal (2026-08-12, `db push --db-url`, v2.113.0) proved the same replay on a local PG16 cluster. Fall back to Path B if anything here errors.
 
 This is the default because `supabase/migrations/` is the source of truth — replaying it is the honest fresh install, and it needs no hand-pasted tail.
 
