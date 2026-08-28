@@ -123,7 +123,21 @@ const WIPE_EXTRA = POSTWIPE ? [
   raw('2026-08-02', -600.00, 'ZELLE FROM CHECKING MASON B', null, 'a2'),
 ] : [];
 
-const ALL = [...AUG, ...JUL, ...WIPE_EXTRA];
+// The WALK opens a transaction row on the Spending tab, and that tab shows the
+// WALL-CLOCK month while every fixture date above is frozen — so from
+// 2026-09-01 the month in view would be empty and the row-click step would die
+// on a missing selector, months after the PR that added it. This one row is
+// dated TODAY so there is always something to open. Deliberately dynamic: do
+// not "clean it up" to a literal. It carries a plain category and a plain
+// positive amount on a card, so it derives 'spending' — the tx sheet's Category
+// ROW renders for it, not the type-locked branch, which is what makes the
+// category-picker step reachable. Being the newest date, it sorts first, so
+// [data-mm-tx-row] resolves to it rather than to a locked transfer row.
+const now = new Date();
+const TODAY = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+const TODAY_ROW = raw(TODAY, 21.40, 'SMOKE DELI TODAY', 'Groceries', 'a3');
+
+const ALL = [...AUG, ...JUL, ...WIPE_EXTRA, TODAY_ROW];
 
 if (POSTWIPE) {
   for (const t of ALL) {

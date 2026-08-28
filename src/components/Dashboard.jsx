@@ -1080,6 +1080,121 @@ function CategorySheet({name,color,when,rows,kids,surf,getName,acctById,acctLabe
   );
 }
 
+// The full-screen category picker PAGE, opened from the transaction detail
+// sheet's Category row (2026-08-28, Mason: "Simple, clean, wide tiles that are
+// easily selectable. Categories reside under category groups which are user
+// determined"). It replaces the inline chip grid that used to live inside the
+// sheet, where every category was the same 11px wrapped chip: a household with
+// thirty of them read as a wall of text, and none of them was a comfortable
+// thumb target.
+//
+// Grouping comes from groupCategories — the SAME pure module the Categories and
+// Budget tabs group with — never a local re-walk. The "groups" the screenshot
+// shows ARE the one-level parent nesting that already exists (dash:cats
+// `parent`), so nothing new is stored and the three surfaces cannot drift.
+//
+// The parent renders as the FIRST TILE inside its own group, under a
+// non-interactive header. A parent is a real, taggable category here
+// (groupMembers includes it — rows tagged to it before its children existed
+// still count), so it needs the same 48px target every child gets, and a header
+// that doubles as a tap target reads like a collapse gesture instead. The
+// header carries NO amount: a parent's own envelope and its rollup are
+// different numbers, and printing one above a group of the other is exactly the
+// ambiguity the Budget tab's one-owner-per-dollar rule exists to avoid.
+function CategoryPickerSheet({cats,catIndex,current,envRowByCat,hasAmounts,getName,getColor,surf,onPick,onNew,onClose}) {
+  useEscClose(onClose);
+  const [q,setQ]=useState("");
+  const needle=q.trim().toLowerCase();
+  // Match what the user SEES (the display alias) and the raw stored label both
+  // — a renamed category has to stay findable by either name.
+  const hit=c=>!needle||getName(c).toLowerCase().includes(needle)||c.toLowerCase().includes(needle);
+  const groups=groupCategories(cats,catIndex,getName);
+  const anyHit=groups.some(g=>[g.name,...g.children].some(hit));
+  const tile=(cat,indent)=>{
+    // Every userCats entry has a row: envRows tops the walk up with an
+    // emptyEnvRow (available 0) for categories that have no envelope yet, which
+    // is what renders the screenshot's $0.00 rather than a blank.
+    const row=envRowByCat.get(cat);
+    const avail=row?row.available:0;
+    const active=current===cat;
+    return (
+      <button key={cat} onClick={()=>onPick(cat)}
+        style={{display:"flex",alignItems:"center",gap:9,width:"100%",minHeight:48,
+          padding:indent?"0 16px 0 32px":"0 16px",background:active?"var(--input-bg)":"none",
+          border:"none",borderBottom:"1px solid var(--border)",fontFamily:"inherit",
+          cursor:"pointer",textAlign:"left"}}>
+        <span aria-hidden="true" style={{width:14,flexShrink:0,fontSize:13,fontWeight:700,color:"var(--accent)"}}>{active?"✓":""}</span>
+        <span aria-hidden="true" style={{width:10,height:10,borderRadius:3,flexShrink:0,background:markOn(getColor(cat),surf.card)}}/>
+        <span style={{flex:1,minWidth:0,fontSize:14,fontWeight:active?600:500,color:"var(--text)",
+          overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{getName(cat)}</span>
+        {hasAmounts&&(
+          <span style={{fontSize:13,fontWeight:600,fontFamily:"'DM Mono',monospace",flexShrink:0,
+            color:avail<0?inkOn(OVER_MONEY,surf.card):avail>0?inkOn(OK_MONEY,surf.card):"var(--muted)"}}>
+            {fmtX(avail)}
+          </span>
+        )}
+      </button>
+    );
+  };
+  return (
+    <div className="overlay" onClick={onClose}>
+      <div className="sheet-full" role="dialog" aria-modal="true" aria-label="Choose a category"
+        onClick={e=>e.stopPropagation()} style={{display:"flex",flexDirection:"column"}}>
+        <div style={{display:"flex",alignItems:"center",gap:10,padding:"14px 16px 10px",flexShrink:0}}>
+          <button className="nbtn" data-mm-cat-back="" aria-label="Back" title="Back" onClick={onClose}>‹</button>
+          <div style={{fontSize:17,fontWeight:600,color:"var(--text)"}}>Category</div>
+        </div>
+        {/* Only this list scrolls, which is what keeps the search bar docked. */}
+        <div style={{flex:1,minHeight:0,overflowY:"auto"}}>
+          {/* Categories only exist because the user made them, so the picker is
+              where most of them will be born — especially on day one, when this
+              list is empty and tiles with no create affordance would be a dead
+              end. The sheet it opens remembers this transaction (addCatFor) and
+              files it under the new category the moment it is created. */}
+          <button onClick={onNew}
+            style={{display:"flex",alignItems:"center",gap:9,width:"100%",minHeight:48,padding:"0 16px",
+              background:"none",border:"none",borderBottom:"1px solid var(--border)",fontFamily:"inherit",
+              cursor:"pointer",textAlign:"left",fontSize:14,fontWeight:600,color:"var(--accent)"}}>
+            ＋ New category
+          </button>
+          {cats.length===0&&(
+            <div style={{padding:16,fontSize:12,color:"var(--muted)",lineHeight:1.5}}>
+              You haven't made any categories yet. Create one for this transaction — after that,
+              the app can remember this merchant and file it for you.
+            </div>
+          )}
+          {groups.map(g=>{
+            const shown=[g.name,...g.children].filter(hit);
+            if(shown.length===0)return null;
+            if(g.children.length===0)return tile(g.name,false);
+            return (
+              <div key={g.name}>
+                <div style={{padding:"16px 16px 6px",fontSize:11,fontWeight:600,color:"var(--muted)",
+                  textTransform:"uppercase",letterSpacing:".06em"}}>{getName(g.name)}</div>
+                {shown.map(c=>tile(c,c!==g.name))}
+              </div>
+            );
+          })}
+          {cats.length>0&&needle&&!anyHit&&(
+            <div style={{padding:"18px 16px",fontSize:13,color:"var(--muted)",textAlign:"center"}}>
+              No category matches that.
+            </div>
+          )}
+        </div>
+        {/* Docked at the bottom, where the thumb already is (the screenshot's
+            placement). fontSize 16 keeps iOS from zooming the page on focus. */}
+        <div style={{flexShrink:0,borderTop:"1px solid var(--border)",background:"var(--card)",
+          padding:"10px 16px calc(10px + env(safe-area-inset-bottom))"}}>
+          <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search categories"
+            aria-label="Search categories"
+            style={{width:"100%",padding:"10px 12px",borderRadius:10,border:"1px solid var(--border)",
+              background:"var(--input-bg)",color:"var(--text)",fontSize:16,fontFamily:"inherit",outline:"none"}}/>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // Every transaction the shared model COUNTS AS INCOME, over the same rolling
 // window the Reflect hub's Income vs. Spending card charts. Opened by tapping
 // that card's income figure — the DrillNum affordance, same idiom as tapping a
@@ -1733,6 +1848,11 @@ export default function Dashboard({ refreshTick = 0 }) {
   // category is applied to that transaction on creation — the picker's create
   // affordance would otherwise make a category and leave the row untouched.
   const [addCatFor,setAddCatFor]=useState(null);
+  // Transaction id the full-screen category picker page is open FOR, or null.
+  // Keyed on the id like addCatFor/typeMenuFor rather than a boolean, so a
+  // different row can never inherit an open picker. Declared here, above
+  // anySheetOpen, for the TDZ reason spelled out over rulesOpen.
+  const [catPickerFor,setCatPickerFor]=useState(null);
   const [newName,setNewName]=useState("");
   const [newColor,setNewColor]=useState("#7F77DD");
   const [newParent,setNewParent]=useState("");
@@ -2664,7 +2784,7 @@ export default function Dashboard({ refreshTick = 0 }) {
   // its listener each commit). stopImmediatePropagation keeps a single press
   // from closing two layers.
   useEffect(()=>{
-    if(!(selTx||addingCat))return;
+    if(!(selTx||addingCat||catPickerFor))return;
     const h=e=>{
       if(e.key!=="Escape")return;
       // The receipt full-size viewer stacks over the tx sheet, and its own
@@ -2676,11 +2796,12 @@ export default function Dashboard({ refreshTick = 0 }) {
       if(document.querySelector("[data-mm-topmost]"))return;
       e.stopImmediatePropagation();
       if(addingCat)setAddingCat(false);
+      else if(catPickerFor)setCatPickerFor(null);
       else setSelTx(null);
     };
     window.addEventListener("keydown",h,true);
     return ()=>window.removeEventListener("keydown",h,true);
-  },[selTx,addingCat]);
+  },[selTx,addingCat,catPickerFor]);
 
   // Taught-rules screen. `rules` is null both before the first load AND when
   // the category_rules table is missing (listCategoryRules returns null, the
@@ -2710,7 +2831,7 @@ export default function Dashboard({ refreshTick = 0 }) {
   // window used to push a racing entry and then be flash-closed by the landing
   // pop — and (b) lets onMount consume an {mmSheet:true} entry stranded by a
   // reload-with-sheet-open, so the first back gesture isn't a dead press.
-  const anySheetOpen=!!(selTx||catDrill||incomeDrill||taxDrill||schedDebtId||monthPicker||importing||connectingSfin||quickAdd||targetEdit||moveFrom||addingCat||rulesOpen);
+  const anySheetOpen=!!(selTx||catPickerFor||catDrill||incomeDrill||taxDrill||schedDebtId||monthPicker||importing||connectingSfin||quickAdd||targetEdit||moveFrom||addingCat||rulesOpen);
   const anySheetOpenRef=useRef(false);
   anySheetOpenRef.current=anySheetOpen;
   const sheetHistRef=useRef(null);
@@ -2723,7 +2844,7 @@ export default function Dashboard({ refreshTick = 0 }) {
   const closeAllSheets=useCallback(()=>{
     setSelTx(null);setCatDrill(null);setIncomeDrill(null);setTaxDrill(null);setSchedDebtId(null);setMonthPicker(false);
     setImporting(false);setConnectingSfin(false);setQuickAdd(false);
-    setTargetEdit(null);setMoveFrom(null);setPickingCat(false);setAddingCat(false);setRulesOpen(false);
+    setTargetEdit(null);setMoveFrom(null);setCatPickerFor(null);setAddingCat(false);setRulesOpen(false);
   },[]);
   useEffect(()=>{
     let st=null;
@@ -2745,7 +2866,7 @@ export default function Dashboard({ refreshTick = 0 }) {
   const [learnedNote,setLearnedNote]=useState(null);
   const [learning,setLearning]=useState(false);
   // Clear the prompt when a different transaction is opened.
-  useEffect(()=>{setLearnPrompt(null);setLearnedNote(null);},[selTx?.id]);
+  useEffect(()=>{setLearnPrompt(null);setLearnedNote(null);setCatPickerFor(null);},[selTx?.id]);
 
   // The string the classifier actually sees at write time — merchant_name is
   // SimpleFIN's `payee`, description its raw descriptor. Must match the write
@@ -5117,7 +5238,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                     const typePill=TYPE_PILL[t.tx_type];
                     const sign=t.amount===0?"":t.amount<0?"+":"−";
                     return (
-                      <div key={t.plaid_tx_id||i} className="tx" onClick={()=>openTx(t)}
+                      <div key={t.plaid_tx_id||i} className="tx" data-mm-tx-row="" onClick={()=>openTx(t)}
                         style={{animationDelay:i*.015+"s",cursor:"pointer",opacity:t.excluded?.5:1}}>
                         <div style={{flex:1,minWidth:0}}>
                           <div style={{fontSize:14,fontWeight:600,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{t.merchant_name||t.description}</div>
@@ -6896,7 +7017,7 @@ export default function Dashboard({ refreshTick = 0 }) {
           <div className="sheet-full" role="dialog" aria-modal="true" aria-label="Transaction details" onClick={e=>e.stopPropagation()}>
             {/* Gradient header — token-only, no literals. */}
             <div style={{background:"linear-gradient(180deg, var(--input-bg), var(--card))",padding:"14px 16px 24px"}}>
-              <button className="nbtn" aria-label="Close" title="Close" onClick={()=>setSelTx(null)}>×</button>
+              <button className="nbtn" data-mm-tx-close="" aria-label="Close" title="Close" onClick={()=>setSelTx(null)}>×</button>
               <div style={{textAlign:"center",marginTop:2}}>
                 <div style={{fontSize:42,fontFamily:"'DM Mono',monospace",fontWeight:500,letterSpacing:"-.02em",
                   color:selTx.amount<0?inkOn(OK_MONEY,surf.card):"var(--text)"}}>
@@ -6990,15 +7111,15 @@ export default function Dashboard({ refreshTick = 0 }) {
             </div>
 
             <div style={{padding:"12px 0",borderBottom:"1px solid var(--border)"}}>
-            <div style={{fontSize:12,color:"var(--muted)",marginBottom:8}}>Category</div>
-            {/* Locked: the type IS the category. The whole picker is withheld
-                rather than disabled — a greyed chip row invites tapping and
+            {/* Locked: the type IS the category. The picker is withheld
+                rather than disabled — a greyed row invites tapping and
                 explains nothing, and the teach-the-merchant confirm below is
-                only reachable from a chip, so hiding the grid closes that
-                path too (a rule taught off a transfer leg would fire on every
-                later row from the same descriptor). */}
+                only reachable THROUGH the picker, so withholding the row that
+                opens it closes that path too (a rule taught off a transfer leg
+                would fire on every later row from the same descriptor). */}
             {catLocked?(
               <div>
+                <div style={{fontSize:11,color:"var(--muted)",marginBottom:3}}>Category</div>
                 <div style={{fontSize:13,fontWeight:500,color:"var(--text)"}}>{txTypeLabel(selTx.tx_type,selTx.amount)}</div>
                 <div style={{fontSize:10,color:"var(--muted)",lineHeight:1.5,marginTop:3}}>
                   {selTx.tx_type==="transfer"
@@ -7008,42 +7129,40 @@ export default function Dashboard({ refreshTick = 0 }) {
                 </div>
               </div>
             ):(<>
-            <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:6}}>
-              {userCats.map(cat=>{
-                const active=selTx.category===cat;
-                // .modal is --card, so that is the surface these tint over.
-                const cs=active?chipOn(getColor(cat),surf.card):null;
-                return (
-                  <button key={cat} onClick={()=>{const next=cat===selTx.auto_category?null:cat;saveTx({user_category:next});setLearnedNote(null);if(next)offerToLearn(next);else setLearnPrompt(null);}}
-                    style={{fontSize:11,fontWeight:600,padding:"5px 10px",borderRadius:20,fontFamily:"inherit",cursor:"pointer",
-                      background:cs?cs.bg:"var(--bg)",color:cs?cs.ink:"var(--muted)",
-                      border:`1px solid ${active?markOn(getColor(cat),surf.card):"var(--border)"}`,transition:"all .15s"}}>
-                    {getName(cat)}
-                  </button>
-                );
-              })}
-              {/* Categories only exist because the user made them, so the
-                  picker is where most of them will be born — especially on day
-                  one, when this row is empty and a chip list with no create
-                  affordance would be a dead end. Opening the sheet from here
-                  remembers this transaction (`addCatFor`) and files it under
-                  the new category the moment it is created, then offers to
-                  teach the merchant like any other pick. */}
-              <button onClick={()=>{setAddCatFor(selTx.id);setAddingCat(true);}}
-                style={{fontSize:11,fontWeight:600,padding:"5px 10px",borderRadius:20,fontFamily:"inherit",cursor:"pointer",
-                  background:"var(--bg)",color:"var(--accent)",border:"1px dashed var(--accent)",transition:"all .15s"}}>
-                ＋ New category
-              </button>
-            </div>
-            {userCats.length===0&&(
-              <div style={{fontSize:11,color:"var(--muted)",lineHeight:1.5,marginBottom:8}}>
-                You haven't made any categories yet. Create one for this transaction — after that,
-                the app can remember this merchant and file it for you.
-              </div>
-            )}
+            {/* The picker is a full-screen PAGE now (2026-08-28) — this row is
+                the affordance that opens it, laid out like the Account and Date
+                rows below. The old inline chip grid made every category an
+                identical 11px chip: thirty of them read as a wall, and none was
+                a comfortable thumb target. selTx STAYS SET while the page is
+                open — saveTx and offerToLearn close over it, and
+                patchAllTxLists repaints the value here the moment a pick
+                lands. */}
+            {(()=>{
+              // Uncategorized is where every row starts and is never a manual
+              // pick, so it reads as the invitation it is rather than as an
+              // answer the app is standing behind.
+              const has=selTx.category&&selTx.category!==UNCATEGORIZED;
+              return (
+                <button data-mm-cat-row="" onClick={()=>setCatPickerFor(selTx.id)}
+                  style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,
+                    width:"100%",minHeight:34,background:"none",border:"none",padding:0,
+                    fontFamily:"inherit",cursor:"pointer",textAlign:"left"}}>
+                  <span style={{fontSize:11,color:"var(--muted)",flexShrink:0}}>Category</span>
+                  <span style={{display:"flex",alignItems:"center",gap:7,minWidth:0}}>
+                    {has&&<span aria-hidden="true" style={{width:10,height:10,borderRadius:3,flexShrink:0,
+                      background:markOn(getColor(selTx.category),surf.card)}}/>}
+                    <span style={{fontSize:13,fontWeight:600,minWidth:0,overflow:"hidden",
+                      textOverflow:"ellipsis",whiteSpace:"nowrap",color:has?"var(--text)":"var(--muted)"}}>
+                      {has?getName(selTx.category):"Choose a category"}
+                    </span>
+                    <span aria-hidden="true" style={{fontSize:15,color:"var(--muted)",flexShrink:0}}>›</span>
+                  </span>
+                </button>
+              );
+            })()}
             {selTx.user_category&&(
               <button onClick={()=>saveTx({user_category:null})}
-                style={{background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",fontSize:11,color:"var(--muted)",textDecoration:"underline",padding:0,marginBottom:6}}>
+                style={{background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",fontSize:11,color:"var(--muted)",textDecoration:"underline",padding:0,marginTop:8,marginBottom:6}}>
                 {/* "Reset to automatic (Uncategorized)" read as though the app
                     had an automatic answer it was declining to use. Post-wipe
                     that is the common case — nothing is guessed, so the stored
@@ -7326,6 +7445,19 @@ export default function Dashboard({ refreshTick = 0 }) {
         );
       })()}
 
+      {/* The category picker PAGE, stacked over the tx sheet. Gated on the id
+          so a stale picker can never render against a different row; selTx
+          stays set underneath (saveTx early-returns without it). */}
+      {catPickerFor&&selTx&&selTx.id===catPickerFor&&(
+        <CategoryPickerSheet
+          cats={userCats} catIndex={catIndex} current={selTx.category}
+          envRowByCat={envRowByCat} hasAmounts={!!envelopes}
+          getName={getName} getColor={getColor} surf={surf}
+          onPick={cat=>{const next=cat===selTx.auto_category?null:cat;saveTx({user_category:next});setLearnedNote(null);if(next)offerToLearn(next);else setLearnPrompt(null);setCatPickerFor(null);}}
+          onNew={()=>{setAddCatFor(selTx.id);setAddingCat(true);}}
+          onClose={()=>setCatPickerFor(null)}/>
+      )}
+
       {/* CSV import (standalone) */}
       {importing&&(
         <Suspense fallback={null}>
@@ -7414,6 +7546,10 @@ export default function Dashboard({ refreshTick = 0 }) {
             saveTx({user_category:n});
             setLearnedNote(null);
             offerToLearn(n);
+            // Land back on the tx sheet: the teach confirm renders there, and
+            // leaving the picker up would hide the answer to the tap. Cancel
+            // does NOT close it — that returns to the picker.
+            setCatPickerFor(null);
           }
           setNewName("");setNewColor("#7F77DD");setNewParent("");close();
         };

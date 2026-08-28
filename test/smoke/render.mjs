@@ -95,6 +95,15 @@ const WALK = [
   // filter row AND (since 2026-08-17) the account + category chip rows render
   // for nobody unless we open it. Not a view of its own.
   [null, '[data-mm-search-toggle]', 'opening the spending search panel'],
+  // The transaction detail sheet and the category picker page it opens render
+  // for NOBODY unless the walk opens them — same blind spot as the search panel
+  // above, and the one the TDZ/hook-order bug class hides in. Open a row, open
+  // the picker, then unwind both so the next nav click isn't swallowed by an
+  // overlay. None is a view of its own.
+  [null, '[data-mm-tx-row]', 'opening a transaction detail sheet'],
+  [null, '[data-mm-cat-row]', 'opening the category picker page'],
+  [null, '[data-mm-cat-back]', 'closing the category picker page'],
+  [null, '[data-mm-tx-close]', 'closing the transaction detail sheet'],
   ['accounts', '[data-mm-nav=accounts]'],
   ['debt', '[data-mm-seg=debt]'],
   ['reflect', '[data-mm-nav=reflect]'],

@@ -103,9 +103,56 @@ test('guessCategory: untaught merchants are Uncategorized, guards still fire', (
 // Budget tab.
 test('the Budget tab has no unreachable category picker', () => {
   const dash = read('src/components/Dashboard.jsx');
-  assert.doesNotMatch(dash, /pickingCat/,
+  // CASE-INSENSITIVE deliberately (2026-08-28). This guard was written as
+  // /pickingCat/ and the deletion left `setPickingCat(false)` behind in
+  // closeAllSheets — the capital S walked straight past the assertion, so a
+  // green suite sat on top of a ReferenceError that fired on every back
+  // gesture, killing the rest of that function (setAddingCat/setRulesOpen
+  // never ran, so the add-category and taught-rules sheets survived the pop).
+  // Nothing local renders the Dashboard, which is why it went two weeks unseen.
+  assert.doesNotMatch(dash, /pickingCat/i,
     'the picker offered a structurally-empty set; it is dead code');
   assert.doesNotMatch(dash, /unbudgetedCats/);
   assert.match(dash, /New category\s*<\/button>/,
     'the Budget tab must keep a create-category button that actually renders');
+});
+
+// --- The transaction sheet's category picker PAGE ---------------------------
+// The Category field is a ROW that opens a full-screen page (2026-08-28); the
+// inline chip grid is gone. Three things about that page are load-bearing and
+// invisible to any pure test, so they are pinned at the source.
+test('the tx-sheet category picker page is registered, grouped and saves the same way', () => {
+  const dash = read('src/components/Dashboard.jsx');
+
+  // (1) A new overlay must reach BOTH registries or the back gesture pops the
+  //     app instead of the page, and sheetHistory desyncs.
+  const sheetLine = dash.split('\n').find(l => l.includes('const anySheetOpen='));
+  assert.ok(sheetLine && sheetLine.includes('catPickerFor'),
+    'catPickerFor must be part of anySheetOpen');
+  const ca = dash.indexOf('const closeAllSheets=useCallback');
+  assert.ok(ca > 0, 'closeAllSheets moved');
+  const closer = dash.slice(ca, dash.indexOf('},[]);', ca));
+  assert.ok(closer.includes('setCatPickerFor(null)'),
+    'catPickerFor must be cleared by closeAllSheets');
+
+  // (2) Grouping comes from the shared pure module, never a local re-walk —
+  //     otherwise the picker drifts from the Categories and Budget tabs the
+  //     first time the nesting rules move.
+  assert.match(dash, /groupCategories\(cats,catIndex,getName\)/,
+    'the picker must group through src/categoryTree.js');
+
+  // (3) The pick semantics survived the redesign byte-for-byte: picking the
+  //     category that already equals auto_category stores NULL (the
+  //     null-equals-automatic shape), and every pick offers to teach.
+  assert.ok(dash.includes(
+    'const next=cat===selTx.auto_category?null:cat;saveTx({user_category:next});setLearnedNote(null);if(next)offerToLearn(next);else setLearnPrompt(null);'),
+    'the one-line pick semantics must survive');
+
+  // (4) The lock still withholds the affordance rather than disabling it: a
+  //     transfer/card-payment row must have no way into the picker, which is
+  //     what keeps a rule from being taught off a transfer leg.
+  const catRow = dash.indexOf('data-mm-cat-row');
+  const locked = dash.lastIndexOf('catLocked?(', catRow);
+  assert.ok(locked > 0 && locked < catRow,
+    'the category row must sit inside the catLocked false-branch');
 });
