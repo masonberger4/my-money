@@ -39,8 +39,8 @@ const MONTH = [
   row('SHELL', 55.0, true, '2026-08-03'),
   row('SHELL', 45.0, true, '2026-08-19'),
   row('BIG APPLIANCE CO', 1200.0, true, '2026-08-07'),
-  row('PAYROLL POME HOLISTIC', -2200.0, false, '2026-08-10'),
-  row('PAYROLL POME HOLISTIC', -2200.0, false, '2026-08-24'),
+  row('PAYROLL NORTHWIND LABS', -2200.0, false, '2026-08-10'),
+  row('PAYROLL NORTHWIND LABS', -2200.0, false, '2026-08-24'),
   row('TRANSFER TO SAVINGS', 500.0, false, '2026-08-05'),
   row('CAPITAL ONE CCPYMT', 320.0, false, '2026-08-12'),
 ];
@@ -57,7 +57,7 @@ test('non-spending rows never enter the ranked merchant list', () => {
   );
   assert.deepEqual(
     other.map((g) => g.key).sort(),
-    ['CAPITAL ONE CCPYMT', 'PAYROLL POME HOLISTIC', 'TRANSFER TO SAVINGS']
+    ['CAPITAL ONE CCPYMT', 'PAYROLL NORTHWIND LABS', 'TRANSFER TO SAVINGS']
   );
 });
 
@@ -81,7 +81,7 @@ test('REGRESSION: the queue spends exactly what the counted rows spend', () => {
 // "· $0" — a merchant with no money, which is not what a $2,200 deposit is.
 test('REGRESSION: an income-only merchant carries its real amount, not $0', () => {
   const { other } = teachQueueGroups(MONTH, byKey);
-  const pay = other.find((g) => g.key === 'PAYROLL POME HOLISTIC');
+  const pay = other.find((g) => g.key === 'PAYROLL NORTHWIND LABS');
   assert.equal(pay.spendCount, 0);
   assert.equal(pay.spent, 0);
   assert.equal(pay.otherCount, 2);

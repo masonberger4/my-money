@@ -11,9 +11,12 @@ the policy cannot silently drop one. Keep this file in sync when the policy chan
 ## Enumerated needs
 
 CSP derived from actual code usage (2026-08-04, Session E item 2). JSON has no
-comments, so the derivation lives in this ignored top-level key; the lockstep
-test (test/securityHeaders.test.js) pins every load-bearing directive so an
-edit here can't silently drop one. Enumerated needs:
+comments, and Vercel REJECTS a documentation key in `vercel.json` (the header
+above), so the derivation lives HERE — never move it back into the config,
+whatever the underscore-prefixed key is called. The lockstep test
+(test/securityHeaders.test.js) pins every load-bearing directive, plus a
+top-level-key allowlist that turns a documentation key into a red test instead
+of a dead deploy. Enumerated needs:
 - script-src 'self' + sha256 hash: index.html's pre-paint theme <script> is the
   ONLY inline script (Vite emits it byte-identical into dist/, verified). The
   hash is recomputed from index.html by the lockstep test — change the script
@@ -44,7 +47,7 @@ edit here can't silently drop one. Enumerated needs:
   'none' (+ X-Frame-Options DENY for older engines): no embeds, no forms
   posting anywhere, never framed — clickjacking off the table (the refresh
   token lives in localStorage; XSS/clickjacking mitigation is the point).
-- Download/share export paths (Dashboard.jsx shareCsv) use blob: anchor
+- Download/share export paths (`downloadCsv` in Dashboard.jsx) use blob: anchor
   downloads / navigator.share — neither is governed by CSP fetch directives,
   so no directive needed.
 Companions: nosniff, Referrer-Policy strict-origin-when-cross-origin (no

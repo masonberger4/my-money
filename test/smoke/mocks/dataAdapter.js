@@ -118,7 +118,7 @@ const MECHANISM = new Set(['Transfers and card payments', 'Return', 'Uncategoriz
 // wording the surviving guards do NOT catch, so it stays Uncategorized and is
 // washed by markInternalTransfers, not by its label).
 const WIPE_EXTRA = POSTWIPE ? [
-  raw('2026-08-01', -2200.00, 'ACH DEPOSIT PAYROLL POME HOLISTIC PE', null, 'a1'),
+  raw('2026-08-01', -2200.00, 'ACH DEPOSIT PAYROLL NORTHWIND LABS PE', null, 'a1'),
   raw('2026-08-02', 600.00, 'ZELLE TO BECU SAVINGS', null, 'a1'),
   raw('2026-08-02', -600.00, 'ZELLE FROM CHECKING MASON B', null, 'a2'),
 ] : [];
@@ -195,7 +195,7 @@ export async function getTransactions({ year, month }) {
 const CASHFLOW_PERIODS = ['Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug'].map((label, i) => {
   const mm = String(3 + i).padStart(2, '0');
   const rows = [
-    raw(`2026-${mm}-15`, -2100, 'ACH DEPOSIT PAYROLL POME HOLISTIC PE', null, 'a1'),
+    raw(`2026-${mm}-15`, -2100, 'ACH DEPOSIT PAYROLL NORTHWIND LABS PE', null, 'a1'),
     raw(`2026-${mm}-01`, -(2100 + (i % 2) * 300), 'DIRECT DEP EMPLOYER INC', null, 'a1'),
   ];
   return {
