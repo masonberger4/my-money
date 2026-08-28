@@ -209,7 +209,13 @@ export async function getCashFlow() {
 }
 export async function getAccounts() { return { accounts: ACCTS.map(a => ({ ...a })) }; }
 export async function updateAccount() {}
-export async function getAccountTransactions() { return { transactions: AUG.map(toTxShape) }; }
+// Date DESC, like the real query's .order('date',{ascending:false}) — the
+// account page day-groups these rows and groupByDay preserves the caller's
+// order, so a mock returning fixture order would render headers out of
+// sequence and make a correct screen look broken in the gate.
+export async function getAccountTransactions() {
+  return { transactions: [...AUG].sort((a, b) => String(b.date).localeCompare(String(a.date))).map(toTxShape) };
+}
 export async function getAccountTransactionsInRange() { return []; }
 export async function updateTransaction() {}
 // The wipe deletes every `budgets` row (they were keyed to categories that no
