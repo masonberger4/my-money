@@ -1789,7 +1789,16 @@ export async function getFeedCoverageGaps(accounts) {
 // table is not installed, which surfaces as months with no balance coverage
 // rather than an error.
 export async function getReconciliation({ maxMonths = 12 } = {}) {
-  const empty = { ok: false, months: [], coverage: { earliestSnapshot: null, latestSnapshot: null } };
+  // Same KEYS as the success path, so the panel never has to guard a field's
+  // existence — only `ok`. The month objects carry `flows` (the gross view) and
+  // the top level carries `nearMiss`; both ride the spread below, so the only
+  // thing this needs is to keep the shapes matched.
+  const empty = {
+    ok: false,
+    months: [],
+    coverage: { earliestSnapshot: null, latestSnapshot: null },
+    nearMiss: { pairs: [], total: 0 },
+  };
   try {
     const { data, error } = await supabase.from('accounts').select('id, type, hidden');
     if (error) throw error;

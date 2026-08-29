@@ -173,6 +173,10 @@ keep true. None is blocked on a technical unknown.
    spending/income totals match the money in the linked accounts. That answers
    "do the totals add up", NOT this item's question — what to DO about a
    mismatch is still unspecified, so the item stays open as written below.
+   **Extended 2026-08-29** with a gross money-out/money-in classification view
+   and `nearMissTransfers` (unpaired transfer legs counting as spending AND
+   income). That one NAMES rows but still takes no action on them, so the
+   action half below is untouched.
    Half the build exists:
    `reconcileCsv` (`src/csvImport.js`) already max-matches statement rows
    against the ledger and CsvImport.jsx renders the comparison. The open

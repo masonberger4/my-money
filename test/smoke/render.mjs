@@ -105,6 +105,12 @@ const WALK = [
   [null, '[data-mm-cat-back]', 'closing the category picker page'],
   [null, '[data-mm-tx-close]', 'closing the transaction detail sheet'],
   ['accounts', '[data-mm-nav=accounts]'],
+  // The reconciliation panel is collapsed by default, so its gross flow
+  // sections and the missed-transfer list render for NOBODY unless the walk
+  // opens them — the same blind spot as the search panel above, and nothing
+  // local renders Dashboard.jsx, so this is the only thing that can catch a
+  // ReferenceError in that path. Not a view of its own.
+  [null, '[data-mm-recon-toggle]', 'opening the reconciliation panel'],
   ['debt', '[data-mm-seg=debt]'],
   ['reflect', '[data-mm-nav=reflect]'],
 ];
