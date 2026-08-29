@@ -21,10 +21,14 @@ import {
   buildReconciliation,
   balancesAsOf,
   classifyUncounted,
+  classifyFlow,
+  nearMissTransfers,
   monthEdges,
   reconciliationScope,
   BUCKET_ORDER,
+  FLOW_ORDER,
   RECON_SCOPE_TYPES,
+  NEAR_MISS_MIN_AMOUNT,
 } from '../src/reconciliation.js';
 import { standardLedger, randomLedger, makeTx, makeAccounts, lcg } from './helpers/ledger.js';
 
@@ -395,6 +399,7 @@ test('garbage input degrades to an empty shape and never throws', () => {
   assert.deepEqual(buildReconciliation(), {
     months: [],
     coverage: { earliestSnapshot: null, latestSnapshot: null },
+    nearMiss: { pairs: [], total: 0 },
   });
   assert.deepEqual(buildReconciliation({}).months, []);
   const r = buildReconciliation({
@@ -438,4 +443,285 @@ test('output is deterministic: months newest first, buckets in a fixed order', (
   const keys = a.months[0].buckets.map(x => x.key);
   assert.deepEqual(keys, BUCKET_ORDER.filter(k => keys.includes(k)));
   assert.deepEqual(a, b, 'same input twice must give the same answer');
+});
+
+// ================================================================ GROSS FLOWS
+//
+// The gross view adds no new external cross-check — balances report only a
+// LEVEL, so gross debits/credits are unrecoverable from them. What it must do
+// is stay welded to the identity it decorates: if the class list and the
+// signed total can drift apart, the panel starts contradicting itself on
+// screen, which is worse than showing nothing.
+
+const flowsOf = (rows, accounts) =>
+  buildReconciliation({
+    monthsRows: [{ month: '2026-07', rows }],
+    snapshots: [],
+    accounts,
+    today: '2026-08-29',
+  }).months[0];
+
+test('classifyFlow agrees with the ONE predicates and partitions every row exactly once', () => {
+  for (const seed of [1, 7, 42, 1234, 98765]) {
+    const led = randomLedger(seed);
+    const rows = sprinkleTypes(led.visibleRows(), seed);
+    markInternalTransfers(rows);
+    for (const t of rows) {
+      const cls = classifyFlow(t);
+      assert.ok(FLOW_ORDER.includes(cls), `${cls} is not a flow class`);
+      assert.equal(cls === 'spending', isSpend(t), `spending disagreement on ${t.id}`);
+      assert.equal(cls === 'income', isIncome(t), `income disagreement on ${t.id}`);
+      if (cls !== 'spending' && cls !== 'income') assert.equal(cls, classifyUncounted(t));
+    }
+  }
+  assert.equal(classifyFlow(null), 'other');
+  assert.equal(classifyFlow(undefined), 'other');
+});
+
+for (const seed of [1, 7, 42, 1234, 98765]) {
+  test(`gross conservation on seed ${seed}: deltaLedger === moneyIn − moneyOut`, () => {
+    const led = randomLedger(seed);
+    const rows = sprinkleTypes(led.visibleRows(), seed);
+    markInternalTransfers(rows);
+    const m = flowsOf(rows, Object.values(led.accounts).filter(a => !a.hidden));
+    // Positive amount is money OUT and deltaLedger is −Σ amount, so the
+    // direction is IN minus OUT. Getting this backwards is the easy mistake.
+    assert.ok(
+      near(m.deltaLedger, m.flows.moneyIn.total - m.flows.moneyOut.total, 1e-6),
+      `deltaLedger ${m.deltaLedger} !== in ${m.flows.moneyIn.total} − out ${m.flows.moneyOut.total}`
+    );
+  });
+
+  test(`the reported spending and income figures are reconstructible on seed ${seed}`, () => {
+    const led = randomLedger(seed);
+    const rows = sprinkleTypes(led.visibleRows(), seed);
+    markInternalTransfers(rows);
+    const m = flowsOf(rows, Object.values(led.accounts).filter(a => !a.hidden));
+    const f = m.flows;
+    // The split that was invisible before: the headline figure is already net.
+    assert.ok(near(f.purchases - f.refunds, f.spending));
+    assert.ok(near(f.incomeReceived - f.incomeReturned, f.income));
+    // ...and adding back the out-of-scope share returns the headline exactly.
+    assert.ok(near(f.spending + f.outOfScope.spending, m.spending), 'spending');
+    assert.ok(near(f.income + f.outOfScope.income, m.income), 'income');
+    // The sentence on screen must equal the list under it.
+    assert.ok(near(f.leftAndStayedGone, f.spending + f.excludedNet + f.otherNet));
+    // Sections add up from their own printed parts.
+    for (const side of [f.moneyOut, f.moneyIn]) {
+      assert.ok(near(side.total, side.classes.reduce((a, c) => a + c.amount, 0)));
+      const keys = side.classes.map(c => c.key);
+      assert.deepEqual(keys, FLOW_ORDER.filter(k => keys.includes(k)), 'class order');
+      for (const c of side.classes) assert.ok(!Object.is(c.amount, -0));
+    }
+    assert.ok(!Object.is(f.moneyOut.total, -0) && !Object.is(f.moneyIn.total, -0));
+  });
+}
+
+test('the standard fixture splits its spending into purchases and refunds', () => {
+  const { led, rows } = julyFixture();
+  const m = flowsOf(rows, Object.values(led.accounts).filter(a => !a.hidden));
+  const f = m.flows;
+  // 764.00 is the pre-refund-netting total recorded in test/helpers/ledger.js —
+  // visible on a screen for the first time.
+  assert.equal(f.purchases, 764.0);
+  assert.equal(f.refunds, 35.0);
+  assert.equal(f.spending, 729.0);
+  assert.equal(f.spending, m.spending, 'must equal what every other screen prints');
+  assert.equal(f.incomeReceived, 2501.25);
+  assert.equal(f.incomeReturned, 0);
+  assert.equal(f.moneyOut.total, 1504.0);
+  assert.equal(f.moneyIn.total, 3236.25);
+  assert.equal(m.deltaLedger, 1732.25);
+  // Both internal classes have both legs in the month, so they net to zero.
+  assert.equal(f.internalOut, 700);
+  assert.equal(f.internalIn, 700);
+  // 729 spending + 40 excluded by hand.
+  assert.equal(f.leftAndStayedGone, 769.0);
+});
+
+// ==================================================== POSSIBLE MISSED TRANSFERS
+//
+// The failure mode no balance check can see: a real transfer that failed to
+// pair counts as spending AND income while the identity still balances
+// perfectly. These guard the detector's precision — a false positive here
+// costs a glance, but a detector that cries wolf gets ignored, and then the
+// $23k/quarter shape it exists for goes unnoticed again.
+
+// A straddling pair: out Jul 31, in Aug 2. Per-month pairing cannot see across
+// the boundary, so both legs count today.
+function straddle(overrides = {}) {
+  const A = makeAccounts();
+  const july = [makeTx(A.checking, 'so', '2026-07-31', 500, 'ONLINE BANKING TRANSFER TO SAVINGS', overrides.out || {})];
+  const august = [makeTx(A.savings, 'si', '2026-08-02', -500, 'ONLINE BANKING TRANSFER FROM CHECKING', overrides.in || {})];
+  markInternalTransfers(july);
+  markInternalTransfers(august);
+  if (overrides.outType) july[0].user_type = overrides.outType;
+  if (overrides.inType) august[0].user_type = overrides.inType;
+  return { A, july, august, all: july.concat(august) };
+}
+
+test('a straddling transfer is found only when both months are seen together', () => {
+  const { july, all } = straddle();
+  const r = nearMissTransfers(all);
+  assert.equal(r.total, 1);
+  assert.equal(r.pairs.length, 1);
+  const p = r.pairs[0];
+  assert.equal(p.tier, 'exact');
+  assert.equal(p.crossMonth, true);
+  assert.equal(p.gapDays, 2);
+  assert.equal(p.amount, 500);
+  assert.equal(p.delta, 0);
+  assert.equal(p.out.id, 'so');
+  assert.equal(p.in.id, 'si');
+  assert.equal(p.out.accountId, 'acc-chk');
+  assert.equal(p.in.accountId, 'acc-sav');
+  // The whole reason the pass folds every fetched month together.
+  assert.equal(nearMissTransfers(july).total, 0, 'one month alone can never see it');
+});
+
+test('a row the human already typed is never flagged (the cashFlow.js:50 mirror)', () => {
+  // user_type IS the human saying what this row is; re-flagging it would undo
+  // the false-wash fix the override exists for.
+  assert.equal(nearMissTransfers(straddle({ outType: 'transfer' }).all).total, 0);
+  assert.equal(nearMissTransfers(straddle({ inType: 'transfer' }).all).total, 0);
+  assert.equal(nearMissTransfers(straddle({ outType: 'spending' }).all).total, 0);
+  // Excluded rows are out of the pool too.
+  assert.equal(nearMissTransfers(straddle({ out: { excluded: true } }).all).total, 0);
+  assert.equal(nearMissTransfers(straddle({ in: { excluded: true } }).all).total, 0);
+});
+
+test('a loan leg is never flagged — loan rows are out of the pairing pool', () => {
+  const A = makeAccounts();
+  const july = [makeTx(A.checking, 'lo', '2026-07-31', 500, 'ONLINE BANKING TRANSFER TO SAVINGS')];
+  const august = [makeTx(A.mortgage, 'li', '2026-08-02', -500, 'PAYMENT RECEIVED THANK YOU')];
+  markInternalTransfers(july);
+  markInternalTransfers(august);
+  assert.equal(nearMissTransfers(july.concat(august)).total, 0);
+});
+
+test('the damage gate: a straddling CARD PAYMENT is not reported, because nothing is over-counted', () => {
+  const A = makeAccounts();
+  // Both legs are vetoed by the card-payment guards, so an unpaired card
+  // payment counts in NEITHER total — there is no error to report.
+  const july = [makeTx(A.checking, 'po', '2026-07-31', 400, 'CAPITAL ONE AUTOPAY PYMT')];
+  const august = [makeTx(A.card1, 'pi', '2026-08-02', -400, 'CAPITAL ONE MOBILE PYMT AUTOPAY')];
+  markInternalTransfers(july);
+  markInternalTransfers(august);
+  assert.equal(isSpend(july[0]), false, 'payer leg is vetoed');
+  assert.equal(isIncome(august[0]), false, 'card leg is not income');
+  assert.equal(nearMissTransfers(july.concat(august)).total, 0);
+});
+
+test('the amount floor keeps small coincidences out', () => {
+  const A = makeAccounts();
+  const mk = amt => {
+    const j = [makeTx(A.checking, 'fo', '2026-07-31', amt, 'ONLINE BANKING TRANSFER TO SAVINGS')];
+    const a = [makeTx(A.savings, 'fi', '2026-08-02', -amt, 'ONLINE BANKING TRANSFER FROM CHECKING')];
+    markInternalTransfers(j);
+    markInternalTransfers(a);
+    return j.concat(a);
+  };
+  assert.equal(nearMissTransfers(mk(50)).total, 0, 'below the floor');
+  assert.equal(nearMissTransfers(mk(NEAR_MISS_MIN_AMOUNT)).total, 1, 'at the floor');
+});
+
+test('the near tier catches a sub-dollar discrepancy, and nothing looser', () => {
+  const A = makeAccounts();
+  const mk = inAmt => {
+    const rows = [
+      makeTx(A.checking, 'no', '2026-07-10', 500, 'ONLINE BANKING TRANSFER TO SAVINGS'),
+      makeTx(A.savings, 'ni', '2026-07-12', -inAmt, 'ONLINE BANKING TRANSFER FROM CHECKING'),
+    ];
+    markInternalTransfers(rows);
+    return rows;
+  };
+  const hit = nearMissTransfers(mk(499.6));
+  assert.equal(hit.total, 1);
+  assert.equal(hit.pairs[0].tier, 'near');
+  assert.equal(hit.pairs[0].delta, 0.4);
+  // $5 apart is not "a fee shaved the receiving leg" — it is two transactions.
+  assert.equal(nearMissTransfers(mk(495)).total, 0);
+});
+
+test('two legs on the SAME account never pair — the pairing requires two accounts', () => {
+  const A = makeAccounts();
+  const rows = [
+    makeTx(A.checking, 'ao', '2026-07-10', 500, 'ONLINE BANKING TRANSFER TO SAVINGS'),
+    makeTx(A.checking, 'ai', '2026-07-16', -500, 'PAYROLL DIRECT DEP'),
+  ];
+  markInternalTransfers(rows);
+  assert.equal(nearMissTransfers(rows).total, 0);
+});
+
+test('no row is reused across candidates', () => {
+  const A = makeAccounts();
+  // One inflow against three identical outflows: without greedy consumption a
+  // single recurring paycheck would match every same-sized outflow in range.
+  const rows = [
+    makeTx(A.checking, 'r1', '2026-07-10', 500, 'ONLINE BANKING TRANSFER TO SAVINGS'),
+    makeTx(A.checking, 'r2', '2026-07-11', 500, 'ONLINE BANKING TRANSFER TO SAVINGS'),
+    makeTx(A.checking, 'r3', '2026-07-12', 500, 'ONLINE BANKING TRANSFER TO SAVINGS'),
+    makeTx(A.savings, 'r4', '2026-07-13', -500, 'ONLINE BANKING TRANSFER FROM CHECKING'),
+  ];
+  markInternalTransfers(rows);
+  const r = nearMissTransfers(rows);
+  const seen = new Set();
+  for (const p of r.pairs) {
+    for (const id of [p.out.id, p.in.id]) {
+      assert.ok(!seen.has(id), `${id} appears in two candidates`);
+      seen.add(id);
+    }
+  }
+  assert.ok(r.total <= 1, 'one inflow can back at most one pair');
+});
+
+test('output is deterministic under input order, capped, and honest about the count', () => {
+  const A = makeAccounts();
+  const rows = [];
+  for (let i = 0; i < 12; i++) {
+    const amt = 100 + i * 50;
+    rows.push(makeTx(A.checking, `co${i}`, '2026-07-10', amt, 'ONLINE BANKING TRANSFER TO SAVINGS'));
+    rows.push(makeTx(A.savings, `ci${i}`, '2026-07-19', -amt, 'ONLINE BANKING TRANSFER FROM CHECKING'));
+  }
+  markInternalTransfers(rows);
+  const r = nearMissTransfers(rows, { limit: 8 });
+  assert.equal(r.total, 12, 'total counts survivors, not just what is shown');
+  assert.equal(r.pairs.length, 8);
+  const amounts = r.pairs.map(p => p.amount);
+  assert.deepEqual(amounts, [...amounts].sort((a, b) => b - a), 'largest first');
+  assert.equal(amounts[0], 100 + 11 * 50, 'the biggest miss leads');
+  // Shuffling the input must not change the answer.
+  const rand = lcg(99);
+  const shuffled = rows.slice().sort(() => rand() - 0.5);
+  assert.deepEqual(nearMissTransfers(shuffled, { limit: 8 }), r);
+});
+
+test('the detector never mutates a row and never throws on garbage', () => {
+  const { all } = straddle();
+  const before = all.map(t => ({ ...t }));
+  nearMissTransfers(all);
+  all.forEach((t, i) => assert.deepEqual({ ...t }, before[i], 'rows must be left untouched'));
+  for (const junk of [undefined, null, [], [null, {}, { amount: NaN }, { id: 'x', amount: 5, date: 'nope' }]]) {
+    assert.deepEqual(nearMissTransfers(junk), { pairs: [], total: 0 });
+  }
+});
+
+test('buildReconciliation surfaces the near miss without disturbing any identity', () => {
+  const { A, july, august } = straddle();
+  const { months, nearMiss } = buildReconciliation({
+    monthsRows: [{ month: '2026-07', rows: july }, { month: '2026-08', rows: august }],
+    snapshots: [],
+    accounts: [A.checking, A.savings],
+    today: '2026-09-15',
+  });
+  assert.equal(nearMiss.total, 1);
+  assert.equal(nearMiss.pairs[0].amount, 500);
+  // The pair really is being double-counted today — that is the whole claim.
+  assert.equal(months[1].spending, 500, 'July counts the outflow as spending');
+  assert.equal(months[0].income, 500, 'August counts the inflow as income');
+  // And every identity still holds on both months.
+  for (const m of months) {
+    assert.ok(near(m.deltaLedger, m.net + m.buckets.reduce((a, b) => a + b.impact, 0)));
+    assert.ok(near(m.deltaLedger, m.flows.moneyIn.total - m.flows.moneyOut.total));
+  }
 });

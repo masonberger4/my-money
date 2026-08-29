@@ -23,7 +23,11 @@
 // (hidden = outside the linked boundary, by decision).
 import { sumSpending, isLoanAccount } from './spending.js';
 
-const INTERNAL_MATCH_WINDOW_DAYS = 4;
+// EXPORTED since 2026-08-29: src/reconciliation.js's near-miss detector looks
+// for the pairs this window MISSED, so it has to know where the window ends. A
+// second `4` over there would be the drifting-constant hazard — widen this one
+// and the audit would keep reporting rows the pairing had started washing.
+export const INTERNAL_MATCH_WINDOW_DAYS = 4;
 
 function dayNumber(iso) {
   const [y, m, d] = (iso || '').split('-').map(Number);

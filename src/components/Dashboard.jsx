@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from "react";
 import { getOverview, getSpending, getBiggestMovers, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES, ACCOUNT_SUBTYPES, setCategoryRule, applyCategoryRuleToHistory, listCategoryRules, countCategoryRuleMatches, deleteCategoryRule, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, getActualIncome, resolveBudgetIncome, invalidateEnvelopeSpending, isEnvelopeSchemaMissing, targetNeed, readyToAssign, envelopePace, setEnvPace as persistEnvPace, updateRecIgnore, getStartupSettings, monthKey, getEntities, createEntity, updateEntity, getTaxYearTransactions, getMileage, addMileage, deleteMileage, getReceiptTxIds, getDebts, getBalanceSnapshots, getNetWorthSeries, addManualTransaction, createManualAccount, updateManualBalance, getDataCoverage, getFeedCoverageGaps, FEED_GAP_SCAN_CAP, getReconciliation, getRestoreRecord, signOut, autoFillMonth, setTargetOverride, effectiveTarget, getExpectedTransactions, addExpected, dismissExpected, matchExpectedManually, getSavedChats, saveChatToApp, deleteSavedChat, addRegistryEntry, updateRegistryParent, removeRegistryEntry, updateCategoryColor, updateCategoryAlias } from "../dataAdapter.js";
+import { FLOW_LABELS } from "../reconciliation.js";
 // Pure cores imported directly (never Supabase — the mock-harness alias rule
 // only covers dataAdapter/sync/db/apiClient; pure modules are safe).
 import { planAutoFill } from "../envelopes.js";
@@ -356,6 +357,31 @@ function useEscClose(onClose){
     window.addEventListener("keydown",h);
     return ()=>window.removeEventListener("keydown",h);
   },[onClose]);
+}
+
+// One direction of the gross flow view — the entityLedger/PropertySheet shape
+// (head + itemised rows), which is the app's existing precedent for "every
+// dollar that moved, split by direction". Magnitudes, not signed values: the
+// heading already says which way the money went, and a column of minus signs
+// under "MONEY OUT" reads as an error.
+function FlowSection({label,section,dir}) {
+  if(!section||!section.classes.length) return null;
+  return (
+    <div style={{marginTop:8}}>
+      <div style={{display:"flex",justifyContent:"space-between",gap:8,alignItems:"baseline"}}>
+        <span style={{fontSize:10,fontWeight:600,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em"}}>{label}</span>
+        <span style={{fontSize:11,fontFamily:"'DM Mono',monospace",color:"var(--text)",flexShrink:0}}>{fmtAuto(section.total)}</span>
+      </div>
+      {section.classes.map(c=>(
+        <div key={c.key} style={{display:"flex",justifyContent:"space-between",gap:8,marginTop:3,fontSize:11,color:"var(--muted)"}}>
+          <span style={{minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+            {FLOW_LABELS[c.key]?.[dir]||c.key} <span style={{opacity:.7}}>· {c.count} row{c.count===1?"":"s"}</span>
+          </span>
+          <span style={{fontFamily:"'DM Mono',monospace",flexShrink:0}}>{fmtAuto(c.amount)}</span>
+        </div>
+      ))}
+    </div>
+  );
 }
 
 function Sk({w="100%",h=16,r=6}) {
@@ -5576,7 +5602,7 @@ export default function Dashboard({ refreshTick = 0 }) {
             residual is an ordinary fact of how money moves. */}
         {tab==="accounts"&&!selAcct&&(
           <div className="card" style={{marginTop:14}}>
-            <div onClick={openRecon} style={{display:"flex",justifyContent:"space-between",alignItems:"center",cursor:"pointer"}}>
+            <div data-mm-recon-toggle onClick={openRecon} style={{display:"flex",justifyContent:"space-between",alignItems:"center",cursor:"pointer"}}>
               <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em"}}>Does it add up?</div>
               <span style={{fontSize:12,color:"var(--muted)"}}>{reconOpen?"▾":"▸"}</span>
             </div>
@@ -5594,6 +5620,41 @@ export default function Dashboard({ refreshTick = 0 }) {
                     <div style={{fontSize:12,fontWeight:600,color:"var(--text)"}}>
                       {m.label}{m.partial&&m.balanceEnd?` so far (through ${m.balanceEnd.date})`:m.partial?" so far":""}
                     </div>
+                    {/* THE ANSWER TO MASON'S QUESTION, first thing after the
+                        month: spending measured against the money that actually
+                        left, with transfers between his own accounts removed.
+                        The "all of it" branch is not cosmetic — on a clean month
+                        leftAndStayedGone EQUALS spending, and "X of the X" reads
+                        as a bug rather than as the good news it is. */}
+                    {m.flows&&(
+                      <div style={{fontSize:11,color:"var(--text)",marginTop:5,lineHeight:1.5}}>
+                        {Math.abs(m.flows.leftAndStayedGone-m.flows.spending)<0.005
+                          ?<>All {fmtAuto(m.flows.leftAndStayedGone)} that left and stayed gone was spending.</>
+                          :<>Spending is {fmtAuto(m.flows.spending)} of the {fmtAuto(m.flows.leftAndStayedGone)} that left and stayed gone.</>}
+                      </div>
+                    )}
+                    {/* The netting nothing else in the app has ever shown: since
+                        refund netting the headline Spending figure is already
+                        purchases MINUS refunds. Rendered only when there is a
+                        refund, so an ordinary month stays clean. */}
+                    {m.flows&&m.flows.refunds>0&&(
+                      <div style={{fontSize:10,color:"var(--muted)",marginTop:3,lineHeight:1.5}}>
+                        {fmtAuto(m.flows.purchases)} in purchases, less {fmtAuto(m.flows.refunds)} that came back as refunds.
+                      </div>
+                    )}
+                    {m.flows&&m.flows.incomeReturned>0&&(
+                      <div style={{fontSize:10,color:"var(--muted)",marginTop:3,lineHeight:1.5}}>
+                        {fmtAuto(m.flows.incomeReceived)} received, less {fmtAuto(m.flows.incomeReturned)} sent back.
+                      </div>
+                    )}
+                    {m.flows&&<FlowSection label="Money out" section={m.flows.moneyOut} dir="out"/>}
+                    {m.flows&&<FlowSection label="Money in" section={m.flows.moneyIn} dir="in"/>}
+
+                    <div style={{height:1,background:"var(--border)",margin:"10px 0 6px"}}/>
+                    <div style={{fontSize:10,fontWeight:600,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em"}}>
+                      Against the bank's balances
+                    </div>
+
                     {/* Label left, number right — the same two-column shape as
                         the bucket rows below, so the month reads as one column
                         of figures. Written as prose it wrapped mid-expression
@@ -5647,18 +5708,90 @@ export default function Dashboard({ refreshTick = 0 }) {
                     )}
                   </div>
                 ))}
+                {/* POSSIBLE MISSED TRANSFERS — the one over-count no balance
+                    check can ever see. When a real transfer between two of the
+                    household's own accounts fails to pair, the money genuinely
+                    moved, so the identity above balances perfectly while the
+                    outflow counts as spending AND the inflow as income. Only
+                    pairs that are miscounted RIGHT NOW are listed (the damage
+                    gate in reconciliation.js), so an empty section is a real
+                    all-clear rather than a shrug. Read-only by decision: openTx
+                    resolves against the VIEWED month, so tapping a row from an
+                    older month would open a sheet with its type selector
+                    withheld — the one control this section asks him to use. */}
+                {reconData&&reconData.ok&&(
+                  <div style={{marginTop:12,paddingTop:10,borderTop:"1px solid var(--border)"}}>
+                    <div style={{fontSize:10,fontWeight:600,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em"}}>
+                      Possible missed transfers
+                    </div>
+                    {reconData.nearMiss.pairs.length===0?(
+                      <div style={{fontSize:11,color:"var(--muted)",marginTop:6}}>
+                        Nothing looks like a missed transfer in the months checked.
+                      </div>
+                    ):(
+                      <>
+                        <div style={{fontSize:10,color:"var(--muted)",marginTop:6,lineHeight:1.5}}>
+                          {/* "both" is load-bearing: typing only the outflow stops it
+                              counting as spending, but the inflow is still an unpaired
+                              deposit and still counts as income. */}
+                          Two rows that look like one transfer between your own accounts, which
+                          the app couldn't pair — so the money out counts as spending and the
+                          money in counts as income. Find them in the Spending list and set
+                          <b> both</b> rows to Transfer.
+                        </div>
+                        {reconData.nearMiss.pairs.map(p=>{
+                          const nm=id=>{const a=accounts.find(x=>x.id===id);return a?acctLabel(a):null;};
+                          const legLine=(l,dir)=>(
+                            <div style={{display:"flex",gap:6,marginTop:2,fontSize:10,color:"var(--muted)"}}>
+                              <span style={{width:24,flexShrink:0,opacity:.7}}>{dir}</span>
+                              <span style={{fontFamily:"'DM Mono',monospace",flexShrink:0}}>{l.date}</span>
+                              <span style={{minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                                {l.name}{nm(l.accountId)?` · ${nm(l.accountId)}`:""}
+                              </span>
+                            </div>
+                          );
+                          return (
+                            <div key={p.key} style={{marginTop:8}}>
+                              <div style={{display:"flex",justifyContent:"space-between",gap:8,fontSize:11}}>
+                                <span style={{fontFamily:"'DM Mono',monospace",color:"var(--text)"}}>{fmtAuto(p.amount)}</span>
+                                <span style={{color:"var(--muted)",fontSize:10,flexShrink:0}}>
+                                  {/* "not paired" is the honest catch-all for an exact
+                                      same-month pair: the pairing window is a constant
+                                      that lives in cashFlow.js, and naming a number here
+                                      would be a second copy of it that could drift. */}
+                                  {p.tier==="near"?`amounts differ by ${fmtAuto(p.delta)}`:p.crossMonth?"different months":"not paired"}
+                                  {" · "}{Math.abs(p.gapDays)} day{Math.abs(p.gapDays)===1?"":"s"} apart
+                                </span>
+                              </div>
+                              {legLine(p.out,"out")}
+                              {legLine(p.in,"in")}
+                            </div>
+                          );
+                        })}
+                        {reconData.nearMiss.total>reconData.nearMiss.pairs.length&&(
+                          <div style={{fontSize:10,color:"var(--muted)",marginTop:8}}>
+                            Showing the {reconData.nearMiss.pairs.length} largest of {reconData.nearMiss.total}.
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </div>
+                )}
                 {reconData&&reconData.ok&&(
                   <div style={{marginTop:8,fontSize:10,color:"var(--muted)",lineHeight:1.5}}>
                     {/* The honest framing. "Small residuals are normal" is doing
                         real work: without it a $3 line reads as a bug and the
                         panel trains its reader to ignore the number that
                         matters. */}
-                    Troubleshooting view — compares counted income and spending against the balances
-                    on checking, savings and cards. Transfers, card payments and excluded rows move
-                    money without counting, so they're listed separately; loans are left out of both
-                    sides. <b>Unexplained</b> is what's left: interest, bank fees the feed only shows
-                    in the balance, pending timing, and the day or two of drift in when balances were
-                    recorded. Small amounts are normal — a large one on an ordinary month is worth a look.
+                    Troubleshooting view, covering checking, savings and cards; loans are left out
+                    of both sides. <b>Money out / money in</b> is every dollar the ledger says moved
+                    and what it was counted as — banks report only a balance, never separate totals
+                    for money out and in, so this comes from the transactions themselves and is a
+                    check on how they're classified, not a second opinion on the amount.
+                    <b> Unexplained</b> is the part no transaction accounts for: interest, bank fees
+                    the feed only shows in the balance, pending timing, and the day or two of drift
+                    in when balances were recorded. Small amounts are normal — a large one on an
+                    ordinary month is worth a look.
                   </div>
                 )}
               </div>

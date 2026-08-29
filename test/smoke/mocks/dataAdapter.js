@@ -552,11 +552,44 @@ export async function getReconciliation() {
     ok: true,
     scopeCount: 5,
     coverage: { earliestSnapshot: '2026-08-01', latestSnapshot: '2026-08-03' },
+    // Two pairs so both tiers and both badges paint. Account ids are the mock's
+    // real ones so acctLabel resolves — a4 carries a nickname, which makes this
+    // a free check that the nickname branch renders.
+    nearMiss: {
+      total: 2,
+      pairs: [
+        { key: 'nm1|nm2', amount: 500, delta: 0, gapDays: 2, tier: 'exact', crossMonth: true,
+          out: { id: 'nm1', date: '2026-07-31', month: '2026-07', amount: 500, name: 'ONLINE BANKING TRANSFER TO SAVINGS', accountId: 'a1' },
+          in:  { id: 'nm2', date: '2026-08-02', month: '2026-08', amount: 500, name: 'ONLINE BANKING TRANSFER FROM CHECKING', accountId: 'a2' } },
+        { key: 'nm3|nm4', amount: 250, delta: 0.4, gapDays: 1, tier: 'near', crossMonth: false,
+          out: { id: 'nm3', date: '2026-08-12', month: '2026-08', amount: 250, name: 'TRANSFER TO OLD CHECKING', accountId: 'a1' },
+          in:  { id: 'nm4', date: '2026-08-13', month: '2026-08', amount: 249.6, name: 'DEPOSIT FROM BECU', accountId: 'am1' } },
+      ],
+    },
     months: [
       {
         month: '2026-08', label: 'August 2026', partial: true,
         income: 6420.00, spending: 4180.55, net: 2239.45,
         deltaLedger: 1379.45,
+        flows: {
+          moneyOut: { total: 6000.55, classes: [
+            { key: 'spending', amount: 4240.55, count: 63 },
+            { key: 'transfer', amount: 900, count: 2 },
+            { key: 'cardPayment', amount: 820, count: 1 },
+            { key: 'excluded', amount: 40, count: 1 },
+          ] },
+          moneyIn: { total: 7380, classes: [
+            { key: 'spending', amount: 60, count: 2 },
+            { key: 'income', amount: 6420, count: 4 },
+            { key: 'transfer', amount: 900, count: 2 },
+          ] },
+          purchases: 4240.55, refunds: 60, spending: 4180.55,
+          incomeReceived: 6420, incomeReturned: 0, income: 6420,
+          internalOut: 1720, internalIn: 900,
+          excludedNet: 40, otherNet: 0,
+          leftAndStayedGone: 4220.55,
+          outOfScope: { spending: 0, income: 0 },
+        },
         buckets: [
           { key: 'transfer', label: 'Transfers between linked accounts', impact: 0, moneyOut: 900, moneyIn: 900, count: 2 },
           { key: 'cardPayment', label: 'Card payments', impact: -820, moneyOut: 820, moneyIn: 0, count: 1 },
@@ -571,6 +604,23 @@ export async function getReconciliation() {
         month: '2026-07', label: 'July 2026', partial: false,
         income: 7100.00, spending: 5290.12, net: 1809.88,
         deltaLedger: 1109.88,
+        flows: {
+          moneyOut: { total: 7190.12, classes: [
+            { key: 'spending', amount: 5290.12, count: 71 },
+            { key: 'transfer', amount: 1200, count: 2 },
+            { key: 'cardPayment', amount: 700, count: 1 },
+          ] },
+          moneyIn: { total: 8300, classes: [
+            { key: 'income', amount: 7100, count: 4 },
+            { key: 'transfer', amount: 1200, count: 2 },
+          ] },
+          purchases: 5290.12, refunds: 0, spending: 5290.12,
+          incomeReceived: 7100, incomeReturned: 0, income: 7100,
+          internalOut: 1900, internalIn: 1200,
+          excludedNet: 0, otherNet: 0,
+          leftAndStayedGone: 5290.12,
+          outOfScope: { spending: 0, income: 0 },
+        },
         buckets: [
           { key: 'transfer', label: 'Transfers between linked accounts', impact: 0, moneyOut: 1200, moneyIn: 1200, count: 2 },
           { key: 'cardPayment', label: 'Card payments', impact: -700, moneyOut: 700, moneyIn: 0, count: 1 },
