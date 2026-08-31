@@ -223,4 +223,11 @@ it move the browser floor, is pdf.js still the legacy build. It comments only wh
 the answer matters — silence is the correct output for a build-only patch bump,
 and a comment on every bump trains everyone to ignore the next one. A missing
 secret leaves the job GREEN with a notice rather than a red X, so it was safe to
-merge before the store was populated.
+merge before the store was populated. **It is ADVISORY, not a gate**, and the
+required-checks rule above is why it must stay that way: on a Dependabot PR
+whose auto-merge is armed, the two required jobs can go green and merge before
+this one finishes, so treat its comment as something to read after the fact as
+often as before it. The job also needs `issues: write` to say anything at all —
+a PR conversation comment is created through the ISSUES endpoint, so
+`pull-requests: write` alone silently fails on the only run that found
+something.

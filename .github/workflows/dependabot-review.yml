@@ -47,14 +47,23 @@ jobs:
     runs-on: ubuntu-latest
     # Explicit and minimal, per the house rule that every new workflow declares
     # its permissions. Read the code, comment once, and mint the app credential:
-    #   contents: read      — check out the diff
-    #   pull-requests: write — post the one comment, when there is one
-    #   id-token: write     — the action's GitHub App auth, needed because no
-    #                         github_token is passed (see claude.yml for why)
+    #   contents: read       — check out the diff
+    #   issues: write        — REQUIRED to post the comment. Do not "minimize"
+    #                          this away: a PR conversation comment (what
+    #                          `gh pr comment` writes) is created through the
+    #                          ISSUES endpoint, POST /repos/{o}/{r}/issues/
+    #                          {n}/comments, and GitHub gates it on the issues
+    #                          scope — `pull-requests: write` alone is not
+    #                          enough. Dropping it fails only on the path that
+    #                          matters: the run that actually found something.
+    #   pull-requests: write — read PR metadata and post inline review comments
+    #   id-token: write      — the action's GitHub App auth, needed because no
+    #                          github_token is passed (see claude.yml for why)
     # Note GitHub hands Dependabot runs a READ-ONLY token by default; unlike the
     # withheld secrets, that part is recoverable exactly here.
     permissions:
       contents: read
+      issues: write
       pull-requests: write
       id-token: write
     # Bounded for the reason every ci.yml job is: an unbounded stall reads as
@@ -124,6 +133,10 @@ jobs:
             noise that trains everyone to ignore the next one.
 
             Never approve, never merge, never push, never edit the PR.
+          # One flag per line in a block scalar, the form the action documents.
+          # A plain-text prompt gets NO shell or GitHub access until granted
+          # here, so dropping a tool from this list silently removes a step the
+          # prompt above depends on.
           claude_args: |
             --model claude-sonnet-5
             --allowedTools "Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr comment:*)"

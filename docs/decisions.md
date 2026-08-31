@@ -80,37 +80,24 @@ the one it reverses.
 ## 2026-08-31 — Dependabot review workflow (`dependabot-review.yml`)
 
 Mason asked for the deferred Dependabot reviewer once the Claude GitHub App was
-installed. Research before writing overturned three assumptions from the
-2026-08-31 deferral note — each would have shipped a workflow that quietly did
-nothing:
+installed. **The mechanics live in docs/memory/workflow.md** — three verified
+facts that each break it silently (Actions secrets withheld from Dependabot
+runs, `allowed_bots` required, the stock plugin self-skipping automated PRs),
+plus why `pull_request_target` was rejected. Not restated here; this entry is
+the journal, that doc is the rulebook.
 
-- **Actions secrets are invisible to Dependabot runs.** GitHub treats them as
-  fork PRs: "the only secrets available to the workflow are Dependabot secrets.
-  GitHub Actions secrets are not available" — all repos, since 2021-03-01. A
-  plain `pull_request` workflow reading `secrets.CLAUDE_CODE_OAUTH_TOKEN` would
-  have gotten an empty string and failed on every PR it existed for. The token
-  must be entered a SECOND time in the Dependabot secret store (a separate tab
-  from Actions, same name).
-- **The stock `code-review` plugin self-skips these PRs.** Its first step stops
-  when "the pull request does not need code review (e.g. automated PR)". So the
-  workflow passes its own `prompt` instead. Corollary: a root `REVIEW.md` was
-  planned and is NOT created — that plugin reads CLAUDE.md files only and never
-  reads `REVIEW.md`, so the file would have been dead weight.
-- **`allowed_bots` is the only actor gate that matters.** The action's other
-  gate, the write-access check, passes any `[bot]` actor unconditionally, so
-  `allowed_bots: "dependabot[bot]"` is necessary and sufficient for admission.
+What was DECIDED, as opposed to discovered:
 
-- **Rejected `pull_request_target`** despite Dependabot branches being same-repo
-  rather than forks. The untrusted input in a Dependabot PR is the NEW
-  DEPENDENCY, whose install scripts and code the job runs; under the privileged
-  trigger that runs with the full secret set in scope, which is the exact
-  exfiltration path the fork treatment exists to close.
-- **Scoped the prompt to what CI cannot see**, rather than a generic review:
-  browser-bundle reach (the iOS risk both Chromium CI jobs miss), MAJOR-version
-  jumps ("a project, not a merge"), browser-floor movement (the vite 5→8
-  lesson), and pdf.js staying on the legacy build. It comments only when the
-  answer matters — a comment on every bump trains everyone to ignore the next.
-- **A missing secret leaves the job GREEN with a notice**, not a red X, via a
-  step-level guard (`secrets` is unavailable in a job-level `if:`). That keeps
-  the workflow safe to merge before the Dependabot store is populated, matching
-  the inert-until-configured property `claude.yml` gets from its comment filter.
+- **Its own prompt, not the stock `code-review` plugin** — and therefore no root
+  `REVIEW.md`, which that plugin never reads. The 2026-08-31 deferral note above
+  assumed both; both were wrong.
+- **Scoped to what CI cannot see** rather than a generic review: browser-bundle
+  reach, MAJOR-version jumps, browser-floor movement, pdf.js legacy build. It
+  stays SILENT on a build-only patch bump, because a comment on every bump
+  trains everyone to ignore the next one.
+- **Advisory, never a gate.** It is not a required check and must not become
+  one, so on a Dependabot PR whose auto-merge is armed the review can land
+  after the merge. Accepted: the alternative is a rule that can block, which
+  this repo's ruleset forbids.
+- **Fails soft.** No secret in the Dependabot store leaves the job green with a
+  notice rather than a red X, so it was safe to merge before setup finished.
