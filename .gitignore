@@ -2,7 +2,10 @@ node_modules/
 .env.local
 .vercel/
 dist/
-.claude/
+# .claude/ is checked in (agents/skills/rules/hooks + shared settings) — only
+# the per-machine pieces stay local.
+.claude/settings.local.json
+.claude/memory/
 .harness/
 
 # Supabase CLI local state — `supabase link` writes the project ref and a

@@ -3,20 +3,20 @@
 > **Contract for AI sessions:** items here are live specs — the PR that ships
 > (or supersedes) an item marks it shipped/refuted in that same PR, noting what
 > shipped instead when the design diverged; an unmarked shipped item is a bug.
-> When every item is resolved this doc is DELETED per CLAUDE.md's maintenance
-> contract. CLAUDE.md is authoritative wherever the two disagree.
+> When every item is resolved this doc is DELETED per the maintenance
+> contract (docs/memory/maintenance-contract.md). The memory docs are authoritative wherever the two disagree.
 
 **Where the live work is:** the **Improvement backlog (2026-08-13)** section is
 the current unbuilt list. Items 2/3/4 under Low-hanging fruit and 1/3/4/5 under
 Harder are the older live specs. Everything struck through is a POINTER to a
 shipped thing, not work — git and the named PRs hold the detail.
 
-**THE single forward-looking doc** (the one exception is recorded in CLAUDE.md's
-Roadmap doc inventory). Both six-dimension audit backlogs (2026-08-01 and
+**THE single forward-looking doc** (the one exception is recorded in the
+Roadmap doc inventory, docs/memory/ship-record.md). Both six-dimension audit backlogs (2026-08-01 and
 2026-08-04) shipped out completely and were deleted 2026-08-05 per the
-delete-when-spent rule — their decided rules live in CLAUDE.md, their history in
+delete-when-spent rule — their decided rules live in the memory docs (docs/memory/), their history in
 git, and the one thing worth carrying forward (what was refuted, so it doesn't
-come back) is the Refuted section near the bottom. CLAUDE.md wins on any
+come back) is the Refuted section near the bottom. The memory docs win on any
 conflict; nothing below relitigates a decided item.
 
 ## Decision queue for Mason
@@ -43,8 +43,8 @@ keep true. None is blocked on a technical unknown.
    without this rule" action; (b) whether `source` should always render.
    (Low-hanging fruit 7)
 10. **Recurring Zelle deposits counted as income** — rent, or reimbursements
-    that inflate income and Ready to Assign? Standing ruling in CLAUDE.md's
-    Pending; surfaced 2026-08-17, unruled.
+    that inflate income and Ready to Assign? Standing ruling in
+    docs/memory/ship-record.md's Pending; surfaced 2026-08-17, unruled.
 11. **vite 5 → 8** — accept a dev-server-only esbuild advisory, or schedule
     the three-major toolchain upgrade as its own task? (2026-08-30 dependency
     pass; PR #117 left open)
@@ -53,7 +53,7 @@ keep true. None is blocked on a technical unknown.
 
 1. ~~**The Pending data/ops tasks FIRST**~~ — **ALL FIVE RESOLVED** (last closed
    2026-08-12, the statement backfill). The resolutions survive as standing
-   rulings in CLAUDE.md's Pending — payroll twins, same-day card dupes, the
+   rulings in docs/memory/ship-record.md's Pending — payroll twins, same-day card dupes, the
    Discover 7933 twins' end state, the two-real-checking-accounts refutation,
    and backfill completeness — and those rulings GOVERN; this item is a pointer.
    Key rotation, the spend cap and NEWREZ closed earlier. Retraining is the only
@@ -63,7 +63,7 @@ keep true. None is blocked on a technical unknown.
    decision): DEFER until retraining settles — it competes for Mason's
    attention with teaching categories, and adds an LLM write path to an app
    whose current job is getting categories right.* Spec stays live.
-   The upgrade path CLAUDE.md already reserved: a new
+   The upgrade path the memory docs already reserved: a new
    `api/receipt-ocr` route on the existing `ANTHROPIC_API_KEY`, reading the
    stored image (signed URL server-side or Storage download under
    service_role), returning merchant/date/amount/category suggestions,
@@ -98,7 +98,7 @@ keep true. None is blocked on a technical unknown.
    `React.lazy` inside Dashboard.jsx (Tax/Debt/Trends render heavy pure
    cores). **Harness caveat:** any split-out module must keep importing
    through `dataAdapter.js` — the smoke harness aliases only the façade-level
-   modules (see the dataAdapter façade key row in CLAUDE.md; its fifth alias,
+   modules (see the dataAdapter façade key row in docs/memory/key-files.md; its fifth alias,
    `supabaseClient.js`, exists for App.jsx and is not a licence for
    components) — a module importing anywhere else either escapes the mocks or
    silently bypasses the façade while the gate stays green (same rule
@@ -107,19 +107,20 @@ keep true. None is blocked on a technical unknown.
 5. ~~**Retire the Data coverage panel**~~ — **RESOLVED 2026-08-13: Mason ruled
    KEEP** ("i kinda like it"). Not a build item; revisit only if he asks. The
    removal recipe and the permanent/temporary split live in the `src/coverage.js`
-   key row (CLAUDE.md) and in git.
+   key row (docs/memory/key-files.md) and in git.
 
 6. ~~**SQL/RLS tests**~~ — **FULLY SHIPPED 2026-08-11 (PR #73)**, executed and
    mutation-tested on a real Postgres 16. The harness, its recipe and its one
    known limit (it proves the migration's policy SQL, not that PROD applied it —
-   `bootstrap_household.sql` stays the prod-side check) live in CLAUDE.md's
-   Local-checks recipe and the `test/` key row.
+   `bootstrap_household.sql` stays the prod-side check) live in
+   docs/memory/workflow.md's Local-checks recipe and the `test/` key row
+   (docs/memory/key-files.md).
 
 7. ~~**Learned-rules review screen ("Taught rules")**~~ — **SHIPPED 2026-08-04**,
    no migration. `RulesSheet` + `listCategoryRules` (rows with metadata, null
    pre-migration) + `countCategoryRuleMatches`; the count-vs-dry-run and
    delete-changes-nothing semantics live in the `ruleHistory.js` key row
-   (CLAUDE.md). **Still open for Mason** (Decision queue 9):
+   (the memory docs). **Still open for Mason** (Decision queue 9):
    - (a) a later "reclassify these rows without this rule" action;
    - (b) whether `source` should always render (today it renders only when >1
      distinct value exists).
@@ -140,7 +141,7 @@ keep true. None is blocked on a technical unknown.
    decision, reversing the seed taxonomy). Migration
    `20260805000001_user_owned_categories.sql` applied and verified against PROD;
    the app ships no categories, nothing is guessed, and a learned rule is the
-   only categorizer. Every rule lives in CLAUDE.md (the no-shipped-categories
+   only categorizer. Every rule lives in docs/memory/conventions.md (the no-shipped-categories
    Convention + the `categoryMap.js` / `categoryList.js` key rows); the
    preserve-then-wipe design and the two deliberate deviations (rules wiped too;
    pasted AFTER the deploy) are in the migration header and PR.
@@ -165,7 +166,7 @@ keep true. None is blocked on a technical unknown.
 2. ~~**Deriving RTA income (the income wall)**~~ — **SHIPPED 2026-08-13 as the
    HYBRID income rule**: a COMPLETED month reads actual measured income, the
    month IN PROGRESS and future months stay hand-typed, uncovered months fall
-   back to manual. Rules in CLAUDE.md's envelope Conventions. Consequence: Age
+   back to manual. Rules in docs/memory/conventions.md's envelope Conventions. Consequence: Age
    of Money is now buildable as its own decision.
 
 3. **Reconciliation** — spec open (Roadmap). **PARTLY SHIPPED 2026-08-28**:
@@ -222,7 +223,7 @@ Accounts / Reflect); the internal `tab` values behind them are unchanged, so
   grabbed the wrong rows, is the classic report. Send the VERBATIM descriptor
   string — the "Bank text:" line in the transaction sheet, which renders only
   when it differs from the display name. `merchantKey` works off exact tokens,
-  and the known over-specific-key limit lives in CLAUDE.md.
+  and the known over-specific-key limit lives in the memory docs.
 - **Classification misses beyond teaching** — categorizing is no longer the
   only classification in the code, so these are their own report classes:
   a transfer or card payment that started counting as spending (the
@@ -331,7 +332,7 @@ Decision queue at the top.
 ### Budgeting ergonomics (the YNAB muscle-memory gaps)
 
 > Note (2026-08-16): distinct from the YNAB-style VISUAL redesign, which
-> shipped separately (rules in CLAUDE.md). These items are budgeting
+> shipped separately (rules in the memory docs). These items are budgeting
 > BEHAVIOR gaps and remain open.
 
 - **Cover overspending — start the move from the red envelope** — S. An
@@ -650,7 +651,7 @@ passes. These are the ones a future audit would otherwise raise again.
   filtered path — not a path filter alone.
 - Anything relitigating the sign conventions, the unified linked-boundary
   model, hidden-by-default accounts, theme tokens, or the envelope walk was
-  screened out against CLAUDE.md's decided lists.
+  screened out against the memory docs' decided lists.
 
 **Mason's 2026-08-04 decisions** (all executed; recorded here because the doc
 that held them is gone): month-navigation caching **yes** (shipped); **no**
@@ -659,19 +660,19 @@ set; the dataAdapter split got **its own quiet session** (shipped).
 
 ## Ship record
 
-Pointers only. Every rule these shipped lives in CLAUDE.md; every detail lives
+Pointers only. Every rule these shipped lives in the memory docs; every detail lives
 in git and the named PRs.
 
 - **Subcategories, one level (2026-08-05, Mason)** — totals at both the parent
   and the leaf, with no migration and no schema change: transactions still
   store one label (the leaf) and the parent link is a `dash:cats` field. Pure
-  core `src/categoryTree.js`; rules in CLAUDE.md's Category-nesting Convention,
+  core `src/categoryTree.js`; rules in docs/memory/conventions.md's Category-nesting Convention,
   including the sort-by-the-number-you-render lesson and the deliberate
   non-decision (parent-level BUDGETING is a separate Mason call — don't
   propose it as a bug).
 - **The sixteen-item self-serve backlog (synthesized 2026-08-11, ALL SHIPPED
   2026-08-12)** — three build waves plus an adversarial review, with two review
-  catches fixed before merge. Recorded in CLAUDE.md's Merged features (PR #76);
+  catches fixed before merge. Recorded in docs/memory/ship-record.md's Merged features (PR #76);
   its one killed item is preserved in the Refuted section above. The
   identifiers those item texts named (e.g. the retired `FEED_LOOKBACK_DAYS`)
   were historical descriptions of fixed hazards, not live references.

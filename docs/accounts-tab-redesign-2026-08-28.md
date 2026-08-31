@@ -1,8 +1,9 @@
 # Accounts tab redesign — collapsible sections + account tiles (2026-08-28)
 
 **Status: SHIPPED.** Process doc, kept at Mason's request ("save the planning doc
-to the repository"). Every durable rule from it now lives in CLAUDE.md's
-`Dashboard.jsx` key row and the localStorage device-pref Convention — read those
+to the repository"). Every durable rule from it now lives in the memory docs —
+the `Dashboard.jsx` key row (docs/memory/key-files.md) and the localStorage
+device-pref Convention (docs/memory/conventions.md) — read those
 first; this file is the reasoning trail behind them, not a second source of truth.
 
 ## The ask
