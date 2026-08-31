@@ -286,22 +286,65 @@ Screenshot new UI before pushing. Tests (checked in, not gitignored):
 `npm test` (node --test over `test/`). Build:
 `VITE_SUPABASE_URL=https://placeholder.supabase.co VITE_SUPABASE_ANON_KEY=placeholder npm run build`.
 
-**GitHub repo settings** live in the GitHub UI, not in this repo — there is no
-settings-as-code file and adding one would be a second source of truth nothing
-applies. So this paragraph records the SHAPE and the commands that re-read it,
-never a frozen snapshot: `gh api repos/{owner}/{repo}` (visibility, merge
-buttons, delete-branch-on-merge, features), `gh api repos/{owner}/{repo}/rulesets`
-(required checks, force-push and deletion protection), `gh api
-repos/{owner}/{repo}/vulnerability-alerts` (204 = on). The one machine-checkable
-coupling: the ruleset's required checks are the job `name:` STRINGS in
-`.github/workflows/ci.yml` ("tests + build", "render check") — rename either and
-the gate silently stops gating, with nothing local to catch it. The repo is
-PUBLIC (hence the no-PII contract rule), squash-only with head branches
-auto-deleting, and auto-merge is armed per PR. Reviewed 2026-08-28; the
-hardening Mason applies by hand — Dependabot alerts + security updates, secret
-scanning + push protection, a read-only default `GITHUB_TOKEN` for Actions with
-approval required for first-time contributors, Projects off (unused) — is listed
-in the plan doc's Decision queue until it is done.
+**GitHub repo settings** live in the GitHub UI/API, not in this repo — there is
+no settings-as-code file and adding one would be a second source of truth
+nothing applies. So this paragraph records the SHAPE, the load-bearing REASONS,
+and the commands that re-read it, never a frozen snapshot: `gh api
+repos/{owner}/{repo}` (visibility, merge buttons, delete-branch-on-merge,
+features, security_and_analysis, pull_request_creation_policy), `gh api
+repos/{owner}/{repo}/rules/branches/main` (the rules actually in force — no
+ruleset id needed), `gh api repos/{owner}/{repo}/rulesets/{id}` (adds
+bypass_actors + conditions), `gh api repos/{owner}/{repo}/actions/permissions`
+(+ `/workflow`), `gh api repos/{owner}/{repo}/vulnerability-alerts` (silent
+204 = on, 404 = off). The hardening checklist was APPLIED 2026-08-30 —
+Dependabot alerts + security updates, secret scanning + push protection,
+Projects off, PR creation restricted to collaborators, fork-PR workflow
+approval widened to all external contributors, and merge buttons narrowed to
+squash at BOTH levels: the repo setting AND the ruleset's
+allowed_merge_methods, since the "squash-only" wording that stood here
+described PRACTICE, not configuration (all three buttons were enabled). The
+Actions default token was already read-only.
+
+**Three properties of the "Protect Main" ruleset are load-bearing** (it targets
+`refs/heads/main`; the ruleset's own updated_at is the applied-date record):
+
+- **bypass_actors is EMPTY and stays empty.** Sessions act with Mason's ADMIN
+  token, so an admin bypass would make every rule below advisory for exactly
+  the actor they exist to constrain. He can edit the ruleset itself in seconds
+  if a hotfix ever needs it, so a standing bypass buys nothing.
+- **No rule may ever be able to DEMAND an approval.** One account owns the repo
+  and GitHub forbids approving your own PR, so an approval here is not slow, it
+  is UNOBTAINABLE — any rule that can require one is a hard deadlock that only
+  a ruleset edit clears. Hence 0 required approvals, no last-push approval, and
+  no extra approval for unattributed changes (that last was ON until
+  2026-08-30, and would have fired the first time a commit landed with an
+  author email GitHub could not attribute). Review-thread resolution is off for
+  the same family of reason: an unresolved bot thread would stall armed
+  auto-merge.
+- **Strict status checks** — a PR must be level with main to merge, which
+  mechanizes workflow rule 4 instead of trusting discipline (the two-sessions-
+  off-different-bases incident is what it prevents). It costs a fresh CI cycle
+  per PR on multi-PR days, since each merge invalidates the others. Alongside
+  it: deletion, non-fast-forward and linear-history protection.
+
+The one machine-checkable coupling is unchanged: the ruleset's required checks
+are the job `name:` STRINGS in `.github/workflows/ci.yml` ("tests + build",
+"render check") — rename either and the gate silently stops gating, with
+nothing local to catch it. DELIBERATELY not enabled: Actions' sha-pinning
+requirement, which would break ci.yml immediately (it floats `actions/*` on
+major tags). It unlocks only after the SHA-pinning backlog item ships — the two
+are a coupled pair, in that order.
+
+**Dependabot now opens PRs unprompted** — SECURITY updates only, since the repo
+carries no Dependabot config file, so there is no routine version-bump noise. A
+session may therefore find open PRs it did not create; they need no
+babysitting, but judge them like any dependency change: only what reaches the
+BROWSER bundle (today just `pdfjs-dist`) carries the iOS risk neither CI job
+can see, while build-tooling bumps are covered by the two jobs. **A security PR
+that jumps MAJOR versions is a project, not a merge** — the first batch
+(2026-08-30) offered vite 5→8 to clear a dev-server-only advisory; the four
+patch-level PRs merged and that one was left open for a deliberate upgrade
+(the plan doc's Decision queue).
 
 ## Conventions
 

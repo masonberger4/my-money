@@ -45,8 +45,9 @@ keep true. None is blocked on a technical unknown.
 10. **Recurring Zelle deposits counted as income** — rent, or reimbursements
     that inflate income and Ready to Assign? Standing ruling in CLAUDE.md's
     Pending; surfaced 2026-08-17, unruled.
-11. **GitHub repo settings checklist** — recorded in CLAUDE.md's Development
-    workflow (2026-08-28); applied by hand in the GitHub UI.
+11. **vite 5 → 8** — accept a dev-server-only esbuild advisory, or schedule
+    the three-major toolchain upgrade as its own task? (2026-08-30 dependency
+    pass; PR #117 left open)
 
 ## Low-hanging fruit
 
@@ -600,6 +601,25 @@ nothing from Mason.
   views (trends/recurring/debt/tax) that are not lazy — the wait is fine, its
   stated reason is fiction, and a future reader could conclude tab-level
   splitting already shipped (see item 4, which recommends against it).
+
+### Added by the 2026-08-30 dependency pass
+
+- **vite 5 → 8 (and `@vitejs/plugin-react` 4 → 6)** — L. **Needs Mason
+  (Decision queue 11).** Turning Dependabot on surfaced a dev-server-only
+  esbuild advisory: a page visited while `npm run dev` is running can issue
+  requests to the local dev server and read the responses. Nothing in
+  production runs a dev server, so the exposure is one developer machine during
+  local dev. The only patched path is a three-major jump of the build
+  toolchain that both CI jobs and the smoke harness stand on —
+  `test/smoke/vite.config.js`, the render check's `npx vite`, and the
+  `manualChunks` split in `vite.config.js`. CI would catch a hard break rather
+  than ship one, so this is a scope call, not a risk call: accept the advisory
+  and ignore the major, or do the upgrade deliberately with the harness and the
+  built app verified. PR #117 is left open as the record; its duplicate (#119,
+  the same jump reached via esbuild) was closed. The four patch-level PRs in
+  that batch merged — `pdfjs-dist` among them, the only one reaching the
+  browser bundle, and the standing reason a pdf.js bump wants a real-device
+  PDF import check that no CI job can supply.
 
 ## Refuted / decided — do NOT re-propose
 
