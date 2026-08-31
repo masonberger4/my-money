@@ -1,0 +1,91 @@
+# Lets anyone summon Claude onto a pull request or issue by writing @claude in a
+# comment — from GitHub itself, or a phone, with NO Claude Code session running.
+#
+# Why this exists, in one line: the GitHub integration sessions already use is
+# SESSION-SCOPED. It authenticates as Mason's own account (which is why PRs read
+# "opened by masonberger4"), so it works only while a session is running and
+# driving it — nothing reached this repo between sessions. This workflow is the
+# repo-side half that does.
+#
+# EVENT-DRIVEN, never polling: it fires on a comment, not a timer. The standing
+# "an armed PR needs no babysitting" ruling (no check-in Routines) is untouched.
+#
+# INERT UNTIL USED: the `if` below means a comment without @claude never starts a
+# runner. Until someone types the phrase this file adds no check, no red X, and
+# no delay to armed auto-merge — so it is safe to merge before the secret exists.
+name: Claude Code
+
+# Three comment surfaces, because @claude in any of them should work and they are
+# three DIFFERENT events: issue_comment covers issue comments AND a PR's top-level
+# comments (GitHub models those as issue comments); pull_request_review_comment is
+# an inline comment on a diff line; pull_request_review is the summary body of a
+# submitted review, which neither of the others fires. Miss the third and a
+# mention written in a review body is silently dropped.
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  pull_request_review:
+    types: [submitted]
+
+jobs:
+  # This job name must NEVER become one of the branch ruleset's required checks
+  # ("tests + build", "render check"). Claude answers a mention; it is not a gate,
+  # and a required check that only sometimes runs reports pending FOREVER rather
+  # than passing — the same mechanic that refuted paths-ignore on docs/.
+  claude:
+    name: claude mention
+    # Cheap pre-filter so runners don't start on the ~all comments that aren't for
+    # Claude (Vercel's bot comments on every PR). Two fields because the event
+    # decides which one exists: review bodies arrive as .review.body, everything
+    # else as .comment.body. The absent one is null and `contains(null, …)` is
+    # false, so each event tests only its own field.
+    #
+    # NOTE this is a filter, NOT the trust boundary. On a PUBLIC repo anyone can
+    # comment, and the real gate is inside the action: it checks the TRIGGERING
+    # ACTOR has write access before Claude starts, and rejects bot actors unless
+    # listed in `allowed_bots`. So a stranger's @claude burns a few seconds of
+    # (free, public-repo) runner time and is then refused — it cannot reach the
+    # write scope below. Keep the comment body out of any `run:` block, where it
+    # WOULD be a script-injection vector; inside an `if:` expression it is data.
+    if: >-
+      contains(github.event.comment.body, '@claude') ||
+      contains(github.event.review.body, '@claude')
+    runs-on: ubuntu-latest
+    # The FIRST write-scoped workflow in this repo — ci.yml needs none. Claude
+    # pushes commits and posts comments when asked to, so it needs write; this is
+    # the action's documented minimum, listed explicitly per the house rule that
+    # every new workflow states its permissions.
+    #   contents/pull-requests/issues: write — push a fix, comment, update a PR
+    #   actions: read  — read CI results on the PR it was called to
+    #   id-token: write — REQUIRED for the action's default GitHub App auth. It is
+    #     needed precisely BECAUSE no github_token is passed below: the action
+    #     mints its app credential via OIDC rather than reusing the job's token.
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+      actions: read
+    # Same reason every ci.yml job is bounded: an unbounded stall reads as "still
+    # running" rather than failing, and GitHub's default would let it sit for SIX
+    # HOURS.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - uses: anthropics/claude-code-action@v1
+        with:
+          # Authenticates against the Claude subscription rather than API billing.
+          # To bill the API account instead, swap this one line for
+          # `anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}` — they are
+          # alternatives, never both. Note that secret is NOT the Ask tab's key:
+          # that one is a Vercel runtime variable and is invisible to Actions.
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # DELIBERATELY no `github_token:`. GitHub does not trigger workflows on
+          # commits made with the default GITHUB_TOKEN, so passing it would leave
+          # Claude's pushes with no ci.yml run at all — green by absence, on the
+          # one repo whose merge gate IS CI. Omitting it authenticates as the
+          # Claude GitHub App, whose pushes do fire CI.

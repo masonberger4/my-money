@@ -149,3 +149,44 @@ patch-level PRs merged and that one was done as its OWN change the next day,
 not as a bot merge — see the browser-floor Gotcha for what that upgrade
 silently moved and what now pins it.
 
+
+**Two DIFFERENT Claude integrations touch this repo; don't confuse them** (verified
+2026-08-31, not assumed). (1) The **account connection** sessions use: the GitHub
+tools authenticate as Mason's own account — `get_me` returns `masonberger4`, which
+is why every session-opened PR reads "opened by masonberger4" and why merges are
+attributed to him. It is SESSION-SCOPED: it acts only while a session is running and
+driving it, so a PR watch held by a session (`subscribe_pr_activity`, which takes one
+PR number and has no repo-wide mode) dies with that session. (2) `.github/workflows/claude.yml`,
+the repo-side half added 2026-08-31: anyone writing `@claude` in a PR or issue comment
+gets a run, with no session anywhere. Four things about it are load-bearing:
+- **It subscribes to THREE comment events, because they are three different ones.**
+  `issue_comment` covers issue comments and a PR's top-level comments (GitHub models
+  those as issue comments); `pull_request_review_comment` is an inline diff-line
+  comment; `pull_request_review` is a submitted review's summary body, which neither
+  of the others fires. Drop the third and a mention written in a review body is
+  silently dropped — caught in review before this shipped.
+- **The `if:` is a cost filter, NOT the trust boundary.** This repo is PUBLIC, so
+  anyone can comment. The real gate is inside the action: it requires the TRIGGERING
+  ACTOR to have write access before Claude starts, and rejects bot actors unless they
+  are listed in `allowed_bots` (which is also why a Dependabot-PR reviewer would need
+  that setting). A stranger's `@claude` therefore burns a few seconds of free
+  public-repo runner time and is refused; it never reaches the write scope. Keep the
+  comment body out of any `run:` block, where it WOULD be a script-injection vector —
+  inside an `if:` expression it is data.
+- **Its job name (`claude mention`) must never join the ruleset's required checks.**
+  It runs only on a mention, and a required check that sometimes doesn't run reports
+  pending forever — the mechanic that refuted `paths-ignore` on `docs/`.
+- **It is the first WRITE-scoped workflow here** (ci.yml needs none). Claude pushes
+  and comments when asked, so `contents`/`pull-requests`/`issues: write` is its real
+  minimum; it is stated explicitly per the every-new-workflow-declares-permissions rule.
+- **It passes no `github_token`.** GitHub doesn't trigger workflows on commits made with
+  the default `GITHUB_TOKEN`, so passing it would leave Claude's pushes with no CI run —
+  green by absence, on the repo whose merge gate IS CI. This is also why the job holds
+  `id-token: write`: with no token passed, the action mints its GitHub App credential
+  via OIDC instead of reusing the job's.
+It needs the repo secret `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`; bills the
+subscription, not the API) and the Claude GitHub App installed. Until both exist a mention
+fails that one run — non-blocking, since it gates nothing. NOTE the Ask tab's
+`ANTHROPIC_API_KEY` is a VERCEL runtime variable and is invisible to Actions; an Actions
+secret is a separate thing. This is event-driven and does not reopen the "no need for
+triggers" ruling: nothing here polls or schedules.
