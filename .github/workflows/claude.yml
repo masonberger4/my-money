@@ -15,11 +15,19 @@
 # no delay to armed auto-merge — so it is safe to merge before the secret exists.
 name: Claude Code
 
+# Three comment surfaces, because @claude in any of them should work and they are
+# three DIFFERENT events: issue_comment covers issue comments AND a PR's top-level
+# comments (GitHub models those as issue comments); pull_request_review_comment is
+# an inline comment on a diff line; pull_request_review is the summary body of a
+# submitted review, which neither of the others fires. Miss the third and a
+# mention written in a review body is silently dropped.
 on:
   issue_comment:
     types: [created]
   pull_request_review_comment:
     types: [created]
+  pull_request_review:
+    types: [submitted]
 
 jobs:
   # This job name must NEVER become one of the branch ruleset's required checks
@@ -29,15 +37,31 @@ jobs:
   claude:
     name: claude mention
     # Cheap pre-filter so runners don't start on the ~all comments that aren't for
-    # Claude (Vercel's bot comments on every PR). The action re-checks the trigger
-    # phrase itself; this only avoids booting a runner to learn that.
-    if: contains(github.event.comment.body, '@claude')
+    # Claude (Vercel's bot comments on every PR). Two fields because the event
+    # decides which one exists: review bodies arrive as .review.body, everything
+    # else as .comment.body. The absent one is null and `contains(null, …)` is
+    # false, so each event tests only its own field.
+    #
+    # NOTE this is a filter, NOT the trust boundary. On a PUBLIC repo anyone can
+    # comment, and the real gate is inside the action: it checks the TRIGGERING
+    # ACTOR has write access before Claude starts, and rejects bot actors unless
+    # listed in `allowed_bots`. So a stranger's @claude burns a few seconds of
+    # (free, public-repo) runner time and is then refused — it cannot reach the
+    # write scope below. Keep the comment body out of any `run:` block, where it
+    # WOULD be a script-injection vector; inside an `if:` expression it is data.
+    if: >-
+      contains(github.event.comment.body, '@claude') ||
+      contains(github.event.review.body, '@claude')
     runs-on: ubuntu-latest
-    # The FIRST write-scoped workflow in this repo — ci.yml needs none and declares
-    # `contents: read` territory only. Claude pushes commits and posts comments when
-    # asked to, so it needs write; this is the action's documented minimum, listed
-    # explicitly per the house rule that every new workflow states its permissions.
-    # `actions: read` is what lets Claude read CI results on the PR it was called to.
+    # The FIRST write-scoped workflow in this repo — ci.yml needs none. Claude
+    # pushes commits and posts comments when asked to, so it needs write; this is
+    # the action's documented minimum, listed explicitly per the house rule that
+    # every new workflow states its permissions.
+    #   contents/pull-requests/issues: write — push a fix, comment, update a PR
+    #   actions: read  — read CI results on the PR it was called to
+    #   id-token: write — REQUIRED for the action's default GitHub App auth. It is
+    #     needed precisely BECAUSE no github_token is passed below: the action
+    #     mints its app credential via OIDC rather than reusing the job's token.
     permissions:
       contents: write
       pull-requests: write
