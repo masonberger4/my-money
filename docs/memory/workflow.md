@@ -140,7 +140,9 @@ are a coupled pair, in that order.
 **Dependabot now opens PRs unprompted** — SECURITY updates only, since the repo
 carries no Dependabot config file, so there is no routine version-bump noise. A
 session may therefore find open PRs it did not create; they need no
-babysitting, but judge them like any dependency change: only what reaches the
+babysitting (and since 2026-08-31 `dependabot-review.yml`, described below,
+reads each one for the risk below automatically), but judge them like any
+dependency change: only what reaches the
 BROWSER bundle (today just `pdfjs-dist`) carries the iOS risk neither CI job
 can see, while build-tooling bumps are covered by the two jobs. **A security PR
 that jumps MAJOR versions is a project, not a merge** — the first batch
@@ -190,3 +192,35 @@ fails that one run — non-blocking, since it gates nothing. NOTE the Ask tab's
 `ANTHROPIC_API_KEY` is a VERCEL runtime variable and is invisible to Actions; an Actions
 secret is a separate thing. This is event-driven and does not reopen the "no need for
 triggers" ruling: nothing here polls or schedules.
+
+**`.github/workflows/dependabot-review.yml` reviews Dependabot's PRs** (added
+2026-08-31) — the only PRs nobody reads: a session reviews its own work before
+pushing, but a bot PR can arrive, go green and merge unread. Three facts it is
+built on, each verified against the primary source and each able to break it
+SILENTLY if changed:
+- **GitHub withholds Actions secrets from Dependabot runs.** Such a run is treated
+  as if it came from a fork — "the only secrets available to the workflow are
+  Dependabot secrets. GitHub Actions secrets are not available" — in every repo,
+  public or private, since 2021-03-01. So `CLAUDE_CODE_OAUTH_TOKEN` must ALSO be
+  entered in Settings → Secrets and variables → **Dependabot**, a different tab
+  from the Actions one beside it: same name, same value, stored twice. Absent
+  there it is the empty string and the review never runs. (`GITHUB_TOKEN` is the
+  lone survivor, read-only by default — recoverable via `permissions:`, which the
+  withheld secrets are not.)
+- **`allowed_bots: "dependabot[bot]"` is required.** The action refuses bot actors
+  unless allowlisted. Its other actor gate, the write-access check, passes any
+  `[bot]` actor unconditionally, so this is the only one that matters here.
+- **It passes its own `prompt` rather than the stock `code-review` plugin**, whose
+  own first step stops when "the pull request does not need code review (e.g.
+  automated PR)" — a Dependabot PR is precisely that, so the plugin would review
+  nothing, quietly. For the same reason a root `REVIEW.md` would be dead weight:
+  that plugin reads CLAUDE.md files only and never `REVIEW.md`.
+NOT `pull_request_target`: the untrusted input in a Dependabot PR is the NEW
+DEPENDENCY, whose code the job would run with the full secret set in scope —
+the exfiltration path the fork treatment exists to close. The prompt asks only
+what CI cannot: does the bump reach the BROWSER bundle, is it a MAJOR jump, could
+it move the browser floor, is pdf.js still the legacy build. It comments only when
+the answer matters — silence is the correct output for a build-only patch bump,
+and a comment on every bump trains everyone to ignore the next one. A missing
+secret leaves the job GREEN with a notice rather than a red X, so it was safe to
+merge before the store was populated.
