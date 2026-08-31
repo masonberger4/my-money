@@ -76,3 +76,28 @@ the one it reverses.
   authors most PRs here). Its value is the browser-bundle iOS risk neither CI job
   sees; its cost is that on session-opened PRs a review usually lands after armed
   auto-merge has merged them, making findings post-merge and advisory.
+
+## 2026-08-31 — Dependabot review workflow (`dependabot-review.yml`)
+
+Mason asked for the deferred Dependabot reviewer once the Claude GitHub App was
+installed. **The mechanics live in docs/memory/workflow.md** — three verified
+facts that each break it silently (Actions secrets withheld from Dependabot
+runs, `allowed_bots` required, the stock plugin self-skipping automated PRs),
+plus why `pull_request_target` was rejected. Not restated here; this entry is
+the journal, that doc is the rulebook.
+
+What was DECIDED, as opposed to discovered:
+
+- **Its own prompt, not the stock `code-review` plugin** — and therefore no root
+  `REVIEW.md`, which that plugin never reads. The 2026-08-31 deferral note above
+  assumed both; both were wrong.
+- **Scoped to what CI cannot see** rather than a generic review: browser-bundle
+  reach, MAJOR-version jumps, browser-floor movement, pdf.js legacy build. It
+  stays SILENT on a build-only patch bump, because a comment on every bump
+  trains everyone to ignore the next one.
+- **Advisory, never a gate.** It is not a required check and must not become
+  one, so on a Dependabot PR whose auto-merge is armed the review can land
+  after the merge. Accepted: the alternative is a rule that can block, which
+  this repo's ruleset forbids.
+- **Fails soft.** No secret in the Dependabot store leaves the job green with a
+  notice rather than a red X, so it was safe to merge before setup finished.

@@ -1,0 +1,142 @@
+# Reviews Dependabot's pull requests for the one class of risk this repo's CI
+# cannot see. Dependabot PRs are the only ones no session reviews: a session
+# reviews its own work before pushing (the reviewer agent), but a bot PR can
+# arrive, go green, and merge with nobody having read it.
+#
+# THREE non-obvious facts this file is built on, each verified against the
+# primary source rather than assumed. Change any of them and it breaks silently.
+#
+# 1. GITHUB WITHHOLDS ACTIONS SECRETS FROM DEPENDABOT RUNS. A run triggered by
+#    dependabot is treated as if it came from a fork: "the only secrets available
+#    to the workflow are Dependabot secrets. GitHub Actions secrets are not
+#    available" (docs.github.com), in every repo, public or private, since
+#    2021-03-01. So CLAUDE_CODE_OAUTH_TOKEN must ALSO exist in the separate
+#    Dependabot secret store — Settings > Secrets and variables > DEPENDABOT tab,
+#    which is NOT the Actions tab next to it. Same name, same value, entered
+#    twice. Absent there, the secret is the empty string and this never runs.
+# 2. THE ACTION REJECTS BOT ACTORS unless they are allowlisted, which is why
+#    `allowed_bots` is set below. (The other actor gate, the write-access check,
+#    passes any `[bot]` actor unconditionally, so allowed_bots is the only one
+#    that matters here.) Without it this workflow would fire and refuse, forever.
+# 3. THE STOCK code-review PLUGIN WOULD SKIP THESE PRs. Its own first step stops
+#    when "the pull request does not need code review (e.g. automated PR)" — a
+#    Dependabot PR is exactly that. So this passes its own `prompt` instead of
+#    invoking that plugin; using the plugin here would review nothing, quietly.
+#
+# NOT `pull_request_target`, deliberately. The tempting argument is that
+# Dependabot branches live in this repo rather than a fork, so the privileged
+# trigger is safe. It isn't: the untrusted input in a Dependabot PR is the NEW
+# DEPENDENCY, whose install scripts and code the job would run — with the full
+# secret set in scope. That is the exact exfiltration path the fork treatment
+# exists to close.
+name: Dependabot review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  # Must never join the branch ruleset's required checks ("tests + build",
+  # "render check"). This is advice on a bot's PR, not a gate — and a required
+  # check that only runs on some PRs reports pending forever on the rest.
+  review:
+    name: dependabot review
+    # Bot PRs only. Every other PR either came from a session (already reviewed
+    # before push) or from Mason.
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    # Explicit and minimal, per the house rule that every new workflow declares
+    # its permissions. Read the code, comment once, and mint the app credential:
+    #   contents: read       — check out the diff
+    #   issues: write        — REQUIRED to post the comment. Do not "minimize"
+    #                          this away: a PR conversation comment (what
+    #                          `gh pr comment` writes) is created through the
+    #                          ISSUES endpoint, POST /repos/{o}/{r}/issues/
+    #                          {n}/comments, and GitHub gates it on the issues
+    #                          scope — `pull-requests: write` alone is not
+    #                          enough. Dropping it fails only on the path that
+    #                          matters: the run that actually found something.
+    #   pull-requests: write — read PR metadata and post inline review comments
+    #   id-token: write      — the action's GitHub App auth, needed because no
+    #                          github_token is passed (see claude.yml for why)
+    # Note GitHub hands Dependabot runs a READ-ONLY token by default; unlike the
+    # withheld secrets, that part is recoverable exactly here.
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+      id-token: write
+    # Bounded for the reason every ci.yml job is: an unbounded stall reads as
+    # "still running" rather than failing, and GitHub's default is SIX HOURS.
+    timeout-minutes: 15
+    steps:
+      # Keeps this workflow harmless before the Dependabot secret exists. Without
+      # this guard every Dependabot PR would carry a red X for a missing
+      # credential — noise on a PR nobody needs to look at. With it the job goes
+      # green and says why it did nothing. `secrets` is not available in a job
+      # `if:`, so the check has to live in a step.
+      - name: Is the Dependabot-store secret present?
+        id: guard
+        env:
+          TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No CLAUDE_CODE_OAUTH_TOKEN in the DEPENDABOT secret store, so no review ran. Add it under Settings > Secrets and variables > Dependabot (the Actions copy is invisible to Dependabot runs)."
+          else
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v7
+        if: steps.guard.outputs.present == 'true'
+        with:
+          fetch-depth: 1
+
+      - uses: anthropics/claude-code-action@v1
+        if: steps.guard.outputs.present == 'true'
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Without this the action refuses every run here: dependabot is a bot.
+          allowed_bots: "dependabot[bot]"
+          prompt: |
+            Review this Dependabot pull request for the one class of risk this
+            repo's CI cannot see. Read the diff with `gh pr diff`.
+
+            Do NOT re-report anything CI already proves. The `tests + build` and
+            `render check` jobs already ran the full suite, the production build,
+            and an 11-view render walk. "Tests pass" is noise, not a review.
+
+            Answer in order, and stop as soon as one answer settles it:
+
+            1. DOES THIS REACH THE BROWSER BUNDLE? Only shipped browser code
+               carries iOS risk neither CI job can see — both jobs render in
+               Chromium, and this app is used on iPhones. Today the only
+               browser-facing dependency is pdfjs-dist. Build-only tooling
+               (vite, babel, postcss, concurrently, express) is covered by the
+               two CI jobs: say so and stop.
+            2. IS IT A MAJOR VERSION JUMP? Standing rule in this repo: a security
+               PR that jumps MAJOR versions is a project, not a merge. Say so
+               plainly and name what the major actually carries.
+            3. COULD IT MOVE THE APP'S BROWSER FLOOR? A toolchain upgrade can
+               silently raise the minimum iOS/Safari version with nothing in CI
+               to catch it — that happened here with vite 5 to 8, and
+               vite.config.js now pins build.target for exactly that reason. If
+               this bump could change emitted syntax or disturb that pin, say so.
+            4. pdf.js must stay on the LEGACY build path (pdfjs-dist/legacy/...).
+               The modern bundle calls a method iOS Safari lacks.
+
+            Post ONE short comment with `gh pr comment` ONLY IF 1-4 turned up
+            something a human should decide. For a patch or minor bump of
+            build-only tooling with no browser-bundle reach, post NOTHING and
+            just print "no comment: build-only bump, CI covers it". Silence is
+            the correct output for the common case; a comment on every bump is
+            noise that trains everyone to ignore the next one.
+
+            Never approve, never merge, never push, never edit the PR.
+          # One flag per line in a block scalar, the form the action documents.
+          # A plain-text prompt gets NO shell or GitHub access until granted
+          # here, so dropping a tool from this list silently removes a step the
+          # prompt above depends on.
+          claude_args: |
+            --model claude-sonnet-5
+            --allowedTools "Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr comment:*)"
