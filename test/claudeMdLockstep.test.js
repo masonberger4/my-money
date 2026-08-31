@@ -1,9 +1,13 @@
-// CLAUDE.md ↔ repo lockstep, in the test/lockstep.test.js / noPlaid.test.js
+// Memory-docs ↔ repo lockstep, in the test/lockstep.test.js / noPlaid.test.js
 // mold: it turns a documented silent breakage into a red test.
 //
-// The failure it guards (the phantom-reference Gotcha): CLAUDE.md is the only
-// guaranteed-loaded memory, and a confident reference to an identifier that no
-// longer exists — or NEVER existed (a key row named `visibleAtHide`) —
+// Since 2026-08-31 the memory is CLAUDE.md (a ≤100-line always-loaded INDEX,
+// capped by a test below — Mason's ruling) plus docs/memory/*.md (the rules,
+// read on demand); this file scans the CONCATENATION of all of them.
+//
+// The failure it guards (the phantom-reference Gotcha): the memory docs are
+// the session's map of the code, and a confident reference to an identifier
+// that no longer exists — or NEVER existed (a key row named `visibleAtHide`) —
 // terminates exactly the search that would falsify it. Refactors grep call
 // sites, never prose, so a phantom is undetectable from the doc side and has
 // no alarm anywhere. Three checks convert that absence into a red test:
@@ -13,7 +17,8 @@
 //      cited in a ship-record section but later deleted should be re-pointed);
 //  (3) every identifier-shaped backticked token in the DURABLE sections
 //      (Maintenance contract / Architecture / Key files / Conventions /
-//      Gotchas) appears somewhere in src/, api/, test/, supabase/, public/,
+//      Gotchas, plus the index's Invariants and Delegation & routing)
+//      appears somewhere in src/, api/, test/, supabase/, public/,
 //      index.html, package.json, or vercel.json — contents OR relative path
 //      (some tokens, e.g. `recurringColumns`, exist only as filenames).
 //      Ship-record sections (Merged features / Pending / Roadmap) are exempt:
@@ -32,11 +37,15 @@ import { dirname, join, relative, sep } from 'node:path';
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 // Test-only override so the guard itself can be verified: point the test at a
-// mutated COPY of CLAUDE.md in /tmp (inject a fake path row / a phantom
+// mutated COPY of the index in /tmp (inject a fake path row / a phantom
 // identifier) and confirm it goes red. Never set in CI or `npm test` — with
 // the var unset the real CLAUDE.md is read, and the repo file is never edited.
+// The override replaces the INDEX only; docs/memory/*.md are always read live.
 const mdPath = process.env.CLAUDE_MD_PATH || join(root, 'CLAUDE.md');
-const md = readFileSync(mdPath, 'utf8');
+const indexMd = readFileSync(mdPath, 'utf8');
+const memoryDir = join(root, 'docs', 'memory');
+const memoryDocs = readdirSync(memoryDir).filter(f => f.endsWith('.md')).sort();
+const md = [indexMd, ...memoryDocs.map(f => readFileSync(join(memoryDir, f), 'utf8'))].join('\n');
 
 // --- allowlist ---------------------------------------------------------------
 // Tokens in the scanned sections that are phantoms BY DESIGN — each entry
@@ -111,7 +120,12 @@ const keyFilePaths = text =>
 const testFileTokens = text =>
   [...new Set([...text.matchAll(/test\/[A-Za-z0-9]+\.test\.js/g)].map(m => m[0]))];
 
-const SCANNED = ['Maintenance contract', 'Architecture', 'Key files', 'Conventions', 'Gotchas'];
+const SCANNED = [
+  'Maintenance contract', 'Architecture', 'Key files', 'Conventions', 'Gotchas',
+  // The index's own durable sections — the always-loaded file must stay
+  // phantom-guarded too.
+  'Invariants', 'Delegation & routing',
+];
 
 function scannedSectionText(text) {
   const sections = text.split(/^## /m).slice(1); // each chunk starts with its heading line;
@@ -149,6 +163,20 @@ test('corpus walk found the repo', () => {
   assert.ok(corpus.includes('markInternalTransfers'), 'content corpus missing');
 });
 
+test('the memory-doc read found docs/memory/', () => {
+  // The silently-empty-walk guard, applied to the 2026-08-31 split: an empty
+  // or renamed docs/memory/ must not quietly shrink the scan to the index.
+  assert.ok(memoryDocs.length >= 7, `only ${memoryDocs.length} memory docs read — the split has 7`);
+  assert.ok(md.length > 100_000, `concatenated memory is implausibly small (${md.length} chars)`);
+});
+
+test('CLAUDE.md stays within the 100-line cap (Mason, 2026-08-31)', () => {
+  // Always the real index, even under CLAUDE_MD_PATH: the cap is a fact about
+  // the repo file, not about a mutated test copy.
+  const lines = readFileSync(join(root, 'CLAUDE.md'), 'utf8').trimEnd().split('\n').length;
+  assert.ok(lines <= 100, `CLAUDE.md is ${lines} lines — the cap is 100; move content into docs/memory/ instead`);
+});
+
 // --- (1) Key-files table paths exist -----------------------------------------
 
 test('every Key-files table path exists', () => {
@@ -160,11 +188,11 @@ test('every Key-files table path exists', () => {
 
 // --- (2) every cited test file exists ----------------------------------------
 
-test('every test/<name>.test.js token in CLAUDE.md exists', () => {
+test('every test/<name>.test.js token in the memory docs exists', () => {
   const tokens = testFileTokens(md);
   assert.ok(tokens.length >= 30, `only ${tokens.length} test tokens extracted`);
   const missing = tokens.filter(t => !existsSync(join(root, t)));
-  assert.deepEqual(missing, [], `CLAUDE.md cites missing test files:\n${missing.join('\n')}`);
+  assert.deepEqual(missing, [], `the memory docs cite missing test files:\n${missing.join('\n')}`);
 });
 
 // --- (3) phantom identifiers in the durable sections -------------------------
@@ -177,8 +205,8 @@ test('no phantom identifiers in the durable sections', () => {
   assert.deepEqual(
     phantoms,
     [],
-    'backticked identifiers in Maintenance contract/Architecture/Key files/' +
-      'Conventions/Gotchas that exist nowhere in src|api|test|supabase|public|' +
+    'backticked identifiers in the scanned durable sections (SCANNED list ' +
+      'above) that exist nowhere in src|api|test|supabase|public|' +
       'index.html|package.json|vercel.json (fix the doc, or allowlist WITH a ' +
       `justification):\n${phantoms.join('\n')}`
   );

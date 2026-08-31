@@ -1,0 +1,57 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm test*)",
+      "Bash(npm ci)",
+      "Bash(npm run build*)",
+      "Bash(VITE_SUPABASE_URL=* npm run build*)",
+      "Bash(node --test *)",
+      "Bash(npx vite --config test/smoke/vite.config.js *)",
+      "Bash(node test/smoke/render.mjs*)",
+      "Bash(CHROMIUM_PATH=* node test/smoke/render.mjs*)",
+      "Bash(npm install --no-save playwright-core*)",
+      "Bash(.claude/hooks/test-digest.sh*)",
+      "Bash(git status*)",
+      "Bash(git diff*)",
+      "Bash(git log*)",
+      "Bash(git show*)",
+      "Bash(git fetch*)",
+      "Bash(git merge origin/main*)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git push -u origin claude/*)",
+      "Bash(git rev-list *)",
+      "Bash(git branch*)",
+      "Bash(git checkout *)",
+      "Bash(wc *)",
+      "Bash(ls *)"
+    ],
+    "ask": [
+      "Bash(supabase *)",
+      "Bash(vercel *)",
+      "Bash(git push --force*)",
+      "Bash(git push -f*)"
+    ],
+    "deny": [
+      "Read(.env)",
+      "Read(.env.local)",
+      "Read(**/.env.local)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/pretooluse-test-guard.sh",
+            "if": "Bash(npm *)",
+            "timeout": 10,
+            "statusMessage": "npm-test digest guard"
+          }
+        ]
+      }
+    ]
+  }
+}

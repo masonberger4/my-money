@@ -3,7 +3,7 @@
 //
 //  (a) index.html's theme-color metas and pre-paint background are hardcoded
 //      copies of ui.css's --bg values, parsed before any stylesheet loads —
-//      CLAUDE.md says they must change in lockstep with --bg.
+//      the memory docs say they must change in lockstep with --bg.
 //  (b) public/sw.js must never cache /api/*, and any change to it needs a
 //      CACHE_VERSION bump — so both must at least exist.
 //  (c) pdf.js must be the LEGACY build: the modern bundle throws

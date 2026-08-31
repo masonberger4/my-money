@@ -90,7 +90,7 @@ Era charges a subscription to sit between you and your banks. Building directly 
 |---|---|---|
 | Checking / savings | Transactions | Balance, transaction history, income detection |
 | Credit cards | Transactions | Balance, transaction history |
-| Loans / mortgages | Transactions | Balance (APR / minimum payment / payoff projection is the planned Debt tracker — see CLAUDE.md Roadmap) |
+| Loans / mortgages | Transactions | Balance (APR / minimum payment / payoff projection is the planned Debt tracker — see the Roadmap in docs/memory/ship-record.md) |
 
 Only `depository`, `credit`, and `loan` account types are synced — no investments support. A **net worth view** (assets minus liabilities, computed from Supabase) is a possible later feature, not built.
 
@@ -163,7 +163,7 @@ Everything already built was ported in with minimal changes. Storage swapped fro
 
 - [x] **Account list**: all linked accounts, grouped by type, with current balances
 - [ ] **Net worth**: assets vs. liabilities summary at top, breakdown by account type (discussed, not committed)
-- [ ] **Debt tracker**: each loan/mortgage/card with payoff projection and minimum payment tracker (specced in CLAUDE.md Roadmap)
+- [ ] **Debt tracker**: each loan/mortgage/card with payoff projection and minimum payment tracker (specced in the Roadmap in docs/memory/ship-record.md)
 - [ ] **Multi-account filter**: "All accounts" default, filter to one account or one account type
 
 ---
