@@ -217,6 +217,24 @@
   woff2 `<link rel=preload>` tags require `crossorigin` EVEN same-origin —
   font fetches are CORS-mode, and without it the preload is wasted and the
   font double-fetched.
+- **A build-toolchain upgrade can silently raise the app's BROWSER FLOOR, and
+  neither CI job can see it.** Vite 5 defaulted to es2020/edge88/firefox78/
+  chrome87/safari14; Vite 6 changed the default to baseline-widely-available
+  (roughly safari16), so the 5→8 upgrade moved this app's iOS floor from 14 to
+  16 as a pure side effect of installing a newer bundler. Measured, not assumed
+  (2026-08-31): built both ways, the un-pinned output emits logical-assignment
+  syntax in the main chunk — Safari 14.1+ — and drops the class-private-field
+  helper the pinned build keeps. Both CI jobs render in Chromium, so this is
+  byte-for-byte the pdf.js iOS failure shape: green on every gate, broken only
+  on the household's phones. `vite.config.js` now PINS `build.target` to Vite
+  5's exact list, so that upgrade changed the toolchain and not the output
+  contract; the pin costs ~3% more raw bytes. Raising the floor is a REAL
+  decision that buys smaller output — take it deliberately and re-measure,
+  never let it ride in on a version bump. The same rule holds for any future
+  bundler swap, and Vite 8 already is one: it ships Rolldown rather than
+  Rollup, and the config's chunk-splitting option survives only as a
+  compatibility shim (verified by checking the vendor chunks still exist in
+  the output, not by trusting the build to succeed).
 - **pdf.js must be the LEGACY build** (`pdfjs-dist/legacy/build/…`). The modern
   bundle calls `Map.prototype.getOrInsertComputed`, which current Chromium and
   iOS Safari don't have — it throws "getOrInsertComputed is not a function" on a

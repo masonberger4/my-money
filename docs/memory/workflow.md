@@ -145,6 +145,7 @@ BROWSER bundle (today just `pdfjs-dist`) carries the iOS risk neither CI job
 can see, while build-tooling bumps are covered by the two jobs. **A security PR
 that jumps MAJOR versions is a project, not a merge** — the first batch
 (2026-08-30) offered vite 5→8 to clear a dev-server-only advisory; the four
-patch-level PRs merged and that one was left open for a deliberate upgrade
-(the plan doc's Decision queue).
+patch-level PRs merged and that one was done as its OWN change the next day,
+not as a bot merge — see the browser-floor Gotcha for what that upgrade
+silently moved and what now pins it.
 

@@ -254,6 +254,13 @@ Conventions / Gotchas. An entry here is a pointer, not a home for rules.
   `nearMissTransfers`, the detector for the one over-count balances can never
   see. Same key row.
 
+- **Vite 5 → 8 (2026-08-31)** — taken as a deliberate upgrade rather than the
+  Dependabot merge it arrived as; clears the dev-server-only esbuild advisory.
+  Vite 8 ships Rolldown, so the verification that mattered was that the vendor
+  chunk split survived and the render gate still booted, not that the build
+  exited 0. The durable rule it produced is the browser-floor Gotcha; `package.json`
+  now declares the Node floor Vite 8 introduced.
+
 ## Pending branches
 
 None in code, and **no migration is outstanding**: every file in
