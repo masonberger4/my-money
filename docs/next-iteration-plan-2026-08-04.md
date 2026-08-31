@@ -45,9 +45,6 @@ keep true. None is blocked on a technical unknown.
 10. **Recurring Zelle deposits counted as income** — rent, or reimbursements
     that inflate income and Ready to Assign? Standing ruling in CLAUDE.md's
     Pending; surfaced 2026-08-17, unruled.
-11. **vite 5 → 8** — accept a dev-server-only esbuild advisory, or schedule
-    the three-major toolchain upgrade as its own task? (2026-08-30 dependency
-    pass; PR #117 left open)
 
 ## Low-hanging fruit
 
@@ -587,12 +584,12 @@ nothing from Mason.
   explains why, while the three `actions/*` uses float on major tags — the same
   argument would SHA-pin them, but that is housekeeping, not a new risk.
 
-- **Pin the Node version the gate actually uses** — S. `package.json` declares
-  no `engines` and there is no `.nvmrc`; Node 22 is asserted only inside CI.
-  `npm test` is `node --test` over a glob, whose semantics have moved across
-  Node majors, so a contributor or a sandbox on an older Node can get a
-  different verdict than the gate gives. Add `"engines": {"node": ">=22"}`.
-
+- ~~**Pin the Node version the gate actually uses**~~ — **SHIPPED 2026-08-31**
+  with the Vite upgrade, which turned a stylistic pin into a real floor: Vite 8
+  requires `^20.19.0 || >=22.12.0`, so the `">=22"` this item proposed would
+  have been WRONG — it admits 22.0–22.11, which Vite 8 refuses. `package.json`
+  now declares Vite's own range, so a contributor on an older Node fails
+  loudly instead of diverging from the gate.
 - **Doc rot inside the CI harness** — S. `ci.yml`'s comments and
   `test/smoke/render.mjs`'s header still describe Dashboard.jsx as a "~5,000
   line" component (it is thousands of lines past that) and still call the
@@ -602,24 +599,23 @@ nothing from Mason.
   stated reason is fiction, and a future reader could conclude tab-level
   splitting already shipped (see item 4, which recommends against it).
 
-### Added by the 2026-08-30 dependency pass
+### Added by the 2026-08-30 dependency pass — SHIPPED 2026-08-31
 
-- **vite 5 → 8 (and `@vitejs/plugin-react` 4 → 6)** — L. **Needs Mason
-  (Decision queue 11).** Turning Dependabot on surfaced a dev-server-only
-  esbuild advisory: a page visited while `npm run dev` is running can issue
-  requests to the local dev server and read the responses. Nothing in
-  production runs a dev server, so the exposure is one developer machine during
-  local dev. The only patched path is a three-major jump of the build
-  toolchain that both CI jobs and the smoke harness stand on —
-  `test/smoke/vite.config.js`, the render check's `npx vite`, and the
-  `manualChunks` split in `vite.config.js`. CI would catch a hard break rather
-  than ship one, so this is a scope call, not a risk call: accept the advisory
-  and ignore the major, or do the upgrade deliberately with the harness and the
-  built app verified. PR #117 is left open as the record; its duplicate (#119,
-  the same jump reached via esbuild) was closed. The four patch-level PRs in
-  that batch merged — `pdfjs-dist` among them, the only one reaching the
-  browser bundle, and the standing reason a pdf.js bump wants a real-device
-  PDF import check that no CI job can supply.
+- ~~**vite 5 → 8 (and `@vitejs/plugin-react` 4 → 6)**~~ — **SHIPPED 2026-08-31**
+  as a deliberate upgrade rather than the bot merge it arrived as; PR #117 is
+  superseded. The advisory it clears is dev-server-only (a page visited while
+  the dev server runs could read its responses; nothing in production runs
+  one), which is why this was never urgent — but the upgrade was worth taking
+  on its own terms rather than carrying an indefinite ignore.
+
+  Two things the original framing did not anticipate, both now recorded as
+  durable rules: Vite 6 had moved the default build target, so the jump
+  silently raised the app's iOS floor from 14 to 16 until `vite.config.js`
+  pinned it back (CLAUDE.md's browser-floor Gotcha — the finding that
+  outlives this item); and Vite 8 ships Rolldown instead of Rollup, which made
+  "the vendor chunk split still exists in the output" something to verify
+  rather than assume. What the original framing got right: CI would have caught
+  a hard break, so this was a scope call, not a risk call.
 
 ## Refuted / decided — do NOT re-propose
 
