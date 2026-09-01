@@ -3,7 +3,7 @@ import { getOverview, getSpending, getBiggestMovers, getTransactions, getCashFlo
 import { FLOW_LABELS } from "../reconciliation.js";
 // Pure cores imported directly (never Supabase — the mock-harness alias rule
 // only covers dataAdapter/sync/db/apiClient; pure modules are safe).
-import { planAutoFill } from "../envelopes.js";
+import { planAutoFill, envelopeBar } from "../envelopes.js";
 import { buildSearchFilters, searchIsActive } from "../searchFilters.js";
 import { expectedByCategory, expectedStatus, isMissedExpected, seedFromRecurring, projectFutureCycles } from "../expectedTx.js";
 import { payoffWhatIf, debtFreeMonth, isMortgage, amortizationSchedule, addMonths, MAX_MONTHS, payoffProgress } from "../debtPayoff.js";
@@ -1943,6 +1943,24 @@ export default function Dashboard({ refreshTick = 0 }) {
     try{localStorage.setItem("mm:acctCollapsed",JSON.stringify(next));}catch{/* private mode: session-only */}
     return next;
   }),[]);
+  // Plan-tab section collapse (Mason, 2026-08-31: the tab shows group names
+  // with a caret; the categories inside appear when it's opened). Same device
+  // pref as acctCollapsed above with ONE deliberate inversion: this stores the
+  // OPEN sections, not the closed ones, because the Plan tab's default is
+  // CLOSED. The rule is that "no stored value" must mean the state Mason asked
+  // for, so whichever way a screen defaults, the set holds the exceptions.
+  // The cost of the inversion is the CI blind spot it creates — collapsed JSX
+  // renders for nobody in the smoke walk (the searchOpen lesson), which is why
+  // the walk clicks [data-mm-plan-group] before asserting the Plan view.
+  const [planOpen,setPlanOpen]=useState(()=>{try{
+    const v=JSON.parse(localStorage.getItem("mm:planOpen")||"[]");
+    return Array.isArray(v)?v.filter(x=>typeof x==="string"):[];
+  }catch{return [];}});
+  const togglePlanSection=useCallback(key=>setPlanOpen(prev=>{
+    const next=prev.includes(key)?prev.filter(k=>k!==key):[...prev,key];
+    try{localStorage.setItem("mm:planOpen",JSON.stringify(next));}catch{/* private mode: session-only */}
+    return next;
+  }),[]);
   // Hydrated from sessionStorage on mount, written back on change (see
   // CHAT_SS_KEY above) — scrollback survives a same-tab reload, not tab close.
   const [chatMsgs,setChatMsgs]=useState(readStoredChat);
@@ -3701,17 +3719,13 @@ export default function Dashboard({ refreshTick = 0 }) {
                 // this renderer is called from component scope now.
                 const okCard=inkOn(OK_MONEY,surf.card),overCard=inkOn(OVER_MONEY,surf.card);
                 const budgetable=isBudgetableCategory(r.category);
-                const pot=r.assigned+r.rolledOver;
-                const ratio=pot>0?r.spent/pot:0;
+                // Spent against the money in the envelope — the SAME pure bar
+                // the collapsed group heading above this row draws.
+                const bar=envelopeBar(r);
                 // An unbudgetable row has no envelope; its available is just
                 // −spent, which must not read as an overspend alarm.
                 const over=budgetable&&r.available<0;
-                // Clamped BELOW as well as above: `r.spent` folds isSpend, so a
-                // refund can take an envelope's spent negative, and a negative
-                // width is invalid CSS — the browser drops it and .bar-fill
-                // falls back to a FULL bar on the emptiest envelope there is.
-                const barW=pot>0?Math.max(0,Math.min(ratio,1))*100:0;
-                const barColor=markOn(over?OVER_MONEY:ratio>=0.8?"#FAC775":getColor(r.category),surf.track);
+                const barColor=markOn(over?OVER_MONEY:bar.ratio>=0.8?"#FAC775":getColor(r.category),surf.track);
                 const need=budgetable?targetNeed(r,{year,month}):0;
                 // Pace warning: opt-in, budgetable envelopes only, off the
                 // spent the walk already produced (never recomputed) against a
@@ -3736,13 +3750,9 @@ export default function Dashboard({ refreshTick = 0 }) {
                     </div>
 
                     <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:5}}>
-                      <div className="bar-bg"><div className="bar-fill" style={{width:barW+"%",background:barColor}}/></div>
+                      <div className="bar-bg"><div className="bar-fill" style={{width:bar.width+"%",background:barColor}}/></div>
                       <span style={{fontSize:11,width:38,textAlign:"right",flexShrink:0,color:over?overCard:"var(--muted)"}}>
-                        {/* Label clamped, bar already is: $129 spent against a
-                            $1 pot is honestly 12900%, but five digits overflow
-                            the 38px span and read as a glitch — the real
-                            amounts sit in the adjacent assigned/spent text. */}
-                        {pot>0?(ratio>9.99?">999%":Math.round(ratio*100)+"%"):"—"}
+                        {bar.label}
                       </span>
                     </div>
 
@@ -3842,6 +3852,92 @@ export default function Dashboard({ refreshTick = 0 }) {
     roll:rollupFields(groupMembers(node),n=>envRowByCat.get(n),
       ["assigned","rolledOver","spent","available"]),
   })),node=>earliestMemberRank(node,n=>envPos.get(n)));
+
+  // ── THE PLAN TAB IS A LIST OF HEADINGS (Mason, 2026-08-31) ────────────────
+  // The tab used to open on every envelope at once — ~25 three-line rows, each
+  // with its editors visible, and the group headings lost in among them. Now
+  // every envelope lives behind a caret: one section per real group, plus ONE
+  // "Ungrouped" section holding every category with no "part of" link (Mason
+  // picked that over leaving the unnested ones as loose rows). Collapsed, a
+  // section is a name, a spent-against-assigned bar and its available.
+  //
+  // The ROWS are untouched — same envRowNode, same editors, same leaf-only
+  // assignment rule. Only what is on screen at rest changed, so nothing here
+  // can move a dollar.
+  const envSections=envGroups.filter(g=>g.children.length>0);
+  const envLoose=envGroups.filter(g=>g.children.length===0&&g.own).map(g=>g.own);
+  // The Ungrouped rollup covers BUDGETABLE loose rows only, which is not a
+  // special case so much as the same population a real group has: a mechanism
+  // category (Uncategorized, transfers) can never be a parent or a child
+  // (categoryTree rule 2), so no group rollup has ever contained one. Summing
+  // an unbudgetable row's "available" here would report the classifier's
+  // ignorance as an overspend. Those rows still RENDER inside the section, with
+  // the "can't be budgeted" line they already carry.
+  const looseBudgetable=envLoose.filter(r=>isBudgetableCategory(r.category));
+  const looseUnbudgetable=envLoose.length-looseBudgetable.length;
+  const looseRoll=rollupFields(looseBudgetable.map(r=>r.category),c=>envRowByCat.get(c),
+    ["assigned","rolledOver","spent","available"]);
+
+  // ONE section renderer, used by both kinds of section. `swatch` is passed in
+  // rather than built here because a real group's swatch is the parent's colour
+  // PICKER — an interactive control, so it sits beside the disclosure button,
+  // never inside it (a button inside a button is invalid and swallows one of
+  // the two taps). `body` is a thunk: a collapsed section must not pay to build
+  // rows nobody can see.
+  function envSectionNode({sectionKey,label,color,swatch=null,roll,count,onDrill,drillTitle,note,body}){
+    const okCard=inkOn(OK_MONEY,surf.card),overCard=inkOn(OVER_MONEY,surf.card);
+    const open=planOpen.includes(sectionKey);
+    const bar=envelopeBar(roll);
+    const over=roll.available<0;
+    const barColor=markOn(over?OVER_MONEY:bar.ratio>=0.8?"#FAC775":color,surf.track);
+    return (
+      <div key={sectionKey} style={{marginBottom:open?18:12}}>
+        <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:5}}>
+          {swatch}
+          <button type="button" aria-expanded={open} data-mm-plan-group=""
+            onClick={()=>togglePlanSection(sectionKey)}
+            title={open?`Hide the ${label} categories`:`Show the ${label} categories`}
+            style={{display:"flex",alignItems:"center",gap:8,flex:1,minWidth:0,background:"none",border:"none",
+              padding:"4px 0",margin:"-4px 0",minHeight:32,fontFamily:"inherit",cursor:"pointer",textAlign:"left"}}>
+            {/* The app's existing ▾/▸ disclosure vocabulary (the Accounts tab's
+                sections), not a new glyph. */}
+            <span aria-hidden="true" style={{fontSize:13,color:"var(--muted)",width:12,flexShrink:0}}>{open?"▾":"▸"}</span>
+            <span style={{fontSize:13,fontWeight:600,color:"var(--text)",minWidth:0,overflow:"hidden",
+              textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{label}</span>
+            <span style={{fontSize:10,color:"var(--muted)",flexShrink:0}}>
+              {count} categor{count===1?"y":"ies"}
+            </span>
+          </button>
+          <span title="Assigned + rolled over − spent, across every category in this group"
+            style={{fontSize:13,fontWeight:600,fontFamily:"'DM Mono',monospace",flexShrink:0,
+              color:over?overCard:roll.available>0?okCard:"var(--muted)"}}>
+            {fmtAuto(roll.available)}
+          </span>
+        </div>
+        {/* Spent against what has been assigned — the ask, and the same bar the
+            rows inside draw, over the rollup instead of one envelope. */}
+        <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:5}}>
+          <div className="bar-bg"><div className="bar-fill" style={{width:bar.width+"%",background:barColor}}/></div>
+          <span style={{fontSize:11,width:38,textAlign:"right",flexShrink:0,color:over?overCard:"var(--muted)"}}>
+            {bar.label}
+          </span>
+        </div>
+        <div style={{display:"flex",alignItems:"center",gap:6,fontSize:11,color:"var(--muted)",flexWrap:"wrap",
+          marginBottom:open?10:0}}>
+          <span>{fmtAuto(roll.assigned)} assigned</span>
+          {roll.rolledOver!==0&&(<><span>·</span>
+            <span style={{color:roll.rolledOver>0?okCard:overCard}}>{signed(roll.rolledOver)} rolled</span></>)}
+          <span>·</span>
+          <DrillNum onClick={onDrill} title={drillTitle}>{fmtAuto(roll.spent)} spent</DrillNum>
+          {/* The note explains what is INSIDE the section, so it earns its line
+              only once the section is open — collapsed, the heading stays one
+              name, one bar and one number. */}
+          {open&&note&&(<><span>·</span><span>{note}</span></>)}
+        </div>
+        {open&&body()}
+      </div>
+    );
+  }
   const budgetableRows=envRows.filter(r=>isBudgetableCategory(r.category));
   // What each targeted category still needs this month to hit its target.
   // Fund targets and move destinations skip PARENTS: a parent takes no
@@ -4959,68 +5055,73 @@ export default function Dashboard({ refreshTick = 0 }) {
                 </div>
               )}
 
-              {envGroups.map(g=>{
-                // No parent, no children: exactly the row it was before.
-                if(g.children.length===0)return g.own?envRowNode(g.own):null;
-                const roll=g.roll;
+              {envSections.map(g=>{
                 const ownHas=!!(g.own&&(g.own.assigned||g.own.rolledOver||g.own.spent||g.own.target!=null));
-                return (
-                <div key={g.name} style={{marginBottom:18}}>
-                  {/* GROUP HEADING — a read-only rollup of own + children.
-                      No assign editor, no target button, no move destination:
-                      one owner per dollar (see the envGroups comment). */}
-                  <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
-                    <Swatch color={getColor(g.name)} onChange={hex=>saveColor(g.name,hex)}/>
-                    <span style={{fontSize:13,fontWeight:600,color:"var(--text)",minWidth:0,overflow:"hidden",
-                      textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{getName(g.name)}</span>
-                    <span style={{fontSize:10,color:"var(--muted)",flexShrink:0}}>rollup</span>
-                    <span style={{flex:1}}/>
-                    <span title="Assigned + rolled over − spent, across this category and its subcategories"
-                      style={{fontSize:13,fontWeight:600,fontFamily:"'DM Mono',monospace",flexShrink:0,
-                        color:roll.available<0?overCard:roll.available>0?okCard:"var(--muted)"}}>
-                      {fmtAuto(roll.available)}
-                    </span>
-                  </div>
-                  <div style={{display:"flex",alignItems:"center",gap:6,fontSize:11,color:"var(--muted)",flexWrap:"wrap",marginBottom:8}}>
-                    <span>{fmtAuto(roll.assigned)} assigned</span>
-                    {roll.rolledOver!==0&&<><span>·</span><span style={{color:roll.rolledOver>0?okCard:overCard}}>{signed(roll.rolledOver)} rolled</span></>}
-                    <span>·</span>
-                    <DrillNum onClick={openDrillGroup(g.name,g.children)}
-                      title={`See every ${getName(g.name)} transaction, subcategories included`}>
-                      {fmtAuto(roll.spent)} spent
-                    </DrillNum>
-                    <span>·</span>
-                    <span>{g.children.length} subcategor{g.children.length!==1?"ies":"y"} — assign in each</span>
-                  </div>
-                  {/* The parent's OWN envelope, if it has one from before it
-                      became a parent. Read-only here (it takes no new
-                      assignment) but never hidden, and it keeps ⇄ so the money
-                      can be moved out rather than stranded. */}
-                  {ownHas&&(
-                    <div style={{marginLeft:14,paddingLeft:10,borderLeft:"1px solid var(--border)",marginBottom:10,
-                      display:"flex",alignItems:"center",gap:6,fontSize:11,color:"var(--muted)",flexWrap:"wrap"}}>
-                      <span>Tagged directly:</span>
-                      <span style={{fontFamily:"'DM Mono',monospace"}}>{fmtAuto(g.own.assigned)} assigned</span>
-                      {g.own.spent!==0&&(<><span>·</span>
-                        <DrillNum onClick={openDrill(g.name)} title={`See the ${getName(g.name)} transactions`}>
-                          {fmtAuto(g.own.spent)} spent
-                        </DrillNum></>)}
-                      <span>·</span>
-                      <span style={{color:g.own.available<0?overCard:"var(--muted)"}}>{fmtAuto(g.own.available)} available</span>
-                      <button onClick={()=>setMoveFrom(g.name)} disabled={envBusy}
-                        title="Move this money into one of the subcategories"
-                        style={{background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",padding:0,
-                          minWidth:32,minHeight:32,margin:"-10px -3px",display:"inline-flex",alignItems:"center",justifyContent:"center",
-                          fontSize:13,lineHeight:1,color:"var(--muted)",flexShrink:0}}>⇄</button>
-                      <span style={{width:"100%",fontSize:10,lineHeight:1.5}}>
-                        A category with subcategories takes no new assignment — assign in the subcategories, or
-                        remove the “part of” link to budget it directly again.
-                      </span>
-                    </div>
-                  )}
-                  {g.rows.map(c=>envRowNode(c,{indent:true}))}
-                </div>
-                );
+                return envSectionNode({
+                  sectionKey:`g:${g.name}`,
+                  label:getName(g.name),
+                  color:getColor(g.name),
+                  swatch:<Swatch color={getColor(g.name)} onChange={hex=>saveColor(g.name,hex)}/>,
+                  roll:g.roll,
+                  count:g.children.length,
+                  onDrill:openDrillGroup(g.name,g.children),
+                  drillTitle:`See every ${getName(g.name)} transaction, subcategories included`,
+                  note:"assign in each",
+                  body:()=>(<>
+                    {/* The parent's OWN envelope, if it has one from before it
+                        became a parent. Read-only here (it takes no new
+                        assignment) but never hidden, and it keeps ⇄ so the money
+                        can be moved out rather than stranded. */}
+                    {ownHas&&(
+                      <div style={{marginLeft:14,paddingLeft:10,borderLeft:"1px solid var(--border)",marginBottom:10,
+                        display:"flex",alignItems:"center",gap:6,fontSize:11,color:"var(--muted)",flexWrap:"wrap"}}>
+                        <span>Tagged directly:</span>
+                        <span style={{fontFamily:"'DM Mono',monospace"}}>{fmtAuto(g.own.assigned)} assigned</span>
+                        {g.own.spent!==0&&(<><span>·</span>
+                          <DrillNum onClick={openDrill(g.name)} title={`See the ${getName(g.name)} transactions`}>
+                            {fmtAuto(g.own.spent)} spent
+                          </DrillNum></>)}
+                        <span>·</span>
+                        <span style={{color:g.own.available<0?overCard:"var(--muted)"}}>{fmtAuto(g.own.available)} available</span>
+                        <button onClick={()=>setMoveFrom(g.name)} disabled={envBusy}
+                          title="Move this money into one of the subcategories"
+                          style={{background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",padding:0,
+                            minWidth:32,minHeight:32,margin:"-10px -3px",display:"inline-flex",alignItems:"center",justifyContent:"center",
+                            fontSize:13,lineHeight:1,color:"var(--muted)",flexShrink:0}}>⇄</button>
+                        <span style={{width:"100%",fontSize:10,lineHeight:1.5}}>
+                          A category with subcategories takes no new assignment — assign in the subcategories, or
+                          remove the “part of” link to budget it directly again.
+                        </span>
+                      </div>
+                    )}
+                    {g.rows.map(c=>envRowNode(c,{indent:true}))}
+                  </>),
+                });
+              })}
+
+              {/* Everything with no "part of" link, under one caret. Its rows
+                  are the SAME leaf rows a group's children are, with the same
+                  editors — this section is a place to put them, not a parent
+                  category, and nothing about it is stored. */}
+              {envLoose.length>0&&envSectionNode({
+                sectionKey:"ungrouped",
+                label:"Ungrouped",
+                color:"#7F77DD",
+                swatch:<span aria-hidden="true" style={{width:14,height:14,borderRadius:3,flexShrink:0,
+                  border:"1.5px dashed var(--muted)"}}/>,
+                roll:looseRoll,
+                count:looseBudgetable.length,
+                // No group drill: "every transaction in 20 unrelated
+                // categories" is not a question the drill sheet answers.
+                onDrill:null,
+                // The heading's numbers cover the budgetable rows (see
+                // looseRoll); an unbudgetable one renders below them and says
+                // so on its own row, but the count would lie without this.
+                note:`not part of any group${looseUnbudgetable>0?` · ${looseUnbudgetable} that can't be budgeted`:""}`,
+                // Indented like a group's children: they are not subcategories,
+                // but they ARE this section's contents, and an unindented row
+                // under an open caret reads as a sibling of the heading.
+                body:()=>envLoose.map(r=>envRowNode(r,{indent:true})),
               })}
 
               <button className="ibtn" onClick={()=>{setAddCatFor(null);setAddingCat(true);}}

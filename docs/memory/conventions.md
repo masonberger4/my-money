@@ -17,10 +17,17 @@
   prefs go in localStorage; account-level prefs go in `settings`.** The other
   localStorage device prefs: `mm:cardTile` (the Overview card-tile selection —
   a stale selection falls back credit-first; `getOverview` carries an additive
-  `id` for it) and `mm:acctCollapsed` (the Accounts tab's COLLAPSED section
+  `id` for it), `mm:acctCollapsed` (the Accounts tab's COLLAPSED section
   labels — folding Credit on one phone must not fold it on the other, and
   storing the collapsed set rather than the open one keeps "no stored value"
-  meaning every section open, which is also what CI's walk renders). No stored
+  meaning every section open, which is also what CI's walk renders) and
+  `mm:planOpen` (the Plan tab's OPEN sections — the INVERSE set, because that
+  tab defaults to CLOSED). The rule the pair encodes is the one to copy: **the
+  stored set holds the EXCEPTIONS to a screen's default**, so "no stored value"
+  always means the state that screen is supposed to open in. The cost of a
+  closed-by-default screen is a CI blind spot — collapsed JSX renders for
+  nobody in the smoke walk (the searchOpen lesson), so the walk has to OPEN the
+  section (`[data-mm-plan-group]`). No stored
   value ⇒ no `data-theme` ⇒ follow the OS. Every storage access is try/caught
   (Safari private mode throws on access). `src/theme.js` owns it; index.html
   carries a deliberate 3-line duplicate of read+apply that must stay in sync.
@@ -543,6 +550,25 @@ category's own first assignment; the pure core is `src/envelopes.js`.
 - **`Uncategorized` (and the transfer bucket) can't be budgeted** —
   `isBudgetableCategory` gates assignments, targets, moves and the picker; its
   spending still renders read-only so the size of the unknown stays visible.
+- **The Plan tab is a list of HEADINGS** (Mason, 2026-08-31): every envelope
+  sits behind a caret — one section per real group, plus ONE `Ungrouped`
+  section holding every category with no `part of` link (chosen over leaving
+  the unnested ones as loose rows). A collapsed section is a name, the
+  spent-against-assigned bar over its rollup, and its available; opening it
+  reveals the SAME `envRowNode` rows, editors and all, so the leaf-only
+  assignment rule and every total are untouched — this changed what is on
+  screen at rest, never what a dollar does. Two details that look arbitrary
+  and aren't: the `Ungrouped` rollup covers BUDGETABLE rows only (a mechanism
+  category can never be a parent or child, so no real group rollup ever
+  contained one either — summing an unbudgetable row's "available" would report
+  the classifier's ignorance as an overspend), and the heading's swatch sits
+  OUTSIDE the disclosure button because it is the colour PICKER, and a button
+  inside a button swallows one of the two taps.
+- **One bar, one arithmetic**: `envelopeBar()` in `src/envelopes.js` is what
+  both the group heading and every row inside it draw — the same clamps
+  (a refund can take `spent` negative, and a negative CSS width renders a FULL
+  bar; a >999% label overflows its 38px span). Two copies of that math would
+  eventually disagree about the same envelope on the same screen.
 - **Overspend carries the category negative.** Real YNAB instead docks next
   month's Ready to Assign on *cash* overspending and only rolls credit-covered
   overspend negative. With no cash-vs-credit envelope split, carrying negative

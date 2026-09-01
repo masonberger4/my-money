@@ -90,6 +90,14 @@ const boundaryAtStart = await bodyHasBoundary();
 const WALK = [
   ['home', '[data-mm-nav=home]'],
   ['plan', '[data-mm-nav=plan]'],
+  // Every Plan-tab envelope now sits behind a caret and the sections are
+  // COLLAPSED by default (mm:planOpen stores the open ones), so the envelope
+  // rows — the assign editors, the target buttons, the pace/move/rollover
+  // controls, the whole 200 lines of envRowNode — render for NOBODY here
+  // unless the walk opens a section. Same blind spot as the search panel
+  // below, and this file is the only thing that evaluates that JSX at all.
+  // Not a view of its own.
+  [null, '[data-mm-plan-group]', 'opening a plan group'],
   ['spending', '[data-mm-nav=spending]'],
   // The Spending refine panel is collapsed behind the magnifier, so its input,
   // filter row AND (since 2026-08-17) the account + category chip rows render
