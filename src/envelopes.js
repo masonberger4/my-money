@@ -102,6 +102,32 @@ export function targetNeed(row, { year, month }) {
   return left > 0 ? cents(left) : 0;
 }
 
+// The Plan tab's progress bar: what an envelope has SPENT against the money
+// actually in it (assigned + rolled over). Pure and shared, because the tab
+// draws this bar at TWO levels since 2026-08-31 — once on each collapsed group
+// heading (over the group's rollup) and once on every envelope row inside it —
+// and two copies of the arithmetic would eventually disagree about the same
+// envelope on the same screen.
+//
+// `pot` 0 is not "0% spent", it is "no envelope": the bar stays empty and the
+// label reads em dash rather than claiming an infinite overspend.
+export function envelopeBar({ assigned = 0, rolledOver = 0, spent = 0 } = {}) {
+  const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+  const pot = num(assigned) + num(rolledOver);
+  const s = num(spent);
+  const ratio = pot > 0 ? s / pot : 0;
+  // Clamped BELOW as well as above: `spent` folds isSpend, so a refund can take
+  // an envelope's spent negative, and a negative width is invalid CSS — the
+  // browser drops the declaration and .bar-fill falls back to a FULL bar on the
+  // emptiest envelope there is.
+  const width = pot > 0 ? Math.max(0, Math.min(ratio, 1)) * 100 : 0;
+  // Label clamped, bar already is: $129 spent against a $1 pot is honestly
+  // 12900%, but five digits overflow the 38px span and read as a glitch — the
+  // real amounts sit in the assigned/spent text beside it.
+  const label = pot > 0 ? (ratio > 9.99 ? '>999%' : `${Math.round(ratio * 100)}%`) : '—';
+  return { pot, ratio, width, label };
+}
+
 // Pace warning (display-only, opt-in per envelope) — is a fungible envelope
 // spending AHEAD of a flat month-pace? Compares the spent-so-far the walk
 // already produced against a linear expectation: fraction-of-month-elapsed ×

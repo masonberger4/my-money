@@ -101,3 +101,38 @@ What was DECIDED, as opposed to discovered:
   this repo's ruleset forbids.
 - **Fails soft.** No secret in the Dependabot store leaves the job green with a
   notice rather than a red X, so it was safe to merge before setup finished.
+
+## 2026-08-31 — The Plan tab collapses into group headings
+
+Mason: the Plan tab should show "only the transaction group category names with
+carrot next to them", and opening one reveals the categories in that group, each
+with its spend as a progress bar against what has been assigned to it. It used
+to render every envelope at once — around twenty-five three-line rows with every
+editor visible and the group headings lost among them.
+
+Decided:
+
+- **One section per real group, plus ONE `Ungrouped` section** for every
+  category with no `part of` link. Asked and answered by Mason directly, over
+  the two alternatives offered: collapsing every top-level row uniformly, or
+  collapsing only real groups and leaving the unnested ones as loose full rows.
+- **Collapsed by default**, which forces the device pref (`mm:planOpen`) to
+  store the OPEN sections — the inverse of `mm:acctCollapsed`. The rule behind
+  both: the stored set holds the exceptions to a screen's default, so "no stored
+  value" means the state the screen should open in. Its known cost is a CI blind
+  spot, paid for with a `[data-mm-plan-group]` step in the smoke walk.
+- **The rows themselves are untouched** — same `envRowNode`, same editors, same
+  leaf-only assignment rule. Nothing here can move a dollar; only what is on
+  screen at rest changed.
+- **The `Ungrouped` rollup counts budgetable rows only.** Not a special case:
+  a mechanism category can never be a parent or a child, so no group rollup has
+  ever held one. An unbudgetable row still renders inside the section, and the
+  heading says how many are in there.
+- **The bar arithmetic became a pure `envelopeBar()`** in `src/envelopes.js`,
+  because the same bar is now drawn at two levels. Rejected: recomputing it in
+  the heading, which is how the two would eventually disagree about the same
+  envelope on the same screen.
+- **The rows inside `Ungrouped` are indented** like a group's children. They are
+  not subcategories, but they are the section's contents, and an unindented row
+  under an open caret reads as a sibling of the heading.
+

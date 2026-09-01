@@ -12,6 +12,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   walkEnvelopes,
+  envelopeBar,
   targetNeed,
   effectiveTarget,
   planAutoFill,
@@ -750,4 +751,54 @@ test('hybrid income: December→January year boundary compares as months, not st
   const r = resolveBudgetIncome({ year: 2025, month: 12, todayKey: '2026-01-05',
     coverageStart: '2025-01-01', manual: 6200, actual: 4000 });
   assert.equal(r.source, 'actual');
+});
+
+// --- envelopeBar: the Plan tab's one progress bar, drawn at both levels ------
+// (the collapsed group heading over its rollup, and every envelope row inside).
+
+test('envelope bar: spent against assigned plus what rolled in', () => {
+  const b = envelopeBar({ assigned: 300, rolledOver: 100, spent: 200 });
+  assert.equal(b.pot, 400);
+  assert.equal(b.ratio, 0.5);
+  assert.equal(b.width, 50);
+  assert.equal(b.label, '50%');
+});
+
+test('envelope bar: an overspent envelope fills the bar, never past it', () => {
+  const b = envelopeBar({ assigned: 100, rolledOver: 0, spent: 250 });
+  assert.equal(b.width, 100);
+  assert.equal(b.label, '250%');
+});
+
+// The bug this clamp exists for: a refund can take an envelope's spent
+// NEGATIVE, and a negative width is invalid CSS — the browser drops the
+// declaration and .bar-fill renders FULL on the emptiest envelope there is.
+test('envelope bar: a refunded envelope reads empty, not full', () => {
+  const b = envelopeBar({ assigned: 100, rolledOver: 0, spent: -40 });
+  assert.equal(b.width, 0);
+  assert.equal(b.label, '-40%');
+});
+
+test('envelope bar: no money in the envelope is "no envelope", not 0% spent', () => {
+  const b = envelopeBar({ assigned: 0, rolledOver: 0, spent: 75 });
+  assert.equal(b.pot, 0);
+  assert.equal(b.width, 0);
+  assert.equal(b.label, '—');
+});
+
+// Five digits overflow the 38px label span and read as a rendering glitch.
+test('envelope bar: an absurd ratio is clamped in the LABEL as well as the bar', () => {
+  const b = envelopeBar({ assigned: 1, rolledOver: 0, spent: 129 });
+  assert.equal(b.width, 100);
+  assert.equal(b.label, '>999%');
+});
+
+// A rollup sums whatever rows a group has; a member with no row this month
+// contributes undefined fields, which must not turn the whole bar into NaN%.
+test('envelope bar: missing or junk fields count as zero, never NaN', () => {
+  const b = envelopeBar({ assigned: 200, spent: undefined });
+  assert.equal(b.width, 0);
+  assert.equal(b.label, '0%');
+  assert.equal(envelopeBar().label, '—');
+  assert.equal(envelopeBar({ assigned: 'nope', spent: 10 }).label, '—');
 });
