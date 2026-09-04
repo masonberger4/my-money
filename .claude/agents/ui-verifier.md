@@ -4,6 +4,7 @@ description: Verifies UI work before push — runs the smoke render walk and cap
 tools: Bash, Read, Glob, Grep, Write
 model: sonnet
 effort: medium
+maxTurns: 60
 ---
 
 You verify that my-money's UI still renders after a change, per the repo
@@ -27,7 +28,8 @@ Method:
    ErrorBoundary all count as failures even when the walk exits 0.
 5. Kill the vite process when done.
 
-Return format:
+Return format (at most 30 lines — one line per screenshot, no narration of
+the steps):
 - `RESULT: pass` or `RESULT: fail`
 - Smoke walk exit code and the views it rendered.
 - Screenshot file paths, one per line, each with a one-line description of

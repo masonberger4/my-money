@@ -136,3 +136,40 @@ Decided:
   not subcategories, but they are the section's contents, and an unindented row
   under an open caret reads as a sibling of the heading.
 
+
+## 2026-09-04 — Token-usage guards on top of the routing setup
+
+Mason: "Generate files to optimize the use of agents for the repository for
+token usage." The mechanics live in docs/claude-routing.md (what was added,
+the routing table with `maxTurns` and report caps, the token-cost ledger, the
+tuning knobs) — not restated here.
+
+Decided:
+
+- **The bare-`npm test` hook now REWRITES instead of denying** (PreToolUse
+  `updatedInput` + allow): a deny cost a refusal-and-retry round trip every
+  time it fired, for the same outcome. The model is told, via
+  `additionalContext`, that the digest ran.
+- **Whole-file reads over 1,000 lines are hook-denied** — a Read with no
+  `limit`, or a bare `cat` — with the real line count and the substitutes in
+  the reason. The threshold sits above every memory doc on purpose: a memory
+  doc that crosses it gets split, the knob does not move. Ranged reads,
+  piped/redirected cats, and binaries pass. The guard fires inside subagents
+  too (settings hooks do), so Explore is held to the same rule.
+- **`.claude/hooks/outline.sh` is the cheap map** the deny points at (~290
+  lines for Dashboard.jsx). It is generated on demand, never checked in: a
+  checked-in map with line numbers would rot on the next edit.
+- **Every agent carries `maxTurns` (a 2–3× backstop) and a report-length
+  cap.** A partial return means "split the task", not "raise the number".
+- **`test/claudeConfigGuards.test.js` pins all of it** by piping the same JSON
+  Claude Code pipes: hooks, outline, digest, and the always-loaded size caps
+  (agent bodies 70 lines, rules 40, skills 45, descriptions 320 chars). It
+  skips the shell cases where `sh`/python3 are absent, because the hooks
+  degrade to allow there by design.
+
+Rejected (reasons in docs/claude-routing.md "Considered and rejected"):
+persistent agent memory for Explore (a second, un-audited memory — the
+phantom-reference shape); lowering `BASH_MAX_OUTPUT_LENGTH`; a build/smoke
+digest (29 and ~3 lines, nothing to save); guarding `head`/`tail`/`sed`;
+capping the GitHub Actions runs. The 2026-08-31 deferrals (SessionStart
+npm-ci hook, statusline) stay deferred.

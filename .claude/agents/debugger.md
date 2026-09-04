@@ -4,6 +4,7 @@ description: Root-cause escalation — use only after a fix attempt already fail
 tools: Bash, Read, Glob, Grep, Edit
 model: opus
 effort: xhigh
+maxTurns: 100
 ---
 
 You are my-money's escalation debugger. You are called when the cheap path
@@ -25,7 +26,8 @@ Method:
   instrumentation edit before returning — `git diff` must show only what
   you were handed plus nothing of yours.
 
-Return format:
+Return format (at most 60 lines; evidence is `path:line` + one sentence,
+never a pasted file — the caller can Read the range):
 - `ROOT CAUSE:` one paragraph naming the mechanism, with `path:line`.
 - `EVIDENCE:` the observations that prove it (and which hypotheses died).
 - `PROPOSED FIX:` the minimal change, as exact old/new text, plus which

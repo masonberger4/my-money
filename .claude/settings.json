@@ -24,7 +24,8 @@
       "Bash(git branch*)",
       "Bash(git checkout *)",
       "Bash(wc *)",
-      "Bash(ls *)"
+      "Bash(ls *)",
+      "Bash(.claude/hooks/outline.sh*)"
     ],
     "ask": [
       "Bash(supabase *)",
@@ -49,6 +50,29 @@
             "if": "Bash(npm *)",
             "timeout": 10,
             "statusMessage": "npm-test digest guard"
+          }
+        ]
+      },
+      {
+        "matcher": "Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/pretooluse-read-guard.sh",
+            "timeout": 10,
+            "statusMessage": "big-file read guard"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/pretooluse-read-guard.sh",
+            "if": "Bash(cat *)",
+            "timeout": 10,
+            "statusMessage": "big-file cat guard"
           }
         ]
       }
