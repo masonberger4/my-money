@@ -107,9 +107,10 @@ same posture.
   2. **reviewer at sonnet/high** — if it misses contract violations the
      memory docs record, the fix is usually a sharper checklist item in its
      body, not a bigger model.
-  3. **The npm-test guard** — if the deny annoys more than it saves,
-     delete the hook entry from settings.json; the digest pipe and the
-     runner agent still work without it.
+  3. **The npm-test guard** — since 2026-09-04 it rewrites rather than
+     denies, so there is nothing to annoy; the only reason to delete its
+     settings.json entry is a CLI without `updatedInput` (next section).
+     The digest pipe and the runner agent work without it either way.
 - **Test-guard rewrite** relies on PreToolUse `updatedInput` (documented,
   no version gate). If a bare `npm test` ever dumps full TAP in a session,
   the CLI running it predates the field: the `additionalContext` note is
