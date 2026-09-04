@@ -27,9 +27,9 @@ doc covering your work area BEFORE editing, and maintain it in the same PR
 
 - Tests: `npm test 2>&1 | .claude/hooks/test-digest.sh` — 5,700+ TAP lines
   collapse to verdict + failures verbatim; a hook rewrites a bare `npm test`.
-- Map a big file: `.claude/hooks/outline.sh <file>` (line-numbered declarations,
-  ~290 lines for Dashboard.jsx). Whole-file Read/`cat` over 1,000 lines is
-  hook-denied — grep or map it, then Read a range.
+- Map a big file: `.claude/hooks/outline.sh <file>` (line-numbered
+  declarations; key-files.md rows). Whole-file Read/`cat` over 1,000 lines or
+  64 KB is hook-denied — grep or map it, then Read a range.
 - Build: `VITE_SUPABASE_URL=https://placeholder.supabase.co VITE_SUPABASE_ANON_KEY=placeholder npm run build`
 - Smoke (renders all 11 views): `npm install --no-save playwright-core@1.62.1`,
   then `npx vite --config test/smoke/vite.config.js --port 5199 &`, then

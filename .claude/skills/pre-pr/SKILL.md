@@ -14,9 +14,11 @@ skill):
 3. **Build**: `VITE_SUPABASE_URL=https://placeholder.supabase.co VITE_SUPABASE_ANON_KEY=placeholder npm run build` — must succeed.
 4. **Smoke + screenshots**: if the diff touches src/components/ or
    src/ui.css, delegate to the **ui-verifier** agent (walk + 390×844
-   screenshots) — otherwise delegate the smoke walk to the **runner** agent.
-5. **Review**: delegate the full diff to the **reviewer** agent; fix real
-   findings and re-run the affected steps.
+   screenshots; it LOOKS at the PNGs — do not Read them again here) —
+   otherwise delegate the smoke walk to the **runner** agent.
+5. **Review**: delegate to the **reviewer** agent by RANGE
+   (`origin/main...HEAD`), never by pasting diff text; fix real findings
+   and re-run the affected steps.
 6. **Security pass**: if the diff touches api/, vercel.json, or supabase/,
    additionally review against docs/memory/architecture.md (service-role
    boundary, sanitized 500s, SSRF) — the /security-review skill if

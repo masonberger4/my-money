@@ -22,8 +22,10 @@ Method:
 - The project's memory lives in `docs/memory/*.md` — when a question is about
   a rule or decision rather than code, search there first.
 
-Return format — exactly this, nothing more, and at most 20 lines total (the
-report lands in the caller's context; hits beyond that are the wrong hits):
+Return format — exactly this, nothing more, and at most 20 lines for a
+lookup (the report lands in the caller's context). A call-site or
+inventory SWEEP is the exception: list every hit, grouped by file with a
+count per file — a dropped call site during a rename is a correctness bug.
 1. One-sentence answer to the question.
 2. A list of `path:line — one-line finding` entries (only the hits that
    matter, not every match).

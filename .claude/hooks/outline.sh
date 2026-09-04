@@ -8,7 +8,8 @@
 #     declarations at ANY depth, const/let/class bindings of arrows, functions,
 #     hooks, memo/forwardRef; useEffect/useLayoutEffect sites; Dashboard's
 #     `tab==="…"&&` view branches; one-line JSX comments; `// ----` banners.
-#   .md: headings.   .sql: create/alter/drop/insert/grant + `-- ===` banners.
+#   .md: headings + table rows whose first cell is a backticked path (so a
+#     key-files.md row is one `sed -n` / Read-with-limit away).   .sql: create/alter/drop/insert/grant + `-- ===` banners.
 #   .json: top-level keys.   .css: `/* ---- */` banners and @-rules.
 #
 # Why: src/components/Dashboard.jsx is 8,000+ lines (~100k tokens); this map
@@ -21,7 +22,7 @@
 [ $# -gt 0 ] || { echo "usage: $0 <file> [<file> ...]" >&2; exit 2; }
 
 JS='^[[:space:]]*(export[[:space:]]+)?(default[[:space:]]+)?(async[[:space:]]+)?function[[:space:]]+[A-Za-z_$]|^[[:space:]]*(export[[:space:]]+)?(const|let|class)[[:space:]]+[A-Za-z_$][A-Za-z0-9_$]*[[:space:]]*=[[:space:]]*(async[[:space:]]*)?(\(|function|use[A-Z]|React\.memo|forwardRef|memo\()|^[[:space:]]*(export[[:space:]]+)?class[[:space:]]+[A-Za-z_$]|^[[:space:]]*(useEffect|useLayoutEffect)\(|tab==="[a-z]+"&&|^[[:space:]]*\{/\*.*\*/\}[[:space:]]*$|^[[:space:]]*//[[:space:]]*(-{3,}|={3,}|#{2,})|^[[:space:]]*(describe|test|it)\('
-MD='^#{1,4} '
+MD='^#{1,4} |^\| `[^`]+` \|'
 SQL='^[[:space:]]*(create|alter|drop|insert|grant|revoke|--[[:space:]]*(={3,}|-{3,}))'
 JSON='^  "[^"]+":'
 CSS='^[[:space:]]*/\*[[:space:]]*(-{3,}|={3,})|^@[a-z-]+'

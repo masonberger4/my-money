@@ -25,7 +25,8 @@
       "Bash(git checkout *)",
       "Bash(wc *)",
       "Bash(ls *)",
-      "Bash(.claude/hooks/outline.sh*)"
+      "Bash(.claude/hooks/outline.sh*)",
+      "Bash(node .claude/hooks/*)"
     ],
     "ask": [
       "Bash(supabase *)",
@@ -46,10 +47,22 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".claude/hooks/pretooluse-test-guard.sh",
+            "command": "node .claude/hooks/pretooluse-test-guard.mjs",
             "if": "Bash(npm *)",
             "timeout": 10,
             "statusMessage": "npm-test digest guard"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .claude/hooks/pretooluse-test-guard.mjs",
+            "if": "Bash(node --test*)",
+            "timeout": 10,
+            "statusMessage": "node --test digest guard"
           }
         ]
       },
@@ -58,7 +71,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".claude/hooks/pretooluse-read-guard.sh",
+            "command": "node .claude/hooks/pretooluse-read-guard.mjs",
             "timeout": 10,
             "statusMessage": "big-file read guard"
           }
@@ -69,7 +82,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".claude/hooks/pretooluse-read-guard.sh",
+            "command": "node .claude/hooks/pretooluse-read-guard.mjs",
             "if": "Bash(cat *)",
             "timeout": 10,
             "statusMessage": "big-file cat guard"

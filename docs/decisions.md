@@ -147,29 +147,43 @@ tuning knobs) — not restated here.
 Decided:
 
 - **The bare-`npm test` hook now REWRITES instead of denying** (PreToolUse
-  `updatedInput` + allow): a deny cost a refusal-and-retry round trip every
-  time it fired, for the same outcome. The model is told, via
-  `additionalContext`, that the digest ran.
-- **Whole-file reads over 1,000 lines are hook-denied** — a Read with no
-  `limit`, or a bare `cat` — with the real line count and the substitutes in
-  the reason. The threshold sits above every memory doc on purpose: a memory
-  doc that crosses it gets split, the knob does not move. Ranged reads,
-  piped/redirected cats, and binaries pass. The guard fires inside subagents
-  too (settings hooks do), so Explore is held to the same rule.
-- **`.claude/hooks/outline.sh` is the cheap map** the deny points at (~290
-  lines for Dashboard.jsx). It is generated on demand, never checked in: a
-  checked-in map with line numbers would rot on the next edit.
+  `updatedInput` + allow), and covers a bare `node --test` too: a deny cost a
+  refusal-and-retry round trip every time it fired, for the same outcome. The
+  model is told, via `additionalContext`, that the digest ran.
+- **The guards run on node, not sh+python3.** Node is the one runtime this
+  repo guarantees on every machine; a guard that silently allows on a Windows
+  shell without python3 saves nothing exactly where Mason runs locally. The
+  digest stays awk (sh is present wherever the smoke commands run).
+- **Whole-file reads over 1,000 lines OR 64 KB are hook-denied** — a Read
+  with no `limit`, or a bare `cat` — with the real size, the substitutes,
+  and the deliberate form (`limit:<lines>`) in the reason. The byte
+  threshold exists for key-files.md: 62 lines, 84 KB, a per-file table every
+  rule says to read one ROW of. Every other memory doc passes; a memory doc
+  that crosses a threshold gets split, the knobs do not move. The guard
+  fires inside subagents too (settings hooks do), so Explore is held to it.
+- **`.claude/hooks/outline.sh` is the cheap map** the deny points at
+  (declarations for code, headings and table rows for .md). Generated on
+  demand, never checked in: a checked-in map with line numbers would rot on
+  the next edit.
 - **Every agent carries `maxTurns` (a 2–3× backstop) and a report-length
   cap.** A partial return means "split the task", not "raise the number".
+  Explore's cap exempts call-site/inventory SWEEPS — a dropped call site
+  during a rename is a correctness bug, not a token saving.
 - **`test/claudeConfigGuards.test.js` pins all of it** by piping the same JSON
-  Claude Code pipes: hooks, outline, digest, and the always-loaded size caps
-  (agent bodies 70 lines, rules 40, skills 45, descriptions 320 chars). It
-  skips the shell cases where `sh`/python3 are absent, because the hooks
-  degrade to allow there by design.
+  Claude Code pipes: hooks and their settings.json wiring, outline, digest,
+  the token report, the routing-table ↔ frontmatter lockstep, backticked
+  paths in `.claude/**/*.md`, and the always-loaded size caps in lines and
+  bytes. Shell cases skip where `sh` is absent (the helpers are sh scripts).
+- **CI's `npm test` runs through the digest** (`set -o pipefail`), so a red
+  job's log tail is the failures. Job names unchanged.
+- **`.claude/hooks/session-tokens.mjs` is the measurement tool** — usage per
+  model and the largest tool results from a transcript — so tuning is
+  against measured numbers, not the dated estimates in the ledger.
 
 Rejected (reasons in docs/claude-routing.md "Considered and rejected"):
 persistent agent memory for Explore (a second, un-audited memory — the
 phantom-reference shape); lowering `BASH_MAX_OUTPUT_LENGTH`; a build/smoke
 digest (29 and ~3 lines, nothing to save); guarding `head`/`tail`/`sed`;
-capping the GitHub Actions runs. The 2026-08-31 deferrals (SessionStart
-npm-ci hook, statusline) stay deferred.
+embedding the outline in the deny reason; a `git diff` digest; pinning the
+ledger's numbers in a test; capping the GitHub Actions runs. The 2026-08-31
+deferrals (SessionStart npm-ci hook, statusline) stay deferred.

@@ -36,7 +36,16 @@ jobs:
       # Includes test/apiLoads.test.js, which is the ONLY thing that catches a
       # dangling import in api/ — nothing else loads those files, so a broken
       # route otherwise ships green and 500s on the first real request.
-      - run: npm test
+      # Through the TAP digest (2026-09-04): a green run logs ~10 lines, a red
+      # run logs every failing block verbatim, so the log TAIL a session pulls
+      # with get_job_logs is the failures, not the last 500 of 5,700 `ok` lines.
+      # pipefail keeps a crashed `npm test` red even if the digest exits 0; the
+      # digest itself exits 1 on any failure and passes a summary-less run
+      # through untouched (test/claudeConfigGuards.test.js pins both).
+      - name: tests (digested)
+        run: |
+          set -o pipefail
+          npm test 2>&1 | .claude/hooks/test-digest.sh
       - name: build (placeholder env)
         env:
           VITE_SUPABASE_URL: https://placeholder.supabase.co
