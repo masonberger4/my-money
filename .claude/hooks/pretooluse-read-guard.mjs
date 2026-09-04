@@ -3,8 +3,9 @@
 //
 // What it stops: a WHOLE-FILE read of a big file — a Read with no `limit`, or a
 // bare `cat <file>` — which puts up to 2,000 lines (~30k tokens for
-// Dashboard.jsx, whose 8,000 lines are ~125k in full; ~21k for the 62-line,
-// 84 KB key-files.md table) into the context in one call. The memory docs
+// Dashboard.jsx, whose thousands of lines are well over 100k in full; tens
+// of thousands for the key-files.md table, which is few lines but wide)
+// into the context in one call. The memory docs
 // already say "search it, never read it whole"; this makes the rule
 // mechanical. Hooks from settings run inside subagents too, so Explore is
 // held to it as well.
@@ -12,8 +13,8 @@
 // Big = over BIG_LINES lines OR over BIG_BYTES bytes. Both knobs sit above
 // every docs/memory file EXCEPT key-files.md, on purpose: that file is a
 // per-file table every rule says to read one ROW of (the outline lists the
-// rows), while conventions.md (55 KB) is meant to be read whole for money
-// math. Override per machine with MM_READ_GUARD_LINES / MM_READ_GUARD_BYTES.
+// rows), while conventions.md sits under both knobs because it is meant to
+// be read whole for money math (`wc -lc docs/memory/*.md` shows the margins). Override per machine with MM_READ_GUARD_LINES / MM_READ_GUARD_BYTES.
 //
 // What passes untouched: a Read with `limit` (the caller chose the range — a
 // deliberate whole read is `limit: <line count>`); a `cat` that pipes or
@@ -88,7 +89,9 @@ function deny(path, m) {
   process.exit(0);
 }
 
-// Minimal shell-word split: enough for `cat [-flags] path ...`; quotes kept together.
+// Minimal shell-word split: enough for `cat [-flags] path ...`; quotes kept
+// together. Command separators glued to a path (`cat f;`, `cat f&&x`) are
+// turned into spaces first so the path still measures.
 function words(cmd) {
   const out = [];
   const re = /"([^"]*)"|'([^']*)'|(\S+)/g;
@@ -105,11 +108,12 @@ if (tool === 'Read') {
   }
 } else if (tool === 'Bash' || tool === 'PowerShell') {
   const cmd = typeof inp.command === 'string' ? inp.command : '';
-  if (!cmd.includes('|') && !cmd.includes('>')) {
-    const w = words(cmd);
+  const piped = /(^|[^|])\|(?!\|)/.test(cmd); // a single `|`; `||` is a separator, not a pipe
+  if (!piped && !cmd.includes('>')) {
+    const w = words(cmd.replace(/;|&&|\|\|/g, ' '));
     if (w.length && basename(w[0]) === 'cat') {
       for (const arg of w.slice(1)) {
-        if (arg.startsWith('-') || arg === '&&' || arg === ';' || arg === '||') continue;
+        if (arg.startsWith('-')) continue;
         const m = measure(arg);
         if (big(m)) deny(arg, m);
       }

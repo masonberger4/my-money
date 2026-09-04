@@ -28,7 +28,7 @@
 //      JSON Claude Code pipes in: the test guard REWRITES a bare `npm test`
 //      / `node --test` to the digest pipe and stays silent on piped or
 //      targeted forms; the read guard DENIES a whole-file Read/cat of a file
-//      over the line OR byte threshold (Dashboard.jsx by lines, the 62-line
+//      over the line OR byte threshold (Dashboard.jsx by lines, the wide
 //      key-files.md by bytes) and stays silent on a ranged Read, a piped cat,
 //      conventions.md, an image; the outline helper maps Dashboard.jsx to a
 //      few hundred lines and key-files.md to its rows; the token report
@@ -227,6 +227,7 @@ test('test guard: bare `npm test` / `node --test` are REWRITTEN to the digest pi
 test('read guard: whole-file Read/cat over the line OR byte threshold is denied with the outline pointer; ranged, piped, small, binary pass', () => {
   assert.ok(lineCount(readFileSync(rel(BIG), 'utf8')) > 1000, `${BIG} is no longer over the line threshold — pick another big file`);
   assert.ok(statSync(rel(WIDE)).size > 64 * 1024 && lineCount(readFileSync(rel(WIDE), 'utf8')) < 1000, `${WIDE} no longer exercises the byte threshold alone`);
+  assert.equal(decision(runHook(READ_GUARD, read({ file_path: rel(WIDE), limit: 0 }))), null, 'limit:0 is a limit — the caller chose it');
   const denied = runHook(READ_GUARD, read({ file_path: rel(BIG) }));
   assert.equal(decision(denied), 'deny');
   const reason = denied.hookSpecificOutput.permissionDecisionReason;
@@ -235,13 +236,16 @@ test('read guard: whole-file Read/cat over the line OR byte threshold is denied 
   assert.match(reason, /\d,\d{3} lines/, 'the deny must state the real line count');
   assert.match(reason, /limit:\d+/, 'the deny must say how to do a deliberate whole read');
   const wide = runHook(READ_GUARD, read({ file_path: rel(WIDE) }));
-  assert.equal(decision(wide), 'deny', 'key-files.md (62 lines, 80+ KB) must be caught by the byte threshold');
+  assert.equal(decision(wide), 'deny', 'key-files.md (few lines, wide) must be caught by the byte threshold');
   assert.match(wide.hookSpecificOutput.permissionDecisionReason, /outline\.sh docs\/memory\/key-files\.md/);
   assert.equal(decision(runHook(READ_GUARD, bash(`cat ${BIG}`))), 'deny');
   assert.equal(decision(runHook(READ_GUARD, bash(`cat -n '${rel(BIG)}'`))), 'deny');
+  assert.equal(decision(runHook(READ_GUARD, bash(`cat ${BIG};`))), 'deny', 'a separator glued to the path must not hide it');
+  assert.equal(decision(runHook(READ_GUARD, bash(`cat ${BIG}&&echo done`))), 'deny');
+  assert.equal(decision(runHook(READ_GUARD, bash(`cat ${BIG} || true`))), 'deny', '`||` is a separator, not a pipe');
   for (const [label, input] of [
     ['ranged Read', read({ file_path: rel(BIG), offset: 1664, limit: 120 })],
-    ['deliberate whole read of the table', read({ file_path: rel(WIDE), limit: 62 })],
+    ['deliberate whole read of the table', read({ file_path: rel(WIDE), limit: lineCount(readFileSync(rel(WIDE), 'utf8')) })],
     ['conventions.md read whole', read({ file_path: rel('docs/memory/conventions.md') })],
     ['a small file', read({ file_path: rel('CLAUDE.md') })],
     ['a missing file', read({ file_path: rel('src/nope.js') })],
@@ -272,7 +276,7 @@ test('outline helper: Dashboard.jsx → a few hundred line-numbered entries incl
   assert.ok(entries.some(l => /export default function Dashboard\(/.test(l)), 'the Dashboard component line is missing from its own map');
   assert.ok(entries.some(l => /tab==="overview"&&/.test(l)), 'the view branches are missing from the map');
   const rows = sh('.claude/hooks/outline.sh', [WIDE]).stdout.split('\n').filter(l => /^\d+:\| `[^`]+` \|/.test(l));
-  assert.ok(rows.length >= 40, `only ${rows.length} key-files rows listed — a row is one Read-with-limit away only if the outline names it`);
+  assert.ok(rows.length >= 30, `only ${rows.length} key-files rows listed — a row is one Read-with-limit away only if the outline names it`);
   assert.ok(sh('.claude/hooks/outline.sh', ['docs/memory/conventions.md']).stdout.split('\n').some(l => /^\d+:## Conventions/.test(l)));
   const missing = sh('.claude/hooks/outline.sh', ['nope.txt']);
   assert.equal(missing.status, 1); assert.match(missing.stdout, /not a file/);

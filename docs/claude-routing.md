@@ -32,7 +32,8 @@ docs/memory/maintenance-contract.md.
     outline map, a ranged Read, the Explore agent) and the deliberate form
     (`limit:<line count>`). Ranged reads, piped or redirected cats,
     binaries, and every memory doc except key-files.md pass — that one is
-    a 62-line, 84 KB table every rule says to read one ROW of. Wired on
+    a few lines but wide (`wc -lc docs/memory/key-files.md`), a per-file
+    table every rule says to read one ROW of. Wired on
     BOTH the Read matcher and `Bash(cat *)`; settings hooks also fire
     inside subagents, so Explore is held to it too.
   - `outline.sh` (2026-09-04) — not a hook: the line-numbered structure
@@ -140,11 +141,12 @@ same posture.
   the top of `.claude/hooks/pretooluse-read-guard.mjs`; per-machine
   overrides `MM_READ_GUARD_LINES` / `MM_READ_GUARD_BYTES`. Both sit above
   every docs/memory file EXCEPT key-files.md, on purpose: conventions.md
-  (760 lines, 55 KB) is meant to be read whole for money math, while
-  key-files.md is a per-file table read one row at a time (the outline
-  lists its rows; the reason text says `limit:62` for a deliberate whole
-  read, which the memory-auditor's table audit needs). If conventions.md
-  ever crosses 64 KB, split it; don't raise the knob.
+  is meant to be read whole for money math, while key-files.md is a
+  per-file table read one row at a time (the outline lists its rows; the
+  reason text names the deliberate form, `limit:<line count>`, which the
+  memory-auditor's table audit needs). `wc -lc docs/memory/*.md` shows
+  each doc's margin; if conventions.md ever crosses a knob, split it,
+  don't raise the knob.
 - **maxTurns**: a partial return means the backstop fired — first ask
   whether the task was too big for one agent (split it), and only then
   raise the number. The caps are 2–3× the observed need, not tight.
@@ -174,7 +176,7 @@ real session before tuning further:
 | Bare `npm test` | ~20k tokens (5,700 TAP lines) | digest pipe: ~10 lines green, failures verbatim red | yes — rewritten by hook |
 | Whole-file Read of Dashboard.jsx | ~30k (the 2,000-line default cap; ~125k in full) | grep -n / outline.sh (~290 lines, ~4k) then a ranged Read | yes — read guard |
 | Whole-file Read of package-lock.json, dataAdapter.js, CsvImport.jsx | ~20–25k each | `git diff --stat`, `npm ls <pkg>`, grep, ranged Read | yes — read guard |
-| Whole-file Read of docs/memory/key-files.md (62 lines, 84 KB) | ~21k | `.claude/hooks/outline.sh docs/memory/key-files.md` lists the rows; Read the touched file's row with offset+limit:1 | yes — read guard (byte threshold) |
+| Whole-file Read of docs/memory/key-files.md (few lines, wide) | bytes/4 — `wc -c` it | `.claude/hooks/outline.sh docs/memory/key-files.md` lists the rows; Read the touched file's row with offset+limit:1 | yes — read guard (byte threshold) |
 | CI logs of a red `tests + build` job | tail of 5,700 TAP lines, failures possibly above the tail | the job now logs the digest: failures verbatim, ~10 lines green | yes — ci.yml |
 | Bare `cat` of any of the above | ~7.5k (the Bash tool truncates at 30,000 chars) plus a wasted, truncated turn | pipe it (`cat f \| grep`) or `sed -n 'A,Bp'` | yes — read guard on `Bash(cat *)` |
 | Reviewer reading a lockfile diff | thousands of lines | `--stat` + `package.json` diff; exclude the lockfile | prompt (reviewer body) |

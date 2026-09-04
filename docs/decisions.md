@@ -157,8 +157,8 @@ Decided:
 - **Whole-file reads over 1,000 lines OR 64 KB are hook-denied** — a Read
   with no `limit`, or a bare `cat` — with the real size, the substitutes,
   and the deliberate form (`limit:<lines>`) in the reason. The byte
-  threshold exists for key-files.md: 62 lines, 84 KB, a per-file table every
-  rule says to read one ROW of. Every other memory doc passes; a memory doc
+  threshold exists for key-files.md: a few lines but wide (`wc -lc` it), a
+  per-file table every rule says to read one ROW of. Every other memory doc passes; a memory doc
   that crosses a threshold gets split, the knobs do not move. The guard
   fires inside subagents too (settings hooks do), so Explore is held to it.
 - **`.claude/hooks/outline.sh` is the cheap map** the deny points at
