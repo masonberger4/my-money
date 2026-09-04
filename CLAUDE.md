@@ -25,8 +25,11 @@ doc covering your work area BEFORE editing, and maintain it in the same PR
 
 ## Commands
 
-- Tests: `npm test 2>&1 | .claude/hooks/test-digest.sh` — full TAP is 5,700+
-  lines; the digest keeps the verdict and any failures verbatim.
+- Tests: `npm test 2>&1 | .claude/hooks/test-digest.sh` — 5,700+ TAP lines
+  collapse to verdict + failures verbatim; a hook rewrites a bare `npm test`.
+- Map a big file: `.claude/hooks/outline.sh <file>` (line-numbered
+  declarations; key-files.md rows). Whole-file Read/`cat` over 1,000 lines or
+  64 KB is hook-denied — grep or map it, then Read a range.
 - Build: `VITE_SUPABASE_URL=https://placeholder.supabase.co VITE_SUPABASE_ANON_KEY=placeholder npm run build`
 - Smoke (renders all 11 views): `npm install --no-save playwright-core@1.62.1`,
   then `npx vite --config test/smoke/vite.config.js --port 5199 &`, then
@@ -70,9 +73,10 @@ Route work to the cheapest agent that can do it (definitions in
 .claude/agents/; full table + tuning in docs/claude-routing.md):
 
 - Code search, "where is X", inventory sweeps → Explore agent. Never read
-  Dashboard.jsx whole (7,900 lines) — search it.
+  Dashboard.jsx whole (8,000 lines) — grep it or map it (Commands above).
 - Running tests/build/smoke → runner agent (or the digest pipe above). Raw
-  `npm test` output must not enter the main context.
+  `npm test` output must not enter the main context. Agent report caps, turn
+  backstops, and the hooks are pinned by `test/claudeConfigGuards.test.js`.
 - Diff touches src/components/ or src/ui.css → ui-verifier agent (smoke walk
   + 390×844 screenshots) before pushing.
 - Before every push → reviewer agent on the full diff. A diff that settles a

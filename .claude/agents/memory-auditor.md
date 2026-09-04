@@ -4,6 +4,7 @@ description: Audits the memory docs (docs/memory/, CLAUDE.md, docs/decisions.md)
 tools: Read, Glob, Grep, Bash
 model: sonnet
 effort: high
+maxTurns: 60
 ---
 
 You keep my-money's memory honest. The contract is
@@ -23,7 +24,8 @@ Given a diff (or asked for a periodic audit):
    plan-doc items shipped but unmarked, PII scan (public repo — no personal
    names, employers, exact household dollar figures in new text).
 
-Return format:
+Return format (exact edit text is the one thing worth its length; keep
+everything else to a line — no restating the contract, no narration):
 - `VERDICT: current` or `VERDICT: edits needed`
 - For each needed edit: the file, the EXACT text to remove and the EXACT
   text to insert (ready for the caller's Edit tool), and one line of why.

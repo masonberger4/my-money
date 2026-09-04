@@ -136,3 +136,54 @@ Decided:
   not subcategories, but they are the section's contents, and an unindented row
   under an open caret reads as a sibling of the heading.
 
+
+## 2026-09-04 — Token-usage guards on top of the routing setup
+
+Mason: "Generate files to optimize the use of agents for the repository for
+token usage." The mechanics live in docs/claude-routing.md (what was added,
+the routing table with `maxTurns` and report caps, the token-cost ledger, the
+tuning knobs) — not restated here.
+
+Decided:
+
+- **The bare-`npm test` hook now REWRITES instead of denying** (PreToolUse
+  `updatedInput` + allow), and covers a bare `node --test` too: a deny cost a
+  refusal-and-retry round trip every time it fired, for the same outcome. The
+  model is told, via `additionalContext`, that the digest ran.
+- **The guards run on node, not sh+python3.** Node is the one runtime this
+  repo guarantees on every machine; a guard that silently allows on a Windows
+  shell without python3 saves nothing exactly where Mason runs locally. The
+  digest stays awk (sh is present wherever the smoke commands run).
+- **Whole-file reads over 1,000 lines OR 64 KB are hook-denied** — a Read
+  with no `limit`, or a bare `cat` — with the real size, the substitutes,
+  and the deliberate form (`limit:<lines>`) in the reason. The byte
+  threshold exists for key-files.md: a few lines but wide (`wc -lc` it), a
+  per-file table every rule says to read one ROW of. Every other memory doc passes; a memory doc
+  that crosses a threshold gets split, the knobs do not move. The guard
+  fires inside subagents too (settings hooks do), so Explore is held to it.
+- **`.claude/hooks/outline.sh` is the cheap map** the deny points at
+  (declarations for code, headings and table rows for .md). Generated on
+  demand, never checked in: a checked-in map with line numbers would rot on
+  the next edit.
+- **Every agent carries `maxTurns` (a 2–3× backstop) and a report-length
+  cap.** A partial return means "split the task", not "raise the number".
+  Explore's cap exempts call-site/inventory SWEEPS — a dropped call site
+  during a rename is a correctness bug, not a token saving.
+- **`test/claudeConfigGuards.test.js` pins all of it** by piping the same JSON
+  Claude Code pipes: hooks and their settings.json wiring, outline, digest,
+  the token report, the routing-table ↔ frontmatter lockstep, backticked
+  paths in `.claude/**/*.md`, and the always-loaded size caps in lines and
+  bytes. Shell cases skip where `sh` is absent (the helpers are sh scripts).
+- **CI's `npm test` runs through the digest** (`set -o pipefail`), so a red
+  job's log tail is the failures. Job names unchanged.
+- **`.claude/hooks/session-tokens.mjs` is the measurement tool** — usage per
+  model and the largest tool results from a transcript — so tuning is
+  against measured numbers, not the dated estimates in the ledger.
+
+Rejected (reasons in docs/claude-routing.md "Considered and rejected"):
+persistent agent memory for Explore (a second, un-audited memory — the
+phantom-reference shape); lowering `BASH_MAX_OUTPUT_LENGTH`; a build/smoke
+digest (29 and ~3 lines, nothing to save); guarding `head`/`tail`/`sed`;
+embedding the outline in the deny reason; a `git diff` digest; pinning the
+ledger's numbers in a test; capping the GitHub Actions runs. The 2026-08-31
+deferrals (SessionStart npm-ci hook, statusline) stay deferred.

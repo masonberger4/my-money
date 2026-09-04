@@ -20,4 +20,8 @@ Hard invariants:
   artifact they check.
 - `test/claudeMdLockstep.test.js` scans CLAUDE.md + docs/memory/ — memory
   edits and identifier renames go together, same PR.
+- `test/claudeConfigGuards.test.js` pins the `.claude/` hooks (by piping
+  hook JSON at them), the outline helper, the digest, the agent/rule/skill
+  size caps, and the routing table ↔ frontmatter lockstep — a hook, agent,
+  or docs/claude-routing.md table edit and this test move together.
 - Run everything through the digest: `npm test 2>&1 | .claude/hooks/test-digest.sh`.
