@@ -115,7 +115,6 @@ export default function ReceiptSection({ txId, onChanged }) {
   return (
     <>
       <div style={{ borderTop: "1px solid var(--border)", margin: "12px 0" }} />
-      <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 8 }}>Receipt</div>
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
         {(receipts || []).map(r => (
           urls[r.id]
@@ -125,7 +124,7 @@ export default function ReceiptSection({ txId, onChanged }) {
         <button onClick={() => fileRef.current?.click()} disabled={busy || receipts === null}
           style={{ width: 72, height: 72, borderRadius: 8, border: "1px dashed var(--border)", background: "none",
             color: "var(--muted)", fontFamily: "inherit", fontSize: 11, cursor: "pointer", lineHeight: 1.3 }}>
-          {busy ? "Saving…" : <>📷<br />Add</>}
+          {busy ? "Saving…" : "Photo"}
         </button>
       </div>
       {/* NO capture attribute: its mere presence makes iOS open the rear
@@ -135,9 +134,6 @@ export default function ReceiptSection({ txId, onChanged }) {
           NOT listed — see src/receiptImage.js. */}
       <input ref={fileRef} type="file" accept="image/jpeg,image/png,image/webp"
         style={{ display: "none" }} onChange={onPick} />
-      <div style={{ marginTop: 5, fontSize: 10, color: "var(--muted)", textAlign: "center" }}>
-        Photos are kept with the transaction for tax records.
-      </div>
       {err && <div style={{ marginTop: 6, fontSize: 11, color: "var(--danger)" }}>{err}</div>}
 
       {viewing && (
