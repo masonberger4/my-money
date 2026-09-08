@@ -9,7 +9,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { toTxShape, patchTxShape } from '../src/spending.js';
+import { toTxShape, patchTxShape, isSpend } from '../src/spending.js';
+import { markInternalTransfers, INTERNAL_MATCH_WINDOW_DAYS } from '../src/cashFlow.js';
 import { withEffectiveDate } from '../src/dataAdapter.js';
 import { makeAccounts, makeTx } from './helpers/ledger.js';
 
@@ -76,7 +77,7 @@ test('month reads range on effective_date; the bank-date reads deliberately do n
     assert.ok(!/\.(gte|lte|order)\('date'/.test(body), `${name} must not range on the bank date`);
     assert.ok(body.includes('withEffectiveDate('), `${name} folds the effective date into \`date\``);
   }
-  for (const name of ['getFeedCoverageStart', 'getAccountTransactionsInRange']) {
+  for (const name of ['getFeedCoverageStart', 'getAccountTransactionsInRange', 'getActualIncome']) {
     const body = fn(name);
     assert.ok(!body.includes('effective_date') && !body.includes('txDateCol'), `${name} stays a bank-date read`);
   }
@@ -102,4 +103,27 @@ test('the migration installs user_date AND the generated effective_date; bootstr
   const boot = read('../supabase/bootstrap_household.sql');
   assert.ok(boot.includes('transactions_user_date'));
   assert.ok(boot.includes('transactions_effective_date'));
+});
+
+test('accepted trade: the transfer pairing sees the EFFECTIVE date — re-dating a leg out of the window un-pairs it', () => {
+  // Two legs of a real transfer, bank-dated a day apart: they wash.
+  // No transfer WORDING on purpose (the F1 case): the pairing must be the
+  // only reason the out leg is washed, or the test proves nothing.
+  const out = makeTx(A.checking, 'w1', '2026-08-01', 500, 'WITHDRAWAL 88213');
+  const inn = makeTx(A.savings, 'w2', '2026-08-02', -500, 'DEPOSIT 88213');
+  assert.equal(isSpend(out), true, 'unpaired, the out leg is plain spending');
+  const paired = withEffectiveDate([out, inn]);
+  markInternalTransfers(paired);
+  assert.equal(isSpend(paired[0]), false, 'the out leg is washed');
+  // The household moves the out leg well past the window: the pairing
+  // follows the effective date (the row lives where it was put), so both
+  // legs stand alone — documented in the two-dates Convention.
+  const far = `2026-07-${String(31 - INTERNAL_MATCH_WINDOW_DAYS - 1).padStart(2, '0')}`;
+  // Fresh rows: markInternalTransfers stamps `_internal` in place above.
+  const out2 = makeTx(A.checking, 'w1', '2026-08-01', 500, 'WITHDRAWAL 88213', { user_date: far, effective_date: far });
+  const inn2 = makeTx(A.savings, 'w2', '2026-08-02', -500, 'DEPOSIT 88213');
+  const moved = withEffectiveDate([out2, inn2]);
+  assert.equal(moved[0].date, far);
+  markInternalTransfers(moved);
+  assert.equal(isSpend(moved[0]), true, 'the re-dated leg counts as spending on its own');
 });

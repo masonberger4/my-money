@@ -392,8 +392,17 @@
   reads stay on `date` by design: `getFeedCoverageStart` (the CSV/feed overlap
   boundary), `getAccountTransactionsInRange` (reconciliation against a
   statement's own dates), the coverage-gap probes, and every dedup id that
-  hashes the date. A trigger rewriting `date` in place was rejected — it
-  would have moved those boundaries invisibly. Pinned in `test/txDate.test.js`.
+  hashes the date, and `getActualIncome`'s earliest-depository-row coverage
+  probe (a "how far back does the ledger reach" question). A trigger
+  rewriting `date` in place was rejected — it would have moved those
+  boundaries invisibly. Pinned in `test/txDate.test.js`.
+  Accepted trade, deliberate: the internal-transfer pairing window
+  (`INTERNAL_MATCH_WINDOW_DAYS`) and recurring-cadence detection ALSO see the
+  effective date, because they run on the same month rows. Re-dating one leg
+  of a real transfer more than 4 days from its partner un-pairs it (both legs
+  then count) and a re-dated bill shifts its apparent cadence — the row now
+  lives where the household put it, and the sheet's "Posted" line shows the
+  bank date to move it back. Pinned (the crossing case) in `test/txDate.test.js`.
 - `api/` 500 handlers return a GENERIC string + a stable code — never raw
   error bodies (no error leakage; `test/apiErrorSanitize.test.js`).
 - Account labels: `nickname || "name ··mask"`; badge color from `ACCOUNT_COLORS`
