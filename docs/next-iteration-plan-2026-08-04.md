@@ -6,10 +6,13 @@
 > When every item is resolved this doc is DELETED per the maintenance
 > contract (docs/memory/maintenance-contract.md). The memory docs are authoritative wherever the two disagree.
 
-**Where the live work is:** the **Improvement backlog (2026-08-13)** section is
-the current unbuilt list. Items 2/3/4 under Low-hanging fruit and 1/3/4/5 under
-Harder are the older live specs. Everything struck through is a POINTER to a
-shipped thing, not work — git and the named PRs hold the detail.
+**Where the live work is:** the **Improvement backlog (2026-09-04 audit)**
+section is the newest list and the only one with a Mason ruling on it (he ticked
+the bug fixes 2026-09-08 and deferred the rest); the **Improvement backlog
+(2026-08-13)** section above it is still unbuilt and still live. Items 2/3/4
+under Low-hanging fruit and 1/3/4/5 under Harder are the older live specs.
+Everything struck through is a POINTER to a shipped thing, not work — git and
+the named PRs hold the detail.
 
 **THE single forward-looking doc** (the one exception is recorded in the
 Roadmap doc inventory, docs/memory/ship-record.md). Both six-dimension audit backlogs (2026-08-01 and
@@ -45,6 +48,11 @@ keep true. None is blocked on a technical unknown.
 10. **Recurring Zelle deposits counted as income** — rent, or reimbursements
     that inflate income and Ready to Assign? Standing ruling in
     docs/memory/ship-record.md's Pending; surfaced 2026-08-17, unruled.
+11. **The 2026-09-04 audit's eighteen Group-7 asks** — listed together in that
+    backlog's "Needs a Mason ruling before code" paragraph rather than repeated
+    here, since they arrived as one reviewed set and Mason deferred them as one.
+    Two of them (the card-payment regex pair) are gated on re-running the PR #101
+    vocabulary probe before any rule widens.
 
 ## Low-hanging fruit
 
@@ -617,6 +625,312 @@ nothing from Mason.
   "the vendor chunk split still exists in the output" something to verify
   rather than assume. What the original framing got right: CI would have caught
   a hard break, so this was a scope call, not a risk call.
+
+## Improvement backlog (2026-09-04 audit; Mason picked the bug fixes 2026-09-08)
+
+> **Provenance and status.** Mason asked for "creative ways to make improvements
+> to this app. Anything from easier to use UI, better features users would enjoy,
+> or fixing bugs". Thirteen lens agents (per-screen UX, bug hunts over the pure
+> cores / Dashboard state / the data layer, PWA resilience, product delight,
+> first-run states) read the code and returned 112 findings against a
+> re-verification of the 2026-08-13 backlog above; curation merged them to 52
+> ranked items and cut 47. Adversarial verification is **PARTIAL** — a session
+> limit killed 12 of 13 verifier batches. The one batch that ran CONFIRMED all
+> four of its items at high confidence (they are marked VERIFIED below). Every
+> other item carries file:line evidence but was not independently re-checked, so
+> **the builder re-reads the cited code first and drops anything whose premise
+> does not hold.** The audit run is `wf_968f56ab-407`.
+>
+> **Mason reviewed all 52 on an interactive checklist and ruled 2026-09-08: "I
+> kept all the bug fixes. The rest can be addressed at another time."** The
+> ticked 25 are the Building-now list; everything else is DEFERRED, not refuted
+> — it is here so a future audit re-finds it as known work rather than as a new
+> discovery. Only ticked items get built (Mason: "only move forward with
+> implementing the items checked off").
+
+Sizes S/M/L, same convention as the 2026-08-13 backlog. Dollar figures in the
+descriptions are invented illustrations, never household numbers (public repo).
+
+### Building now — ticked 2026-09-08, three PRs
+
+**Wave A — money and date bugs (pure cores first; each lands with a test that
+was red before the fix).**
+
+1. **`detectRecurring` ignores `counted`/`excluded`** — S. A row the household
+   marked excluded, and a linked loan's own ledger postings, still become
+   subscriptions, inflate the "/mo" headline, and can be seeded as Upcoming
+   bills; the Ask tab's copy of the detector already omits them, so two Reflect
+   surfaces disagree. The same function still falls back to a retired taxonomy
+   name. Fix in the pure core so both callers inherit it; fallback becomes
+   `UNCATEGORIZED`. `src/recurring.js:119-129,191-193`.
+2. **`matchExpected` reads the raw bank payee, never the household's rename** —
+   S. Rename a merchant, tap Expect on it, and the bill never auto-matches: it
+   goes overdue and then "missed?" every cycle. Test BOTH descriptors the row
+   carries (the `applyRuleToHistory` pattern). `src/expectedTx.js:58-60,90-91`.
+3. **Trends month bars parse `YYYY-MM-01` through `new Date()`** — S. Date-only
+   ISO parses as UTC midnight, so west of UTC the highlight sits on the wrong
+   bar and tapping one opens the previous month. Derive year/month from the
+   string as `shortDate` does; pin the derivation under a non-UTC `TZ`.
+   `src/components/Dashboard.jsx:6622-6662`.
+4. **QuickAddSheet defaults to the UTC day** — S. An evening cash entry is dated
+   tomorrow (next month on the 31st), lands outside the viewed month and reads
+   as "it didn't save". Add a local-today helper beside `shortDate`; CsvImport's
+   UTC `todayIso` is deliberate and stays. `src/components/Dashboard.jsx:727-728`.
+5. **The assistant's clock is UTC while every screen is local** — S. For the last
+   hours of each month the Ask tab answers about the next month, contradicting
+   the screen. Client passes its local day; the server validates it (strict
+   regex, year floor, within ±2 days of UTC now) and derives the window and the
+   envelope month from it, keeping the determinism contract.
+   `api/_lib/spendingContext.js:149-151,185-195`, `api/assistant.js:108-120`.
+6. **Biggest movers compares this month SO FAR against last month IN FULL** — S.
+   Early in the month every category reads as a fall; the Home tile fixed this
+   with same-day slicing and Trends did not. One shared slicer, and a sub-line
+   that says which comparison is being drawn. `src/spending.js:264-287,332-360`.
+7. **`envelopeBar` renders "—" when a carried-in overspend exceeds this month's
+   assignment** — S. The same glyph an unbudgeted category gets, right after the
+   user assigned money. Treat a non-positive pot with an assignment as "in the
+   hole" and let the callers' existing over-colouring paint it.
+   `src/envelopes.js:114-128`.
+8. **Debt "Total owed over time" folds a 365-day-windowed snapshot fetch** — S.
+   A hand-tracked loan nobody edits drops out of every point after a year while
+   the headline above it still counts the balance — two numbers disagreeing on
+   one screen. Fetch unwindowed and clamp through the existing `clampSeries`.
+   `src/components/Dashboard.jsx:2572-2648`, `src/dataAdapter.js:562-575`.
+9. **Negative utilization on a card in credit** — S. After a refund on a paid-off
+   card the row prints a negative percentage and a negative bar width. A pure
+   `utilization(balance, limit)` returning null / 0 / ratio, and "nothing owed"
+   copy. `src/components/Dashboard.jsx:6217-6241`.
+10. **"vs minimums only" prints "$0 saved · same timeline" when the baseline
+    stalls** — S. When a typed minimum is below the monthly interest, minimums
+    alone never pay the card off and the extra is the only reason a payoff date
+    exists; the tile says the opposite. Render the `baselineStalled` the core
+    already returns. `src/debtPayoff.js:207-218`, `Dashboard.jsx:6367-6376`.
+11. **"vs last month" compares the first covered month against a $0 that means
+    "no data"** — S. The first month after a backfill start reads as a large
+    over-spend in the over-money ink. Treat the base as unknown when the prior
+    month precedes `coverageStart` so the existing null branches render "—".
+    `Dashboard.jsx:3417-3426`, `src/dataAdapter.js:308-337`.
+12. **Home's card-balance tile prints "$0 · Linked account" on any non-current
+    month** — S, and worse after a rollover: `reloadData` closes over a `now`
+    frozen at mount, so the real new month gets the same until a relaunch. Take
+    a fresh date inside the load, and render "—" rather than a fabricated
+    balance when no account resolves. `Dashboard.jsx:2339-2362,3403-3410`.
+
+**Wave B — statement import.**
+
+13. **Single-Amount CSVs get no sign control** — S, **VERIFIED**. The batch guard
+    tests `columns.debit == null` but the header mapper returns `-1` for an
+    absent role, so a `Date,Description,Amount` card export (positive = charge)
+    imports with every sign inverted and no toggle is ever shown; the
+    single-file preview shows the inversion but offers nothing to flip it. A
+    wrong-signed row hashes differently and can never be deduped away, which is
+    what makes this the worst item in the wave. Pure
+    `hasSingleAmountColumn(columns)` (`amount >= 0 && debit < 0 && credit < 0`),
+    probe every file in a batch, and render the same sign select above the
+    single-file preview with a concrete first-row example.
+    `src/components/CsvImport.jsx:468-477,1137-1139`, `src/csvImport.js:140-164`.
+14. **A manual account holding one quick-add row is permanently blocked from
+    statement import** — S, **VERIFIED**. The mixed-source gate counts
+    `'manual'` as a format conflict, so one hand-typed cash purchase disables
+    Import forever, with a message that is false in both of its branches. A pure
+    ALLOWLIST helper: `'manual'` never conflicts (uuid ids dedup against
+    nothing); the legacy `'plaid'` default and unknown sources still do.
+    `src/components/CsvImport.jsx:398-401,631-634,1052-1061`.
+15. **Hand-adjusted PDF columns are discarded when the account is picked
+    afterwards** — S, **VERIFIED**. The layout editor sits above the account
+    picker, so the natural order loses the fix silently, and the auto layout is
+    then saved as that account's template for every later statement. A pure
+    `resolveTemplateForTarget({saved, auto, current, edited})` plus an edited
+    flag reset per file. Keep the effect's original rationale: switching to an
+    account with no saved template must still drop the PREVIOUS account's
+    layout; offer, don't silently apply, when edits and a saved template collide.
+    `src/components/CsvImport.jsx:568-590,674-676`.
+16. **`parseDate` rejects ISO datetimes** — S. An export whose date column
+    carries a time imports zero rows and no control changes the outcome. Accept
+    a date followed by `T` or a space, keep the day (the dedup hash already uses
+    the day, so ids stay stable). M/D/Y stays strict — no D/M/Y guessing.
+    `src/csvImport.js:215-236`.
+17. **Batch failures and skipped rows dead-end** — S. "Import this file on its
+    own" means leaving the modal and re-finding the file; the boundary-error box
+    says "close and retry" with no retry; skipped rows show three names and an
+    ellipsis, so a real purchase with an odd date is indistinguishable from a
+    memo line; and overlap rows are struck through with no label saying the feed
+    already has them. `src/components/CsvImport.jsx:843-891,1260-1289,1641-1686`.
+
+**Wave C — state that does not refresh or save as it looks (plus two ticked
+Group-5 bugs).**
+
+18. **`togglePace` persists the whole `env:pace` map from local state** — S. The
+    other phone's opt-ins vanish on the first tap — the exact class the
+    `rec:ignore` fix closed. Route it through `makeSerializedUpdater` and adopt
+    the merged map. `Dashboard.jsx:4066-4071`, `src/adapters/envelopeIO.js:193-197`.
+19. **`EditName` commits on every blur/Enter even when unchanged** — S. On the
+    account page that stores the derived label, mask and all, as the nickname,
+    which then cannot be cleared by any UI action; on the payee line it stores
+    the bank's own text as a user override. `Dashboard.jsx:481-499,5916,7451-7457`.
+20. **The account page is a frozen snapshot** — S. Refresh, the startup sync's
+    follow-up, a foreground return and the other phone's writes all leave its
+    balance, "as of" and transaction list stale until the page is closed and
+    reopened, so it disagrees with the tile behind it. Derive the account from
+    the id at render and refetch open lists. `Dashboard.jsx:2757-2766,5927-5952`.
+21. **Every account edit refetches the whole 500-row list** — S, and the colour
+    picker writes on every drag step while the feed-gap scan re-runs on each
+    optimistic patch. Key the effects on ids and commit the swatch on close.
+    `Dashboard.jsx:463-478,2796-2800,1827-1834`.
+22. **Recurring and Debt still use the null-sentinel cache** — S. A reload landing
+    during their first fetch caches a pre-sync snapshot (the documented
+    invalidation gotcha); copy the Tax tab's epoch block.
+    `Dashboard.jsx:2518-2530,2566-2583`.
+23. **`selTx` is a snapshot: after teaching, the sheet's Reset link lies** — S. It
+    still offers "back to Uncategorized" and tapping it leaves the sheet and the
+    list showing different categories until reopened. Re-resolve the selected
+    row by id on reload. `Dashboard.jsx:2384,7513-7524`.
+24. **Day-one Plan tab hides its own "start here" hint** — S. The hint is gated on
+    "no envelope rows", which is never true once Uncategorized has spending, so
+    a household on day one sees a collapsed `Ungrouped · 0 categories · $0`
+    heading over a full month of uncategorized spending and no guidance. Gate on
+    the budgetable rows instead, and let a zero-count section render its note.
+    `Dashboard.jsx:3690-3691,3907-3909,5052-5056`.
+25. **The income editor cannot be cancelled on a phone** — S. There is no blur
+    commit and no Cancel, and iOS has no Escape, so the only exits are a write
+    or an empty commit that deletes the month's override. Mirror `AssignEdit`.
+    `Dashboard.jsx:563-580`.
+
+### Deferred by Mason 2026-09-08 — "the rest can be addressed at another time"
+
+Not refuted and not cut: reviewed, understood, and postponed. Each carries its
+evidence so a later session can build it without re-deriving the premise.
+
+**Reliability and data-integrity (the rest of Wave C's original group).**
+Teaching on a flaky connection reports a saved rule as unsaved and leaves the
+taught-rules list stale (`Dashboard.jsx:3037-3059`); `setCategoryRule` deletes
+the old rule before inserting the new one, so a failed insert leaves the
+merchant with NO rule (`src/dataAdapter.js:660-694` — an update-first rewrite
+also changes the recorded delete-then-insert rule in
+docs/memory/conventions.md, same PR); two paged reads have no ORDER BY, so a
+re-import can show stored rows as new (`src/dataAdapter.js:1416-1443,1479-1492`,
+plus a `pagedGuards` extension); `category_rules` is read unpaged on both sides
+of the wire and the assistant's and mileage caps exceed PostgREST's default, so
+past ~1,000 taught rules the classifier silently stops seeing some of them
+(`src/dataAdapter.js:521-524,624-652,717-755`, `api/sync.js:90-110`); the
+expected-bill auto-match updates by id alone, so a stale pass can resurrect a
+bill the other phone just stopped or mint a twin
+(`src/dataAdapter.js:2030-2047,2108-2123`); and a crash after `api/sync.js`
+inserts a first-sight bank's accounts strands that bank's history, because the
+watermark is neither advanced nor reset (`api/sync.js:479-487,571-630`).
+
+**Phone-shell resilience.** A stale chunk after a deploy turns Import or Manage
+Bank Connections into the full-screen error card (`src/main.jsx:20-24`,
+`Dashboard.jsx:31-35,7811-7836`); a resident PWA runs yesterday's bundle with no
+update signal (`public/sw.js:29-47`); an offline launch waits on the OS fetch
+timeout before serving the cached shell (`public/sw.js:92-105` — keep the
+`fresh.ok` line verbatim, the lockstep test matches it, and bump
+`CACHE_VERSION`); a foreground return after hours away never re-pulls the feed
+or re-checks feed health (`Dashboard.jsx:1984,2452-2479`, **VERIFIED**, and the
+hour-gated case must not paint the sync-failure banner); the load-failure banner
+blames a local cache the app has not had since Dexie was removed, and a failed
+cash-flow read renders as "not enough measured income" rather than an error
+(`Dashboard.jsx:2407-2411,2488-2490,4224,4446-4451`); the sign-in bounce says
+nothing about why (`src/App.jsx:104-113`, `src/components/Login.jsx:14-21`);
+sub-16px inputs trigger Safari's focus zoom on roughly fourteen inputs (one
+`@media (pointer: coarse)` rule in `src/ui.css`, then re-screenshot the filter,
+add-debt and mileage rows, which will reflow); and every pre-Dashboard screen
+overflows by the safe-area insets.
+
+**Teaching and Plan ergonomics.** "Show all" when the Review filter empties the
+list; a Recent row in the category picker; the taught-rules screen's copy still
+promising "the app's own guess"; overspent/needs chips on collapsed Plan group
+headings; a warning before Fund-targets writes past Ready to Assign; a tappable
+"needs $X" that funds one envelope; MoveSheet's All chip, per-destination
+balances and overspend-first ordering; Home's bills line split into overdue and
+upcoming with names and a tap; a tappable Home donut; the Trends cash-flow
+card's pre-unification wording; debt due-date roll-forward, the missing-APR
+notice and a route from a loan's account page to its terms; the two screens
+claiming the Checking/Savings split drives spending totals (it drives labels —
+the Bank/Credit/Loan choice is what moves the three numbers); the hidden-accounts
+cue explaining that a new account must be opened, type-checked and unhidden;
+Sign out on the first-run screen; the account-chip search that reports "no
+matches" above a Load-more button; and the tax tab's hand-typed mileage
+footnote naming the wrong year.
+
+**Features (Group 6).** Recurring rows tapping through to their charges; recent
+searches and search-this-merchant; Ask-about-this entry points and data-derived
+prompt chips; the assistant's blind spots (properties, expected bills) and its
+90-day subscription window; a day heatmap over the Spending list; progress
+deltas on the Debt and Net-worth cards; a moved-to-savings line off the existing
+pairing; receipt glyphs and a With-receipt filter; per-account CSV column memory;
+quick-add merchant memory; PDF near-miss reporting and per-file batch totals;
+correcting a taught rule from the taught-rules screen; the trim-the-key preview
+naming the merchants a shorter key would swallow; subscription price-hike
+detection (a large hike currently makes the sub vanish for months); naming the
+broken bank on its tile; and category colour dots in place of the retired
+taxonomy's emoji on Home rows.
+
+**Needs a Mason ruling before code (Group 7).** The two card-payment regex
+findings — a loan payment worded like a card payment being vetoed out of
+spending, and a transfer-worded card credit netting as a refund when its payer
+leg is hidden — both gated on re-running the PR #101 vocabulary probe first, per
+the standing ruling in docs/memory/ship-record.md. Whether "Always" should
+release the taught row's hand pin. What a by-date target does after its date
+passes. The monthly-target wording versus a real refill kind. Whether the
+Income-vs-Spending verdict drops the half-finished month. The cold-start
+count-error screen (a decision the refuted list already reserves for Mason).
+Manual bank balances (today ignored by rule). Per-month scoping for the
+reconciliation panel. The month-end bill drift (needs an anchor-day column).
+The two-phone envelope write race (record as accepted, or add a database
+function). An undo-this-import delete path against the soft-hide ruling. Peeling
+one layer on the iOS back-swipe. Pull-to-refresh. The tax year default during
+filing season. Home's cash and Ready-to-Assign tiles. A since-you-last-looked
+changelog and a needs-a-look flag pair for two-phone coordination.
+
+**First-run and empty states.** Uncovered months rendering confident $0s across
+Home, Categories and Trends; the SimpleFIN success screen repeating the retired
+subtype rule; the Plan income prompt talking about "the month in progress" on a
+month that ended before coverage; and a second smoke-walk pass over the empty,
+all-hidden and post-wipe states, whose mock knobs already exist and are consumed
+by nothing.
+
+### Cut by the curator before Mason saw the list
+
+Kept so a future audit recognizes them rather than re-finding them as new:
+Reflect's month-scoped breakdown against a hub with no month control; a cash-on-hand
+tile and balance staleness; Home's budget silence; the Plan heading's dead-tap
+available; MoveSheet destination signals; the two S-sized cuts of Rapid teach
+mode (queue rows opening straight into the picker, and a Next-merchant note);
+the trim-the-key merchant preview; correcting a rule from RulesSheet; the
+back-swipe peel; debt due dates and dead-end debt account pages; per-bank feed
+failure naming; imported checking accounts showing $0.00 with no way to type a
+balance; PDF near-misses; per-account CSV maps; batch reopen and skipped-row
+disclosure; quick-add memory; undo-this-import; the sw.js offline timeout;
+safe-area insets; keyboard inset for docked inputs; pull-to-refresh; the Login
+reason; the assistant's subscription window; the mileage footnote; and the
+Group-6 features. Several were later ticked or deferred above; where an item
+appears in both places, the Mason ruling governs.
+
+### Corrections to the 2026-08-13 backlog above (re-verified 2026-09-04)
+
+All 41 unbuilt items in this doc plus the deferred list in
+docs/memory/ship-record.md were re-checked against main. **Nothing had silently
+shipped.** Six premises moved and are corrected here rather than in place, so
+the items keep their original text and its reasoning:
+
+- **Cover overspending** — since PR #125 every leaf row sits behind a collapsed
+  group heading, and the heading itself renders the rollup red with only a
+  drill-in. The item should also decide what a red HEADING offers, since that is
+  the red the user sees at rest.
+- **Scheduled health workflow** — its line about being "the cheapest place to
+  start" the permissions habit is moot: `claude.yml` and `dependabot-review.yml`
+  both declare `permissions:`, and `ci.yml` is now the only workflow without one.
+- **Persist the Debt payoff plan** — the localStorage device-pref precedent is
+  now three keys, not two (`mm:planOpen` joined it in #125).
+- **The render-gate gap** — half shipped: PR #113 added the reconciliation
+  panel's hook and walk step. Still open: the account tile, its back button, and
+  the Data coverage card.
+- **Uncleared/pending banner** — `transactions.pending` exists end to end but the
+  pull is posted-only by design, so the item is moot unless
+  `SIMPLEFIN_INCLUDE_PENDING` is turned on; that is the decision, not the banner.
+- **Memo field** — SimpleFIN's memo is normalized but never upserted, so a memo
+  means either a new user-typed column or persisting the feed's.
 
 ## Refuted / decided — do NOT re-propose
 

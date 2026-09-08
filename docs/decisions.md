@@ -187,3 +187,45 @@ digest (29 and ~3 lines, nothing to save); guarding `head`/`tail`/`sed`;
 embedding the outline in the deny reason; a `git diff` digest; pinning the
 ledger's numbers in a test; capping the GitHub Actions runs. The 2026-08-31
 deferrals (SessionStart npm-ci hook, statusline) stay deferred.
+
+## 2026-09-08 — The 2026-09-04 improvement audit, and Mason's pick
+
+Mason asked for "creative ways to make improvements to this app … easier to use
+UI, better features users would enjoy, or fixing bugs". **The findings live in
+docs/next-iteration-plan-2026-08-04.md's "Improvement backlog (2026-09-04
+audit)" section** — 52 curated items, the deferred list, the curator's cut list,
+and six corrections to the 2026-08-13 backlog. Not restated here; that doc is
+the rulebook, this is the journal.
+
+What was DECIDED, as opposed to found:
+
+- **Everything is documented; only ticked items get built** (Mason: "document
+  everything that was mentioned. only move forward with implementing the items
+  checked off"). The unticked ones are recorded as DEFERRED — "the rest can be
+  addressed at another time" — never as refuted, so a later session re-finds
+  them as known work with their evidence intact. This is the first time the
+  refuted-list discipline has been used for *postponed* items rather than
+  killed ones, and the distinction is deliberate: a refuted item carries a
+  reason it must not come back, a deferred one carries its file references.
+- **Mason kept the bug fixes and nothing else** (2026-09-08): 25 items in three
+  waves — money/date arithmetic, statement import, and state that does not
+  refresh as it looks. Features, phone-shell resilience, teaching ergonomics and
+  every preference-shaped question wait.
+- **The review surface was an interactive checklist**, not a markdown list: a
+  published artifact with a real checkbox per item, saving each tick to its own
+  document so the build step reads the picks back rather than transcribing them.
+  Chosen after a plain checkbox list proved untickable in the plan view. The
+  page is disposable scaffolding — this journal entry and the backlog section
+  are the durable record, and neither depends on the page surviving.
+- **Verification was PARTIAL and is labelled as such.** A session limit killed
+  12 of the 13 adversarial verifier batches; the one that ran confirmed all four
+  of its items at high confidence. The backlog section marks those four VERIFIED
+  and says plainly that every other item is finder-reported, so the builder
+  re-reads the cited code and drops anything whose premise does not hold. An
+  audit that hides its own coverage gap is the confidently-wrong shape this
+  codebase refuses; saying "12 of 13 batches did not run" costs one sentence.
+- **The two card-payment regex findings do not move without the probe.** Both
+  would widen or narrow the vocabulary that keeps card payments out of spending,
+  and the standing ruling (docs/memory/ship-record.md, 2026-08-17) is that the
+  regex is calibrated against the household's real descriptors — re-run the
+  PR #101 SQL before touching it, never reason from invented samples.
