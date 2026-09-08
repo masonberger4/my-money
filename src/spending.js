@@ -274,16 +274,14 @@ export function displayCategory(t) {
 // the isSpend lineage is unchanged — this only narrows WHICH rows are summed.
 // A month with fewer days than `day` simply contributes all of its rows, which
 // is the honest reading of "the whole month so far" on the 31st.
-export function spendingToDate(txs, day) {
+export function rowsToDate(txs, day) {
   const cutoff = Number(day);
-  if (!Number.isFinite(cutoff)) return sumSpending(txs);
-  let total = 0;
-  for (const t of txs) {
-    if (!isSpend(t)) continue;
-    if (dayOfMonth(t) > cutoff) continue;
-    total += t.amount;
-  }
-  return total;
+  if (!Number.isFinite(cutoff)) return txs || [];
+  return (txs || []).filter(t => dayOfMonth(t) <= cutoff);
+}
+
+export function spendingToDate(txs, day) {
+  return sumSpending(rowsToDate(txs, day));
 }
 
 // The day-of-month off a row's stored date, read from the STRING rather than
@@ -342,9 +340,18 @@ export function spendingGroups(txs) {
 // delta under `minDelta` ($1) — sub-dollar drift is noise at monthly grain and
 // would let a $0.40 wobble occupy a slot. Ties in |delta| break alphabetically
 // so the same data always renders the same list.
-export function biggestMovers(currRows, prevRows, { limit = 5, minDelta = 1 } = {}) {
+// `toDate` (day-of-month, optional) slices the COMPARISON month at the same
+// day, which is the whole fix for the month in progress: unsliced, a month
+// three days old is compared against a full one and every category reads as a
+// fall — the flavour of confidently-wrong the Overview tile already retired
+// with spendingToDate. Only prevRows are sliced; the viewed month keeps every
+// row the caller gave it, since "so far" is what those rows already are. Past
+// months pass no toDate and are byte-identical to before (pinned).
+export function biggestMovers(currRows, prevRows, { limit = 5, minDelta = 1, toDate = null } = {}) {
   const curr = new Map(spendingGroups(currRows).map(g => [g.label, g.amount]));
-  const prev = new Map(spendingGroups(prevRows).map(g => [g.label, g.amount]));
+  const prev = new Map(
+    spendingGroups(toDate == null ? prevRows : rowsToDate(prevRows, toDate)).map(g => [g.label, g.amount])
+  );
   const movers = [];
   for (const label of new Set([...curr.keys(), ...prev.keys()])) {
     const c = curr.get(label) || 0;

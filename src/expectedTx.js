@@ -55,8 +55,32 @@ function daysInMonth(y, m) {
   return new Date(Date.UTC(y, m, 0)).getUTCDate();
 }
 
-function txDescriptor(t) {
-  return t.merchant_name || t.description || '';
+// BOTH strings a row carries, in the order the adapter fills them: the bank's
+// payee (`merchant_name`) and the household's rename (dataAdapter passes
+// `user_description || description` as `description`). Reading only the first
+// non-empty one made a RENAMED merchant unmatchable — rename a gym, tap
+// Expect, and the bill goes overdue and then "missed?" every cycle while the
+// charge sits in the ledger. Same discipline as applyRuleToHistory, which
+// tests a rule against both descriptors for the same reason.
+function txDescriptors(t) {
+  const out = [];
+  for (const v of [t.merchant_name, t.description]) {
+    const s = typeof v === 'string' ? v.trim() : '';
+    if (s && !out.includes(s)) out.push(s);
+  }
+  return out;
+}
+
+// A descriptor agrees when EITHER string clears the similarity floor or
+// collapses to the same merchant key. Widening from one string to two cannot
+// make an unrelated merchant match: each string still faces the same two
+// tests, and the amount, account and date-window gates are untouched.
+function descriptorAgrees(expDescription, expKey, t) {
+  for (const desc of txDescriptors(t)) {
+    if (descSimilarity(expDescription, desc) >= 0.4) return true;
+    if (merchantKey(desc) === expKey) return true;
+  }
+  return false;
 }
 
 function expWindowDays(exp, override) {
@@ -87,8 +111,7 @@ export function matchExpected(pendingRows, txRows, { amountTolPct = EXPECTED_AMO
       if (Math.abs(t.amount - exp.amount) > amountTolPct * exp.amount) continue;
       const dist = Math.abs(dayNumber(t.transaction_date) - dueDay);
       if (dist > win) continue;
-      const desc = txDescriptor(t);
-      if (descSimilarity(exp.description, desc) < 0.4 && merchantKey(desc) !== expKey) continue;
+      if (!descriptorAgrees(exp.description, expKey, t)) continue;
       candidates.push({ exp, tx: t, dist });
     }
   }

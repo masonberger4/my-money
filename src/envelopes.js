@@ -116,16 +116,31 @@ export function envelopeBar({ assigned = 0, rolledOver = 0, spent = 0 } = {}) {
   const pot = num(assigned) + num(rolledOver);
   const s = num(spent);
   const ratio = pot > 0 ? s / pot : 0;
+  // THREE states, not two. `pot <= 0` used to collapse into the "no envelope"
+  // branch, so a category carrying a bigger overspend than this month's
+  // assignment rendered the em dash and an empty bar — the glyph an UNBUDGETED
+  // category gets — right after the user assigned money to it.
+  //
+  // STRICTLY `pot < 0`. A pot of exactly zero stays "no envelope" however much
+  // was spent against it, which two older tests pin deliberately: an
+  // unbudgeted category's spending renders read-only, and painting it as an
+  // overspend would report the classifier's ignorance as a budgeting failure —
+  // the same reasoning that keeps the Ungrouped rollup to budgetable rows.
+  // Only a negative pot is a real hole: money was assigned, and the carry ate
+  // more than it.
+  const inTheHole = pot < 0;
   // Clamped BELOW as well as above: `spent` folds isSpend, so a refund can take
   // an envelope's spent negative, and a negative width is invalid CSS — the
   // browser drops the declaration and .bar-fill falls back to a FULL bar on the
   // emptiest envelope there is.
-  const width = pot > 0 ? Math.max(0, Math.min(ratio, 1)) * 100 : 0;
+  const width = inTheHole ? 100 : pot > 0 ? Math.max(0, Math.min(ratio, 1)) * 100 : 0;
   // Label clamped, bar already is: $129 spent against a $1 pot is honestly
   // 12900%, but five digits overflow the 38px span and read as a glitch — the
-  // real amounts sit in the assigned/spent text beside it.
-  const label = pot > 0 ? (ratio > 9.99 ? '>999%' : `${Math.round(ratio * 100)}%`) : '—';
-  return { pot, ratio, width, label };
+  // real amounts sit in the assigned/spent text beside it. 'over' rather than a
+  // percentage in the hole: there is no pot to be a percentage OF, and the
+  // callers' existing `over` colouring already paints this bar red.
+  const label = inTheHole ? 'over' : pot > 0 ? (ratio > 9.99 ? '>999%' : `${Math.round(ratio * 100)}%`) : '—';
+  return { pot, ratio, width, label, inTheHole };
 }
 
 // Pace warning (display-only, opt-in per envelope) — is a fungible envelope

@@ -52,3 +52,25 @@ for (const file of routes) {
     );
   });
 }
+
+// --- 2026-09-04 audit: the assistant runs on the CALLER's day ---------------
+// UTC rolled the month over hours before the phones did, so "what did we spend
+// this month?" was answered about a month with no rows. The client now sends
+// its local day and the route validates it — strictly, because the value
+// shapes queries.
+test('resolveToday accepts a valid nearby day and refuses everything else', async () => {
+  const { resolveToday } = await import('../api/assistant.js');
+  const now = Date.parse('2026-10-01T04:00:00Z'); // 9pm Sep 30 in US Pacific
+
+  assert.equal(resolveToday('2026-09-30', now), '2026-09-30', 'the phone is still in September');
+  assert.equal(resolveToday('2026-10-01', now), '2026-10-01');
+  assert.equal(resolveToday('2026-10-02', now), '2026-10-02', 'a day ahead is a real timezone');
+
+  const utc = '2026-10-01';
+  assert.equal(resolveToday('2026-06-01', now), utc, 'an arbitrary past date is refused');
+  assert.equal(resolveToday('2027-01-01', now), utc, 'an arbitrary future date is refused');
+  assert.equal(resolveToday(undefined, now), utc, 'no value falls back to UTC');
+  assert.equal(resolveToday('not-a-date', now), utc);
+  assert.equal(resolveToday('2026-13-45', now), utc, 'shaped but impossible');
+  assert.equal(resolveToday(20260930, now), utc, 'a non-string is refused');
+});

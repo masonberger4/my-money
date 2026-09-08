@@ -30,6 +30,19 @@ const MAX_TURNS = 30;
 const MAX_MSG_CHARS = 8000;
 const MAX_TOTAL_CHARS = 60000;
 
+// A client-supplied 'YYYY-MM-DD', accepted only when it is shaped right and
+// sits within a day of the server's own UTC day; anything else falls back to
+// UTC, which is what this route always used. Never let the request body shape
+// a query without bounding it.
+export function resolveToday(value, nowMs = Date.now()) {
+  const utc = new Date(nowMs).toISOString().slice(0, 10);
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return utc;
+  const t = Date.parse(`${value}T00:00:00Z`);
+  if (!Number.isFinite(t)) return utc;
+  if (Math.abs(t - Date.parse(`${utc}T00:00:00Z`)) > 86400000) return utc;
+  return value;
+}
+
 // Per-household request throttle. In-memory and therefore BEST-EFFORT ONLY:
 // serverless instances are ephemeral and don't share memory, so a cold start
 // resets the window and concurrent instances each allow their own quota.
@@ -72,7 +85,7 @@ export default async function handler(req, res) {
     });
   }
 
-  const { messages, model: reqModel, effort: reqEffort } = req.body || {};
+  const { messages, model: reqModel, effort: reqEffort, today: reqToday } = req.body || {};
   if (!Array.isArray(messages) || messages.length === 0) {
     return res.status(400).json({ error: 'messages array required' });
   }
@@ -105,8 +118,18 @@ export default async function handler(req, res) {
   }
 
   try {
-    const context = await buildSpendingContext(user.householdId);
-    const today = new Date().toISOString().slice(0, 10);
+    // THE CLIENT'S CALENDAR DAY, validated — not the server's UTC one. Every
+    // screen renders in the phone's local timezone, so for the last hours of
+    // each month a US household saw September everywhere while the assistant
+    // was told it was October: it answered "what did we spend this month?"
+    // about a month with no rows, from a budget section whose envelopes were
+    // all $0. Validation is strict because this value shapes queries: date-only
+    // shape, and within a day of UTC now on either side (the widest real
+    // offset is 14h, so a day covers every timezone while refusing an
+    // arbitrary date). Date-only keeps the determinism contract — same DB
+    // state plus the same client day still yields the same bytes.
+    const today = resolveToday(reqToday);
+    const context = await buildSpendingContext(user.householdId, { today });
 
     const anthropic = new Anthropic();
 

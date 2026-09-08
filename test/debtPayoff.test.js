@@ -20,7 +20,7 @@ import {
   simulatePayoff,
   payoffWhatIf,
   addMonths,
-  debtFreeMonth, payoffProgress } from '../src/debtPayoff.js';
+  debtFreeMonth, payoffProgress, utilization } from '../src/debtPayoff.js';
 
 const debt = (over = {}) => ({
   id: over.id ?? 'd1',
@@ -299,4 +299,19 @@ test('REGRESSION: the payoff bar never rounds UP to "100% paid off" while money 
     /a\.current_balance>0\?Math\.min\(99,Math\.round\(pct\)\):Math\.round\(pct\)/,
     'the bar caps at 99 while anything is still owed, reserving 100 for a zero balance'
   );
+});
+
+// --- 2026-09-04 audit: utilization must survive a card in credit ------------
+// `Math.min(bal/limit, 1)` had no lower clamp, so a card paid off and then
+// refunded (a stored NEGATIVE balance) printed "−3% of limit" in the good-money
+// ink under an in-credit balance, and set a negative CSS bar width — which the
+// browser drops, falling back to a FULL bar on the emptiest card there is (the
+// same hazard envelopeBar documents).
+test('utilization: null without a limit, 0 in credit, ratio in between, clamped at 1', () => {
+  assert.equal(utilization(500, 0), null, 'no limit typed yet');
+  assert.equal(utilization(500, null), null);
+  assert.equal(utilization(-75, 2000), 0, 'a card in credit owes nothing');
+  assert.equal(utilization(0, 2000), 0);
+  assert.equal(utilization(500, 2000), 0.25);
+  assert.equal(utilization(3000, 2000), 1, 'over the limit still fills the bar exactly once');
 });

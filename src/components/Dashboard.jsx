@@ -1,12 +1,13 @@
 import { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from "react";
 import { getOverview, getSpending, getBiggestMovers, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES, ACCOUNT_SUBTYPES, setCategoryRule, applyCategoryRuleToHistory, listCategoryRules, countCategoryRuleMatches, deleteCategoryRule, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, getActualIncome, resolveBudgetIncome, invalidateEnvelopeSpending, isEnvelopeSchemaMissing, targetNeed, readyToAssign, envelopePace, setEnvPace as persistEnvPace, updateRecIgnore, getStartupSettings, monthKey, getEntities, createEntity, updateEntity, getTaxYearTransactions, getMileage, addMileage, deleteMileage, getReceiptTxIds, getDebts, getBalanceSnapshots, getNetWorthSeries, addManualTransaction, createManualAccount, updateManualBalance, getDataCoverage, getFeedCoverageGaps, FEED_GAP_SCAN_CAP, getReconciliation, getRestoreRecord, signOut, autoFillMonth, setTargetOverride, effectiveTarget, getExpectedTransactions, addExpected, dismissExpected, matchExpectedManually, getSavedChats, saveChatToApp, deleteSavedChat, addRegistryEntry, updateRegistryParent, removeRegistryEntry, updateCategoryColor, updateCategoryAlias } from "../dataAdapter.js";
 import { FLOW_LABELS } from "../reconciliation.js";
+import { clampSeries } from "../netWorth.js";
 // Pure cores imported directly (never Supabase — the mock-harness alias rule
 // only covers dataAdapter/sync/db/apiClient; pure modules are safe).
 import { planAutoFill, envelopeBar } from "../envelopes.js";
 import { buildSearchFilters, searchIsActive } from "../searchFilters.js";
 import { expectedByCategory, expectedStatus, isMissedExpected, seedFromRecurring, projectFutureCycles } from "../expectedTx.js";
-import { payoffWhatIf, debtFreeMonth, isMortgage, amortizationSchedule, addMonths, MAX_MONTHS, payoffProgress } from "../debtPayoff.js";
+import { payoffWhatIf, debtFreeMonth, isMortgage, amortizationSchedule, addMonths, MAX_MONTHS, payoffProgress, utilization } from "../debtPayoff.js";
 import { SCHEDULE_E_LINES, RENTS_KEY, DEFAULT_SCHEDULE_E_MAP, scheduleEReport, entityMonthly, entityLedger, personalDeductionReport, DEDUCTION_BUCKETS, DEFAULT_DEDUCTION_MAP, mileageDeduction, scheduleECsv } from "../taxReport.js";
 import { merchantKey, matchLearnedRule, isKeyPrefix } from "../txClassify.js";
 import { trimChatMsgs, buildSavedChat } from "../savedChats.js";
@@ -156,6 +157,34 @@ function useSurfaces(resolved){
     setSurf(prev=>(prev.card===next.card&&prev.bg===next.bg&&prev.track===next.track)?prev:next);
   },[resolved]);
   return surf;
+}
+
+// A period's start ('YYYY-MM-DD') as { y, m } read from the STRING. `new
+// Date('2026-08-01').getMonth()` is UTC midnight rendered locally, so in any
+// western timezone it is July: the Trends bars highlighted the wrong month and
+// every tap jumped one month early. Same reasoning as spending.js's dayOfMonth
+// and shortDate below — never parse a date-only string through Date().
+function periodYM(start) {
+  const s = String(start || '');
+  return { y: Number(s.slice(0, 4)), m: Number(s.slice(5, 7)) };
+}
+
+// TODAY on the WALL CLOCK, never toISOString(): that is UTC, so from ~5pm
+// Pacific onward it is already tomorrow — a quick-added cash entry landed on
+// tomorrow's date (next MONTH on the 31st), fell outside the viewed month, and
+// read as "it didn't save". CsvImport keeps its own UTC `todayIso`
+// deliberately, for feed-boundary math; this is the human-facing one.
+function localTodayIso() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+// "8th", "21st" — the movers card says WHICH day the comparison month was cut
+// at, so a sliced comparison is never mistaken for a whole-month one.
+function ordinalSuffix(n) {
+  const d = Number(n);
+  if (d % 100 >= 11 && d % 100 <= 13) return "th";
+  return { 1: "st", 2: "nd", 3: "rd" }[d % 10] || "th";
 }
 
 function monthLabel(y, m) { return new Date(y,m-1,1).toLocaleString("default",{month:"long",year:"numeric"}); }
@@ -724,7 +753,7 @@ function QuickAddSheet({accounts,manualAccounts,allCats,getName,getColor,acctLab
   // Commit-on-blur: <input type=date> emits complete garbage years while typing
   // ("0002-..") — see the date Gotcha. `date` is the committed value; `dateRaw`
   // tracks keystrokes and is validated (year floor) only on blur.
-  const today=new Date().toISOString().slice(0,10);
+  const today=localTodayIso();
   const [date,setDate]=useState(today);
   const [dateRaw,setDateRaw]=useState(today);
   const [description,setDescription]=useState("");
@@ -2506,7 +2535,7 @@ export default function Dashboard({ refreshTick = 0 }) {
       .then(([cf,mv])=>{
         if(seq!==trendsSeq.current)return;
         if(cf)setCashFlow(cf);
-        if(mv!==undefined)setMovers({y:year,m:month,list:mv.movers||[]});
+        if(mv!==undefined)setMovers({y:year,m:month,list:mv.movers||[],toDate:mv.toDate??null});
       })
       .catch(err=>{if(seq===trendsSeq.current)console.error(err);})
       .finally(()=>{if(seq===trendsSeq.current)setTrendsLoading(false);});
@@ -2569,8 +2598,15 @@ export default function Dashboard({ refreshTick = 0 }) {
     getDebts()
       .then(async d=>{
         try{
-          const since=new Date(Date.now()-365*86400000).toISOString().slice(0,10);
-          setDebtSnaps(await getBalanceSnapshots(d.debts.map(a=>a.id),since));
+          // FULL history, clamped after the fold — never a windowed FETCH.
+          // Snapshots are written on balance CHANGE only, so an account that
+          // hasn't moved inside the window has zero rows in it and a windowed
+          // fetch drops its whole balance from every point: a hand-tracked loan
+          // typed once vanishes from the line a year later while the headline
+          // above still counts it, and the line reads as a paydown that never
+          // happened. getNetWorthSeries already documents and avoids exactly
+          // this; the Debt tab was the copy that didn't.
+          setDebtSnaps(await getBalanceSnapshots(d.debts.map(a=>a.id),null));
         }catch(err){console.error("balance snapshots load failed",err);setDebtSnaps([]);}
         try{
           const since=new Date(Date.now()-365*86400000).toISOString().slice(0,10);
@@ -2645,7 +2681,7 @@ export default function Dashboard({ refreshTick = 0 }) {
       catch(err){console.error("net worth refresh failed",err);}
       try{
         const ids=(debtData?.debts||[]).map(d=>d.id);
-        if(ids.length)setDebtSnaps(await getBalanceSnapshots(ids,since));
+        if(ids.length)setDebtSnaps(await getBalanceSnapshots(ids,null)); // full history (see the load path)
       }catch(err){console.error("balance snapshots refresh failed",err);}
     }).catch(err=>{
       console.error("manual balance save failed",err);
@@ -3407,7 +3443,15 @@ export default function Dashboard({ refreshTick = 0 }) {
   const creditAccts=(overview?.accounts||[]).filter(a=>a.type==="credit");
   const tileAcct=creditAccts.find(a=>a.id===cardTileId)||creditAccts[0]||overview?.accounts?.[0];
   const tileIdx=Math.max(0,creditAccts.indexOf(tileAcct));
-  const balance=displayBalance(tileAcct?.balance?.current,tileAcct?.type);
+  // NULL when no account resolves, so the tile's own `?? "—"` finally fires.
+  // `overview` is fetched for the CURRENT month only, so paging back one month
+  // left tileAcct undefined and displayBalance(undefined) rendered a confident
+  // "$0 · Linked account" — a today-fact, fabricated, about a month it does not
+  // describe. Same shape on a first run where every account is still hidden.
+  // The label follows the account's own type, so a household with no card does
+  // not read a bank balance under the word "Card".
+  const balance=tileAcct?displayBalance(tileAcct?.balance?.current,tileAcct?.type):null;
+  const tileLabel=tileAcct&&tileAcct.type!=="credit"?"Bank balance":"Card balance";
   const cycleCard=(dir)=>{
     if(creditAccts.length<2)return;
     const next=creditAccts[(tileIdx+dir+creditAccts.length)%creditAccts.length];
@@ -3422,7 +3466,21 @@ export default function Dashboard({ refreshTick = 0 }) {
   // already complete, so it keeps the full-month comparison.
   // Degrades to the old behaviour if the adapter predates the additive field.
   const lastToDate=overview?.last_month?.spending_to_date?.amount;
-  const cmpBase=isCurrent&&lastToDate!=null?lastToDate:lastSpent;
+  // A prior month the LEDGER DOES NOT REACH is not a $0 month. Before this,
+  // the first covered month compared its real spending against that 0 and the
+  // tile read a large "↑ more" in the over-money ink — the household had not
+  // spent more, last month simply is not in the ledger. Same coverage
+  // discipline as resolveBudgetIncome: a month counts as covered only when the
+  // earliest visible depository row lands on or before its 1st, so a coverage
+  // start MID-month (a partial total, equally misleading) also reads unknown.
+  // coverageStart is a household-wide fact, not a per-month one, so it is read
+  // untagged. Unknown coverage keeps today's behaviour rather than blanking a
+  // number that may well be right — the same fallback instinct.
+  const prevY=month===1?year-1:year,prevM=month===1?12:month-1;
+  const prevFirst=`${prevY}-${String(prevM).padStart(2,"0")}-01`;
+  const covStart=actualInc?.coverageStart??null;
+  const prevCovered=covStart==null||covStart<=prevFirst;
+  const cmpBase=!prevCovered?null:(isCurrent&&lastToDate!=null?lastToDate:lastSpent);
   const delta=cmpBase!=null?totalSpent-cmpBase:null;
   // TOMBSTONE — `tileAvail` lived here until 2026-08-19. It put the card's
   // available CREDIT on the Overview tile's sub line, which is why that tile
@@ -4295,7 +4353,7 @@ export default function Dashboard({ refreshTick = 0 }) {
             // last month" next to "+$89 ↑ more so far" reads as a $400
             // contradiction (review catch). Both now quote cmpBase, and the
             // wording says which basis it is.
-            {label:"Total spent",val:loading?null:fmt(totalSpent),sub:isCurrent&&cmpBase!=null?(lastToDate!=null?`vs ${fmt(cmpBase)} by this day`:`vs ${fmt(cmpBase)} last month`):monthLabel(year,month)},
+            {label:"Total spent",val:loading?null:fmt(totalSpent),sub:isCurrent&&cmpBase!=null?(lastToDate!=null?`vs ${fmt(cmpBase)} by this day`:`vs ${fmt(cmpBase)} last month`):(!prevCovered&&isCurrent?"no history to compare with yet":monthLabel(year,month))},
             // Whole dollars like its neighbours: a negative card balance with
             // cents is too wide for a third of a 390px screen and wrapped the
             // minus sign onto its own line.
@@ -4313,8 +4371,8 @@ export default function Dashboard({ refreshTick = 0 }) {
             // lives on the account sheet. The name reads through the shared
             // acctLabel, so the tile calls the card whatever the Accounts tab
             // calls it — which needs `nickname` on getOverview's rows.
-            {label:"Card balance",val:loading?null:fmt(balance),
-             sub:acctLabel(tileAcct)||"Linked account",
+            {label:tileLabel,val:loading||balance==null?null:fmt(balance),
+             sub:acctLabel(tileAcct)||(isCurrent?"Linked account":"Balances are today's"),
              cycle:!loading&&creditAccts.length>1},
             // Same-point comparison while the month is in progress (see cmpBase)
             // — the sub says which, so the number is never ambiguous.
@@ -6147,6 +6205,7 @@ export default function Dashboard({ refreshTick = 0 }) {
           const extra=Math.max(0,Number(debtExtra)||0);
           const missingMin=included.filter(d=>!(Number(d.minimum_payment)>0));
           const plan=included.length?payoffWhatIf(included,{strategy:debtStrategy,extraMonthly:extra}):null;
+          const debtSince=new Date(Date.now()-365*86400000).toISOString().slice(0,10);
           const startMonth=`${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,"0")}`;
           const freeMonth=plan?debtFreeMonth(startMonth,plan):null;
           // Total-owed history: carry each account's last-seen snapshot forward
@@ -6160,7 +6219,11 @@ export default function Dashboard({ refreshTick = 0 }) {
               if(cur&&cur.date===s.captured_on)cur.total=total;
               else pts.push(cur={date:s.captured_on,total});
             }
-            return pts.length>=2?pts:[];
+            // The 365-day window is a DISPLAY window applied to the folded
+            // points, so the carry across its boundary survives (clampSeries
+            // keeps the point before the cutoff for exactly that reason).
+            const shown=clampSeries(pts,debtSince);
+            return shown.length>=2?shown:[];
           })();
           return (
           <div style={{display:"flex",flexDirection:"column",gap:12}}>
@@ -6216,7 +6279,12 @@ export default function Dashboard({ refreshTick = 0 }) {
                 debts.map((a,i)=>{
                   const bal=Number(a.current_balance)||0;
                   const limit=Number(a.credit_limit)||0;
-                  const util=a.type==="credit"&&limit>0?Math.min(bal/limit,1):null;
+                  // Pure helper (src/debtPayoff.js): null with no limit, 0 in
+                  // credit, clamped 0..1 otherwise. Inline it read
+                  // Math.min(bal/limit,1) with no LOWER clamp, so an overpaid
+                  // card showed a negative percentage and a negative bar width.
+                  const util=a.type==="credit"?utilization(bal,limit):null;
+                  const inCredit=util===0&&bal<=0;
                   const utilColor=util!=null?(util>=.8?OVER_MONEY:OK_MONEY):null;
                   const inc=inPayoff(a);
                   return (
@@ -6232,7 +6300,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                         </div>
                         <div style={{textAlign:"right",flexShrink:0}}>
                           <div style={{fontSize:14,fontFamily:"'DM Mono',monospace",fontWeight:600}}>{fmtX(displayBalance(a.current_balance,a.type))}</div>
-                          {util!=null&&<div style={{fontSize:10,color:inkOn(utilColor,surf.card),marginTop:1}}>{Math.round(util*100)}% of limit</div>}
+                          {util!=null&&<div style={{fontSize:10,color:inkOn(utilColor,surf.card),marginTop:1}}>{inCredit?"nothing owed":`${Math.round(util*100)}% of limit`}</div>}
                         </div>
                       </div>
                       {util!=null&&(
@@ -6373,11 +6441,19 @@ export default function Dashboard({ refreshTick = 0 }) {
                   <div style={{display:"flex",gap:10,flexWrap:"wrap",marginBottom:10}}>
                     {[{label:"Debt-free",val:freeMonth?monthYear(freeMonth):"—",sub:`${plan.months} month${plan.months!==1?"s":""}`},
                       {label:"Total interest",val:fmtAuto(plan.totalInterest),sub:`${debtStrategy} order`},
-                      ...(extra>0?[{label:"vs minimums only",val:fmtAuto(plan.interestSaved)+" saved",sub:plan.monthsSaved>0?`${plan.monthsSaved} month${plan.monthsSaved!==1?"s":""} sooner`:"same timeline",clr:inkOn(OK_MONEY,surf.bg)}]:[]),
+                      // When the MINIMUMS-ONLY baseline stalls (a typed minimum
+                      // below the monthly interest) payoffWhatIf can't subtract
+                      // two totals, so interestSaved/monthsSaved are 0 and this
+                      // tile read "$0.00 saved · same timeline" — the exact
+                      // opposite of the truth, since the extra payment is the
+                      // only reason a payoff date exists at all.
+                      ...(extra>0?[plan.baselineStalled
+                        ?{label:"vs minimums only",val:"minimums alone never pay this off",sub:"the extra is what makes a payoff possible",clr:inkOn(OK_MONEY,surf.bg),small:true}
+                        :{label:"vs minimums only",val:fmtAuto(plan.interestSaved)+" saved",sub:plan.monthsSaved>0?`${plan.monthsSaved} month${plan.monthsSaved!==1?"s":""} sooner`:"same timeline",clr:inkOn(OK_MONEY,surf.bg)}]:[]),
                     ].map((c,i)=>(
                       <div key={i} style={{flex:"1 1 100px",background:"var(--bg)",borderRadius:10,padding:"10px 12px"}}>
                         <div style={{fontSize:10,color:"var(--muted)",fontWeight:500,marginBottom:3}}>{c.label}</div>
-                        <div style={{fontSize:15,fontWeight:600,fontFamily:"'DM Mono',monospace",color:c.clr||"var(--text)"}}>{c.val}</div>
+                        <div style={{fontSize:c.small?12:15,fontWeight:600,fontFamily:c.small?"inherit":"'DM Mono',monospace",color:c.clr||"var(--text)",lineHeight:1.25}}>{c.val}</div>
                         <div style={{fontSize:10,color:"var(--muted)",marginTop:2}}>{c.sub}</div>
                       </div>
                     ))}
@@ -6619,12 +6695,12 @@ export default function Dashboard({ refreshTick = 0 }) {
                       // definite to resolve against and every bar collapsed to
                       // minHeight. 114 = the 130px row minus the amount label + gap.
                       const h=Math.max((p.spending.amount/maxSpend)*114,3);
-                      const pStart=new Date(p.start);
-                      const isSel=pStart.getFullYear()===year&&pStart.getMonth()+1===month;
+                      const pYM=periodYM(p.start);
+                      const isSel=pYM.y===year&&pYM.m===month;
                       return (
                         <div key={i} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:4}}>
                           <span style={{fontSize:9,fontFamily:"'DM Mono',monospace",color:"var(--muted)",whiteSpace:"nowrap"}}>{fmt(p.spending.amount)}</span>
-                          <div onClick={()=>{setYear(pStart.getFullYear());setMonth(pStart.getMonth()+1);setTab("overview");}}
+                          <div onClick={()=>{setYear(pYM.y);setMonth(pYM.m);setTab("overview");}}
                             title={`View ${p.label}`}
                             style={{width:"100%",height:h,minHeight:4,background:isSel?"var(--accent)":"var(--track)",
                               borderRadius:"4px 4px 0 0",transition:"all .4s ease",cursor:"pointer"}}
@@ -6636,8 +6712,8 @@ export default function Dashboard({ refreshTick = 0 }) {
                   </div>
                   <div style={{display:"flex",gap:8}}>
                     {cfPs.map((p,i)=>{
-                      const pStart=new Date(p.start);
-                      return <div key={i} onClick={()=>{setYear(pStart.getFullYear());setMonth(pStart.getMonth()+1);setTab("overview");}}
+                      const pYM=periodYM(p.start);
+                      return <div key={i} onClick={()=>{setYear(pYM.y);setMonth(pYM.m);setTab("overview");}}
                         style={{flex:1,textAlign:"center",fontSize:10,color:"var(--muted)",cursor:"pointer"}}>{p.label.split(" ")[0]}</div>;
                     })}
                   </div>
@@ -6659,7 +6735,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                 // bar rather than an empty one.
                 const sw=Math.max(0,(p.spending.amount/maxFlow)*100);
                 const iw=Math.max(0,(p.income.amount/maxFlow)*100);
-                const pStart=new Date(p.start);
+                const pYM=periodYM(p.start);
                 // Each bar is now a real tap target rather than a 5px hairline:
                 // BAR_H + 11px of padding top and bottom makes every row a
                 // MEASURED 316x44 at 390px (checked in the browser, not
@@ -6677,7 +6753,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                 const BAR_H=22;
                 const rows=[
                   {key:"Spend",w:sw,color:markOn(OVER_MONEY,surf.track),val:p.spending.amount,
-                   onTap:()=>{setYear(pStart.getFullYear());setMonth(pStart.getMonth()+1);setTab("categories");},
+                   onTap:()=>{setYear(pYM.y);setMonth(pYM.m);setTab("categories");},
                    title:`See what ${p.label} was spent on`},
                   {key:"Income",w:iw,color:markOn(OK_MONEY,surf.track),val:p.income.amount,
                    // Nothing measured that month means nothing to open — the
@@ -6749,7 +6825,8 @@ export default function Dashboard({ refreshTick = 0 }) {
             <div className="card">
               <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em",marginBottom:4}}>Biggest movers</div>
               <div style={{fontSize:11,color:"var(--muted)",marginBottom:14}}>
-                By category — {new Date(year,month-1,1).toLocaleString("default",{month:"short",year:"numeric"})} vs {new Date(year,month-2,1).toLocaleString("default",{month:"short",year:"numeric"})}.
+                By category — {new Date(year,month-1,1).toLocaleString("default",{month:"short",year:"numeric"})} vs {new Date(year,month-2,1).toLocaleString("default",{month:"short",year:"numeric"})}
+                {movers?.y===year&&movers?.m===month&&movers?.toDate?<> by the {movers.toDate}{ordinalSuffix(movers.toDate)}</>:null}.
                 Same spending count as the bars above, split by category.
               </div>
               {(()=>{

@@ -200,6 +200,23 @@ export function simulatePayoff(debts, { strategy = 'snowball', extraMonthly = 0 
   };
 }
 
+// Credit utilization as a 0..1 ratio, or null when there is no limit to be a
+// fraction OF. Pure because the Debt card cannot be trusted with the arithmetic
+// inline: it read `Math.min(bal / limit, 1)` with no LOWER clamp, so a card
+// paid off and then refunded (balances are stored positive = owed, so an
+// overpaid card stores a negative) printed a negative percentage in the
+// good-money ink and set a negative CSS bar width — invalid, dropped by the
+// browser, and .bar-fill then renders FULL on the emptiest card there is.
+// A card in credit owes nothing: that is 0, and the caller says "nothing owed"
+// rather than a percentage.
+export function utilization(balance, creditLimit) {
+  const limit = Number(creditLimit) || 0;
+  if (!(limit > 0)) return null;
+  const bal = Number(balance) || 0;
+  if (bal <= 0) return 0;
+  return Math.min(bal / limit, 1);
+}
+
 // The what-if the Debt view renders: the plan with extraMonthly, compared to
 // the minimums-only baseline under the SAME strategy. interestSaved /
 // monthsSaved are vs that baseline (0 when either run stalls — a stalled run

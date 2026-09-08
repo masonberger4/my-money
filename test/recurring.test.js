@@ -516,3 +516,62 @@ test('toggleIgnoreKey merges ONE key into a freshly-read list (the write path ne
   assert.deepEqual(toggleIgnoreKey(null, 'A', true), ['A']);
   assert.deepEqual(toggleIgnoreKey(['A', 42, '', 'A'], 'B', true), ['A', 'B']);
 });
+
+// --- 2026-09-04 audit: the detector must read the shared verdicts ------------
+// Both bugs were the same shape — re-deriving eligibility instead of reading
+// what the row already carries — and both made the Recurring report disagree
+// with the Ask tab, which folds the same detector over rows the server had
+// already filtered.
+
+test('detectRecurring skips rows the household excluded', () => {
+  const monthly = (day, extra = {}) => ({
+    merchant_name: 'STREAMING CO',
+    transaction_date: `2026-0${day}-10`,
+    amount: 12.99,
+    category: 'Fun',
+    account_id: 'a1',
+    ...extra,
+  });
+  const counted = [monthly(4), monthly(5), monthly(6)];
+  assert.equal(detectRecurring(counted).length, 1, 'guard rail: the series is detected');
+
+  const excluded = counted.map(t => ({ ...t, excluded: true }));
+  assert.deepEqual(detectRecurring(excluded), [], 'an excluded series is not a subscription');
+});
+
+test('detectRecurring skips rows stamped counted:false (loan ledger postings)', () => {
+  const rows = [4, 5, 6].map(m => ({
+    merchant_name: 'SERVICER ESCROW',
+    transaction_date: `2026-0${m}-01`,
+    amount: 240,
+    category: 'Housing',
+    account_id: 'loan1',
+    counted: false,
+  }));
+  assert.deepEqual(detectRecurring(rows), []);
+});
+
+test('detectRecurring tolerates rows with no counted flag (the pure contract)', () => {
+  // `counted` is stamped where a month's rows are assembled; single-account
+  // reads never carry it, and those rows must still detect.
+  const rows = [4, 5, 6].map(m => ({
+    merchant_name: 'GYM',
+    transaction_date: `2026-0${m}-03`,
+    amount: 40,
+    category: 'Health',
+    account_id: 'a1',
+  }));
+  assert.equal(detectRecurring(rows).length, 1);
+});
+
+test('an untaught recurring merchant falls back to Uncategorized, not a retired taxonomy name', () => {
+  const rows = [4, 5, 6].map(m => ({
+    merchant_name: 'UNTAUGHT VENDOR',
+    transaction_date: `2026-0${m}-08`,
+    amount: 9.5,
+    category: null,
+    account_id: 'a1',
+  }));
+  const [item] = detectRecurring(rows);
+  assert.equal(item.category, 'Uncategorized');
+});

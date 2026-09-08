@@ -104,5 +104,14 @@ export function askAssistant(messages, opts = {}) {
     messages,
     model: opts.model,
     effort: opts.effort,
+    // The phone's OWN calendar day. The server validates it and falls back to
+    // UTC — without it, the assistant spent the last hours of every month
+    // answering about the next one while every screen said otherwise.
+    today: localDayIso(),
   });
+}
+
+function localDayIso() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
