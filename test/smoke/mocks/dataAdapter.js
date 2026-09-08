@@ -180,7 +180,14 @@ export async function getSpending({ year, month }) {
 export async function getBiggestMovers({ year, month }) {
   const py = month === 1 ? year - 1 : year;
   const pm = month === 1 ? 12 : month - 1;
-  return { movers: biggestMovers(inMonth(year, month), inMonth(py, pm)) };
+  // Mirrors the real adapter: the month IN PROGRESS compares against the prior
+  // month sliced at the same day-of-month, and reports which day it cut at, so
+  // the walk actually renders the "by the Nth" sub-label instead of leaving
+  // that branch unexercised.
+  const now = new Date();
+  const isCurrent = now.getFullYear() === year && now.getMonth() + 1 === month;
+  const toDate = isCurrent ? now.getDate() : null;
+  return { movers: biggestMovers(inMonth(year, month), inMonth(py, pm), { toDate }), toDate };
 }
 export async function getTransactions({ year, month }) {
   const txs = inMonth(year, month).slice().sort((a, b) => a.date === b.date ? b.amount - a.amount : (a.date < b.date ? 1 : -1));

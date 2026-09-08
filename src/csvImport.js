@@ -20,6 +20,7 @@
 // gets a descriptor and no category). Re-exported here so this module's public
 // surface — which test/csvImport.test.js imports from — is unchanged.
 import { guessCategory, transferRawCategory } from './txClassify.js';
+import { UNCATEGORIZED } from './categoryMap.js';
 
 export { guessCategory, transferRawCategory } from './txClassify.js';
 
@@ -666,7 +667,12 @@ export function descSimilarity(a, b) {
 // Effective category for a Plaid row (user override wins), for the mismatch
 // flag. Kept here so reconcile stays pure; dataAdapter passes the raw columns.
 function plaidEffectiveCategory(p) {
-  return p.user_category || p.mapped_category || 'Shopping and gear';
+  // UNCATEGORIZED, not a real category. 'Shopping and gear' stood here after
+  // the taxonomy was retired, so an untaught ledger row silently claimed a
+  // category the household actually uses — and the mismatch flag beside it
+  // then read "no mismatch" against any statement row that happened to carry
+  // that name. Same fallback shape the recurring detector had.
+  return p.user_category || p.mapped_category || UNCATEGORIZED;
 }
 
 function plaidDescriptor(p) {

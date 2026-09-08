@@ -78,7 +78,13 @@ function txDescriptors(t) {
 function descriptorAgrees(expDescription, expKey, t) {
   for (const desc of txDescriptors(t)) {
     if (descSimilarity(expDescription, desc) >= 0.4) return true;
-    if (merchantKey(desc) === expKey) return true;
+    // An EMPTY key is not an identity. merchantKey drops numeric tokens, so a
+    // digits-only or punctuation-only descriptor ('1234', '## 99') keys to ''
+    // — and so does a bill someone named '2026'. Comparing those would make
+    // '' === '' a match between two unrelated rows that happen to carry no
+    // word. The single-descriptor gate had the same hole; testing two strings
+    // doubles the exposure, so it is closed here rather than left.
+    if (expKey && merchantKey(desc) === expKey) return true;
   }
   return false;
 }
