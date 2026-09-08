@@ -8061,19 +8061,18 @@ export default function Dashboard({ refreshTick = 0 }) {
             </div>
             {/* Date is display-only — date editing does not exist today and is
                 deliberately deferred, not forgotten (the spec's deferred list). */}
-            <div style={{padding:"12px 0",display:"flex",alignItems:"center",justifyContent:"space-between",gap:10}}>
+            <div style={{padding:"12px 0",borderBottom:"1px solid var(--border)",display:"flex",alignItems:"center",justifyContent:"space-between",gap:10}}>
               <div style={{fontSize:11,color:"var(--muted)"}}>Date</div>
               <div style={{fontSize:13,fontWeight:500,color:"var(--text)"}}>{longDate(selTx.transaction_date)}</div>
             </div>
-            </div>
-
-            {/* Receipt photos. Owns its own load/state (not a transactions
-                column, so it's outside the saveTx patch discipline); receipt
-                changes only need the tax cache dropped for the no-receipt
-                nag. key remounts on row change so state can't bleed. */}
-            <div className="card">
-              <div style={{fontSize:11,color:"var(--muted)",marginBottom:4}}>Photo</div>
+            {/* Receipt photos, as the row after Date. Owns its own load/state
+                (not a transactions column, so it's outside the saveTx patch
+                discipline); receipt changes only need the tax cache dropped
+                for the no-receipt nag. key remounts on row change so state
+                can't bleed. The "Photo" tile is its own label — no row header. */}
+            <div style={{padding:"12px 0"}}>
               <ReceiptSection key={selTx.id} txId={selTx.id} onChanged={invalidateTax}/>
+            </div>
             </div>
 
             {/* Everything below the fold: the raw bank text, the rental/tax
