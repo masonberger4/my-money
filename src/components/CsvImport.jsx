@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { analyzeCsv, toInsertRow, parseCsv, reconcileCsv, csvDateRange, buildRows, importPlan, planFileBatch, fileKindOf } from "../csvImport.js";
+import { analyzeCsv, toInsertRow, parseCsv, reconcileCsv, csvDateRange, buildRows, importPlan, planFileBatch, fileKindOf, hasSingleAmountColumn, conflictingSources, resolveTemplateForTarget } from "../csvImport.js";
 import { applyTemplate, autoDetectTemplate, defaultTemplate, rowTotals, TEMPLATE_VERSION } from "../pdfImport.js";
 import { createManualAccount, importCsvTransactions, getExistingTxIds, getAccountTransactionsInRange, isManualAccount, isSimpleFinAccount, getCategoryRules, getFeedCoverageStart } from "../dataAdapter.js";
 import { FEED_OVERLAP_DAYS, FEED_REACH_DAYS } from "../coverage.js";
@@ -147,7 +147,18 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
   const [pdfTemplate, setPdfTemplate] = useState(null);
   const [pdfAutoTemplate, setPdfAutoTemplate] = useState(null);
   const [pdfBusy, setPdfBusy] = useState(false);
-  const [templateSource, setTemplateSource] = useState(null); // 'saved' | 'auto'
+  const [templateSource, setTemplateSource] = useState(null); // 'saved' | 'auto' | 'edited'
+  // Has the user hand-adjusted the columns on THIS file? A ref, not state: it
+  // gates an effect that must not re-run because of it. Reset on every new
+  // file (both entry points below null the template, and this rides along).
+  const templateEdited = useRef(false);
+  // The live template, mirrored into a ref so the target effect can READ it
+  // without listing it as a dependency — depending on the value it also sets
+  // would re-run the effect on every column drag.
+  const pdfTemplateRef = useRef(null);
+  // A saved layout the target has, offered rather than applied because live
+  // edits are on screen — silently discarding either one is the bug.
+  const [offerSavedTemplate, setOfferSavedTemplate] = useState(null);
   const [showEditor, setShowEditor] = useState(false);
   // --- Multi-file batch (set ONLY when >1 file is selected, so the single-file
   // path stays byte-identical to the pre-batch behaviour). Each queue item is
@@ -325,6 +336,12 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
   const rows = analysis?.rows || [];
   const skipped = analysis?.skipped || [];
   const preview = rows.slice(0, 200);
+  // A single-file CSV whose header WAS detected never mounts ManualMapper, so
+  // until now it had no sign control at all: the preview said "check the sign"
+  // and offered nothing to change it, leaving Cancel or a knowingly wrong
+  // import as the only exits. Same predicate the batch probe uses.
+  const signRelevant = fileKind === "csv" && !!analysis && !analysis.error
+    && !analysis.needsManualMapping && hasSingleAmountColumn(analysis.columns);
 
   // An unknown target can only be compared. `compareOnly` is the user's
   // override. `verdict === 'audit'` is the file's own answer: every row is
@@ -388,17 +405,19 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
   // the dedup hash differs and feeding one account both formats double-inserts.
   // Warn when the account already holds rows from the other format.
   const incomingSource = fileKind === "pdf" ? "pdf" : "csv";
-  // Every row on a MANUAL account arrived through an import, so any source
-  // that isn't the incoming format is a conflict — including the legacy 'plaid'
-  // column default on rows predating the source column, because we cannot tell
-  // which format those came from and guessing wrong double-counts permanently.
-  //
-  // A FED account legitimately holds its own feed rows next to imported
-  // history, so those are not a format conflict; only csv-vs-pdf is.
-  const IMPORT_FORMATS = new Set(["csv", "pdf"]);
-  const importedSources = [...existingSources].filter(s => (targetIsManual ? true : IMPORT_FORMATS.has(s)));
-  const mixedSource = targetIsExisting && importedSources.some(s => s !== incomingSource);
-  const legacySource = targetIsManual && mixedSource && !importedSources.some(s => IMPORT_FORMATS.has(s));
+  // Which existing sources actually conflict (pure — see conflictingSources).
+  // A MANUAL account's rows all arrived through an import EXCEPT quick-adds,
+  // which mint a uuid rather than a content hash and so can collide with
+  // nothing; counting those as a conflict disabled Import forever after one
+  // hand-typed cash purchase. The legacy 'plaid' default still conflicts on a
+  // manual account (format unknowable), and a FED account legitimately holds
+  // its own feed rows beside imported history, so only csv-vs-pdf counts there.
+  const conflicts = conflictingSources(existingSources, incomingSource, targetIsManual);
+  const mixedSource = targetIsExisting && conflicts.length > 0;
+  const legacySource = targetIsManual && mixedSource && !conflicts.some(s => s === "csv" || s === "pdf");
+  // Name the format actually present rather than assuming it is the other one:
+  // with 'plaid'/unknown rows there IS no other format to name.
+  const conflictFormat = conflicts.includes("pdf") ? "PDF" : conflicts.includes("csv") ? "CSV" : null;
 
   // The audit: reconcile the statement against what the account already holds
   // over the statement's date range (± the drift window). Inserts nothing.
@@ -445,6 +464,8 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
       setFileText(null);
       setPdfPages(null);
       setPdfTemplate(null);
+      templateEdited.current = false;
+      setOfferSavedTemplate(null);
       setPdfAutoTemplate(null);
       setTemplateSource(null);
       setShowEditor(false);
@@ -467,17 +488,34 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
       // than Debit/Credit, surface the sign toggle before the run.
       setBatchSignRelevant(false);
       if (plan.kind === "csv") {
-        try {
-          const text = await plan.order[0].file.text();
-          const probe = analyzeCsv(text, { existingIds: new Set(), manualColumns: null, amountSign, rules: {}, overlapFrom: null });
-          if (!probe.error && !probe.needsManualMapping && probe.columns && probe.columns.amount != null && probe.columns.debit == null) {
-            setBatchSignRelevant(true);
-          }
-        } catch { /* probe is best-effort; the run itself re-parses */ }
+        // EVERY file, not just the first: a mixed selection can hide the
+        // single-amount file further down the queue, and one un-flipped file
+        // is a whole month imported backwards. The predicate lives in
+        // csvImport.js because the test written here inline was wrong —
+        // `columns.debit == null` never fires, since the mapper returns -1.
+        for (const d of plan.order) {
+          try {
+            const text = await d.file.text();
+            const probe = analyzeCsv(text, { existingIds: new Set(), manualColumns: null, amountSign, rules: {}, overlapFrom: null });
+            if (!probe.error && !probe.needsManualMapping && hasSingleAmountColumn(probe.columns)) {
+              setBatchSignRelevant(true);
+              break;
+            }
+          } catch { /* probe is best-effort; the run itself re-parses */ }
+        }
       }
       return;
     }
-    const f = files[0];
+    await loadSingleFile(files[0]);
+  }
+
+  // The single-file path, extracted so a batch row can hand a file straight
+  // back to it. "Import this file on its own" used to mean: leave the modal,
+  // reopen it, walk the Files app, find the right month again — on a phone,
+  // for one file out of twelve. The queue still holds the File object; the
+  // only thing missing was a way to spend it.
+  async function loadSingleFile(f) {
+    if (!f) return;
     if (f.size > MAX_FILE_BYTES) {
       setFileName(f.name);
       setFileText(null);
@@ -496,6 +534,9 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
     setFileName(f.name);
     setPdfPages(null);
     setPdfTemplate(null);
+    // A new file has no edits yet, and no saved layout to offer against them.
+    templateEdited.current = false;
+    setOfferSavedTemplate(null);
     setPdfAutoTemplate(null);
     setTemplateSource(null);
     setShowEditor(false);
@@ -562,30 +603,38 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
     }
   }
 
+  useEffect(() => { pdfTemplateRef.current = pdfTemplate; }, [pdfTemplate]);
+
   // A template the user already taught for THIS account wins over auto-detect.
   // Switching to an account without one must fall back to auto-detect rather
   // than silently keeping the previous account's layout.
   useEffect(() => {
     if (fileKind !== "pdf" || !pdfPages) return;
     let cancelled = false;
-    const useAuto = () => {
-      if (cancelled || !pdfAutoTemplate) return;
-      setPdfTemplate(pdfAutoTemplate);
-      setTemplateSource("auto");
+    // The decision is pure (resolveTemplateForTarget): hand-adjusted columns
+    // survive a target change and the account's saved layout is OFFERED, while
+    // a layout the user never touched is still replaced — which is what keeps
+    // the PREVIOUS account's template from following them here.
+    const apply = saved => {
+      if (cancelled) return;
+      const r = resolveTemplateForTarget({
+        saved,
+        auto: pdfAutoTemplate,
+        current: pdfTemplateRef.current,
+        edited: templateEdited.current,
+      });
+      if (r.template) setPdfTemplate(r.template);
+      if (r.source) setTemplateSource(r.source);
+      setOfferSavedTemplate(r.offerSaved);
     };
-    if (target === "new") { useAuto(); return; }
+    if (target === "new") { apply(null); return; }
     getSetting(`pdftpl:${target}`)
       .then(raw => {
         if (cancelled) return;
         const saved = raw ? JSON.parse(raw) : null;
-        if (saved && saved.version === TEMPLATE_VERSION) {
-          setPdfTemplate(saved);
-          setTemplateSource("saved");
-        } else {
-          useAuto();
-        }
+        apply(saved && saved.version === TEMPLATE_VERSION ? saved : null);
       })
-      .catch(() => useAuto());
+      .catch(() => apply(null));
     return () => { cancelled = true; };
   }, [fileKind, pdfPages, target, pdfAutoTemplate]);
 
@@ -1056,7 +1105,7 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
               came from. If they came from a {incomingSource === "pdf" ? "CSV" : "PDF"}, importing this
               {incomingSource === "pdf" ? " PDF" : " CSV"} would add every transaction a second time — banks word the same
               transaction differently in the two formats, so the duplicate check can't see it. Import into a new account instead.</>
-            : <>This account already holds transactions imported from {incomingSource === "pdf" ? "a CSV" : "a PDF"}. Banks word
+            : <>This account already holds transactions imported from {conflictFormat === "PDF" ? "a PDF" : "a CSV"}. Banks word
               the same transaction differently in the two formats, so importing both would add each transaction twice. Stick to
               one format per account, or create a separate account for this one.</>}
         </div>
@@ -1147,6 +1196,22 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                       {showEditor ? "Done adjusting" : "Adjust columns"}
                     </button>
                   </div>
+                  {/* Your adjustments are kept when you pick an account, so the
+                      account's own saved layout is OFFERED here rather than
+                      applied over them. Silently discarding either one is what
+                      this replaced. */}
+                  {offerSavedTemplate && (
+                    <div style={{ marginBottom: 8, fontSize: 12, color: "var(--muted)", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8, padding: "9px 12px", lineHeight: 1.5 }}>
+                      Keeping the columns you adjusted. This account also has a layout saved from a previous import.
+                      <div style={{ marginTop: 6, display: "flex", gap: 6 }}>
+                        <button className="ibtn" style={{ fontSize: 11 }}
+                          onClick={() => { templateEdited.current = false; setPdfTemplate(offerSavedTemplate); setTemplateSource("saved"); setOfferSavedTemplate(null); }}>
+                          Use the saved layout
+                        </button>
+                        <button className="ibtn" style={{ fontSize: 11 }} onClick={() => setOfferSavedTemplate(null)}>Keep mine</button>
+                      </div>
+                    </div>
+                  )}
                   <div style={{
                     fontSize: 12, borderRadius: 8, padding: "9px 12px", lineHeight: 1.5,
                     background: pdfApplied?.layoutSuspect ? "var(--danger-bg)" : "var(--bg)",
@@ -1173,9 +1238,10 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                   </div>
                   {showEditor && (
                     <div style={{ marginTop: 12 }}>
-                      <PdfTemplateEditor pages={pdfPages} template={pdfTemplate} onChange={setPdfTemplate} rowCount={rows.length} />
+                      <PdfTemplateEditor pages={pdfPages} template={pdfTemplate} rowCount={rows.length}
+                        onChange={t => { templateEdited.current = true; setTemplateSource("edited"); setOfferSavedTemplate(null); setPdfTemplate(t); }} />
                       {pdfAutoTemplate && (
-                        <button className="ibtn" style={{ fontSize: 11 }} onClick={() => { setPdfTemplate(pdfAutoTemplate); setTemplateSource("auto"); }}>
+                        <button className="ibtn" style={{ fontSize: 11 }} onClick={() => { templateEdited.current = false; setOfferSavedTemplate(null); setPdfTemplate(pdfAutoTemplate); setTemplateSource("auto"); }}>
                           Reset to auto-detected
                         </button>
                       )}
@@ -1204,7 +1270,8 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                       border: `1px solid ${boundaryState === "error" ? "var(--danger-border)" : boundaryState === "unsynced" || overlapCount > 0 ? "var(--warn-border)" : "transparent"}`,
                     }}>
                       {boundaryState === "loading" ? "Checking what the feed already has…"
-                        : boundaryState === "error" ? <>Couldn't check where this account's feed starts, so importing isn't safe — a statement covering dates the feed already has would count every transaction twice. Close and retry.</>
+                        : boundaryState === "error" ? <>Couldn't check where this account's feed starts, so importing isn't safe — a statement covering dates the feed already has would count every transaction twice.{" "}
+                          <button className="ibtn" style={{ fontSize: 11 }} onClick={() => setCoverageNonce(n => n + 1)}>Retry</button></>
                         : boundaryState === "unsynced" ? <>This account hasn't synced yet, so there's no boundary to import against — the first pull reaches back about three months and would land on top of anything imported now.</>
                         : !coverageStart ? <>The feed has no transactions for this account{createdWall ? <>, so rows on/after <strong>{createdWall}</strong> (the feed's reach window) are excluded and everything earlier imports</> : <>. Rows from the last {FEED_OVERLAP_DAYS} days are still excluded — every pull re-reads that window</>}.</>
                         : verdict === "audit" ? <>The feed covers this account from <strong>{overlapFrom}</strong> and every row here is inside that. Nothing will be imported — here's how your statement compares.</>
@@ -1251,6 +1318,30 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                       </div>
                     </div>
 
+                    {signRelevant && (
+                      <div style={{ marginBottom: 8, fontSize: 12, color: "var(--muted)", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8, padding: "10px 12px", lineHeight: 1.5 }}>
+                        This file has one Amount column, so only you can say which way it points.
+                        <div style={{ marginTop: 6 }}>
+                          <select value={amountSign} onChange={e => setAmountSign(e.target.value)}
+                            style={{ ...selStyle, width: "auto", fontSize: 12 }}>
+                            <option value="in_positive">Positive numbers are money IN (deposits)</option>
+                            <option value="out_positive">Positive numbers are money OUT (spending)</option>
+                          </select>
+                        </div>
+                        {/* Checked against a REAL line rather than an abstraction:
+                            the choice is easy to get backwards, and the first row
+                            says out loud what it will become. */}
+                        {preview[0] && (
+                          <div style={{ marginTop: 6 }}>
+                            First row: “{preview[0].merchant_name || preview[0].description || "—"}” imports as{" "}
+                            <strong style={{ color: "var(--text)" }}>
+                              {preview[0].amount >= 0 ? "money out" : "money in"} ({money(Math.abs(preview[0].amount))})
+                            </strong>.
+                          </div>
+                        )}
+                      </div>
+                    )}
+
                     <div style={{ border: "1px solid var(--border)", borderRadius: 10, overflow: "hidden" }}>
                       {preview.length === 0 && <div style={{ padding: "18px 12px", textAlign: "center", fontSize: 13, color: "var(--muted)" }}>No importable rows.</div>}
                       {preview.map((r, i) => (
@@ -1269,6 +1360,10 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                               <span>{r.mapped_category}</span>
                               {r.isTransfer && <span style={{ background: "var(--bg)", color: "var(--muted)", borderRadius: 10, padding: "1px 6px", fontWeight: 600 }}>transfer</span>}
                               {r.isDuplicate && <span style={{ background: "var(--bg)", color: "var(--muted)", borderRadius: 10, padding: "1px 6px", fontWeight: 600 }}>already imported</span>}
+                              {/* Struck through and unlabelled, an overlap row
+                                  reads as something the parser got wrong. It is
+                                  the opposite: the live feed already has it. */}
+                              {r.isOverlap && !r.isDuplicate && <span style={{ background: "var(--bg)", color: "var(--muted)", borderRadius: 10, padding: "1px 6px", fontWeight: 600 }}>in feed</span>}
                             </div>
                           </div>
                           <div style={{ fontSize: 12, fontFamily: "'DM Mono',monospace", fontWeight: 500, flexShrink: 0, color: r.amount < 0 ? readableInk(MONEY_IN, cardSurface) : "var(--text)" }}>
@@ -1283,9 +1378,29 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                       </div>
                     )}
                     {skipped.length > 0 && (
-                      <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 8, background: "var(--bg)", borderRadius: 8, padding: "8px 10px" }}>
-                        {skipped.length} row{skipped.length !== 1 ? "s" : ""} skipped (unreadable date/amount or $0): {skipped.slice(0, 3).map(s => s.rawDesc || s.rawDate || "—").join(", ")}{skipped.length > 3 ? "…" : ""}
-                      </div>
+                      <details style={{ fontSize: 11, color: "var(--muted)", marginTop: 8, background: "var(--bg)", borderRadius: 8, padding: "8px 10px" }}>
+                        {/* Three names and an ellipsis could not tell a memo
+                            line (fine) from a real purchase with an odd date
+                            (money missing from the backfill, permanently). Every
+                            skipped row is listed, with what was actually in the
+                            cells — the data was already here, only unshown. */}
+                        <summary style={{ cursor: "pointer" }}>
+                          {skipped.length} row{skipped.length !== 1 ? "s" : ""} skipped (unreadable date/amount or $0) — tap to see them
+                        </summary>
+                        <div style={{ marginTop: 6, maxHeight: 160, overflowY: "auto" }}>
+                          {skipped.map((sk, i) => (
+                            <div key={i} style={{ display: "flex", gap: 8, padding: "3px 0", borderTop: i ? "1px solid var(--border)" : "none" }}>
+                              <span style={{ flexShrink: 0, fontFamily: "'DM Mono',monospace" }}>{sk.rawDate || "—"}</span>
+                              <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{sk.rawDesc || "—"}</span>
+                              <span style={{ flexShrink: 0, fontFamily: "'DM Mono',monospace" }}>{[sk.rawDebit, sk.rawCredit].filter(Boolean).join(" / ") || "—"}</span>
+                              {/* The REASON is the whole point: "zero amount"
+                                  is a memo line, "unparseable date" is a real
+                                  purchase the backfill is about to lose. */}
+                              <span style={{ flexShrink: 0, color: sk.reason === "zero amount" ? "var(--muted)" : "var(--warn)" }}>{sk.reason}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </details>
                     )}
                     <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 8, lineHeight: 1.5 }}>
                       Positive = money out, negative (green) = money in. Importing past months will recompute earlier Trends
@@ -1314,7 +1429,8 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                       border: `1px solid ${boundaryState === "error" ? "var(--danger-border)" : boundaryState === "unsynced" ? "var(--warn-border)" : "transparent"}`,
                     }}>
                       {boundaryState === "loading" ? "Checking what the feed already has…"
-                        : boundaryState === "error" ? <>Couldn't check where this account's feed starts, so importing isn't safe — a statement covering dates the feed already has would count every transaction twice. Close and retry.</>
+                        : boundaryState === "error" ? <>Couldn't check where this account's feed starts, so importing isn't safe — a statement covering dates the feed already has would count every transaction twice.{" "}
+                          <button className="ibtn" style={{ fontSize: 11 }} onClick={() => setCoverageNonce(n => n + 1)}>Retry</button></>
                         : boundaryState === "unsynced" ? <>This account hasn't synced yet, so there's no boundary to import against — the first pull reaches back about three months and would land on top of anything imported now.</>
                         : !coverageStart ? <>The feed has no transactions for this account{createdWall ? <>, so rows on/after <strong>{createdWall}</strong> (the feed's reach window) are excluded and everything earlier imports</> : <>. Rows from the last {FEED_OVERLAP_DAYS} days are still excluded — every pull re-reads that window</>}.</>
                         : <>The feed covers this account from <strong>{overlapFrom}</strong>. In each file, rows before that import; rows on or after it are counted but never inserted.</>}
@@ -1376,7 +1492,11 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                       </div>
                     </div>
                   )}
-                  <BatchQueue queue={queue} summary={batchSummary} sectionLabel={sectionLabel} />
+                  <BatchQueue queue={queue} summary={batchSummary} sectionLabel={sectionLabel}
+                    onOpenAlone={batchRunning ? null : async file => {
+                      setQueue(null); setBatchSummary(null); setBatchSignRelevant(false);
+                      await loadSingleFile(file);
+                    }} />
                 </>
               )}
 
@@ -1638,7 +1758,7 @@ function Reconciliation({ recon, loading, sectionLabel, step = 3 }) {
 // plus the one batch summary line once the run finishes. Statuses:
 // waiting / reading… / needs columns / imported (N · M compare-only) /
 // skipped / failed (message).
-function BatchQueue({ queue, summary, sectionLabel }) {
+function BatchQueue({ queue, summary, sectionLabel, onOpenAlone }) {
   const statusText = it => {
     if (it.status === "waiting") return "waiting";
     if (it.status === "parsing") return "reading…";
@@ -1681,6 +1801,12 @@ function BatchQueue({ queue, summary, sectionLabel }) {
             <div style={{ flexShrink: 0, maxWidth: "55%", fontSize: 11, textAlign: "right", color: statusColor(it), whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
               {statusText(it)}
             </div>
+            {/* A file that imported nothing is the one the user has to act on,
+                and the File object is right here — so the fix is a button, not
+                a sentence telling them to go find it again. */}
+            {onOpenAlone && (it.status === "failed" || it.status === "skipped" || it.status === "needs-template") && it.file && (
+              <button className="ibtn" style={{ fontSize: 11, flexShrink: 0 }} onClick={() => onOpenAlone(it.file)}>Open alone</button>
+            )}
           </div>
         ))}
       </div>
