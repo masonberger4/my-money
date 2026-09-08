@@ -7,6 +7,14 @@ on:
   push:
     branches: [main]
 
+# Every job below reads the checkout and nothing else — tests, a build, a local
+# vite server, three linters. The repository's Actions default token is already
+# read-only, but that is a SETTING no reader of this file can see; stating the
+# scope here puts it in the diff and survives someone widening the default.
+# Workflows that genuinely need more declare their own (claude.yml, codeql.yml).
+permissions:
+  contents: read
+
 # A newer push supersedes an in-flight run for the same ref — but only on a
 # PR. On main every commit is a distinct thing that shipped, and cancelling
 # its run to start the next one destroys the record of whether the first was
@@ -21,6 +29,9 @@ jobs:
   # with placeholder env (the real VITE_* values are baked at build time on
   # Vercel; placeholders prove the bundle compiles without leaking secrets).
   checks:
+    # REQUIRED CHECK. This exact string is what the "Protect Main" ruleset
+    # requires, alongside "render check" and "static checks". Rename it and the
+    # gate silently stops gating — there is nothing local that can catch that.
     name: tests + build
     runs-on: ubuntu-latest
     # Every step here finishes in seconds; anything past this is a stall, and
@@ -59,6 +70,8 @@ jobs:
   # ErrorBoundary. Visiting one tab only proved that tab; each tab renders a
   # different slice of a ~5,000 line component.
   smoke:
+    # REQUIRED CHECK, exactly as with "tests + build" above (and "static
+    # checks" below): the ruleset matches on this string.
     name: render check
     runs-on: ubuntu-latest
     # The backstop for anything that stalls (historically: apt, see the install
@@ -123,7 +136,7 @@ jobs:
         run: |
           npx vite --config test/smoke/vite.config.js --port 5199 > /tmp/vite-smoke.log 2>&1 &
           # Plain poll rather than a wait-on dependency.
-          for i in $(seq 1 60); do
+          for _ in $(seq 1 60); do
             curl -sf http://localhost:5199 >/dev/null && break
             sleep 1
           done
@@ -132,3 +145,56 @@ jobs:
       - name: harness log on failure
         if: failure()
         run: cat /tmp/vite-smoke.log || true
+
+  # Free static checks — no Claude tokens, no browser, no apt. Three tools,
+  # each for a class of breakage neither job above can see:
+  #   eslint     — an undefined identifier, or a hook called inside a branch,
+  #                is a ReferenceError on first render that `vite build` and
+  #                `npm test` both pass. The render gate catches the ones on a
+  #                path it walks; this catches the rest. It found a
+  #                conditionally-called useMemo in the PDF template editor on
+  #                its first run. Rules and reasons: eslint.config.js.
+  #   actionlint — the workflows in this directory ARE the merge gate, and they
+  #                have no test. A typo in an `if:` or a `${{ }}` is a run that
+  #                never happens, or a job that never gates. It also pipes
+  #                every `run:` block through shellcheck.
+  #   shellcheck — .claude/hooks/*.sh run in every session AND inside the
+  #                tests job above (test-digest.sh is on the other end of that
+  #                pipe), so a bashism that dash rejects breaks the gate.
+  # REQUIRED CHECK: "static checks" is a ruleset-required name exactly like the
+  # two above. Rename it and the gate silently stops gating.
+  static:
+    name: static checks
+    runs-on: ubuntu-latest
+    # Seconds of work; anything past this is a stall, and GitHub's default
+    # would let it sit for SIX HOURS.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: eslint
+        run: npm run lint
+      # ubuntu-latest ships shellcheck. Printing the version first makes an
+      # absent binary a loud failure rather than a check that quietly passes.
+      # `-s sh` because both hooks are `#!/bin/sh` (pinned by
+      # test/claudeConfigGuards.test.js) — the default assumes bash and would
+      # wave through a bashism that breaks them at session start.
+      - name: shellcheck (.claude/hooks)
+        run: |
+          shellcheck --version
+          shellcheck -s sh .claude/hooks/*.sh
+      # Pinned version AND pinned script ref, for the reason the playwright
+      # driver above is pinned: a floating version lands new rules on an
+      # unrelated PR, where the failure looks like that PR's fault. Bump the
+      # two together. This download is the job's only network step, so it is
+      # bounded (the apt lesson above: an unbounded stall reads as "still
+      # running" and blocks the merge without ever failing).
+      - name: actionlint (workflows)
+        timeout-minutes: 5
+        run: |
+          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.12/scripts/download-actionlint.bash) 1.7.12
+          ./actionlint -color

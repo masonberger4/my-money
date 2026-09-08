@@ -581,7 +581,13 @@ nothing from Mason.
   in CI) applied to three more surfaces; the magnifier's own walk step is the
   precedent to copy.
 
-- **CI hardening: token scope, plus a warning on the two check names** — S.
+- ~~**CI hardening: token scope, plus a warning on the two check names**~~ —
+  **SHIPPED 2026-09-08**: ci.yml declares `permissions: contents: read` at
+  workflow level, and all THREE required job names (a third, `static checks`,
+  shipped in the same PR) carry a comment saying the ruleset matches the exact
+  string. The optional SHA-pin note below is NOT shipped and stays a backlog
+  item — it is still coupled to the ruleset's sha-pinning switch, in that order.
+  Original item:
   `.github/workflows/ci.yml` declares no `permissions:` block, so both jobs
   inherit the repository default `GITHUB_TOKEN` scope while neither needs any
   write access (one runs tests and a build, the other boots a local vite

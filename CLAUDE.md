@@ -34,7 +34,7 @@ doc covering your work area BEFORE editing, and maintain it in the same PR
 - Smoke (renders all 11 views): `npm install --no-save playwright-core@1.62.1`,
   then `npx vite --config test/smoke/vite.config.js --port 5199 &`, then
   `CHROMIUM_PATH=/opt/pw-browsers/chromium node test/smoke/render.mjs`
-- No lint, no typecheck. Node's built-in test runner, zero test deps.
+- Lint: `npm run lint` (eslint; `eslint.config.js` says what is on and why). No typecheck. Node's built-in test runner, zero test-framework deps.
 
 ## Invariants (always hold — reasons and detail live in docs/memory/)
 

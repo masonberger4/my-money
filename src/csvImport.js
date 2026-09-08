@@ -128,12 +128,6 @@ const HEADER_SYNONYMS = {
   amount: [/^amount$/i, /^transaction\s*amount$/i],
 };
 
-function matchColumn(cell, patterns) {
-  const v = String(cell ?? '').trim();
-  if (!v) return false;
-  return patterns.some(re => re.test(v));
-}
-
 // Find, for one candidate header row, the index of the best cell for each role.
 // "description" deliberately does not fall back to the generic /transaction/i
 // pattern when a more specific column already claimed a role, to avoid a
@@ -409,7 +403,9 @@ export function buildRows(rows, opts = {}) {
 
     // Compute the signed app amount (positive = money out).
     let amount;
-    let rawDebit = '';
+    // No initialiser: every branch below assigns rawDebit before anything reads
+    // it. rawCredit keeps its '' — the single-amount branch never sets it.
+    let rawDebit;
     let rawCredit = '';
     if (columns.debit >= 0 || columns.credit >= 0) {
       rawDebit = String(cell(cells, columns.debit) ?? '').trim();

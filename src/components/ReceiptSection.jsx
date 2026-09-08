@@ -80,7 +80,7 @@ export default function ReceiptSection({ txId, onChanged }) {
         const u = URL.createObjectURL(blob);
         objectUrls.current.push(u);
         setUrls(prev => ({ ...prev, [row.id]: u }));
-      } catch {}
+      } catch { /* the preview URL is optional; the receipt itself is saved */ }
       onChanged?.();
     } catch (e) {
       console.error("receipt add failed", e);

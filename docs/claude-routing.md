@@ -65,7 +65,9 @@ docs/memory/maintenance-contract.md.
 - **`.github/workflows/ci.yml`** (2026-09-04) — the `tests + build` job runs
   `npm test` through the digest under `set -o pipefail`, so a red job's log
   tail (what `get_job_logs` returns) is the failures, not the last 500 of
-  5,700 `ok` lines. Job names unchanged; the ruleset still gates on them.
+  5,700 `ok` lines. A third required job, `static checks` (lint, actionlint,
+  shellcheck), joined it 2026-09-08 — see docs/memory/workflow.md for the
+  required-check coupling. Job names are what the ruleset gates on.
 - **`.claude/skills/`** — /pre-pr, /ship, /escalate, /cheap-pass,
   /migration, /memory-audit.
 - **`.claude/rules/`** — path-scoped pointer checklists (api-server,

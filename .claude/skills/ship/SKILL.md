@@ -18,9 +18,9 @@ combinations reach main.
 4. **Arm auto-merge (squash) immediately** — it is per-PR, not automatic;
    an unarmed green PR sits unmerged (the PR #73 lesson). Exception: a PR
    meant to accumulate more commits stays unarmed until its last push.
-5. Confirm the merge landed (the required checks are "tests + build" and
-   "render check"). An ARMED PR needs no babysitting — investigate only if
-   CI goes red.
+5. Confirm the merge landed (the required checks are "tests + build",
+   "render check" and "static checks"). An ARMED PR needs no babysitting —
+   investigate only if CI goes red.
 
 Migration PRs: hand Mason the exact SQL and the paste order FIRST —
 additive SQL pastes BEFORE the merge; a DROP pastes only AFTER the deploy

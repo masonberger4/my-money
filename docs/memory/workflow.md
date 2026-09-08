@@ -14,8 +14,11 @@
    feature branch → open the pull request → ARM AUTO-MERGE (squash) the
    moment the PR opens → confirm the merge landed**. Auto-merge is Mason's
    ruling (2026-08-11, "keep build flow moving"): the branch ruleset requires
-   `tests + build` + `render check`, so green CI merges itself with no
-   polling gap — but arm it per-PR (`enable_pr_auto_merge`), it is NOT
+   the job NAMES from ci.yml — three since 2026-09-08 (`tests + build`,
+   `render check`, `static checks`) — so green CI merges itself with no
+   polling gap. A job added to ci.yml gates NOTHING until its name is added
+   in the ruleset by hand, so read the rules back (the API call below) rather
+   than assuming the click happened — but arm it per-PR (`enable_pr_auto_merge`), it is NOT
    automatic, and a PR left unarmed sits green and unmerged (how PR #73
    stalled). Two boundaries: a PR meant to accumulate MORE commits before
    merging stays unarmed until its last push, and if the ruleset's required
@@ -85,7 +88,8 @@ count → Dashboard, canary-verified: an App-startup crash fails the gate);
 the count-query ERROR paths stay untested by decision — asserting them means
 choosing user-facing behavior, the call that killed the wider item.
 Screenshot new UI before pushing. Tests (checked in, not gitignored):
-`npm test` (node --test over `test/`). Build:
+`npm test` (node --test over `test/`). Lint: `npm run lint` (eslint —
+`eslint.config.js` carries every rule choice and its reason). Build:
 `VITE_SUPABASE_URL=https://placeholder.supabase.co VITE_SUPABASE_ANON_KEY=placeholder npm run build`.
 
 **GitHub repo settings** live in the GitHub UI/API, not in this repo — there is
@@ -105,7 +109,10 @@ approval widened to all external contributors, and merge buttons narrowed to
 squash at BOTH levels: the repo setting AND the ruleset's
 allowed_merge_methods, since the "squash-only" wording that stood here
 described PRACTICE, not configuration (all three buttons were enabled). The
-Actions default token was already read-only.
+Actions default token was already read-only — and since 2026-09-08 ci.yml
+STATES `permissions: contents: read` at workflow level, so the scope is
+reviewable in a diff instead of living only in a setting nothing in the repo
+can see.
 
 **Three properties of the "Protect Main" ruleset are load-bearing** (it targets
 `refs/heads/main`; the ruleset's own updated_at is the applied-date record):
@@ -131,11 +138,41 @@ Actions default token was already read-only.
 
 The one machine-checkable coupling is unchanged: the ruleset's required checks
 are the job `name:` STRINGS in `.github/workflows/ci.yml` ("tests + build",
-"render check") — rename either and the gate silently stops gating, with
-nothing local to catch it. DELIBERATELY not enabled: Actions' sha-pinning
+"render check", "static checks" since 2026-09-08) — rename any of them and the
+gate silently stops gating, with nothing local to catch it. Each `name:` now
+carries a comment saying so. The companion invariant, worth keeping because it
+makes the file readable at a glance: **every job in ci.yml IS a required check;
+anything advisory lives in its own workflow file** whose header says it must
+never become one (claude.yml, dependabot-review.yml, codeql.yml,
+dependency-review.yml). "static checks" runs three free tools, each for a class
+neither other job sees — eslint (an undefined identifier or a conditionally
+called hook is a ReferenceError on first render that `npm test` AND `vite
+build` both pass; it found a real one in the PDF template editor on its first
+run), actionlint (the workflows here ARE the merge gate and have no test), and
+shellcheck over `.claude/hooks/*.sh` (they run in every session and inside the
+tests job). actionlint is version-pinned AND script-ref-pinned for the same
+reason the playwright driver is: a floating version lands new rules on an
+unrelated PR, where the failure reads as that PR's fault. DELIBERATELY not enabled: Actions' sha-pinning
 requirement, which would break ci.yml immediately (it floats `actions/*` on
 major tags). It unlocks only after the SHA-pinning backlog item ships — the two
 are a coupled pair, in that order.
+
+**Two ADVISORY workflows added 2026-09-08, both free of Claude tokens.**
+`codeql.yml` (check name `codeql analysis`) runs GitHub's taint-tracking
+queries — injection sinks, unsafe regex, prototype pollution — on every PR and
+every push to main. It scans main too because a PR's findings are reported
+RELATIVE to the base analysis; with no baseline every PR would carry the
+repo's pre-existing findings as its own. Deliberately NO `schedule:`: the cron
+in the stock template exists to re-scan UNCHANGED code as query packs improve,
+and main moves most days here. It is mutually exclusive with CodeQL "default
+setup" in Settings → Code security (which was OFF when this shipped): enabling
+that REJECTS this workflow's upload, so turning it on means deleting the file,
+not debugging the run. `dependency-review.yml` (check name `dependency
+review`, `pull_request` only, `fail-on-severity: high`) reads the LOCKFILE DIFF
+before merge — a different moment from both Dependabot alerts (what is already
+on main) and dependabot-review.yml (browser-bundle and iOS-floor risk on a
+bot's PR, never advisories). Neither may ever join the required checks: a
+false positive must not hold a merge that CI proved.
 
 **Dependabot now opens PRs unprompted** — SECURITY updates only, since the repo
 carries no Dependabot config file, so there is no routine version-bump noise. A

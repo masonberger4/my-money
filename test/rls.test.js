@@ -56,7 +56,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -81,7 +81,7 @@ function findBindir() {
   const onPath = which('initdb');
   if (onPath) return path.dirname(onPath);
   for (const glob of ['/usr/lib/postgresql', '/usr/local/opt', '/opt/homebrew/opt']) {
-    let entries = [];
+    let entries;
     try { entries = fs.readdirSync(glob); } catch { continue; }
     for (const e of entries.sort().reverse()) {
       const bin = path.join(glob, e, 'bin');
@@ -180,6 +180,6 @@ test('RLS policies: cross-household access denied (needs local Postgres)', async
     if (started && dir) {
       run(`${shq(path.join(bindir, 'pg_ctl'))} -D ${shq(path.join(dir, 'data'))} -m immediate -w -t 15 stop`);
     }
-    if (dir) { try { fs.rmSync(dir, { recursive: true, force: true }); } catch {} }
+    if (dir) { try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* a leftover temp dir is harmless */ } }
   }
 });

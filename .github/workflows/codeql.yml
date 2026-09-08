@@ -1,0 +1,67 @@
+# GitHub's CodeQL over this repo's JavaScript: taint-tracking queries (injection
+# sinks, unsafe regex, prototype pollution, hard-coded credentials) that neither
+# eslint's syntax rules nor the test suite look for. Free on a public repo, and
+# it spends no Claude tokens — unlike claude.yml and dependabot-review.yml.
+#
+# ADVISORY, and it must stay that way: the job name below must NEVER join the
+# ruleset's required checks ("tests + build", "render check", "static checks").
+# Findings land in the Security tab and as PR annotations; a false positive must
+# not be able to hold a merge that CI already proved.
+#
+# NO `schedule:`. The stock template adds a weekly cron so that UNCHANGED code
+# gets re-scanned as the query packs improve. Here every merge to main is
+# scanned on push and every PR on open, and main moves most days, so a new pack
+# reaches this code within days anyway. Add the cron only if main goes quiet for
+# weeks at a time.
+#
+# If Settings > Code security ever has CodeQL "default setup" ENABLED, this
+# workflow's upload is REJECTED — the two are mutually exclusive, and the error
+# names that as the reason. Default setup was off when this shipped
+# (2026-09-08); turning it on means deleting this file, not debugging the run.
+name: CodeQL
+
+on:
+  pull_request:
+  # main as well, and not for symmetry: a PR's results are reported RELATIVE to
+  # the base branch's analysis. With no main baseline, every PR would carry
+  # every pre-existing finding in the repo as if it had introduced it.
+  push:
+    branches: [main]
+
+# ci.yml's rule, same reasoning: a newer push supersedes an in-flight run on a
+# PR, never on main, where each commit's verdict is the record that it shipped.
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  analyze:
+    # The check-name string is this `name:`. One language and no matrix, so it
+    # is "codeql analysis" and not the template's "Analyze (javascript-...)".
+    name: codeql analysis
+    runs-on: ubuntu-latest
+    # Bounded like every job in ci.yml. This size of codebase analyzes in a few
+    # minutes; the bound only ever catches a stall.
+    timeout-minutes: 20
+    # Declared explicitly and per-job (the every-new-workflow rule), which is
+    # also why this is its own file: ci.yml is workflow-level contents: read,
+    # and security-events: write has no business being in scope there.
+    #   security-events: write — upload the SARIF results (the entire point)
+    #   contents: read         — check out the code
+    #   actions: read          — the action reads its own run metadata
+    permissions:
+      security-events: write
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: javascript-typescript
+          # JavaScript is analyzed from source; there is no build to observe.
+          # Stated so nobody adds a build step "to help" — it would only add
+          # minutes to an advisory job.
+          build-mode: none
+      - uses: github/codeql-action/analyze@v4
+        with:
+          category: /language:javascript-typescript
