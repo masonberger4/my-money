@@ -117,6 +117,6 @@ test('handleUnlink alert prefers detail.message over the stable code', () => {
   const body = dash.slice(start, dash.indexOf('const cats=', start));
   assert.ok(
     body.includes('err.detail?.message||err.detail?.error||friendlyError(err)'),
-    'the unlink failure alert must read detail.message first, then fall back to friendlyError (a wire death reads as "couldn'\''t reach the server")'
+    'the unlink failure alert must read detail.message first, then fall back to friendlyError (a wire death reads as "could not reach the server")'
   );
 });
