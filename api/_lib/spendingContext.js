@@ -135,7 +135,11 @@ async function fetchBudgetInputs(supabase, householdId, visibleIds, year, month)
 // must never happen is two same-state calls on one day differing — a
 // wall-clock TIMESTAMP in the text would break exactly that; a date-only query
 // boundary does not.
-export async function buildSpendingContext(householdId) {
+// `today` ('YYYY-MM-DD', optional): the CALLER's calendar day. The route
+// validates it and falls back to UTC; passing it here is what keeps the
+// assistant's window and its envelope month on the same day the screens are
+// showing (for the last hours of a month, UTC had already rolled over).
+export async function buildSpendingContext(householdId, { today = null } = {}) {
   const supabase = getServiceClient();
 
   const { data: accounts, error: acctErr } = await supabase
@@ -146,8 +150,12 @@ export async function buildSpendingContext(householdId) {
     .order('name', { ascending: true });
   if (acctErr) throw acctErr;
 
-  const since = new Date();
-  since.setDate(since.getDate() - 90);
+  // Anchored on the caller's day (see the parameter above), UTC when absent.
+  const todayStr = /^\d{4}-\d{2}-\d{2}$/.test(String(today || ''))
+    ? today
+    : new Date().toISOString().slice(0, 10);
+  const since = new Date(`${todayStr}T00:00:00Z`);
+  since.setUTCDate(since.getUTCDate() - 90);
   const sinceStr = since.toISOString().slice(0, 10);
 
   // Filter to visible accounts in the QUERY, not after: the 1500-row cap is
@@ -182,16 +190,17 @@ export async function buildSpendingContext(householdId) {
     txs = data || [];
   }
 
-  // The envelope month is "now" in UTC — same clock discipline as `since`:
-  // it shapes the queries and the section's month label, never a timestamp in
-  // the text, so same DB state + same day ⇒ same bytes.
-  const now = new Date();
+  // The envelope month comes off the SAME day as `since` — same clock
+  // discipline: it shapes the queries and the section's month label, never a
+  // timestamp in the text, so same DB state + same caller day ⇒ same bytes.
+  // Read from the string, not through Date(), for the reason every other
+  // date-only read in this codebase is: a parsed 'YYYY-MM-DD' is UTC midnight.
   const budget = await fetchBudgetInputs(
     supabase,
     householdId,
     visibleIds,
-    now.getUTCFullYear(),
-    now.getUTCMonth() + 1
+    Number(todayStr.slice(0, 4)),
+    Number(todayStr.slice(5, 7))
   );
 
   // `since` travels into the text: the oldest calendar month of a rolling

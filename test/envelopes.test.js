@@ -802,3 +802,47 @@ test('envelope bar: missing or junk fields count as zero, never NaN', () => {
   assert.equal(envelopeBar().label, '—');
   assert.equal(envelopeBar({ assigned: 'nope', spent: 10 }).label, '—');
 });
+
+// --- 2026-09-04 audit: an envelope in the hole is not an empty one ----------
+// `pot <= 0` took the same branch as "no envelope", so a category carrying a
+// bigger overspend than this month's assignment rendered the em dash and an
+// empty bar — the glyph an UNBUDGETED category gets — immediately after the
+// user assigned money to it. Both surfaces share envelopeBar, so this fixes
+// the group heading and the row by construction (the one-bar rule).
+
+test('envelopeBar: a carried-in overspend bigger than the assignment reads as over, not empty', () => {
+  const bar = envelopeBar({ assigned: 150, rolledOver: -400, spent: 60 });
+  assert.equal(bar.label, 'over');
+  assert.equal(bar.width, 100);
+  assert.ok(bar.pot < 0, 'the pot really is negative');
+});
+
+// Deliberately NOT extended to a zero pot: two older tests above pin that an
+// unbudgeted category spending money is still "no envelope", because painting
+// it as an overspend reports the classifier's ignorance as a budgeting
+// failure. Only a NEGATIVE pot is a hole. (Caught by those tests going red
+// when this fix was first written the wider way.)
+test('envelopeBar: a zero pot stays "no envelope" however much was spent', () => {
+  assert.equal(envelopeBar({ assigned: 0, rolledOver: 0, spent: 25 }).label, '—');
+  assert.equal(envelopeBar({ assigned: 0, rolledOver: 0, spent: 25 }).width, 0);
+});
+
+test('envelopeBar: the em dash survives for a genuine non-envelope', () => {
+  const bar = envelopeBar({ assigned: 0, rolledOver: 0, spent: 0 });
+  assert.equal(bar.label, '—');
+  assert.equal(bar.width, 0);
+});
+
+test('envelopeBar: an assignment exactly cancelled by carry, unspent, is not "over"', () => {
+  assert.equal(envelopeBar({ assigned: 100, rolledOver: -100, spent: 0 }).label, '—');
+});
+
+test('envelopeBar: ordinary positive pots are untouched', () => {
+  const bar = envelopeBar({ assigned: 200, rolledOver: 0, spent: 50 });
+  assert.equal(bar.label, '25%');
+  assert.equal(bar.width, 25);
+  assert.equal(envelopeBar({ assigned: 100, rolledOver: 0, spent: 250 }).label, '250%');
+  assert.equal(envelopeBar({ assigned: 100, rolledOver: 0, spent: 250 }).width, 100);
+  assert.equal(envelopeBar({ assigned: 1, rolledOver: 0, spent: 129 }).label, '>999%');
+  assert.equal(envelopeBar({ assigned: 200, rolledOver: 0, spent: -20 }).width, 0, 'a refund cannot go negative-width');
+});

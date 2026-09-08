@@ -14,6 +14,7 @@ import {
   isSpend,
   sumSpending,
   spendingToDate,
+  rowsToDate,
   spendingGroups,
   biggestMovers,
   toTxShape,
@@ -836,4 +837,44 @@ test('displayCategory changes NOTHING the spending model counts: a locked row is
     if (displayCategory(t) !== effectiveCategory(t)) assert.equal(isSpend(t), false, `${t.id} locked but counted`);
   }
   near(sumSpending(rows), before, 'no total moved');
+});
+
+// --- 2026-09-04 audit: movers must compare like for like --------------------
+// The Overview tile learned this on 2026-08-1x (spendingToDate); Trends did
+// not, so on the 8th of a month every category read as a FALL — true, because
+// the prior month had 31 days behind it, and useless. One slicer now serves
+// both, so the two surfaces cannot drift apart again.
+
+test('rowsToDate is the one slicer, and spendingToDate folds over it', () => {
+  const rows = [
+    { transaction_date: '2026-06-03', amount: 10, accounts: { type: 'depository' } },
+    { transaction_date: '2026-06-08', amount: 20, accounts: { type: 'depository' } },
+    { transaction_date: '2026-06-20', amount: 40, accounts: { type: 'depository' } },
+  ];
+  assert.deepEqual(rowsToDate(rows, 8).map(r => r.amount), [10, 20]);
+  assert.equal(spendingToDate(rows, 8), 30);
+  assert.equal(spendingToDate(rows, 31), 70, 'a day past every row keeps them all');
+});
+
+test('biggestMovers slices the comparison month at the same day when asked', () => {
+  const dep = { type: 'depository' };
+  const curr = [{ transaction_date: '2026-06-05', amount: 100, category: 'Fun', accounts: dep }];
+  const prev = [
+    { transaction_date: '2026-05-04', amount: 90, category: 'Fun', accounts: dep },
+    { transaction_date: '2026-05-25', amount: 500, category: 'Fun', accounts: dep },
+  ];
+  const full = biggestMovers(curr, prev);
+  assert.equal(full[0].delta, -490, 'unsliced: the month-so-far reads as a collapse');
+
+  const sliced = biggestMovers(curr, prev, { toDate: 8 });
+  assert.equal(sliced[0].prev, 90, 'only the prior month is sliced');
+  assert.equal(sliced[0].curr, 100, 'the viewed month keeps every row it was given');
+  assert.equal(sliced[0].delta, 10);
+});
+
+test('biggestMovers with no toDate is byte-identical to before (past months unchanged)', () => {
+  const dep = { type: 'depository' };
+  const curr = [{ transaction_date: '2026-06-05', amount: 100, category: 'Fun', accounts: dep }];
+  const prev = [{ transaction_date: '2026-05-25', amount: 60, category: 'Fun', accounts: dep }];
+  assert.deepEqual(biggestMovers(curr, prev), biggestMovers(curr, prev, {}));
 });

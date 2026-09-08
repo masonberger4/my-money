@@ -365,7 +365,16 @@ export async function getBiggestMovers({ year, month }) {
     getTransactionsBetween(cb.start, cb.end),
     getTransactionsBetween(pb.start, pb.end),
   ]);
-  return { movers: biggestMovers(currRows, prevRows) };
+  // The month IN PROGRESS is compared against the prior month SLICED at the
+  // same day-of-month — the honest pairing the Overview tile has used since
+  // spendingToDate shipped. Without it, on the 8th every category read as a
+  // fall simply because the prior month had 31 days behind it. A past month is
+  // already complete and keeps the full-month comparison (toDate null), so its
+  // output is byte-identical to before.
+  const today = localTodayISO();
+  const isCurrent = today.slice(0, 7) === `${year}-${String(month).padStart(2, '0')}`;
+  const toDate = isCurrent ? Number(today.slice(8, 10)) : null;
+  return { movers: biggestMovers(currRows, prevRows, { toDate }), toDate };
 }
 
 // fields: { user_category } (null reverts to the automatic category),

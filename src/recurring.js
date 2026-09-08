@@ -10,7 +10,7 @@
 // the band) and similar amounts (within ±20% of the median). Gaps outside
 // every band (biweekly ~14, quarterly ~91) stay undetected.
 
-import { TRANSFER_CATEGORY, RETURN_CATEGORY } from './categoryMap.js';
+import { TRANSFER_CATEGORY, RETURN_CATEGORY, UNCATEGORIZED } from './categoryMap.js';
 
 // Price creep: flag when the most recent charge exceeds the group median by
 // STRICTLY more than this fraction. A Netflix-style hike (~10–15%) hides
@@ -120,6 +120,19 @@ export function detectRecurring(transactions, today = null) {
   const groups = new Map();
   for (const t of transactions) {
     if (!(t.amount > 0)) continue; // money in can't be a subscription
+    // Read the verdicts the row already carries rather than re-deriving them
+    // (the one-predicate rule). `excluded` is the household saying "don't count
+    // this", and `counted` is the stamped isSpend() verdict — a linked loan's
+    // own ledger postings arrive counted:false. Without these two, a
+    // reimbursed subscription kept inflating the "/mo" headline and could be
+    // seeded as an Upcoming bill for money the household had already said not
+    // to count, while api/_lib/spendingContext.js's copy of this detector —
+    // fed rows the server had already filtered — omitted it: two Reflect
+    // surfaces, two answers. Absent `counted` is NOT false: single-account
+    // reads never pair, so they never stamp it, and those rows must still
+    // detect (pinned by its own test).
+    if (t.excluded) continue;
+    if (t.counted === false) continue;
     if (t.category === TRANSFER_CATEGORY || t.category === RETURN_CATEGORY) continue;
     if (!t.transaction_date) continue;
     const key = normalizeMerchant(t.merchant_name || t.description);
@@ -189,7 +202,11 @@ export function detectRecurring(transactions, today = null) {
     out.push({
       key,
       name: mostFrequent(kept.map(t => t.merchant_name)) || titleCase(key),
-      category: mostFrequent(kept.map(t => t.category)) || 'Shopping and gear',
+      // UNCATEGORIZED, never a real category: the app has shipped no taxonomy
+      // since 2026-08-05, and 'Shopping and gear' — a category a household
+      // actually uses — stood here as the fallback, which is precisely the
+      // "we don't know" that reads like a confident answer.
+      category: mostFrequent(kept.map(t => t.category)) || UNCATEGORIZED,
       account_id: mostFrequent(kept.map(t => t.account_id)) || null,
       // Historical name: the median PER-CHARGE amount (for monthly the two are
       // the same thing, which is where the name came from). For weekly/annual

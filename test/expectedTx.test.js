@@ -293,3 +293,51 @@ test('REGRESSION: walkEnvelopes output is byte-identical with the expectations p
   assert.deepEqual(txRows, txSnapshot, 'matchExpected must not mutate transactions');
   assert.deepEqual(pending, pendingSnapshot, 'matchExpected must not mutate expectations');
 });
+
+// --- 2026-09-04 audit: a renamed merchant's bill must still auto-match -------
+// The adapter hands matchExpected BOTH strings a row carries — the bank's
+// payee as `merchant_name` and the household's rename as `description`
+// (dataAdapter's `t.user_description || t.description`) — but the gate read
+// only the first non-empty one, so a rename made the bill unmatchable: it went
+// overdue, then "missed?", every cycle, while the charge sat in the ledger.
+// Same discipline as applyRuleToHistory, which tests both descriptors.
+
+test('matchExpected matches when the RENAME agrees and the bank payee does not', () => {
+  const exp = { id: 'e1', description: 'Gym', amount: 40, due_date: '2026-06-10', cadence: 'monthly', account_id: null };
+  const tx = {
+    id: 't1',
+    transaction_date: '2026-06-11',
+    amount: 40,
+    account_id: 'a1',
+    merchant_name: '24 HOUR FITNESS USA',
+    description: 'Gym',
+  };
+  const matches = matchExpected([exp], [tx]);
+  assert.deepEqual(matches, [{ expectationId: 'e1', txId: 't1' }]);
+});
+
+test('matchExpected still matches on the bank payee when there is no rename', () => {
+  const exp = { id: 'e1', description: 'NETFLIX', amount: 15.99, due_date: '2026-06-10', cadence: 'monthly', account_id: null };
+  const tx = {
+    id: 't1',
+    transaction_date: '2026-06-10',
+    amount: 15.99,
+    account_id: 'a1',
+    merchant_name: 'NETFLIX.COM',
+    description: 'NETFLIX.COM',
+  };
+  assert.equal(matchExpected([exp], [tx]).length, 1);
+});
+
+test('matchExpected does not match an unrelated merchant just because two strings are tried', () => {
+  const exp = { id: 'e1', description: 'Gym', amount: 40, due_date: '2026-06-10', cadence: 'monthly', account_id: null };
+  const tx = {
+    id: 't1',
+    transaction_date: '2026-06-11',
+    amount: 40,
+    account_id: 'a1',
+    merchant_name: 'HARDWARE STORE',
+    description: 'HARDWARE STORE 114',
+  };
+  assert.deepEqual(matchExpected([exp], [tx]), []);
+});
