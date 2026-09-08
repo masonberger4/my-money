@@ -221,7 +221,12 @@ body { font-family: var(--font-sans); }
 /* Full-screen sheet (the redesigned transaction detail, PR E of the YNAB
    redesign). Swaps in for .modal inside the same .overlay shell — the
    overlay keeps the backdrop, stacking and close-on-backdrop behavior. */
-.sheet-full { background: var(--card); width: 100%; height: 100dvh; max-height: 100dvh; border-radius: 0; border: none; overflow-y: auto; padding: 0; }
+.sheet-full { background: var(--card); width: 100%; height: 100dvh; max-height: 100dvh; border-radius: 0; border: none; overflow-y: auto; padding: 0; padding-top: env(safe-area-inset-top, 0px); }
+/* ^ The .overlay is fixed/inset:0, so it does NOT inherit the body's safe-area
+   padding (index.html): on the iPhone PWA the sheet's header — and its × close
+   button — sat under the status bar, where iOS swallows taps (2026-09-08,
+   Mason: "the x box … does not work and is too high"). The inset is 0 on
+   desktop, so the layout there is unchanged. */
 
 /* Bottom navigation (Dashboard, PR B of the YNAB redesign). Fixed, floating.
    z-index 50 sits UNDER .overlay (100) so every sheet covers it; the content
