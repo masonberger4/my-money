@@ -424,6 +424,19 @@ Rejected:
 - **Retrying POST** — the two failure modes above (duplicate rows, a burnt
   refresh token) are worse than the alert the retry would prevent.
 
+## 2026-09-08 — full-screen sheets pad for the iPhone status bar
+
+Mason: the tx sheet's × close "does not work and is too high" on the iPhone.
+`.overlay` is fixed/inset:0 and so escapes the body's safe-area padding; the ×
+sat under the status bar, where iOS intercepts taps. `.sheet-full` now carries
+`padding-top: env(safe-area-inset-top, 0px)` — zero on desktop, ~47–59px on
+iPhones — which lowers the header by about one button height and puts the
+close button back in tappable territory. Recorded in gotchas.md.
+
+Rejected:
+- **A fixed 36px margin on the button** — would shift desktop too and still
+  leave the button partly under a 59px inset on the Pro models.
+
 ## 2026-09-08 — The header collapses into a gear menu; pull-to-refresh on every tab
 
 The global header had grown a `＋` quick-add (Spending only), a tap-to-cycle
