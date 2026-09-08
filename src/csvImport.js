@@ -164,6 +164,76 @@ function mapHeaderRow(cells) {
   return { date, description, debit, credit, amount };
 }
 
+// Which PDF layout a target change should apply, given what is on screen.
+//
+// The layout editor sits ABOVE the account picker, so the natural order on a
+// phone is adjust the columns, then scroll down and pick the account — and the
+// effect then replaced the hand-adjusted layout with auto-detect, silently,
+// and confirm() went on to SAVE that wrong layout as the account's template
+// for every later statement. Only the user's own edits are protected: a
+// non-edited layout still gets replaced when the target changes, which is the
+// behaviour that keeps the PREVIOUS account's saved template from following
+// you to an account that has none.
+//
+// Returns { template, source, offerSaved } — `offerSaved` asks the UI to
+// OFFER the account's saved layout rather than apply it over live edits,
+// because silently discarding either one is what this fixes.
+export function resolveTemplateForTarget({ saved = null, auto = null, current = null, edited = false }) {
+  if (edited && current) {
+    return saved
+      ? { template: current, source: 'edited', offerSaved: saved }
+      : { template: current, source: 'edited', offerSaved: null };
+  }
+  if (saved) return { template: saved, source: 'saved', offerSaved: null };
+  if (auto) return { template: auto, source: 'auto', offerSaved: null };
+  return { template: current, source: current ? 'edited' : null, offerSaved: null };
+}
+
+// Which of an account's existing row-sources CONFLICT with the format being
+// imported. The rule is csv-vs-pdf and only that (a bank words the same
+// transaction differently in the two formats, so their dedup hashes differ and
+// importing both double-inserts every row).
+//
+// `'manual'` is NEVER a conflict: a quick-added row mints `manual:` + a uuid,
+// deliberately not a content hash, so it can collide with nothing. Counting it
+// as one meant a single hand-typed cash purchase disabled Import on that
+// account FOREVER — and said so with a sentence that was false either way
+// ("from before the app started recording which format they came from" on a
+// quick-add-created account, or "already holds transactions imported from a
+// PDF" when a CSV account had picked up one manual row).
+//
+// The legacy `'plaid'` default and any unknown source DO still conflict on a
+// manual account: those rows predate the source column, so their format is
+// unknowable and guessing wrong double-counts permanently. An allowlist, not a
+// blanket relaxation — a new source added later conflicts until someone
+// decides otherwise, which is the safe direction.
+const NON_CONFLICTING_SOURCES = new Set(['manual']);
+export function conflictingSources(existingSources, incomingSource, targetIsManual) {
+  const all = [...(existingSources || [])];
+  const relevant = targetIsManual
+    ? all.filter(s => !NON_CONFLICTING_SOURCES.has(s))
+    : all.filter(s => s === 'csv' || s === 'pdf');
+  return relevant.filter(s => s !== incomingSource);
+}
+
+// Does this mapping carry ONE signed Amount column rather than a Debit/Credit
+// pair? That is the only shape whose sign is ambiguous, so it is the only one
+// that needs the money-in/money-out toggle.
+//
+// Written as a predicate because the caller got it wrong inline: it tested
+// `columns.debit == null`, and `pick` returns **-1** for an absent role, never
+// null — so the test was false for every file and the toggle never appeared.
+// Six card exports shaped `Date,Description,Amount` (positive = a charge) then
+// imported with every sign inverted, in a batch, with nothing on screen to
+// flip. A wrong-signed row hashes differently from its correct twin, so it can
+// never be deduped away afterwards: this toggle is the only chance to get it
+// right. Indices, not null-checks — a manual mapping from ManualMapper uses
+// the same -1 convention.
+export function hasSingleAmountColumn(columns) {
+  if (!columns) return false;
+  return columns.amount >= 0 && !(columns.debit >= 0) && !(columns.credit >= 0);
+}
+
 function isUsableMapping(m) {
   if (!m || m.date < 0) return false;
   const hasDebitCredit = m.debit >= 0 && m.credit >= 0;
@@ -216,8 +286,16 @@ export function parseMoney(raw) {
 export function parseDate(raw) {
   const v = String(raw ?? '').trim();
   if (!v) return null;
-  // already ISO
-  let m = v.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  // Already ISO, with or without a time part. Several fintech and P2P exports
+  // (and some banks' "transaction history" downloads) ship
+  // '2026-08-01 14:03:22' or '2026-08-01T14:03:22Z', and a strict end-anchor
+  // rejected every row of such a file: the user saw N transactions found, zero
+  // importable, and no control that changed the outcome. The DAY is kept and
+  // the time dropped — the dedup hash is built from the ISO day, so ids stay
+  // stable against a file that carries times and one that doesn't. The time is
+  // NOT used to shift the day: it is the bank's own posting stamp, in an
+  // unstated zone, and shifting on it would move rows across month boundaries.
+  let m = v.match(/^(\d{4})-(\d{2})-(\d{2})(?:[T ].*)?$/);
   if (m) {
     const [, y, mo, d] = m;
     return isValidYmd(+y, +mo, +d) ? `${y}-${mo}-${d}` : null;

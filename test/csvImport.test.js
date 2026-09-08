@@ -13,6 +13,11 @@ import {
   planFileBatch,
   fileKindOf,
   CSV_TX_ID_PREFIX,
+  detectHeader,
+  hasSingleAmountColumn,
+  conflictingSources,
+  resolveTemplateForTarget,
+  parseDate,
 } from '../src/csvImport.js';
 import { TRANSFER_CATEGORY, FALLBACK_CATEGORY } from '../src/categoryMap.js';
 import { pullWasClean } from '../src/sync.js';
@@ -423,4 +428,132 @@ test('REGRESSION: the batch abort ref RESETS on mount — StrictMode must never 
     /batchAbortRef\.current\s*=\s*false;[\s\S]{0,600}?return\s*\(\)\s*=>\s*\{[\s\S]{0,300}?batchAbortRef\.current\s*=\s*true/,
     'the mount effect must clear batchAbortRef BEFORE returning the cleanup that sets it'
   );
+});
+
+// --- 2026-09-04 audit: the sign toggle must actually appear -----------------
+// mapHeaderRow's `pick` returns -1 for an absent role, never null, so the
+// batch probe's `columns.debit == null` was false for EVERY file and the
+// money-in/money-out toggle never rendered. A card export shaped
+// Date,Description,Amount then imported with every sign inverted — and a
+// wrong-signed row hashes differently from its correct twin, so it can never
+// be deduped away afterwards.
+test('hasSingleAmountColumn recognises the shape whose sign is ambiguous', () => {
+  const detected = detectHeader([['Date', 'Description', 'Amount'], ['2026-06-01', 'STORE', '12.34']]);
+  assert.ok(detected, 'guard rail: the header is detected');
+  assert.deepEqual(
+    { debit: detected.columns.debit, credit: detected.columns.credit },
+    { debit: -1, credit: -1 },
+    'the -1 convention is what the old null-check missed'
+  );
+  assert.equal(hasSingleAmountColumn(detected.columns), true);
+});
+
+test('hasSingleAmountColumn is false for a Debit/Credit pair (its sign is unambiguous)', () => {
+  const detected = detectHeader([
+    ['Date', 'Description', 'Debit', 'Credit'],
+    ['2026-06-01', 'STORE', '12.34', ''],
+  ]);
+  assert.ok(detected);
+  assert.equal(hasSingleAmountColumn(detected.columns), false);
+});
+
+test('hasSingleAmountColumn tolerates junk', () => {
+  assert.equal(hasSingleAmountColumn(null), false);
+  assert.equal(hasSingleAmountColumn(undefined), false);
+  assert.equal(hasSingleAmountColumn({ date: 0, description: 1, debit: -1, credit: -1, amount: -1 }), false);
+});
+
+// --- 2026-09-04 audit: a quick-add row is not a format conflict -------------
+// Every row on a manual account arrived through an import, so the gate counted
+// ANY other source as a conflict — including 'manual'. One hand-typed cash
+// purchase then disabled Import on that account forever, and the message was
+// false in both of its branches.
+test('conflictingSources: a manual row never blocks a statement import', () => {
+  assert.deepEqual(conflictingSources(new Set(['manual']), 'csv', true), []);
+  assert.deepEqual(conflictingSources(new Set(['csv', 'manual']), 'csv', true), []);
+  assert.deepEqual(conflictingSources(new Set(['manual']), 'pdf', true), []);
+});
+
+test('conflictingSources: csv-vs-pdf is still a conflict, on either target kind', () => {
+  assert.deepEqual(conflictingSources(new Set(['pdf']), 'csv', true), ['pdf']);
+  assert.deepEqual(conflictingSources(new Set(['csv']), 'pdf', false), ['csv']);
+  assert.deepEqual(conflictingSources(new Set(['csv', 'manual']), 'pdf', true), ['csv']);
+});
+
+test('conflictingSources: the legacy plaid default still conflicts on a manual account', () => {
+  // Those rows predate the source column, so their format is unknowable and
+  // guessing wrong double-counts permanently.
+  assert.deepEqual(conflictingSources(new Set(['plaid']), 'csv', true), ['plaid']);
+  assert.deepEqual(conflictingSources(new Set(['something-new']), 'csv', true), ['something-new']);
+  // ...but a FED account legitimately holds its own feed rows beside imports.
+  assert.deepEqual(conflictingSources(new Set(['plaid', 'simplefin']), 'csv', false), []);
+});
+
+test('conflictingSources: same format is never a conflict', () => {
+  assert.deepEqual(conflictingSources(new Set(['csv']), 'csv', true), []);
+  assert.deepEqual(conflictingSources(new Set(), 'csv', true), []);
+});
+
+// --- 2026-09-04 audit: hand-adjusted PDF columns must survive ---------------
+// The layout editor renders ABOVE the account picker, so the natural order is
+// adjust, then pick — and picking replaced the adjustment with auto-detect
+// without a word, then taught that wrong layout to the account.
+const TPL = { version: 1, name: 'edited' };
+const AUTO = { version: 1, name: 'auto' };
+const SAVED = { version: 1, name: 'saved' };
+
+test('resolveTemplateForTarget keeps live edits and offers the saved layout instead of applying it', () => {
+  const r = resolveTemplateForTarget({ saved: SAVED, auto: AUTO, current: TPL, edited: true });
+  assert.equal(r.template, TPL);
+  assert.equal(r.source, 'edited');
+  assert.equal(r.offerSaved, SAVED, 'the choice is offered, never taken silently');
+});
+
+test('resolveTemplateForTarget keeps live edits when the account has no saved layout', () => {
+  const r = resolveTemplateForTarget({ saved: null, auto: AUTO, current: TPL, edited: true });
+  assert.equal(r.template, TPL);
+  assert.equal(r.offerSaved, null);
+});
+
+test('resolveTemplateForTarget still drops a NON-edited layout on a target change', () => {
+  // The effect's original rationale, preserved: switching to an account with
+  // no saved template must not keep the previous account's saved one.
+  assert.equal(resolveTemplateForTarget({ saved: null, auto: AUTO, current: SAVED, edited: false }).template, AUTO);
+  assert.equal(resolveTemplateForTarget({ saved: SAVED, auto: AUTO, current: null, edited: false }).template, SAVED);
+  assert.equal(resolveTemplateForTarget({ saved: SAVED, auto: AUTO, current: null, edited: false }).source, 'saved');
+});
+
+test('resolveTemplateForTarget with nothing to apply leaves the screen alone', () => {
+  assert.deepEqual(resolveTemplateForTarget({}), { template: null, source: null, offerSaved: null });
+  assert.equal(resolveTemplateForTarget({ current: TPL, edited: false }).template, TPL);
+});
+
+// --- 2026-09-04 audit: ISO dates that carry a time --------------------------
+// A strict end-anchor rejected every row of an export whose date column ships
+// '2026-08-01 14:03', so the file reported N transactions found and zero
+// importable, with nothing on screen that could change it.
+test('parseDate accepts an ISO date with a time part and keeps the DAY', () => {
+  assert.equal(parseDate('2026-08-01 14:03:22'), '2026-08-01');
+  assert.equal(parseDate('2026-08-01T14:03:22Z'), '2026-08-01');
+  assert.equal(parseDate('2026-08-01T00:00:00.000Z'), '2026-08-01');
+  assert.equal(parseDate('2026-08-01'), '2026-08-01', 'the plain form is unchanged');
+});
+
+test('parseDate does not shift the day by the time it dropped', () => {
+  // The stamp is the bank's, in an unstated zone; shifting on it would move
+  // rows across month boundaries.
+  assert.equal(parseDate('2026-08-31 23:59:59'), '2026-08-31');
+  assert.equal(parseDate('2026-09-01 00:00:01'), '2026-09-01');
+});
+
+test('parseDate still rejects an impossible date, with or without a time', () => {
+  assert.equal(parseDate('2026-13-45 10:00'), null);
+  assert.equal(parseDate('2026-02-30T00:00:00Z'), null);
+  assert.equal(parseDate('not a date'), null);
+  assert.equal(parseDate(''), null);
+});
+
+test('parseDate leaves M/D/Y strict — no D/M/Y guessing', () => {
+  assert.equal(parseDate('8/1/2026'), '2026-08-01');
+  assert.equal(parseDate('8/1/2026 14:03'), null, 'a slash date with a time is not a shape we claim to know');
 });
