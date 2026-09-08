@@ -189,6 +189,13 @@
    a family), so this is the floor, not the only declaration. */
 body { font-family: var(--font-sans); }
 
+/* Pull-to-refresh is ours (src/pullRefresh.js), so the browser must not run
+   its own on the same drag: `contain` stops Chrome Android firing a native
+   reload underneath ours. It does NOT remove the iOS rubber band (WebKit
+   ignores overscroll-behavior on the root, and we want the bounce anyway —
+   it is what makes the gesture feel native) and does not affect wheel events. */
+html, body { overscroll-behavior-y: contain; }
+
 @keyframes pulse { 0%, 100% { opacity: 1 } 50% { opacity: .4 } }
 @keyframes fadeIn { from { opacity: 0; transform: translateY(5px) } to { opacity: 1; transform: none } }
 @keyframes spin { to { transform: rotate(360deg) } }

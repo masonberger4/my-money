@@ -1,4 +1,4 @@
-// Theme selection + application (the plumbing; the toggle UI lives in Dashboard).
+// Theme selection + application (the plumbing; the picker UI is Dashboard's GearMenu).
 //
 // WHERE THE PREFERENCE LIVES: localStorage, deliberately NOT the Supabase
 // `settings` table. `settings` is household-shared under one shared login, so a
@@ -21,7 +21,7 @@ import { useCallback, useEffect, useState } from 'react';
 // theme while bypassing useTheme's subscription, leaving its state stale.
 const THEME_STORAGE_KEY = 'mm:theme';
 
-/** Preference values, in toggle-cycle order. Default is 'system'. */
+/** Preference values, in display order. Default is 'system'. */
 export const THEME_PREFS = ['system', 'light', 'dark'];
 
 const DARK_QUERY = '(prefers-color-scheme: dark)';
@@ -185,7 +185,7 @@ export function initTheme() {
 }
 
 /**
- * React binding: { pref, resolved, setPref, cycleTheme }.
+ * React binding: { pref, resolved, setPref }.
  *   pref     — 'system' | 'light' | 'dark' (what the user chose)
  *   resolved — 'light' | 'dark' (what is actually rendered)
  */
@@ -205,12 +205,5 @@ export function useTheme() {
     setResolved(setThemePref(v));
   }, []);
 
-  // Cycle from the STATE, not from storage: when localStorage is unavailable
-  // (Safari private mode) the write is a no-op, so reading it back would return
-  // the same preference forever and the toggle would be stuck.
-  const cycleTheme = useCallback(() => {
-    setPref(THEME_PREFS[(THEME_PREFS.indexOf(pref) + 1) % THEME_PREFS.length]);
-  }, [pref, setPref]);
-
-  return { pref, resolved, setPref, cycleTheme };
+  return { pref, resolved, setPref };
 }

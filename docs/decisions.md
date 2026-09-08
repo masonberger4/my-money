@@ -423,3 +423,79 @@ Rejected:
   write added would silently not have it. The wrapper cannot be forgotten.
 - **Retrying POST** — the two failure modes above (duplicate rows, a burnt
   refresh token) are worse than the alert the retry would prevent.
+
+## 2026-09-08 — The header collapses into a gear menu; pull-to-refresh on every tab
+
+The global header had grown a `＋` quick-add (Spending only), a tap-to-cycle
+theme button, a refresh button, and a "Sign out" text button — four controls
+at 390px, already crowding the `pageTitle` h1 before anyone asked for a fifth.
+Mason's direction was to collapse them.
+
+Decided:
+- **One gear icon, every tab.** All four header controls are replaced by a
+  single gear `.nbtn` (`data-mm-gear`) that opens `GearMenu`. The Add
+  Transaction row inside it stays Spending-only (`tab==="transactions"`) —
+  collapsing the chrome doesn't mean surfacing a control where it doesn't
+  apply.
+- **A small anchored panel, not a modal or a full sheet.** `GearMenu` is a
+  260px panel anchored top-right under the gear — a menu of short actions
+  reads as a menu, not a page takeover, and an anchored panel keeps the gear
+  itself visible as the thing that opened it.
+- **A picker, not a cycle.** The old theme control was tap-to-cycle
+  (Auto → Light → Dark → Auto); it is replaced by a three-way Auto/Light/Dark
+  segmented control that calls `useTheme`'s `setPref` directly. A cycle that
+  only moves forward turns "I want Dark" into a guessing game of how many taps
+  away it is; a picker reaches any of the three in one tap. See the Theme
+  Convention and the removed tap-to-cycle helper's retirement in the
+  `src/theme.js` Key-files row.
+- **Refresh stays in the menu AS WELL AS the new gesture.** The menu's
+  Refresh row (with its "updated HH:MM" watermark) is the pointer-device
+  fallback — a mouse has no pull gesture — while pull-to-refresh (below)
+  covers touch and wheel/trackpad. Both call the same `refreshNow`.
+- **Sign out keeps its word and its confirm.** Icon-only sign-out on a shared
+  household login is a mis-tap hazard neither collapsing the header nor an
+  icon budget is worth risking.
+- **`GearMenu` is a REGISTERED overlay** (`useEscClose` + `role="dialog"` /
+  `aria-modal`, in both `anySheetOpen` and `closeAllSheets`), not an inline
+  `searchOpen`-style disclosure, because it has a page-covering transparent
+  backdrop (`data-mm-gear-close`) and is reachable by a back gesture — an
+  unregistered flag would make it the app's first overlay a back gesture
+  ignores and that `closeAllSheets` can't reach. The registration also pays
+  for itself twice: pull-to-refresh's `blocked={anySheetOpen||loading}` gate
+  gets "is any overlay open" for free instead of needing its own tracking.
+
+Pull-to-refresh (`src/pullRefresh.js`, `createPullRefresh`) now runs on every
+tab, not just Spending:
+- **Thresholds**: `PULL_DEFAULTS` = 70px touch (the iOS/Android convention,
+  roughly half a thumb's travel), 120px wheel (about two mouse-wheel notches,
+  so one accidental notch shows progress but doesn't fire), 250ms wheel idle
+  (about how long trackpad inertia takes to visibly stop).
+- **`scrollY <= 0`, never `=== 0`**: iOS reports a negative scrollY during the
+  rubber band, so an exact-zero check goes dead exactly where pulling feels
+  most natural.
+- **Touch fires on release**; a move away from the top disarms — that's a
+  scroll, not a pull. **Wheel has no release event**, so it fires the instant
+  a burst crosses threshold, but only when that burst was already at the top
+  when it STARTED. That "burst-armed-at-start" rule is what stops a trackpad
+  fling-to-top — one continuous burst that only reaches the top partway
+  through — from firing a refresh nobody asked for.
+- **Cooldown + quiet** guard against double-firing: `cooldown` blocks a
+  second trigger until the caller's refresh actually finishes (`settle()`);
+  a separate wheel-only `quiet` flag absorbs the trackpad's momentum tail,
+  clearing only on a fresh burst that starts after cooldown is already off —
+  without it, inertia that outlives a fast cached refresh would cross
+  threshold again and fire a second time.
+- **All five window listeners (touchstart/touchmove/touchend/touchcancel/
+  wheel) are PASSIVE** and never call `preventDefault` or set `touch-action`:
+  the indicator rides on top of the page's own scroll/rubber-band rather than
+  owning or cancelling it.
+- **`src/ui.css` gains `html, body { overscroll-behavior-y: contain }`** so
+  Chrome Android's own native pull-to-refresh can't fire a second, competing
+  reload underneath ours. It does NOT remove the iOS rubber-band bounce
+  (WebKit ignores `overscroll-behavior` on the root, and the bounce is
+  wanted) and has no effect on wheel/trackpad input.
+
+Also settled: the segmented theme control's active-segment fill is `--card`,
+not `--input-bg` — the 2026-09-08 light accent reaches only 4.24:1 on
+`--input-bg` but clears AA on the card, the same contrast measurement already
+recorded on `.bnav` in `src/ui.css`.
