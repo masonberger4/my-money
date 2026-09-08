@@ -132,7 +132,7 @@ function julyFixture({ drift = 0 } = {}) {
 }
 
 test('the standard ledger reconciles to the penny, with every bucket named', () => {
-  const { led, rows, scope, snaps } = julyFixture();
+  const { led, rows, snaps } = julyFixture();
   const { months } = buildReconciliation({
     monthsRows: [{ month: '2026-07', rows }],
     snapshots: snaps,

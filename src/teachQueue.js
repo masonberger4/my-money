@@ -75,7 +75,7 @@ export function teachQueueGroups(rows, keyOf) {
 
   for (const t of Array.isArray(rows) ? rows : []) {
     if (!t) continue;
-    let k = '';
+    let k;
     try {
       k = key(t) || '';
     } catch {

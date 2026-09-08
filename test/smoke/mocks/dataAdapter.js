@@ -267,8 +267,8 @@ export async function updateRecIgnore(key, ignored) {
 const SEARCH_CORPUS = (() => {
   const rows = [];
   for (let i = 0; i < 230; i++) {
-    const y = i < 40 ? 2026 : 2026 - Math.floor((i - 40) / 96); // recent first-ish
-    const m = ((230 - i) % 12) + 1;
+    // The date is built from `i` directly below; two earlier y/m attempts sat
+    // here unused and unread.
     const d = (i % 27) + 1;
     const date = `${2026 - Math.floor(i / 96)}-${String(((i % 12) + 1)).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
     const amount = i % 9 === 0 ? -(20 + (i % 60)) : (4.5 + (i % 13) * 7.35);

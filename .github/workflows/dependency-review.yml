@@ -1,0 +1,39 @@
+# Refuses a PR whose lockfile change pulls in a dependency carrying a known HIGH
+# or CRITICAL advisory. Free, and no Claude tokens.
+#
+# Not redundant with the two dependency things already here, because all three
+# look at a different moment:
+#   - Dependabot alerts (repo setting) fire on what is ALREADY on main.
+#   - dependabot-review.yml reads Dependabot's own PRs for the browser-bundle
+#     and iOS-floor risk that no CI job can see — never for advisories.
+#   - this reads the DIFF, before merge, when a new dependency is still cheap
+#     to refuse.
+#
+# ADVISORY: "dependency review" must NEVER join the ruleset's required checks
+# ("tests + build", "render check", "static checks"). Its own file rather than a
+# ci.yml job for two reasons — every job in ci.yml is a required check and this
+# one must not be, and it runs on pull_request ONLY (the action diffs a base
+# against a head), so inside ci.yml it would also be a permanently "skipped" job
+# on every push to main.
+name: Dependency review
+
+on:
+  pull_request:
+
+# Reads the lockfile diff and the advisory database; it posts nothing.
+permissions:
+  contents: read
+
+jobs:
+  review:
+    name: dependency review
+    runs-on: ubuntu-latest
+    # One API call. Bounded for the same reason as every job in ci.yml.
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/dependency-review-action@v5
+        with:
+          # moderate and low are a judgement call for a human reading the PR;
+          # high and critical are a "why is this here?".
+          fail-on-severity: high

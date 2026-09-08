@@ -25,7 +25,7 @@ import { displayBalance, isDebtAccount as isDebtType, balanceAsOf, BALANCE_STALE
 import { unhideConfirmMessage } from "../unhideConfirm.js";
 import { NAV_ITEMS, REFLECT_TABS, navForTab, pageTitle } from "../nav.js";
 import { groupByDay, longDate } from "../txList.js";
-import { TX_TYPES, TX_TYPE_LABELS, txTypeLabel, allowedUserTypes } from "../txType.js";
+import { TX_TYPES, txTypeLabel, allowedUserTypes } from "../txType.js";
 import { breakdownSegments, incomeVsSpendingInsight, incomeSections } from "../reflect.js";
 import { createSheetHistory } from "../sheetHistory.js";
 import { runSync } from "../sync.js";
@@ -669,7 +669,7 @@ function IncomeEdit({value,isDefault,onSave}) {
 // Rule 2, "Embrace Your True Expenses". A monthly target is topped up every
 // month; a by-date target is a sinking fund — the amount you want to have by a
 // deadline, which the app spreads over the months remaining.
-function TargetSheet({name,row,busy,surf,year,month,onSave,onClose}) {
+function TargetSheet({name,row,busy,year,month,onSave,onClose}) {
   useEscClose(onClose);
   const hasOverride=row?.targetOverride!=null;
   // Scope: "all" edits the category-level target (budgets); "month" edits ONLY
@@ -793,7 +793,7 @@ function TargetSheet({name,row,busy,surf,year,month,onSave,onClose}) {
 //
 // Category: left blank = let the write-time classifier decide (mapped_category);
 // an explicit pick becomes user_category, which still wins at read time.
-function QuickAddSheet({accounts,manualAccounts,allCats,getName,getColor,acctLabel,acctColor,busy,surf,onSave,onClose}) {
+function QuickAddSheet({manualAccounts,allCats,getName,getColor,acctLabel,acctColor,busy,surf,onSave,onClose}) {
   useEscClose(onClose);
   const [amount,setAmount]=useState("");
   const [dir,setDir]=useState("out"); // out = spent (positive); in = refund/income (negative)
@@ -2211,7 +2211,7 @@ export default function Dashboard({ refreshTick = 0 }) {
         if(ri?.length)setRecIgnore(ri);
         if(am&&ASSISTANT_MODELS[am])setAsstModel(am);
         if(ae&&EFFORT_LEVELS.includes(ae))setAsstEffort(ae);
-      } catch{}
+      } catch{ /* unreadable assistant prefs: the defaults above stand */ }
       setReady(true);
     }
     load();
@@ -2835,7 +2835,7 @@ export default function Dashboard({ refreshTick = 0 }) {
         setTaxMaps(prev=>{
           if(prev)return prev; // don't clobber unsaved edits with a stale read
           let parsed=null;
-          try{parsed=maps?JSON.parse(maps):null;}catch{}
+          try{parsed=maps?JSON.parse(maps):null;}catch{ /* unparseable saved maps fall back to the defaults below */ }
           return (parsed&&typeof parsed==="object")
             ?{emap:parsed.emap||{},dmap:parsed.dmap||{...DEFAULT_DEDUCTION_MAP}}
             :{emap:{},dmap:{...DEFAULT_DEDUCTION_MAP}};
@@ -3152,7 +3152,7 @@ export default function Dashboard({ refreshTick = 0 }) {
     listCategoryRules()
       .then(rows=>{ if(rulesSeq.current===seq) setRules(rows); })
       .catch(err=>console.error("taught rules load failed",err));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // Epoch-keyed on purpose: `rules` itself must not re-trigger its own load.
   },[rulesEpoch,tab]);
   const invalidateRules=useCallback(()=>setRulesEpoch(e=>e+1),[]);
 
@@ -3455,7 +3455,7 @@ export default function Dashboard({ refreshTick = 0 }) {
       if(restoreSeq.current!==seq)return;
       setRestoreIds(ids);
     });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // Epoch-keyed on purpose, as above.
   },[manualInstId,restoreEpoch,tab]);
 
   // What Restore would actually bring back. Two conditions, both load-bearing:
@@ -4988,7 +4988,7 @@ export default function Dashboard({ refreshTick = 0 }) {
         {/* BUDGET (envelopes — YNAB rules 1, 2 and 3) */}
         {tab==="budget"&&(()=>{
           const okBg=inkOn(OK_MONEY,surf.bg),overBg=inkOn(OVER_MONEY,surf.bg);
-          const okCard=inkOn(OK_MONEY,surf.card),overCard=inkOn(OVER_MONEY,surf.card);
+          const overCard=inkOn(OVER_MONEY,surf.card);
           // The walk stamps the month it computed. Until the viewed month's
           // rows arrive, the previous month's must not render EDITABLE under
           // the new header — an assignment typed against them would be written
