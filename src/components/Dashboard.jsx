@@ -570,8 +570,12 @@ function MonthJumpSheet({year,month,now,maxAhead,onPick,onClose}) {
 // only listener that matters.
 function GearMenu({tab,themePref,themeResolved,onTheme,loading,lastUpd,onRefresh,onQuickAdd,onSignOut,onClose}) {
   useEscClose(onClose);
+  // 14px of vertical padding around a 14px/1.2 label puts every row at ~45px:
+  // these are thumb targets on a phone, and 11px left them at 39-41px (the
+  // 390x844 measurement). The repo's recorded 32px floor is the minimum a
+  // control may be, not what a full-width menu row should settle for.
   const rowStyle={display:"flex",alignItems:"center",gap:10,width:"100%",background:"none",border:"none",
-    padding:"11px 16px",fontFamily:"inherit",fontSize:14,fontWeight:500,textAlign:"left",color:"var(--text)",cursor:"pointer"};
+    padding:"14px 16px",fontFamily:"inherit",fontSize:14,fontWeight:500,textAlign:"left",color:"var(--text)",cursor:"pointer"};
   const glyphStyle={width:16,flexShrink:0,color:"var(--muted)",textAlign:"center"};
   return (
     <div className="overlay" data-mm-gear-close="" onClick={onClose} style={{background:"transparent"}}>
