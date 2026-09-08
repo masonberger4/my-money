@@ -272,7 +272,7 @@ function monthYear(dateStr) {
   if(!y||!m) return "";
   return new Date(y,m-1,1).toLocaleString("default",{month:"short",year:"numeric"});
 }
-const MONO={color:"var(--text)",fontFamily:"'DM Mono',monospace"};
+const MONO={color:"var(--text)",fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums"};
 // The semantic money pair (under / over). Always rendered through inkOn/markOn
 // against the actual surface so both themes keep contrast.
 const OK_MONEY="#1D9E75",OVER_MONEY="#D85A30";
@@ -305,7 +305,7 @@ function DebtNum({id,value,onSave,placeholder,prefix,suffix,width=74}) {
           if(v!==(value??null))onSave(v);
         }}
         style={{width,padding:"5px 7px",borderRadius:8,border:"1px solid var(--border)",background:"var(--bg)",
-          color:"var(--text)",fontSize:12,fontFamily:"'DM Mono',monospace",outline:"none",textAlign:"right"}}/>
+          color:"var(--text)",fontSize:12,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",outline:"none",textAlign:"right"}}/>
       {suffix}
     </span>
   );
@@ -345,7 +345,7 @@ function AddDebtForm({busy,surf,onSave,onClose}) {
           <input value={bal} inputMode="decimal" placeholder="0"
             onChange={e=>setBal(numericish(e.target.value,{negative:false}))}
             style={{width:80,padding:"6px 8px",borderRadius:8,border:"1px solid var(--border)",background:"var(--card)",
-              color:"var(--text)",fontSize:12,fontFamily:"'DM Mono',monospace",outline:"none",textAlign:"right"}}/>
+              color:"var(--text)",fontSize:12,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",outline:"none",textAlign:"right"}}/>
         </span>
       </div>
       <div style={{display:"flex",gap:8,marginTop:8,justifyContent:"flex-end"}}>
@@ -399,14 +399,14 @@ function FlowSection({label,section,dir}) {
     <div style={{marginTop:8}}>
       <div style={{display:"flex",justifyContent:"space-between",gap:8,alignItems:"baseline"}}>
         <span style={{fontSize:10,fontWeight:600,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em"}}>{label}</span>
-        <span style={{fontSize:11,fontFamily:"'DM Mono',monospace",color:"var(--text)",flexShrink:0}}>{fmtAuto(section.total)}</span>
+        <span style={{fontSize:11,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",color:"var(--text)",flexShrink:0}}>{fmtAuto(section.total)}</span>
       </div>
       {section.classes.map(c=>(
         <div key={c.key} style={{display:"flex",justifyContent:"space-between",gap:8,marginTop:3,fontSize:11,color:"var(--muted)"}}>
           <span style={{minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
             {FLOW_LABELS[c.key]?.[dir]||c.key} <span style={{opacity:.7}}>· {c.count} row{c.count===1?"":"s"}</span>
           </span>
-          <span style={{fontFamily:"'DM Mono',monospace",flexShrink:0}}>{fmtAuto(c.amount)}</span>
+          <span style={{fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",flexShrink:0}}>{fmtAuto(c.amount)}</span>
         </div>
       ))}
     </div>
@@ -657,9 +657,9 @@ function IncomeEdit({value,isDefault,onSave}) {
   return (
     <button onClick={()=>setEd(true)} title="What the household has to budget this month"
       style={{background:"none",border:"none",cursor:"pointer",padding:0,
-        fontSize:13,fontWeight:600,color:value!=null?"var(--text)":"var(--accent)",fontFamily:"'DM Mono',monospace"}}>
+        fontSize:13,fontWeight:600,color:value!=null?"var(--text)":"var(--accent)",fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums"}}>
       {value!=null?fmtAuto(value):"＋ set income"}
-      {value!=null&&<span style={{fontSize:10,fontWeight:500,color:"var(--muted)",fontFamily:"'DM Sans','Helvetica Neue',sans-serif",marginLeft:5}}>
+      {value!=null&&<span style={{fontSize:10,fontWeight:500,color:"var(--muted)",fontFamily:"var(--font-sans)",marginLeft:5}}>
         {isDefault?"every month":"this month"}
       </span>}
     </button>
@@ -722,7 +722,7 @@ function TargetSheet({name,row,busy,surf,year,month,onSave,onClose}) {
         <input value={amount} inputMode="decimal" autoFocus placeholder="0"
           onChange={e=>setAmount(numericish(e.target.value,{negative:false}))}
           style={{width:"100%",padding:"9px 12px",borderRadius:8,border:"1px solid var(--border)",background:"var(--input-bg)",
-            color:"var(--text)",fontSize:16,fontFamily:"'DM Mono',monospace",outline:"none",marginBottom:14}}/>
+            color:"var(--text)",fontSize:16,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",outline:"none",marginBottom:14}}/>
 
         <div style={{fontSize:12,color:"var(--muted)",marginBottom:8}}>Applies</div>
         <div style={{display:"flex",gap:8,marginBottom:14}}>
@@ -838,7 +838,7 @@ function QuickAddSheet({accounts,manualAccounts,allCats,getName,getColor,acctLab
         <div style={{fontSize:12,color:"var(--muted)",marginBottom:6}}>Amount</div>
         <input value={amount} inputMode="decimal" autoFocus placeholder="0"
           onChange={e=>setAmount(numericish(e.target.value,{negative:false}))}
-          style={{...inputStyle,fontFamily:"'DM Mono',monospace",marginBottom:14}}/>
+          style={{...inputStyle,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",marginBottom:14}}/>
 
         <div style={{fontSize:12,color:"var(--muted)",marginBottom:6}}>Date</div>
         <input type="date" value={dateRaw} onChange={e=>setDateRaw(e.target.value)} onBlur={commitDate}
@@ -936,7 +936,7 @@ function MoveSheet({from,srcRow,rows,getName,chipFor,busy,surf,onMove,onClose}) 
         <input value={amount} inputMode="decimal" autoFocus placeholder="0"
           onChange={e=>setAmount(numericish(e.target.value,{negative:false}))}
           style={{width:"100%",padding:"9px 12px",borderRadius:8,border:"1px solid var(--border)",background:"var(--input-bg)",
-            color:"var(--text)",fontSize:16,fontFamily:"'DM Mono',monospace",outline:"none",marginBottom:14}}/>
+            color:"var(--text)",fontSize:16,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",outline:"none",marginBottom:14}}/>
 
         <div style={{fontSize:12,color:"var(--muted)",marginBottom:8}}>Into</div>
         <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:14}}>
@@ -1035,7 +1035,7 @@ function ScheduleSheet({debt,startMonth,acctLabel,onClose}){
   const capped=!showAll&&sched.rows.length>SCHED_PREVIEW;
   const shown=capped?sched.rows.slice(0,SCHED_PREVIEW):sched.rows;
   const hidden=sched.rows.length-shown.length;
-  const cell={fontSize:11,fontFamily:"'DM Mono',monospace",textAlign:"right",whiteSpace:"nowrap"};
+  const cell={fontSize:11,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",textAlign:"right",whiteSpace:"nowrap"};
   const hcell={fontSize:10,color:"var(--muted)",fontWeight:500,textAlign:"right"};
   const monthCapped=sched.stalled&&sched.rows.length>=MAX_MONTHS;
   return (
@@ -1046,7 +1046,7 @@ function ScheduleSheet({debt,startMonth,acctLabel,onClose}){
           <span style={{fontSize:16,fontWeight:600,color:"var(--text)",minWidth:0,overflow:"hidden",
             textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{acctLabel(debt)}</span>
           <span style={{flex:1}}/>
-          <span style={{fontSize:16,fontWeight:600,fontFamily:"'DM Mono',monospace",flexShrink:0}}>
+          <span style={{fontSize:16,fontWeight:600,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",flexShrink:0}}>
             {fmtX(displayBalance(debt.current_balance,debt.type))}
           </span>
         </div>
@@ -1068,7 +1068,7 @@ function ScheduleSheet({debt,startMonth,acctLabel,onClose}){
               ].map((c,i)=>(
                 <div key={i} style={{flex:"1 1 100px",background:"var(--bg)",borderRadius:10,padding:"10px 12px"}}>
                   <div style={{fontSize:10,color:"var(--muted)",fontWeight:500,marginBottom:3}}>{c.label}</div>
-                  <div style={{fontSize:15,fontWeight:600,fontFamily:"'DM Mono',monospace"}}>{c.val}</div>
+                  <div style={{fontSize:15,fontWeight:600,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums"}}>{c.val}</div>
                   <div style={{fontSize:10,color:"var(--muted)",marginTop:2}}>{c.sub}</div>
                 </div>
               ))}
@@ -1137,7 +1137,7 @@ function CategorySheet({name,color,when,rows,kids,surf,getName,acctById,acctLabe
             {t.excluded&&<Pill label="Excluded" color="#888780" surface={surf.card}/>}
           </div>
         </div>
-        <div style={{fontSize:13,fontFamily:"'DM Mono',monospace",fontWeight:500,flexShrink:0}}>{fmtX(t.amount)}</div>
+        <div style={{fontSize:13,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",fontWeight:500,flexShrink:0}}>{fmtX(t.amount)}</div>
       </div>
     );
   }
@@ -1150,7 +1150,7 @@ function CategorySheet({name,color,when,rows,kids,surf,getName,acctById,acctLabe
           <span style={{fontSize:16,fontWeight:600,color:"var(--text)",minWidth:0,overflow:"hidden",
             textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{getName(name)}</span>
           <span style={{flex:1}}/>
-          <span style={{fontSize:16,fontWeight:600,fontFamily:"'DM Mono',monospace",flexShrink:0}}>{fmtAuto(total)}</span>
+          <span style={{fontSize:16,fontWeight:600,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",flexShrink:0}}>{fmtAuto(total)}</span>
         </div>
         <div style={{fontSize:12,color:"var(--muted)",marginBottom:14}}>
           {when} · {counted.length} transaction{counted.length!==1?"s":""}
@@ -1230,7 +1230,7 @@ function CategoryPickerSheet({cats,catIndex,current,envRowByCat,hasAmounts,getNa
         <span style={{flex:1,minWidth:0,fontSize:14,fontWeight:active?600:500,color:"var(--text)",
           overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{getName(cat)}</span>
         {hasAmounts&&(
-          <span style={{fontSize:13,fontWeight:600,fontFamily:"'DM Mono',monospace",flexShrink:0,
+          <span style={{fontSize:13,fontWeight:600,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",flexShrink:0,
             color:avail<0?inkOn(OVER_MONEY,surf.card):avail>0?inkOn(OK_MONEY,surf.card):"var(--muted)"}}>
             {fmtX(avail)}
           </span>
@@ -1351,7 +1351,7 @@ function IncomeSheet({report,when,busy,surf,acctById,acctLabel,acctColor,onPick,
           {/* A DIV, not a span: Sk renders a div, and phrasing content can't
               hold flow content — the same validity rule that stopped the card
               outside from being one big button. */}
-          <div style={{fontSize:16,fontWeight:600,fontFamily:"'DM Mono',monospace",color:green,flexShrink:0}}>
+          <div style={{fontSize:16,fontWeight:600,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",color:green,flexShrink:0}}>
             {pending?<Sk w={90} h={16}/>:fmtAuto(report.total)}
           </div>
         </div>
@@ -1382,7 +1382,7 @@ function IncomeSheet({report,when,busy,surf,acctById,acctLabel,acctColor,onPick,
               borderBottom:"1px solid var(--border)"}}>
               <span style={{fontSize:12,fontWeight:600}}>{s.label}</span>
               <span style={{flex:1}}/>
-              <span style={{fontSize:12,fontFamily:"'DM Mono',monospace",color:s.amount>0?green:"var(--muted)"}}>
+              <span style={{fontSize:12,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",color:s.amount>0?green:"var(--muted)"}}>
                 {fmtAuto(s.amount)}
               </span>
             </div>
@@ -1413,7 +1413,7 @@ function IncomeSheet({report,when,busy,surf,acctById,acctLabel,acctColor,onPick,
                       "+" would claim the opposite of what it does to the total
                       above it. */}
                   {(()=>{const c=-t.amount;return (
-                    <div style={{fontSize:13,fontFamily:"'DM Mono',monospace",fontWeight:500,flexShrink:0,
+                    <div style={{fontSize:13,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",fontWeight:500,flexShrink:0,
                       color:c<0?"var(--muted)":green}}>
                       {c<0?"−":"+"}{fmtX(Math.abs(c))}
                     </div>
@@ -1503,7 +1503,7 @@ function RulesSheet({rules,monthRows,monthLabel,txDescriptor,surf,getName,getCol
         <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
           <span style={{fontSize:16,fontWeight:600,color:"var(--text)"}}>Taught rules</span>
           <span style={{flex:1}}/>
-          <span style={{fontSize:13,color:"var(--muted)",fontFamily:"'DM Mono',monospace"}}>{rules.length}</span>
+          <span style={{fontSize:13,color:"var(--muted)",fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums"}}>{rules.length}</span>
         </div>
         <div style={{fontSize:12,color:"var(--muted)",marginBottom:14,lineHeight:1.5}}>
           Merchants you've taught. New transactions matching one of these get its category
@@ -1523,7 +1523,7 @@ function RulesSheet({rules,monthRows,monthLabel,txDescriptor,surf,getName,getCol
             <div key={rid} style={{padding:"10px 0",borderTop:"1px solid var(--border)"}}>
               <div style={{display:"flex",alignItems:"center",gap:8}}>
                 <div style={{flex:1,minWidth:0}}>
-                  <div style={{fontSize:13,fontWeight:500,fontFamily:"'DM Mono',monospace",
+                  <div style={{fontSize:13,fontWeight:500,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",
                     whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
                     {r.merchant_key}
                     {/* The amount is part of the rule's IDENTITY here, not a
@@ -1617,7 +1617,7 @@ function PropertySheet({name,year,rows,busy,receiptTxIds,surf,getName,getColor,a
     <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",fontSize:11,fontWeight:500,
       color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em",marginBottom:4}}>
       <span>{label}</span>
-      {total!=null&&<span style={{fontFamily:"'DM Mono',monospace"}}>{fmtAuto(total)}</span>}
+      {total!=null&&<span style={{fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums"}}>{fmtAuto(total)}</span>}
     </div>
   );
   function row(t,muted){
@@ -1643,7 +1643,7 @@ function PropertySheet({name,year,rows,busy,receiptTxIds,surf,getName,getColor,a
             {t.excluded&&<Pill label="Excluded" color="#888780" surface={surf.card}/>}
           </div>
         </div>
-        <div style={{fontSize:13,fontFamily:"'DM Mono',monospace",fontWeight:500,flexShrink:0}}>{fmtX(t.amount)}</div>
+        <div style={{fontSize:13,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",fontWeight:500,flexShrink:0}}>{fmtX(t.amount)}</div>
       </div>
     );
   }
@@ -1656,7 +1656,7 @@ function PropertySheet({name,year,rows,busy,receiptTxIds,surf,getName,getColor,a
           <span style={{fontSize:16,fontWeight:600,color:"var(--text)",minWidth:0,overflow:"hidden",
             textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{name}</span>
           <span style={{flex:1}}/>
-          <span style={{fontSize:16,fontWeight:600,fontFamily:"'DM Mono',monospace",flexShrink:0}}>
+          <span style={{fontSize:16,fontWeight:600,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",flexShrink:0}}>
             {signed(Math.round((led.moneyIn.total-led.moneyOut.total)*100)/100)}
           </span>
         </div>
@@ -3822,7 +3822,7 @@ export default function Dashboard({ refreshTick = 0 }) {
         </div>
         <div style={{display:"flex",alignItems:"baseline",gap:5,marginLeft:12,flexShrink:0}}>
           <DrillNum onClick={openDrill(c.label)} title={`See the ${getName(c.label)} transactions`}
-            style={{fontSize:13,fontFamily:"'DM Mono',monospace"}}>{fmt(c.amount)}</DrillNum>
+            style={{fontSize:13,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums"}}>{fmt(c.amount)}</DrillNum>
           {/* No budget on Uncategorized — it would be a budget on
               the classifier's ignorance, and the number moves as
               merchants get learned rather than as spending changes. */}
@@ -3925,7 +3925,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                       <span style={{flex:1}}/>
                       {/* An unbudgetable row has no envelope, so a negative
                           "available" would be a false alarm — show its spend. */}
-                      <span style={{fontSize:13,fontWeight:600,fontFamily:"'DM Mono',monospace",flexShrink:0,
+                      <span style={{fontSize:13,fontWeight:600,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",flexShrink:0,
                         color:!budgetable?"var(--muted)":over?overCard:r.available>0?okCard:"var(--muted)"}}>
                         {budgetable?fmtAuto(r.available):fmtAuto(r.spent)}
                       </span>
@@ -4091,7 +4091,7 @@ export default function Dashboard({ refreshTick = 0 }) {
             </span>
           </button>
           <span title="Assigned + rolled over − spent, across every category in this group"
-            style={{fontSize:13,fontWeight:600,fontFamily:"'DM Mono',monospace",flexShrink:0,
+            style={{fontSize:13,fontWeight:600,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",flexShrink:0,
               color:over?overCard:roll.available>0?okCard:"var(--muted)"}}>
             {fmtAuto(roll.available)}
           </span>
@@ -4356,7 +4356,7 @@ export default function Dashboard({ refreshTick = 0 }) {
   };
 
   return (
-    <div style={{fontFamily:"'DM Sans','Helvetica Neue',sans-serif",background:"var(--bg)",minHeight:"100vh",
+    <div style={{fontFamily:"var(--font-sans)",background:"var(--bg)",minHeight:"100vh",
       color:"var(--text)"}}>
       {/* 96px bottom padding keeps the fixed bottom nav clear of the last row. */}
       <div style={{maxWidth:720,margin:"0 auto",padding:"24px 16px 96px"}}>
@@ -4370,7 +4370,7 @@ export default function Dashboard({ refreshTick = 0 }) {
             hazard, and the confirm text is the safety net. */}
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:10,marginBottom:16}}>
           <div style={{minWidth:0}}>
-            <h1 style={{fontSize:30,fontWeight:600,letterSpacing:"-.03em",lineHeight:1.15,color:"var(--text)"}}>{pageTitle(tab)}</h1>
+            <h1 style={{fontSize:30,fontWeight:700,letterSpacing:"-.03em",lineHeight:1.15,color:"var(--text)"}}>{pageTitle(tab)}</h1>
             {["overview","budget","transactions","categories"].includes(tab)&&(
               <div style={{display:"flex",alignItems:"center",gap:4,marginTop:8}}>
                 <button className="nbtn" onClick={prevMonth} aria-label="Previous month" style={{width:30,height:30,fontSize:14}}>‹</button>
@@ -4581,7 +4581,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                 <span aria-hidden="true" style={{color:"var(--muted)",fontSize:18}}>›</span>
               </div>
               <div style={{fontSize:12,color:"var(--muted)"}}>{monthLabel(year,month)}</div>
-              <div style={{fontSize:38,fontWeight:600,fontFamily:"'DM Mono',monospace",letterSpacing:"-.02em",margin:"2px 0 12px"}}>
+              <div style={{fontSize:38,fontWeight:700,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",letterSpacing:"-.02em",margin:"2px 0 12px"}}>
                 {loading?<Sk w={160} h={34}/>:fmt(totalSpent)}
               </div>
               {bd.segments.length>0&&(
@@ -4602,7 +4602,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                   <span style={{flex:1,fontSize:13,minWidth:0,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
                     {s.others?"All Others":getName(s.label)}
                   </span>
-                  <span style={{fontSize:13,fontFamily:"'DM Mono',monospace",color:"var(--muted)",flexShrink:0}}>{fmtX(s.amount)}</span>
+                  <span style={{fontSize:13,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",color:"var(--muted)",flexShrink:0}}>{fmtX(s.amount)}</span>
                 </div>
               ))}
               {/* The headline above is the month's NET spending; the bar and
@@ -4613,7 +4613,7 @@ export default function Dashboard({ refreshTick = 0 }) {
               {bd.returned>0&&(
                 <div style={{display:"flex",justifyContent:"space-between",fontSize:12,color:"var(--muted)",marginTop:4}}>
                   <span>Less returns</span>
-                  <span style={{fontFamily:"'DM Mono',monospace"}}>−{fmtX(bd.returned)}</span>
+                  <span style={{fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums"}}>−{fmtX(bd.returned)}</span>
                 </div>
               )}
               {!loading&&bd.segments.length===0&&(
@@ -4658,7 +4658,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                     Income
                     <DrillNum onClick={openIncomeDrill}
                       title={`See the ${incomeReport.count} transaction${incomeReport.count===1?"":"s"} counted as income`}
-                      style={{fontFamily:"'DM Mono',monospace",fontWeight:500,color:"var(--text)"}}>
+                      style={{fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",fontWeight:500,color:"var(--text)"}}>
                       {fmt(insight.avgIncome)}/mo
                     </DrillNum>
                   </span>
@@ -4668,7 +4668,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                         that bar off the 1.30:1 hairline. */}
                     <span style={{width:8,height:8,borderRadius:"50%",flexShrink:0,background:trackMark}}/>
                     Spending
-                    <span style={{fontFamily:"'DM Mono',monospace",fontWeight:500,color:"var(--text)"}}>
+                    <span style={{fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",fontWeight:500,color:"var(--text)"}}>
                       {fmt(insight.avgSpending)}/mo
                     </span>
                   </span>
@@ -4720,7 +4720,7 @@ export default function Dashboard({ refreshTick = 0 }) {
               const tot=due.reduce((s,r)=>s+(Number(r.amount)||0),0);
               return (
                 <div className="card" style={{padding:"10px 16px",fontSize:12,color:"var(--muted)"}}>
-                  📅 {due.length} bill{due.length===1?"":"s"} expected in the next 7 days · <span style={{fontFamily:"'DM Mono',monospace",color:"var(--text)"}}>{fmtAuto(tot)}</span>
+                  📅 {due.length} bill{due.length===1?"":"s"} expected in the next 7 days · <span style={{fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",color:"var(--text)"}}>{fmtAuto(tot)}</span>
                 </div>
               );
             })()}
@@ -4734,7 +4734,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                       <div key={i} style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
                         <div style={{width:8,height:8,borderRadius:"50%",background:markOn(getColor(c.label),surf.card),flexShrink:0}}/>
                         <span style={{fontSize:12,color:"var(--text)",flex:1,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{getName(c.label)}</span>
-                        <span style={{fontSize:12,fontFamily:"'DM Mono',monospace",color:"var(--muted)",flexShrink:0}}>{fmt(c.amount)}</span>
+                        <span style={{fontSize:12,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",color:"var(--muted)",flexShrink:0}}>{fmt(c.amount)}</span>
                       </div>
                     ))}
                 </div>
@@ -4757,7 +4757,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                       </div>
                     </div>
                     {/* Directional at ROW level only — the PR C rule. */}
-                    <div style={{fontSize:13,fontFamily:"'DM Mono',monospace",fontWeight:500,flexShrink:0,
+                    <div style={{fontSize:13,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",fontWeight:500,flexShrink:0,
                       color:t.amount<0?inkOn(OK_MONEY,surf.card):"var(--text)"}}>
                       {t.amount===0?"":t.amount<0?"+":"−"}{fmtX(Math.abs(t.amount))}
                     </div>
@@ -4786,9 +4786,9 @@ export default function Dashboard({ refreshTick = 0 }) {
             </div>
             {budgetCount>0&&!loading&&(
               <div style={{display:"flex",alignItems:"center",gap:8,background:"var(--bg)",borderRadius:10,padding:"10px 14px",marginBottom:16,fontSize:12,flexWrap:"wrap"}}>
-                <span style={{color:"var(--muted)"}}>Targets <strong style={{color:"var(--text)",fontFamily:"'DM Mono',monospace"}}>{fmt(budgetedTotal)}</strong></span>
+                <span style={{color:"var(--muted)"}}>Targets <strong style={{color:"var(--text)",fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums"}}>{fmt(budgetedTotal)}</strong></span>
                 <span style={{color:"var(--muted)"}}>·</span>
-                <span style={{color:"var(--muted)"}}>Spent <strong style={{color:"var(--text)",fontFamily:"'DM Mono',monospace"}}>{fmt(budgetedSpent)}</strong></span>
+                <span style={{color:"var(--muted)"}}>Spent <strong style={{color:"var(--text)",fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums"}}>{fmt(budgetedSpent)}</strong></span>
                 <span style={{flex:1}}/>
                 <span style={{fontWeight:600,color:inkOn(budgetLeft>=0?"#1D9E75":"#D85A30",surf.bg)}}>
                   {budgetLeft>=0?`${fmt(budgetLeft)} left`:`${fmt(-budgetLeft)} over`}
@@ -4823,7 +4823,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                       </DrillNum>
                     </div>
                     <DrillNum onClick={open} title={`See every ${getName(g.name)} transaction, subcategories included`}
-                      style={{fontSize:14,fontWeight:600,fontFamily:"'DM Mono',monospace",marginLeft:12,flexShrink:0}}>
+                      style={{fontSize:14,fontWeight:600,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",marginLeft:12,flexShrink:0}}>
                       {fmt(roll.amount)}
                     </DrillNum>
                   </div>
@@ -4897,7 +4897,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                   <button key={g.key} onClick={()=>setSelTx(g.tx)} style={TEACH_ROW}>
                     <span style={TEACH_KEY}>{g.key}</span>
                     <span style={{fontSize:10,color:"var(--muted)",flexShrink:0}}>{g.spendCount} txn{g.spendCount!==1?"s":""}</span>
-                    <span style={{fontSize:11,fontFamily:"'DM Mono',monospace",color:"var(--text)",flexShrink:0}}>{fmt(g.spent)}</span>
+                    <span style={{fontSize:11,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",color:"var(--text)",flexShrink:0}}>{fmt(g.spent)}</span>
                     <span style={{fontSize:11,color:"var(--muted)",flexShrink:0}}>›</span>
                   </button>
                 ))}
@@ -4937,7 +4937,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                       <button key={g.key} onClick={()=>setSelTx(g.tx)} style={TEACH_ROW}>
                         <span style={TEACH_KEY}>{g.key}</span>
                         <span style={{fontSize:10,color:"var(--muted)",flexShrink:0}}>{g.otherCount} txn{g.otherCount!==1?"s":""}</span>
-                        <span style={{fontSize:10,color:"var(--muted)",fontFamily:"'DM Mono',monospace",flexShrink:0}}>{nonSpendLabel(g,fmt)}</span>
+                        <span style={{fontSize:10,color:"var(--muted)",fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",flexShrink:0}}>{nonSpendLabel(g,fmt)}</span>
                         <span style={{fontSize:11,color:"var(--muted)",flexShrink:0}}>›</span>
                       </button>
                     ))}
@@ -5023,7 +5023,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                        visible beside it so the switchover is never silent. */
                     <span title="Actual income for this completed month — money into your checking and savings from outside your linked accounts"
                       style={{display:"inline-flex",alignItems:"baseline",gap:5}}>
-                      <span style={{fontSize:13,fontWeight:600,color:"var(--text)",fontFamily:"'DM Mono',monospace"}}>{fmtAuto(incomeResolved.actual)}</span>
+                      <span style={{fontSize:13,fontWeight:600,color:"var(--text)",fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums"}}>{fmtAuto(incomeResolved.actual)}</span>
                       <span style={{fontSize:10,fontWeight:500,color:"var(--muted)"}}>
                         actual{incomeResolved.manual!=null?` · planned ${fmtAuto(incomeResolved.manual)}`:""}
                       </span>
@@ -5036,7 +5036,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                 </div>
                 {rta!=null?(
                   <div style={{display:"flex",alignItems:"baseline",gap:8,flexWrap:"wrap"}}>
-                    <span style={{fontSize:22,fontWeight:600,letterSpacing:"-.02em",fontFamily:"'DM Mono',monospace",
+                    <span style={{fontSize:22,fontWeight:600,letterSpacing:"-.02em",fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",
                       color:rta>0?okBg:rta<0?overBg:"var(--text)"}}>{fmtAuto(Math.abs(rta))}</span>
                     <span style={{fontSize:12,color:"var(--muted)"}}>
                       {rta>0?"left to assign":rta<0?"assigned beyond your income":"every dollar has a job"}
@@ -5154,7 +5154,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                 <div style={{background:"var(--bg)",borderRadius:10,padding:"12px 14px",marginBottom:14}}>
                   <div style={{display:"flex",alignItems:"baseline",gap:8,marginBottom:2}}>
                     <span style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em"}}>Upcoming bills</span>
-                    {expShownTotal>0&&<span style={{fontSize:11,fontFamily:"'DM Mono',monospace",color:"var(--muted)"}}>{fmtAuto(expShownTotal)} expected</span>}
+                    {expShownTotal>0&&<span style={{fontSize:11,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",color:"var(--muted)"}}>{fmtAuto(expShownTotal)} expected</span>}
                   </div>
                   <div style={{fontSize:10,color:"var(--muted)",marginBottom:8}}>
                     Display only — never counted in Available or spending; a paid bill just points at its real transaction.
@@ -5184,7 +5184,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                                 <span style={{fontSize:9,fontWeight:600,padding:"1px 5px",borderRadius:5,color:cs.ink,background:cs.bg}}>missed?</span>);})()}
                             </div>
                           </div>
-                          <span style={{fontSize:12,fontFamily:"'DM Mono',monospace",fontWeight:500,color:dueInk||"var(--text)",flexShrink:0}}>{fmtX(r.amount)}</span>
+                          <span style={{fontSize:12,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",fontWeight:500,color:dueInk||"var(--text)",flexShrink:0}}>{fmtX(r.amount)}</span>
                           {!r.projected&&(<>
                             {(missed||overdue)&&(
                               <button className="ibtn" disabled={expBusy} style={{fontSize:9,padding:"2px 7px",flexShrink:0}}
@@ -5227,7 +5227,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                                   padding:"3px 0",fontFamily:"inherit",textAlign:"left"}}>
                                 <span style={{fontSize:11,color:"var(--text)",flex:1,minWidth:0,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{t.merchant_name||t.description}</span>
                                 <span style={{fontSize:10,color:"var(--muted)",flexShrink:0}}>{shortDate(t.transaction_date)}</span>
-                                <span style={{fontSize:11,fontFamily:"'DM Mono',monospace",color:"var(--text)",flexShrink:0}}>{fmtX(t.amount)}</span>
+                                <span style={{fontSize:11,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",color:"var(--text)",flexShrink:0}}>{fmtX(t.amount)}</span>
                               </button>
                             ))}
                             <button className="ibtn" style={{fontSize:9,padding:"2px 7px",marginTop:3}} onClick={()=>setExpMatchId(null)}>Cancel</button>
@@ -5240,7 +5240,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                     <div key={r.id} style={{display:"flex",alignItems:"center",gap:8,marginBottom:6,opacity:.6}}>
                       <span style={{fontSize:11,color:inkOn("#1D9E75",surf.bg),flexShrink:0}}>✓</span>
                       <span style={{fontSize:12,color:"var(--muted)",flex:1,minWidth:0,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{r.description}</span>
-                      <span style={{fontSize:11,fontFamily:"'DM Mono',monospace",color:"var(--muted)",flexShrink:0}}>{fmtX(r.amount)}</span>
+                      <span style={{fontSize:11,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",color:"var(--muted)",flexShrink:0}}>{fmtX(r.amount)}</span>
                     </div>
                   ))}
                 </div>
@@ -5280,7 +5280,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                       <div style={{marginLeft:14,paddingLeft:10,borderLeft:"1px solid var(--border)",marginBottom:10,
                         display:"flex",alignItems:"center",gap:6,fontSize:11,color:"var(--muted)",flexWrap:"wrap"}}>
                         <span>Tagged directly:</span>
-                        <span style={{fontFamily:"'DM Mono',monospace"}}>{fmtAuto(g.own.assigned)} assigned</span>
+                        <span style={{fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums"}}>{fmtAuto(g.own.assigned)} assigned</span>
                         {g.own.spent!==0&&(<><span>·</span>
                           <DrillNum onClick={openDrill(g.name)} title={`See the ${getName(g.name)} transactions`}>
                             {fmtAuto(g.own.spent)} spent
@@ -5603,7 +5603,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                           </div>
                         </div>
                         <div style={{textAlign:"right",flexShrink:0}}>
-                          <div style={{fontSize:13,fontFamily:"'DM Mono',monospace",fontWeight:500,
+                          <div style={{fontSize:13,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",fontWeight:500,
                             color:t.amount<0?inkOn(OK_MONEY,surf.card):"var(--text)"}}>
                             {sign}{fmtX(Math.abs(t.amount))}
                           </div>
@@ -5719,7 +5719,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                         total above it and the reference: a positive
                         displayBalance is cash on hand, a debt already carries
                         its minus from displayBalance. */}
-                    <div style={{fontSize:14,fontFamily:"'DM Mono',monospace",fontWeight:600,
+                    <div style={{fontSize:14,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",fontWeight:600,
                       color:bal>0?inkOn(OK_MONEY,surf.card):"var(--text)"}}>{fmtX(bal)}</div>
                     {/* An age only once it is worth knowing (BALANCE_STALE_DAYS),
                         and MUTED, never amber: a stale balance is a known limit
@@ -5752,7 +5752,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                       <span aria-hidden="true" style={{fontSize:13,color:"var(--muted)",width:12,flexShrink:0}}>{open?"▾":"▸"}</span>
                       <span style={{fontSize:17,fontWeight:700,color:"var(--text)",letterSpacing:"-.01em"}}>{label}</span>
                       {total!==null&&(
-                        <span style={{marginLeft:"auto",fontSize:15,fontWeight:600,fontFamily:"'DM Mono',monospace",
+                        <span style={{marginLeft:"auto",fontSize:15,fontWeight:600,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",
                           color:total>0?inkOn(OK_MONEY,surf.bg):"var(--text)"}}>{fmtX(total)}</span>
                       )}
                       {total===null&&(
@@ -5824,7 +5824,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                       {a?acctLabel(a):"Account"}
                     </div>
                     <div style={{fontSize:11,color:"var(--muted)",marginTop:2}}>
-                      history before <span style={{fontFamily:"'DM Mono',monospace",color:"var(--text)"}}>{g.served_from}</span> was never fetched
+                      history before <span style={{fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",color:"var(--text)"}}>{g.served_from}</span> was never fetched
                     </div>
                   </div>
                 );
@@ -5870,17 +5870,17 @@ export default function Dashboard({ refreshTick = 0 }) {
                         <div style={{fontSize:12,fontWeight:500,color:"var(--text)",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
                           {acctLabel(a)}{a.hidden&&<span style={{fontSize:10,color:"var(--muted)",marginLeft:6}}>hidden</span>}
                         </div>
-                        <div style={{fontSize:10,fontFamily:"'DM Mono',monospace",color:"var(--muted)",marginTop:2}}>
+                        <div style={{fontSize:10,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",color:"var(--muted)",marginTop:2}}>
                           {c?.first?`${c.first} – ${c.last}`:"—"}
                         </div>
                       </div>
                       <div style={{display:"flex",gap:4,flexShrink:0,flexWrap:"wrap",justifyContent:"flex-end",maxWidth:150}}>
                         {c&&Object.entries(c.sources).map(([s,n])=>(
-                          <span key={s} style={{fontSize:9,fontFamily:"'DM Mono',monospace",color:"var(--muted)",
+                          <span key={s} style={{fontSize:9,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",color:"var(--muted)",
                             background:"var(--bg)",border:"1px solid var(--border)",borderRadius:6,padding:"1px 5px"}}>{s} {n}</span>
                         ))}
                       </div>
-                      <div style={{fontSize:12,fontFamily:"'DM Mono',monospace",color:"var(--text)",flexShrink:0,minWidth:34,textAlign:"right"}}>
+                      <div style={{fontSize:12,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",color:"var(--text)",flexShrink:0,minWidth:34,textAlign:"right"}}>
                         {c?c.count:0}
                       </div>
                     </div>
@@ -5970,7 +5970,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                         at 390px and the totals stopped lining up. */}
                     <div style={{display:"flex",justifyContent:"space-between",gap:8,marginTop:5,fontSize:11,color:"var(--muted)"}}>
                       <span style={{minWidth:0}}>Income {fmtAuto(m.income)} − Spending {fmtAuto(m.spending)}</span>
-                      <span style={{fontFamily:"'DM Mono',monospace",color:"var(--text)",flexShrink:0}}>{signed(m.net)}</span>
+                      <span style={{fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",color:"var(--text)",flexShrink:0}}>{signed(m.net)}</span>
                     </div>
                     {m.deltaObserved===null?(
                       // Three different reasons a month can't be checked, and
@@ -5990,11 +5990,11 @@ export default function Dashboard({ refreshTick = 0 }) {
                         <div style={{display:"flex",justifyContent:"space-between",gap:8,marginTop:3,fontSize:11,color:"var(--muted)"}}>
                           <span style={{minWidth:0}}>
                             Balance change
-                            <span style={{fontFamily:"'DM Mono',monospace",opacity:.7,marginLeft:5}}>
+                            <span style={{fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",opacity:.7,marginLeft:5}}>
                               {m.balanceStart.date} → {m.balanceEnd.date}
                             </span>
                           </span>
-                          <span style={{fontFamily:"'DM Mono',monospace",color:"var(--text)",flexShrink:0}}>{signed(m.deltaObserved)}</span>
+                          <span style={{fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",color:"var(--text)",flexShrink:0}}>{signed(m.deltaObserved)}</span>
                         </div>
                         {/* A hairline under the two headline figures: the lines
                             below EXPLAIN the gap between them, and without a
@@ -6005,13 +6005,13 @@ export default function Dashboard({ refreshTick = 0 }) {
                             <span style={{minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
                               {b.label} <span style={{opacity:.7}}>· {b.count} row{b.count===1?"":"s"}</span>
                             </span>
-                            <span style={{fontFamily:"'DM Mono',monospace",flexShrink:0}}>{signed(b.impact)}</span>
+                            <span style={{fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",flexShrink:0}}>{signed(b.impact)}</span>
                           </div>
                         ))}
                         <div style={{display:"flex",justifyContent:"space-between",gap:8,marginTop:6,
                           fontSize:11,fontWeight:600,color:"var(--text)"}}>
                           <span>Unexplained</span>
-                          <span style={{fontFamily:"'DM Mono',monospace"}}>{signed(m.unexplained)}</span>
+                          <span style={{fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums"}}>{signed(m.unexplained)}</span>
                         </div>
                       </>
                     )}
@@ -6053,7 +6053,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                           const legLine=(l,dir)=>(
                             <div style={{display:"flex",gap:6,marginTop:2,fontSize:10,color:"var(--muted)"}}>
                               <span style={{width:24,flexShrink:0,opacity:.7}}>{dir}</span>
-                              <span style={{fontFamily:"'DM Mono',monospace",flexShrink:0}}>{l.date}</span>
+                              <span style={{fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",flexShrink:0}}>{l.date}</span>
                               <span style={{minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
                                 {l.name}{nm(l.accountId)?` · ${nm(l.accountId)}`:""}
                               </span>
@@ -6062,7 +6062,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                           return (
                             <div key={p.key} style={{marginTop:8}}>
                               <div style={{display:"flex",justifyContent:"space-between",gap:8,fontSize:11}}>
-                                <span style={{fontFamily:"'DM Mono',monospace",color:"var(--text)"}}>{fmtAuto(p.amount)}</span>
+                                <span style={{fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",color:"var(--text)"}}>{fmtAuto(p.amount)}</span>
                                 <span style={{color:"var(--muted)",fontSize:10,flexShrink:0}}>
                                   {/* "not paired" is the honest catch-all for an exact
                                       same-month pair: the pairing window is a constant
@@ -6143,7 +6143,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                     page and the section total above it — one number, one
                     colour, whichever screen it is read on. */}
                 {(()=>{const bal=displayBalance(selAcct.current_balance,selAcct.type);return (
-                  <div style={{fontSize:15,fontFamily:"'DM Mono',monospace",fontWeight:600,
+                  <div style={{fontSize:15,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",fontWeight:600,
                     color:bal>0?inkOn(OK_MONEY,surf.card):"var(--text)"}}>{fmtX(bal)}</div>
                 );})()}
                 {/* What the balance is worth knowing beside it. Both lines are
@@ -6336,7 +6336,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                             {t.excluded&&<Pill label="Excluded" color="#888780" surface={surf.card}/>}
                           </div>
                         </div>
-                        <div style={{fontSize:13,fontFamily:"'DM Mono',monospace",fontWeight:500,flexShrink:0,
+                        <div style={{fontSize:13,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",fontWeight:500,flexShrink:0,
                           color:t.amount<0?inkOn(OK_MONEY,surf.card):"var(--text)"}}>
                           {sign}{fmtX(Math.abs(t.amount))}
                         </div>
@@ -6395,7 +6395,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                       the headline and the rows agree on the sign (a positive
                       total above negative cards is exactly the inconsistency
                       displayBalance exists to remove). */}
-                  <div style={{fontSize:24,fontWeight:600,letterSpacing:"-.02em",fontFamily:"'DM Mono',monospace"}}>
+                  <div style={{fontSize:24,fontWeight:600,letterSpacing:"-.02em",fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums"}}>
                     {fmtX(displayBalance(debtData.totalDebt,"credit"))}
                   </div>
                   <div style={{fontSize:11,color:"var(--muted)",marginTop:3}}>
@@ -6459,7 +6459,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                           </div>
                         </div>
                         <div style={{textAlign:"right",flexShrink:0}}>
-                          <div style={{fontSize:14,fontFamily:"'DM Mono',monospace",fontWeight:600}}>{fmtX(displayBalance(a.current_balance,a.type))}</div>
+                          <div style={{fontSize:14,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",fontWeight:600}}>{fmtX(displayBalance(a.current_balance,a.type))}</div>
                           {util!=null&&<div style={{fontSize:10,color:inkOn(utilColor,surf.card),marginTop:1}}>{inCredit?"nothing owed":`${Math.round(util*100)}% of limit`}</div>}
                         </div>
                       </div>
@@ -6579,7 +6579,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                   <input value={debtExtra} inputMode="decimal" placeholder="0"
                     onChange={e=>setDebtExtra(numericish(e.target.value,{negative:false}))}
                     style={{width:64,padding:"5px 7px",borderRadius:8,border:"1px solid var(--border)",background:"var(--bg)",
-                      color:"var(--text)",fontSize:12,fontFamily:"'DM Mono',monospace",outline:"none",textAlign:"right"}}/>
+                      color:"var(--text)",fontSize:12,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",outline:"none",textAlign:"right"}}/>
                   /mo
                 </span>
               </div>
@@ -6613,7 +6613,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                     ].map((c,i)=>(
                       <div key={i} style={{flex:"1 1 100px",background:"var(--bg)",borderRadius:10,padding:"10px 12px"}}>
                         <div style={{fontSize:10,color:"var(--muted)",fontWeight:500,marginBottom:3}}>{c.label}</div>
-                        <div style={{fontSize:c.small?12:15,fontWeight:600,fontFamily:c.small?"inherit":"'DM Mono',monospace",color:c.clr||"var(--text)",lineHeight:1.25}}>{c.val}</div>
+                        <div style={{fontSize:c.small?12:15,fontWeight:600,fontFamily:"var(--font-num)",fontVariantNumeric:c.small?"normal":"tabular-nums",color:c.clr||"var(--text)",lineHeight:1.25}}>{c.val}</div>
                         <div style={{fontSize:10,color:"var(--muted)",marginTop:2}}>{c.sub}</div>
                       </div>
                     ))}
@@ -6652,7 +6652,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                     <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{width:"100%",height:H,display:"block"}}>
                       <polyline points={pts} fill="none" stroke={line} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round"/>
                     </svg>
-                    <div style={{display:"flex",justifyContent:"space-between",marginTop:6,fontSize:10,color:"var(--muted)",fontFamily:"'DM Mono',monospace"}}>
+                    <div style={{display:"flex",justifyContent:"space-between",marginTop:6,fontSize:10,color:"var(--muted)",fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums"}}>
                       <span>{shortDate(series[0].date)} · {fmt(displayBalance(series[0].total,"credit"))}</span>
                       <span>{shortDate(series[series.length-1].date)} · {fmt(displayBalance(series[series.length-1].total,"credit"))}</span>
                     </div>
@@ -6670,7 +6670,7 @@ export default function Dashboard({ refreshTick = 0 }) {
             {nwSeries.length>0&&(
             <div className="card">
               <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em",marginBottom:5}}>Net worth</div>
-              <div style={{fontSize:24,fontWeight:600,letterSpacing:"-.02em",fontFamily:"'DM Mono',monospace"}}>
+              <div style={{fontSize:24,fontWeight:600,letterSpacing:"-.02em",fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums"}}>
                 {fmtX(nwSeries[nwSeries.length-1].total)}
               </div>
               <div style={{fontSize:11,color:"var(--muted)",marginTop:3}}>
@@ -6688,7 +6688,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                     <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{width:"100%",height:H,display:"block",marginTop:10}}>
                       <polyline points={pts} fill="none" stroke={line} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round"/>
                     </svg>
-                    <div style={{display:"flex",justifyContent:"space-between",marginTop:6,fontSize:10,color:"var(--muted)",fontFamily:"'DM Mono',monospace"}}>
+                    <div style={{display:"flex",justifyContent:"space-between",marginTop:6,fontSize:10,color:"var(--muted)",fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums"}}>
                       <span>{shortDate(nwSeries[0].date)} · {fmt(nwSeries[0].total)}</span>
                       <span>{shortDate(nwSeries[nwSeries.length-1].date)} · {fmt(nwSeries[nwSeries.length-1].total)}</span>
                     </div>
@@ -6726,7 +6726,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                   )}
                   {est&&(
                     <span title="Rough estimate. Low = a follow-up in an ongoing chat (context served from cache); high = the first question of a chat. Actual cost depends on answer length."
-                      style={{fontSize:11,color:"var(--muted)",fontFamily:"'DM Mono',monospace",marginLeft:"auto"}}>
+                      style={{fontSize:11,color:"var(--muted)",fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",marginLeft:"auto"}}>
                       ~{formatCents(est.low)}–{formatCents(est.high)}/question
                     </span>
                   )}
@@ -6859,7 +6859,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                       const isSel=pYM.y===year&&pYM.m===month;
                       return (
                         <div key={i} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:4}}>
-                          <span style={{fontSize:9,fontFamily:"'DM Mono',monospace",color:"var(--muted)",whiteSpace:"nowrap"}}>{fmt(p.spending.amount)}</span>
+                          <span style={{fontSize:9,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",color:"var(--muted)",whiteSpace:"nowrap"}}>{fmt(p.spending.amount)}</span>
                           <div onClick={()=>{setYear(pYM.y);setMonth(pYM.m);setTab("overview");}}
                             title={`View ${p.label}`}
                             style={{width:"100%",height:h,minHeight:4,background:isSel?"var(--accent)":"var(--track)",
@@ -6932,7 +6932,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                         <div className="bar-bg" style={{height:BAR_H,borderRadius:BAR_H/2}}>
                           <div className="bar-fill" style={{width:row.w+"%",background:row.color,borderRadius:BAR_H/2}}/>
                         </div>
-                        <span style={{fontSize:12,fontFamily:"'DM Mono',monospace",fontWeight:500,color:"var(--text)",
+                        <span style={{fontSize:12,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",fontWeight:500,color:"var(--text)",
                           width:62,flexShrink:0,textAlign:"right"}}>{fmt(row.val)}</span>
                       </>);
                       const shell={display:"flex",gap:8,alignItems:"center",width:"100%",padding:"11px 0",
@@ -6968,7 +6968,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                             targets. */}
                         <div style={{position:"absolute",top:2,height:10,borderRadius:5,background:markOn(pos?"#1D9E75":"#D85A30",surf.bg),width:w+"%",left:pos?"50%":"auto",right:pos?"auto":"50%"}}/>
                       </div>
-                      <span style={{fontSize:11,fontFamily:"'DM Mono',monospace",fontWeight:500,color:inkOn(pos?"#1D9E75":"#D85A30",surf.card),width:64,textAlign:"right",flexShrink:0}}>{pos?"+":"−"}{fmt(Math.abs(n.net))}</span>
+                      <span style={{fontSize:11,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",fontWeight:500,color:inkOn(pos?"#1D9E75":"#D85A30",surf.card),width:64,textAlign:"right",flexShrink:0}}>{pos?"+":"−"}{fmt(Math.abs(n.net))}</span>
                     </div>
                   );
                 });
@@ -7006,7 +7006,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                     <div key={m.label} style={{marginBottom:12}}>
                       <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,marginBottom:4}}>
                         <Pill label={getName(m.label)} color={getColor(m.label)} surface={surf.card}/>
-                        <span style={{fontSize:11,fontFamily:"'DM Mono',monospace",fontWeight:600,color:inkOn(up?OVER_MONEY:OK_MONEY,surf.card),flexShrink:0}}>
+                        <span style={{fontSize:11,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",fontWeight:600,color:inkOn(up?OVER_MONEY:OK_MONEY,surf.card),flexShrink:0}}>
                           {up?"+":"−"}{fmt(Math.abs(m.delta))}
                         </span>
                       </div>
@@ -7014,7 +7014,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                         <div style={{flex:1,height:6,background:"var(--bg)",borderRadius:3,overflow:"hidden"}}>
                           <div style={{height:"100%",width:w+"%",borderRadius:3,background:markOn(up?OVER_MONEY:OK_MONEY,surf.bg)}}/>
                         </div>
-                        <span style={{fontSize:10,fontFamily:"'DM Mono',monospace",color:"var(--muted)",flexShrink:0}}>{fmt(m.prev)} → {fmt(m.curr)}</span>
+                        <span style={{fontSize:10,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",color:"var(--muted)",flexShrink:0}}>{fmt(m.prev)} → {fmt(m.curr)}</span>
                       </div>
                     </div>
                   );
@@ -7104,7 +7104,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                       )}
                     </div>
                   </div>
-                  <div style={{fontSize:13,fontFamily:"'DM Mono',monospace",fontWeight:500,flexShrink:0}}>
+                  <div style={{fontSize:13,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",fontWeight:500,flexShrink:0}}>
                     {fmtX(r.monthlyAmount)}<span style={{fontSize:10,color:"var(--muted)"}}>{perLabel[r.cadence]||"/mo"}</span>
                   </div>
                   {expectReady&&(expKeys.has(r.key)?(
@@ -7286,16 +7286,16 @@ export default function Dashboard({ refreshTick = 0 }) {
                     <div>
                       <div style={{fontSize:10,color:"var(--muted)"}}>Money in</div>
                       <DrillNum onClick={()=>setTaxDrill(e.id)} title={`Everything compiled under ${e.name}`}
-                        style={{display:"block",fontSize:15,fontWeight:600,fontFamily:"'DM Mono',monospace",color:inkOn("#1D9E75",surf.card)}}>{fmtAuto(totIn)}</DrillNum>
+                        style={{display:"block",fontSize:15,fontWeight:600,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",color:inkOn("#1D9E75",surf.card)}}>{fmtAuto(totIn)}</DrillNum>
                     </div>
                     <div>
                       <div style={{fontSize:10,color:"var(--muted)"}}>Money out</div>
                       <DrillNum onClick={()=>setTaxDrill(e.id)} title={`Everything compiled under ${e.name}`}
-                        style={{display:"block",fontSize:15,fontWeight:600,fontFamily:"'DM Mono',monospace",color:"var(--text)"}}>{fmtAuto(totOut)}</DrillNum>
+                        style={{display:"block",fontSize:15,fontWeight:600,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",color:"var(--text)"}}>{fmtAuto(totOut)}</DrillNum>
                     </div>
                     <div>
                       <div style={{fontSize:10,color:"var(--muted)"}}>Net cash</div>
-                      <div style={{fontSize:15,fontWeight:600,fontFamily:"'DM Mono',monospace",color:totIn-totOut<0?inkOn("#D85A30",surf.card):"var(--text)"}}>{signed(Math.round((totIn-totOut)*100)/100)}</div>
+                      <div style={{fontSize:15,fontWeight:600,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",color:totIn-totOut<0?inkOn("#D85A30",surf.card):"var(--text)"}}>{signed(Math.round((totIn-totOut)*100)/100)}</div>
                     </div>
                   </div>
 
@@ -7303,7 +7303,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                   <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em",marginBottom:8}}>Schedule E worksheet</div>
                   <div style={{display:"flex",justifyContent:"space-between",fontSize:12,marginBottom:5}}>
                     <span style={{color:"var(--text)"}}>3 · Rents received</span>
-                    <span style={{fontFamily:"'DM Mono',monospace",color:"var(--text)"}}>{fmtAuto(rep.rents.total)}</span>
+                    <span style={{fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",color:"var(--text)"}}>{fmtAuto(rep.rents.total)}</span>
                   </div>
                   {/* Line 3 goes on the return — say how much of it was a
                       DEFAULT (unmapped money in) rather than an explicit
@@ -7319,12 +7319,12 @@ export default function Dashboard({ refreshTick = 0 }) {
                   {rep.lines.filter(l=>l.total!==0).map(l=>(
                     <div key={l.line} style={{display:"flex",justifyContent:"space-between",fontSize:12,marginBottom:5}}>
                       <span style={{color:"var(--text)"}}>{l.line} · {l.label}</span>
-                      <span style={{fontFamily:"'DM Mono',monospace",color:"var(--text)"}}>{fmtAuto(l.total)}</span>
+                      <span style={{fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",color:"var(--text)"}}>{fmtAuto(l.total)}</span>
                     </div>
                   ))}
                   <div style={{display:"flex",justifyContent:"space-between",fontSize:12,fontWeight:600,marginTop:2,paddingTop:6,borderTop:"1px solid var(--border)"}}>
                     <span style={{color:"var(--text)"}}>Total expenses on the worksheet</span>
-                    <span style={{fontFamily:"'DM Mono',monospace",color:"var(--text)"}}>{fmtAuto(rep.totalExpenses)}</span>
+                    <span style={{fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",color:"var(--text)"}}>{fmtAuto(rep.totalExpenses)}</span>
                   </div>
 
                   {rep.unmapped.length>0&&(
@@ -7338,7 +7338,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                       {rep.unmapped.map(u=>(
                         <div key={u.category} style={{display:"flex",justifyContent:"space-between",fontSize:11,color:"var(--muted)",marginBottom:4}}>
                           <span>{getName(u.category)} · {u.count}</span>
-                          <span style={{fontFamily:"'DM Mono',monospace"}}>{fmtAuto(u.total)}</span>
+                          <span style={{fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums"}}>{fmtAuto(u.total)}</span>
                         </div>
                       ))}
                       <div style={{fontSize:10,color:"var(--muted)",marginTop:2}}>
@@ -7364,7 +7364,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                               {(!c.placed_in_service||!c.useful_life_years)&&<span style={{color:amber}}> · needs in-service date/life</span>}
                               {receiptTxIds&&!receiptTxIds.has(c.id)&&<span style={{color:amber}}> · no receipt</span>}
                             </span>
-                            <span style={{fontFamily:"'DM Mono',monospace",flexShrink:0}}>{fmtAuto(c.amount)}</span>
+                            <span style={{fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",flexShrink:0}}>{fmtAuto(c.amount)}</span>
                           </div>
                         );
                       })}
@@ -7406,7 +7406,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                 {deductions.map(b=>(
                   <div key={b.key} style={{display:"flex",justifyContent:"space-between",fontSize:12,marginBottom:5}}>
                     <span style={{color:"var(--text)"}}>{b.label}{b.count>0&&<span style={{color:"var(--muted)"}}> · {b.count}</span>}</span>
-                    <span style={{fontFamily:"'DM Mono',monospace",color:"var(--text)"}}>{fmtAuto(b.total)}</span>
+                    <span style={{fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",color:"var(--text)"}}>{fmtAuto(b.total)}</span>
                   </div>
                 ))}
                 <div style={{borderTop:"1px solid var(--border)",margin:"10px 0"}}/>
@@ -7441,8 +7441,8 @@ export default function Dashboard({ refreshTick = 0 }) {
                   {!mileForm&&<button className="ibtn" style={{fontSize:11}} onClick={()=>setMileForm({on_date:localToday,miles:"",purpose:"",entity_id:activeEnts[0]?.id||""})}>＋ Log a drive</button>}
                 </div>
                 <div style={{fontSize:13,color:"var(--text)",marginBottom:4}}>
-                  <strong style={{fontFamily:"'DM Mono',monospace"}}>{mileSum.miles.toLocaleString("en-US")}</strong> mi in {taxYear} ·
-                  deduction <strong style={{fontFamily:"'DM Mono',monospace"}}>{fmtAuto(mileSum.amount)}</strong>
+                  <strong style={{fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums"}}>{mileSum.miles.toLocaleString("en-US")}</strong> mi in {taxYear} ·
+                  deduction <strong style={{fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums"}}>{fmtAuto(mileSum.amount)}</strong>
                 </div>
                 {mileSum.byRate.length>1&&(
                   <div style={{fontSize:10,color:"var(--muted)",marginBottom:4}}>
@@ -7490,7 +7490,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                     <span style={{flex:1,minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",color:"var(--text)"}}>
                       {m.purpose||"Drive"}{m.entity_id&&entName(m.entity_id)?` · ${entName(m.entity_id)}`:""}
                     </span>
-                    <span style={{fontFamily:"'DM Mono',monospace",flexShrink:0}}>{Number(m.miles).toLocaleString("en-US")} mi</span>
+                    <span style={{fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",flexShrink:0}}>{Number(m.miles).toLocaleString("en-US")} mi</span>
                     <button onClick={()=>handleDeleteMileage(m.id)} title="Delete this drive"
                       style={{background:"none",border:"none",cursor:"pointer",color:"var(--muted)",fontSize:15,lineHeight:1,padding:"0 2px",flexShrink:0}}>×</button>
                   </div>
@@ -7606,7 +7606,7 @@ export default function Dashboard({ refreshTick = 0 }) {
             <div style={{background:"linear-gradient(180deg, var(--input-bg), var(--card))",padding:"14px 16px 24px"}}>
               <button className="nbtn" data-mm-tx-close="" aria-label="Close" title="Close" onClick={()=>setSelTx(null)}>×</button>
               <div style={{textAlign:"center",marginTop:2}}>
-                <div style={{fontSize:42,fontFamily:"'DM Mono',monospace",fontWeight:500,letterSpacing:"-.02em",
+                <div style={{fontSize:42,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",fontWeight:500,letterSpacing:"-.02em",
                   color:selTx.amount<0?inkOn(OK_MONEY,surf.card):"var(--text)"}}>
                   {sign}{fmtX(Math.abs(selTx.amount))}
                 </div>
@@ -7918,7 +7918,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                 rule is taught from this string, and "why didn't my rule
                 fire?" is unanswerable if the string is never shown. */}
             {selTx.description&&selTx.description!==(selTx.merchant_name||"")&&(
-              <div style={{fontSize:10,color:"var(--muted)",fontFamily:"'DM Mono',monospace",wordBreak:"break-word"}}>
+              <div style={{fontSize:10,color:"var(--muted)",fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",wordBreak:"break-word"}}>
                 Bank text: {selTx.description}
               </div>
             )}

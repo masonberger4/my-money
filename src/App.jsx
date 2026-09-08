@@ -19,7 +19,7 @@ function ConfigErrorScreen() {
         padding: 24,
         background: 'var(--bg)',
         color: 'var(--text)',
-        fontFamily: "'DM Sans','Helvetica Neue',sans-serif",
+        fontFamily: "var(--font-sans)",
       }}
     >
       <div
@@ -72,7 +72,7 @@ function StartupSkeleton() {
         padding: 24,
         background: 'var(--bg)',
         color: 'var(--text)',
-        fontFamily: "'DM Sans','Helvetica Neue',sans-serif",
+        fontFamily: "var(--font-sans)",
       }}
     >
       <div

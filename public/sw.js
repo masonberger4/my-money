@@ -10,7 +10,7 @@
 //
 // Bump CACHE_VERSION on any change to this file or the precache list.
 
-const CACHE_VERSION = 'v6';
+const CACHE_VERSION = 'v7';
 const SHELL_CACHE = `shell-${CACHE_VERSION}`;
 const ASSET_CACHE = `assets-${CACHE_VERSION}`;
 
@@ -21,9 +21,7 @@ const PRECACHE = [
   '/icon-192.png',
   '/icon-512.png',
   '/icon-maskable-512.png',
-  '/fonts/dm-sans.woff2',
-  '/fonts/dm-mono-400.woff2',
-  '/fonts/dm-mono-500.woff2',
+  '/fonts/inter.woff2',
 ];
 
 self.addEventListener('install', (event) => {

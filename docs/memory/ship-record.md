@@ -261,6 +261,14 @@ Conventions / Gotchas. An entry here is a pointer, not a home for rules.
   exited 0. The durable rule it produced is the browser-floor Gotcha; `package.json`
   now declares the Node floor Vite 8 introduced.
 
+- **One typeface + the near-black indigo dark theme (2026-09-08)** — Inter
+  400–800 (one self-hosted variable file) replaced DM Sans and both DM Mono
+  weights, and the dark tokens were re-sampled from Mason's reference
+  screenshot. Rules in the `src/ui.css` key row; the reasoning, including why a
+  `-apple-system` stack was ruled out and why money kept its alignment without
+  a mono font, is the 2026-09-08 decision-journal entry. HALF-DONE BY DESIGN:
+  the LIGHT palette is untouched until Mason supplies a light reference.
+
 ## Pending branches
 
 None in code, and **no migration is outstanding**: every file in
@@ -389,7 +397,7 @@ session builds them as decisions rather than rediscoveries: an
 approved/reviewed column + "Approve" semantics; an "uncleared/pending" count
 banner; two-line transfer payee (needs a pair link the pairing doesn't
 store); date editing in the tx sheet; a memo field (`user_description` IS
-the rename); font weights past 600 (the variable font's ceiling); the
+the rename); the
 manifest `theme_color` inconsistency (pre-existing, untested).
 
 **The forward-looking doc is `docs/next-iteration-plan-2026-08-04.md`** — the

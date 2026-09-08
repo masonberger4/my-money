@@ -224,7 +224,7 @@ export default function PdfTemplateEditor({ pages, template, onChange, rowCount 
               position: "absolute", left: r.x * scale, top: r.y * scale,
               fontSize: Math.max(3, (r.h || 9) * scale * 0.92), lineHeight: 1,
               whiteSpace: "pre", color: rowYs.has(Math.round(r.y)) ? "var(--text)" : "var(--muted)",
-              fontFamily: "'DM Mono',monospace", pointerEvents: "none",
+              fontFamily: "var(--font-mono)", pointerEvents: "none",
             }}>{r.str}</div>
           ))}
           {/* column boundary rules */}

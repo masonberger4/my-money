@@ -1366,7 +1366,7 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                               {r.isOverlap && !r.isDuplicate && <span style={{ background: "var(--bg)", color: "var(--muted)", borderRadius: 10, padding: "1px 6px", fontWeight: 600 }}>in feed</span>}
                             </div>
                           </div>
-                          <div style={{ fontSize: 12, fontFamily: "'DM Mono',monospace", fontWeight: 500, flexShrink: 0, color: r.amount < 0 ? readableInk(MONEY_IN, cardSurface) : "var(--text)" }}>
+                          <div style={{ fontSize: 12, fontFamily: "var(--font-num)", fontVariantNumeric: "tabular-nums", fontWeight: 500, flexShrink: 0, color: r.amount < 0 ? readableInk(MONEY_IN, cardSurface) : "var(--text)" }}>
                             {money(r.amount)}
                           </div>
                         </div>
@@ -1390,9 +1390,9 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                         <div style={{ marginTop: 6, maxHeight: 160, overflowY: "auto" }}>
                           {skipped.map((sk, i) => (
                             <div key={i} style={{ display: "flex", gap: 8, padding: "3px 0", borderTop: i ? "1px solid var(--border)" : "none" }}>
-                              <span style={{ flexShrink: 0, fontFamily: "'DM Mono',monospace" }}>{sk.rawDate || "—"}</span>
+                              <span style={{ flexShrink: 0, fontFamily: "var(--font-mono)" }}>{sk.rawDate || "—"}</span>
                               <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{sk.rawDesc || "—"}</span>
-                              <span style={{ flexShrink: 0, fontFamily: "'DM Mono',monospace" }}>{[sk.rawDebit, sk.rawCredit].filter(Boolean).join(" / ") || "—"}</span>
+                              <span style={{ flexShrink: 0, fontFamily: "var(--font-mono)" }}>{[sk.rawDebit, sk.rawCredit].filter(Boolean).join(" / ") || "—"}</span>
                               {/* The REASON is the whole point: "zero amount"
                                   is a memo line, "unparseable date" is a real
                                   purchase the backfill is about to lose. */}
@@ -1645,7 +1645,7 @@ function ReconRow({ left, sub, amount, amountNote }) {
         {sub && <div style={{ fontSize: 10, color: "var(--muted)", marginTop: 2 }}>{sub}</div>}
       </div>
       <div style={{ textAlign: "right", flexShrink: 0 }}>
-        <div style={{ fontSize: 12, fontFamily: "'DM Mono',monospace", fontWeight: 500 }}>{amount}</div>
+        <div style={{ fontSize: 12, fontFamily: "var(--font-num)", fontVariantNumeric: "tabular-nums", fontWeight: 500 }}>{amount}</div>
         {amountNote && <div style={{ fontSize: 10, color: "var(--muted)", marginTop: 1 }}>{amountNote}</div>}
       </div>
     </div>

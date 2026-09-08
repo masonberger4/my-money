@@ -276,3 +276,39 @@ them:
 - **The render gate is still the only check that evaluates the Dashboard in a
   browser.** It caught a TypeError that `npm test` and `vite build` both
   passed. That is the third time this failure shape is on the record.
+
+## 2026-09-08 — One typeface (Inter), and a near-black indigo dark theme
+
+Mason's ask was "copy the font and color scheme to be used by the app", with a
+reference screenshot of the Reflect tab. It was NOT the palette main ships: the
+capture (Display P3, so sampled and converted to sRGB before use) reads
+`#05050F` page / `#111227` card / pure-white ink / a bluer `#7482FF` accent, in
+a Helvetica-SF grotesque with headings well past DM Sans's 600 ceiling.
+
+- **Inter replaces DM Sans AND both DM Mono weights** — one variable file,
+  400–800, self-hosted like its predecessors. Mason asked what a Dell in a
+  browser would get: that question is what ruled OUT a `-apple-system` stack,
+  which matches the screenshot only on Apple devices and resolves to Segoe UI
+  on Windows. Inter is the same grotesque everywhere.
+- **Money columns keep their alignment without a mono font**, through
+  `font-variant-numeric: tabular-nums` at the ~95 sites that named DM Mono.
+  The reference screenshot renders amounts in the same proportional face, so
+  keeping a second family for them would have half-copied the design.
+  `--font-mono` survives as the SYSTEM stack and is for RAW data only (the CSV
+  importer's source columns, the SimpleFIN token, the PDF template overlay),
+  where a monospace says "the file's text, not ours".
+- **Dark tokens come from the screenshot; light is untouched in this pass** —
+  Mason is providing a light-mode reference, and inventing one meanwhile would
+  have to be redone. Ink got safer (text 14.21→18.43:1 on the card, muted
+  6.52→10.74:1); the accent got bluer and therefore DARKER, so its ratio fell
+  — 6.90→5.60:1 on the card, 7.73→6.16:1 on the page — which is the one number
+  this re-theme spends rather than gains. It clears 4.5:1 on both surfaces, so
+  accent text stays AA, but a future accent tweak has less headroom than the
+  navy palette had.
+- **The active nav pill moved from `--bg` to `--input-bg`.** Light-identical
+  (the two tokens share a value there), and in dark it becomes the LIFTED pill
+  the screenshot shows — a pill darker than the bar reads as a hole once the
+  page is near-black.
+- **Heading weight 700 is now reachable**, so the page `h1` and the Reflect
+  headline take it. This retires the YNAB redesign's deferred "font weights
+  past 600 (the variable font's ceiling)" item.

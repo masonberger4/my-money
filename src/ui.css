@@ -1,27 +1,37 @@
-/* Self-hosted fonts (latin subsets from Google Fonts; woff2 in public/fonts/).
+/* Self-hosted font (latin subset from Google Fonts; woff2 in public/fonts/).
    Was a fonts.googleapis.com @import — render-blocking and cross-origin, so
    sw.js could never cache it and offline fell back to system fonts.
-   DM Sans is a variable font: one file serves 400–600. */
+
+   ONE variable file serves 400–800 (Inter, 2026-09-08, replacing DM Sans +
+   the two DM Mono weights). Mason's reference screenshot is a Helvetica/SF
+   grotesque with 700+ headings — weights DM Sans's 400–600 file could not
+   reach at all (the "font weights past 600" item deferred with the YNAB
+   redesign). A bare `-apple-system` stack would have matched that screenshot
+   only on Apple devices; Mason also opens the app on a Windows laptop, where
+   it resolves to Segoe UI. Inter is the same grotesque and renders identically
+   on every device, so self-hosting stays (never reintroduce a cross-origin
+   font — sw.js can't cache one).
+
+   There is no separate money font any more: --font-num IS --font-sans, and
+   the column alignment DM Mono was carrying comes from
+   `font-variant-numeric: tabular-nums` at those sites. --font-mono is the
+   system stack, and is for RAW data only (the CSV importer's source columns,
+   the SimpleFIN token, the PDF template overlay) — where "this is the file's
+   own text, not ours" is the message the typeface is sending. */
 @font-face {
-  font-family: 'DM Sans';
+  font-family: 'Inter';
   font-style: normal;
-  font-weight: 400 600;
+  font-weight: 400 800;
   font-display: swap;
-  src: url('/fonts/dm-sans.woff2') format('woff2');
+  src: url('/fonts/inter.woff2') format('woff2');
 }
-@font-face {
-  font-family: 'DM Mono';
-  font-style: normal;
-  font-weight: 400;
-  font-display: swap;
-  src: url('/fonts/dm-mono-400.woff2') format('woff2');
-}
-@font-face {
-  font-family: 'DM Mono';
-  font-style: normal;
-  font-weight: 500;
-  font-display: swap;
-  src: url('/fonts/dm-mono-500.woff2') format('woff2');
+
+/* Font tokens. Not theme tokens — one value each, no light/dark split — but
+   they live here for the same reason those do: one source of truth. */
+:root {
+  --font-sans: 'Inter', 'Helvetica Neue', Arial, sans-serif;
+  --font-num: var(--font-sans);
+  --font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
 }
 
 /* Theme tokens — the ONE place these values live.
@@ -59,26 +69,30 @@
   --light-shadow: rgba(0, 0, 0, .08);
   --light-overlay: rgba(0, 0, 0, .45);
 
-  /* dark palette — near-black navy (the 2026-08-15 YNAB-style re-theme).
+  /* dark palette — the near-black indigo Mason's 2026-09-08 screenshot shows
+     (sampled from the capture and converted Display P3 -> sRGB, which is what
+     the browser paints). It replaces the 2026-08-15 near-black navy: the page
+     drops nearly to black, the card rises to a deeper indigo, and the ink goes
+     pure white, so every ratio below is HIGHER than the palette it replaces.
      Ratios measured with src/paletteContrast.js; index.html's dark
      theme-color meta + pre-paint backgrounds mirror --dark-bg in lockstep
      (test/lockstep.test.js), and test/paletteContrast.test.js's
      DARK_SURFACES mirror the four surfaces below. */
-  --dark-bg: #12141F;
-  --dark-card: #1C1F2E;
-  --dark-text: #F0EFEB;          /* 14.21:1 on --card */
-  --dark-muted: #9FA3B5;         /* grey-lavender, 6.52:1 on --card */
-  --dark-border: #2B2F42;
-  --dark-accent: #A79FF0;        /* 7.73:1 on --bg */
-  --dark-accent-text: #12141F;   /* = --dark-bg; 7.73:1 on --accent */
+  --dark-bg: #05050F;
+  --dark-card: #111227;
+  --dark-text: #FFFFFF;          /* 18.43:1 on --card */
+  --dark-muted: #C4C5CF;         /* grey-lavender, 10.74:1 on --card */
+  --dark-border: #232748;
+  --dark-accent: #7482FF;        /* 5.60:1 on --card, 6.16:1 on --bg */
+  --dark-accent-text: #05050F;   /* = --dark-bg; 6.16:1 on --accent */
   --dark-danger: #F2A0A0;        /* 8.16:1 on --danger-bg */
   --dark-danger-bg: #2A1A1C;
   --dark-danger-border: #7F3639;
   --dark-warn: #E8C069;          /* 8.95:1 on --warn-bg */
   --dark-warn-bg: #2A2415;
   --dark-warn-border: #5A4A22;
-  --dark-input-bg: #232738;
-  --dark-track: #6E7188;         /* 3.41:1 on --card — a data mark, not a hairline */
+  --dark-input-bg: #1C1D2E;      /* the screenshot's lifted surface: the nav bar and the active nav pill */
+  --dark-track: #6E7188;         /* 3.84:1 on --card — a data mark, not a hairline */
   --dark-shadow: rgba(0, 0, 0, .5);
   --dark-overlay: rgba(0, 0, 0, .65);
 }
@@ -163,6 +177,10 @@
    render before Dashboard mounts, get them too. */
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
+/* The app's typeface, once. The pre-Dashboard screens and Dashboard itself
+   still name --font-sans on their root elements (form controls don't inherit
+   a family), so this is the floor, not the only declaration. */
+body { font-family: var(--font-sans); }
 
 @keyframes pulse { 0%, 100% { opacity: 1 } 50% { opacity: .4 } }
 @keyframes fadeIn { from { opacity: 0; transform: translateY(5px) } to { opacity: 1; transform: none } }
@@ -209,7 +227,11 @@
 /* Emoji ignore CSS color, so the inactive/active tint is a grayscale filter
    instead — muted icons on idle items, full color on the active one. */
 .bnav-item .bnav-ico { font-size: 17px; line-height: 1; filter: grayscale(1); opacity: .75; }
-.bnav-item.active { background: var(--bg); color: var(--text); font-weight: 600; }
+/* The active pill sits on --input-bg, not --bg: in light mode those are the
+   same value, so nothing changes there, while the dark theme gets the LIFTED
+   pill the reference screenshot shows (a pill darker than the bar reads as a
+   hole once the page itself is near-black). */
+.bnav-item.active { background: var(--input-bg); color: var(--text); font-weight: 600; }
 .bnav-item.active .bnav-ico { color: var(--accent); filter: none; opacity: 1; }
 .bnav-item:hover:not(.active) { color: var(--text); }
 

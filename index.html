@@ -6,17 +6,17 @@
     <title>my-money</title>
 
     <link rel="manifest" href="/manifest.webmanifest" />
-    <!-- Self-hosted fonts (declared in src/ui.css @font-face, precached by
+    <!-- The self-hosted font (declared in src/ui.css @font-face, precached by
          sw.js). Preloaded so the first visit per device doesn't FOUT waiting
          on the built CSS. crossorigin is REQUIRED even same-origin — font
-         fetches are CORS-mode, and without it the preload double-fetches. -->
-    <link rel="preload" href="/fonts/dm-sans.woff2" as="font" type="font/woff2" crossorigin />
-    <link rel="preload" href="/fonts/dm-mono-400.woff2" as="font" type="font/woff2" crossorigin />
-    <link rel="preload" href="/fonts/dm-mono-500.woff2" as="font" type="font/woff2" crossorigin />
+         fetches are CORS-mode, and without it the preload double-fetches.
+         ONE variable file since 2026-09-08: Inter 400–800 replaced DM Sans +
+         two DM Mono weights, so this went from three preloads to one. -->
+    <link rel="preload" href="/fonts/inter.woff2" as="font" type="font/woff2" crossorigin />
     <!-- --bg light/dark, kept in lockstep with src/ui.css. These follow the OS;
          src/theme.js rewrites both @content values when a theme is forced. -->
     <meta name="theme-color" content="#F7F6F2" media="(prefers-color-scheme: light)" />
-    <meta name="theme-color" content="#12141F" media="(prefers-color-scheme: dark)" />
+    <meta name="theme-color" content="#05050F" media="(prefers-color-scheme: dark)" />
 
     <!-- iOS home-screen app -->
     <meta name="apple-mobile-web-app-capable" content="yes" />
@@ -43,10 +43,10 @@
          src/ui.css — parsed before the stylesheet loads, so they must be
          changed in lockstep with it. */
       html, body { margin: 0; background: #F7F6F2; }
-      @media (prefers-color-scheme: dark) { html, body { background: #12141F; } }
+      @media (prefers-color-scheme: dark) { html, body { background: #05050F; } }
       /* A forced theme must beat the OS in both directions. */
       html[data-theme="light"], html[data-theme="light"] body { background: #F7F6F2; }
-      html[data-theme="dark"], html[data-theme="dark"] body { background: #12141F; }
+      html[data-theme="dark"], html[data-theme="dark"] body { background: #05050F; }
       /* Pad the app for the iPhone notch + home indicator when launched
          from the home screen with status-bar-style: black-translucent. */
       body {
