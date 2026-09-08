@@ -431,6 +431,8 @@ export function invalidateEnvelopeSpending() {}
 export function isEnvelopeSchemaMissing() { return false; }
 export async function getEnvPace() { return false; }
 export async function setEnvPace() {}
+// Mirrors the façade: returns the MERGED map, like updateRecIgnore.
+export async function updateEnvPace() { return {}; }
 // Startup batch (the façade shape: raw Dashboard-owned rows in `values`, the
 // two adapter-owned rows parsed).
 export async function getStartupSettings(keys) {

@@ -12,6 +12,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { makeSettingsChains } from '../src/adapters/settingsIO.js';
+import { makeEnvPaceChain } from '../src/adapters/envelopeIO.js';
 
 // Fake settings table: key → raw string value, exactly db.js's surface
 // (getSetting returns the stored string or null; setSetting stores a string).
@@ -227,4 +228,49 @@ test('the two sites are independent rows: each chain touches only its own key', 
   );
   assert.deepEqual(JSON.parse(t.rows['rec:ignore']), ['netflix']);
   assert.deepEqual(JSON.parse(t.rows['asst:chats']).map(c => c.id), ['another', 'saved']);
+});
+
+// --- 2026-09-04 audit: env:pace needed the same discipline as rec:ignore ----
+// The pace toggle persisted the whole map rebuilt from LOCAL state, so a phone
+// holding a stale read (a blipped mount, or simply loading before the other
+// phone's opt-ins) wrote that map back over everything on its first tap. The
+// other phone's warnings vanished on its next launch with nothing to say so.
+// This is the failure updateRecIgnore already fixed for its own key.
+test('updateEnvPace merges one key at a time and never writes a stale whole map', async () => {
+  const store = new Map([['env:pace', JSON.stringify({ Groceries: true, Gas: true, Fun: true })]]);
+  const db = {
+    getSetting: async k => store.get(k) ?? null,
+    setSetting: async (k, v) => { store.set(k, v); },
+  };
+  const chains = makeEnvPaceChain(db);
+
+  // A phone that mounted BEFORE those three opt-ins existed still holds {}.
+  // Its tap must add one key, not replace the map with its own view.
+  const merged = await chains.updateEnvPace('Dining', true);
+  assert.deepEqual(
+    merged,
+    { Groceries: true, Gas: true, Fun: true, Dining: true },
+    'the other phone\'s opt-ins survive'
+  );
+  assert.deepEqual(JSON.parse(store.get('env:pace')), merged, 'and that is what was stored');
+
+  const off = await chains.updateEnvPace('Gas', false);
+  assert.deepEqual(off, { Groceries: true, Fun: true, Dining: true }, 'turning one off removes only it');
+});
+
+test('concurrent updateEnvPace calls serialize rather than clobbering', async () => {
+  const store = new Map();
+  let reads = 0;
+  const db = {
+    getSetting: async k => { reads++; await new Promise(r => setTimeout(r, 1)); return store.get(k) ?? null; },
+    setSetting: async (k, v) => { store.set(k, v); },
+  };
+  const chains = makeEnvPaceChain(db);
+  await Promise.all([
+    chains.updateEnvPace('A', true),
+    chains.updateEnvPace('B', true),
+    chains.updateEnvPace('C', true),
+  ]);
+  assert.deepEqual(JSON.parse(store.get('env:pace')), { A: true, B: true, C: true });
+  assert.ok(reads >= 3, 'each update re-read rather than reusing one snapshot');
 });

@@ -653,6 +653,33 @@ descriptions are invented illustrations, never household numbers (public repo).
 
 ### Building now — ticked 2026-09-08, three PRs
 
+> **ALL THREE WAVES SHIPPED 2026-09-08** — Wave A as PR #128, its review
+> findings as #129, Wave B as #130, Wave C as the PR carrying this note. The
+> item texts below are kept as the record of what was wrong and why, since
+> every one of them is a failure shape worth recognising again; nothing here is
+> unbuilt work any more. What each wave actually changed lives in its PR body
+> and in the code comments the fixes carry.
+>
+> Four things the build learned that the audit could not:
+> - **`envelopeBar`'s fix had to be NARROWED.** Two older tests pin that a ZERO
+>   pot stays "no envelope" however much was spent against it, and they are
+>   right: painting an unbudgetable category's spending as an overspend reports
+>   the classifier's ignorance as a budgeting failure. Only a NEGATIVE pot is a
+>   hole. Those tests going red is what caught the over-wide first draft.
+> - **Two more mock/façade drifts surfaced** (`getBiggestMovers` missing its new
+>   field, `getExistingTxIds` returning a bare Set where the real one returns
+>   `{ids, sources}` — the latter crashed the whole app into the ErrorBoundary
+>   inside the harness, which is why the overlap path had never been rendered).
+>   `test/smokeMocks.test.js` asserts every needed export EXISTS but nothing
+>   about the SHAPE it returns; closing that gap is unbuilt work, recorded here.
+> - **The render gate earned its keep again.** The Wave C sheet re-resolve
+>   assumed `transactions` was an array; it is a result object that starts null.
+>   `npm test` and `vite build` both passed on that TypeError. Only the browser
+>   walk failed it.
+> - **The empty merchant key** (`merchantKey` drops numeric tokens, so `1234`
+>   keys to `''`) could match two unrelated rows on `'' === ''`. Pre-existing,
+>   doubled in exposure by Wave A's two-descriptor widening, closed in #129.
+
 **Wave A — money and date bugs (pure cores first; each lands with a test that
 was red before the fix).**
 

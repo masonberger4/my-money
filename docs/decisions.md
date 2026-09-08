@@ -229,3 +229,50 @@ What was DECIDED, as opposed to found:
   and the standing ruling (docs/memory/ship-record.md, 2026-08-17) is that the
   regex is calibrated against the household's real descriptors — re-run the
   PR #101 SQL before touching it, never reason from invented samples.
+
+## 2026-09-08 — The audit's bug fixes shipped in three waves
+
+The 25 items Mason ticked landed as PRs #128 (twelve wrong numbers and dates),
+#129 (three findings the reviewer returned after #128 had merged), #130 (five
+statement-import bugs) and the Wave C PR (eight state bugs). **The findings and
+their evidence live in docs/next-iteration-plan-2026-08-04.md's 2026-09-04
+audit section**, now marked shipped. Not restated here.
+
+What was DECIDED, as opposed to fixed:
+
+- **A zero-pot envelope stays "no envelope", and that is not a bug.** The
+  overspend fix was written wide (`pot <= 0`) and two older tests refused it.
+  They are right and the rule is now stated where it can be found: painting an
+  unbudgetable category's spending as an overspend reports the classifier's
+  ignorance as a budgeting failure, which is the same reasoning that keeps the
+  Ungrouped rollup to budgetable rows. Only a NEGATIVE pot is a hole.
+- **A client-supplied date may shape a server query, bounded.** The assistant
+  now takes the caller's calendar day so it stops answering about next month
+  for the last hours of every month. It is validated to a date-only shape
+  within a day of the server's UTC day — wide enough for every real timezone,
+  narrow enough that the body cannot name an arbitrary month. Date-only keeps
+  the determinism contract: same DB state plus the same caller day, same bytes.
+- **The account page holds an ID and derives its account.** Holding the object
+  made it a snapshot that no refresh reached AND made every rename re-fetch 500
+  rows. Deriving fixes both, and removes the second optimistic copy that
+  `saveAccount` had to keep in step.
+- **`env:pace` joins the serialized read-merge-write set.** It was the last
+  household settings row written as a whole map rebuilt from local state — the
+  shape that let one phone erase the other's opt-ins, which `rec:ignore` had
+  already been fixed for. Its chain is a factory over an injectable db, like
+  `makeSettingsChains`, so the concurrency is testable without a network.
+- **Recurring and Debt moved off the null sentinel** to the epoch counter the
+  Tax tab uses, and the in-flight flag came OUT of the effect guard — gating on
+  it is what makes the stale response win, which the gotcha already records.
+
+Recorded because they cost real time, and because the next audit should expect
+them:
+
+- **`test/smokeMocks.test.js` checks that mock exports EXIST, not what they
+  RETURN.** Two shape drifts surfaced in one session; the second crashed the
+  app inside the harness and had hidden the import modal's overlap path from
+  every previous walk. A shape guard is unbuilt work, deliberately not bolted
+  onto a bug-fix PR.
+- **The render gate is still the only check that evaluates the Dashboard in a
+  browser.** It caught a TypeError that `npm test` and `vite build` both
+  passed. That is the third time this failure shape is on the record.
