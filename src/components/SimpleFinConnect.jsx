@@ -360,7 +360,7 @@ export default function SimpleFinConnect({ onClose, onConnected }) {
                       autoCorrect="off"
                       style={{
                         width: "100%", boxSizing: "border-box", resize: "vertical",
-                        fontFamily: "'DM Mono',monospace", fontSize: 12, lineHeight: 1.5,
+                        fontFamily: "var(--font-mono)", fontSize: 12, lineHeight: 1.5,
                         color: "var(--text)", background: "var(--bg)",
                         border: "1px solid var(--border)", borderRadius: 8, padding: "10px 12px", outline: "none",
                       }}

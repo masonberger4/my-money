@@ -83,7 +83,9 @@ test('every ui.css @font-face file exists in public/ and is precached by sw.js',
   const css = read('src/ui.css');
   const sw = read('public/sw.js');
   const urls = [...css.matchAll(/url\('(\/fonts\/[^']+)'\)/g)].map(m => m[1]);
-  assert.ok(urls.length >= 3, `expected self-hosted font urls in ui.css (found ${urls.length})`);
+  // One variable file since 2026-09-08 (Inter 400–800 replaced DM Sans + two
+  // DM Mono weights). The floor is "the app self-hosts its font at all".
+  assert.ok(urls.length >= 1, `expected self-hosted font urls in ui.css (found ${urls.length})`);
   assert.doesNotMatch(css, /@import[^;]*fonts\.googleapis\.com/, 'fonts must stay self-hosted');
   for (const u of urls) {
     statSync(join(root, 'public', u)); // throws if the file is missing

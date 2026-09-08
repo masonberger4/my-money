@@ -32,12 +32,12 @@ const CATEGORY_COLORS = ['#7F77DD', '#1D9E75', '#D85A30', '#378ADD', '#FAC775', 
 // Surfaces a chip can sit on. These are TEST FIXTURES mirroring --bg/--card/
 // --input-bg/--border in src/ui.css, which stays the single source of truth —
 // the module itself hardcodes no surface; callers read them at runtime.
-const LIGHT_SURFACES = ['#F7F6F2', '#FFFFFF', '#E4E2DC'];
+const LIGHT_SURFACES = ['#F4F2EA', '#FFFFFF', '#EBEAE2', '#E4E2DC'];
 // #6E7188 is the dark --track: the mid-grey the budget rails, the 6-month bars
 // and the cash-flow bars are painted on, and the only surface in the app with
 // headroom in neither direction — so it is the one that exercises readableInk's
 // direction choice hardest.
-const DARK_SURFACES = ['#12141F', '#1C1F2E', '#232738', '#6E7188'];
+const DARK_SURFACES = ['#05050F', '#111227', '#1C1D2E', '#6E7188'];
 const SURFACES = [...LIGHT_SURFACES, ...DARK_SURFACES];
 
 const GARBAGE = [null, undefined, '', 'red', '#12', '#7F77DD80', '12345678', '#GGG', '  ', 42, {}, []];
@@ -206,10 +206,10 @@ test('readableInk/markColor clear their targets directly against a surface too',
 });
 
 test('a colour that already clears the target comes back untouched (just normalised)', () => {
-  // #1D9E75 is 4.83:1 on the dark card — no fix-up needed.
-  assert.ok(contrastRatio('#1D9E75', '#1C1F2E') >= 4.5);
-  assert.equal(readableInk('#1d9e75', '#1C1F2E'), '#1D9E75');
-  assert.equal(markColor('#1d9e75', '#1C1F2E'), '#1D9E75');
+  // #1D9E75 is 5.44:1 on the dark card — no fix-up needed.
+  assert.ok(contrastRatio('#1D9E75', '#111227') >= 4.5);
+  assert.equal(readableInk('#1d9e75', '#111227'), '#1D9E75');
+  assert.equal(markColor('#1d9e75', '#111227'), '#1D9E75');
 });
 
 // --- hue preservation --------------------------------------------------------
@@ -287,9 +287,9 @@ test('readableInk keeps saturation — only lightness moves', () => {
 // (a pure-white and a near-black surface bracketing the fixtures' narrow
 // failure band), NOT mirrors of the app's theme — do not update them when
 // the ui.css palette moves. The theme mirrors live in LIGHT_SURFACES /
-// DARK_SURFACES above. (The 2026-08-15 re-theme's --dark-bg #12141F is
-// darker than #18181A; swapping it in here would flip the deliberately-
-// failing mid-grey fixtures.)
+// DARK_SURFACES above. (The 2026-09-08 re-theme's --dark-bg #05050F is
+// darker still than #18181A; swapping it in here would flip the
+// deliberately-failing mid-grey fixtures.)
 
 test('direction follows the surface: darken on light, lighten on dark', () => {
   // Only a mid-tone that fails 4.5:1 on BOTH surfaces proves the direction is

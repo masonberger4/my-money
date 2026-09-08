@@ -24,7 +24,7 @@ export default function EmptyState({ onLinked }) {
         minHeight: '100vh',
         background: 'var(--bg)',
         color: 'var(--text)',
-        fontFamily: "'DM Sans','Helvetica Neue',sans-serif",
+        fontFamily: "var(--font-sans)",
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',

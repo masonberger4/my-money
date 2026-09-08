@@ -1,6 +1,8 @@
 ## Conventions
 
-- Dashboard style: compact inline-styled JSX, CSS vars, accent #7F77DD.
+- Dashboard style: compact inline-styled JSX, CSS vars, accent #465AFA light
+  / #7482FF dark (the 2026-09-08 re-theme; #7F77DD was the light accent until
+  then and SURVIVES as `ACCOUNT_COLORS[0]`, which is DATA — don't chase it).
   Mobile-first: verify at 390px. Navigation is a FIXED 5-item bottom bar
   (`src/nav.js` owns the map, `.bnav` in ui.css owns the chrome, z-index 50
   under every `.overlay` at 100; the content column carries 96px bottom
@@ -50,9 +52,12 @@
   deliberately NOT corrected: the Swatch fill (it's the color picker — it must
   show the stored value truthfully) and the Donut's slice separation (the
   palette maps several categories to one hex, so adjacent slices can be a
-  literal 1:1 — a `--card` stroke separates them instead). Known and
-  deliberate: `--light-muted` #888780 is 3.61:1 on the card, so light-mode
-  small labels still fail AA while dark passes — a palette decision, not a bug.
+  literal 1:1 — a `--card` stroke separates them instead). The wording that stood
+  here — "`--light-muted` #888780 is 3.61:1 on the card, so light-mode small
+  labels still fail AA while dark passes — a palette decision, not a bug" — is
+  RETIRED: the 2026-09-08 light reference darkened muted to #51504D (8.06:1 on
+  the card), so both themes now pass on small labels and a session finding a
+  low-contrast light label is looking at a real bug.
 - Amounts: **positive = money out, negative = money in** — the app's own
   convention, inherited from Plaid and kept because every stored row already
   uses it. SimpleFIN is the opposite (positive = money *in*) and its amounts arrive as numeric

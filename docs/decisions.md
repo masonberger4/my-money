@@ -331,3 +331,58 @@ decisions already recorded here); a `dependabot.yml` (security-only remains the
 standing ruling); a weekly CodeQL cron; a migration-replay job (`test/rls.test.js`
 already is one); and SHA-pinning `actions/*`, which stays coupled to the ruleset
 switch it would unlock.
+
+## 2026-09-08 — One typeface (Inter), and a near-black indigo dark theme
+
+Mason's ask was "copy the font and color scheme to be used by the app", with a
+reference screenshot of the Reflect tab. It was NOT the palette main ships: the
+capture (Display P3, so sampled and converted to sRGB before use) reads
+`#05050F` page / `#111227` card / pure-white ink / a bluer `#7482FF` accent, in
+a Helvetica-SF grotesque with headings well past DM Sans's 600 ceiling.
+
+- **Inter replaces DM Sans AND both DM Mono weights** — one variable file,
+  400–800, self-hosted like its predecessors. Mason asked what a Dell in a
+  browser would get: that question is what ruled OUT a `-apple-system` stack,
+  which matches the screenshot only on Apple devices and resolves to Segoe UI
+  on Windows. Inter is the same grotesque everywhere.
+- **Money columns keep their alignment without a mono font**, through
+  `font-variant-numeric: tabular-nums` at the ~95 sites that named DM Mono.
+  The reference screenshot renders amounts in the same proportional face, so
+  keeping a second family for them would have half-copied the design.
+  `--font-mono` survives as the SYSTEM stack and is for RAW data only (the CSV
+  importer's source columns, the SimpleFIN token, the PDF template overlay),
+  where a monospace says "the file's text, not ours".
+- **Both palettes come from screenshots** — the dark one first, then Mason's
+  light reference the same day, sampled and converted the same way. Nothing was
+  invented to fill the gap, which is why the two themes are tonally related
+  rather than merely both-present. Ink got safer (text 14.21→18.43:1 on the card, muted
+  6.52→10.74:1); the accent got bluer and therefore DARKER, so its ratio fell
+  — 6.90→5.60:1 on the card, 7.73→6.16:1 on the page — which is the one number
+  this re-theme spends rather than gains. It clears 4.5:1 on both surfaces, so
+  accent text stays AA, but a future accent tweak has less headroom than the
+  navy palette had.
+- **The active nav pill moved from `--bg` to `--input-bg`.** Light-identical
+  (the two tokens share a value there), and in dark it becomes the LIFTED pill
+  the screenshot shows — a pill darker than the bar reads as a hole once the
+  page is near-black.
+- **Heading weight 700 is now reachable**, so the page `h1` and the Reflect
+  headline take it. This retires the YNAB redesign's deferred "font weights
+  past 600 (the variable font's ceiling)" item.
+- **Light ink got a real fix, not a re-tint.** Text went near-black → black and
+  muted #888780 → #51504D, which takes small light-mode labels from 3.61:1 to
+  8.06:1 and RETIRES the "light small labels still fail AA — a palette
+  decision, not a bug" note that stood in Conventions. Both themes pass now, so
+  a low-contrast light label is a bug again.
+- **`--light-input-bg` stopped equalling `--light-bg`.** It is the reference's
+  inset surface (#EBEAE2) — input fills and the active nav pill — which is what
+  lets ONE token express a pill that is LIFTED in dark and INSET in light.
+  A session assuming the old equality (it made the nav change a light no-op
+  when the dark half shipped) will now be wrong.
+- **The active nav label stays `--text` in both themes**, and the surface that
+  decides it is now the PILL, not the page: the new light accent clears 4.5:1
+  on the page (4.57:1) but reaches only 4.24:1 on the pill. Both references
+  show a blue active label; this is the one place the copy deliberately stops.
+- **`manifest.webmanifest` follows `--light-bg`.** Its `theme_color` had been
+  #1D9E75, a green from the DATA palette — the "manifest theme_color
+  inconsistency" the YNAB redesign recorded as deferred. Fixed here because
+  this PR is the one that moves every other colour that flanks it.
