@@ -495,7 +495,11 @@ function Donut({data,size=130}) {
 // of that account's whole transaction list — a burst of UPDATEs and a flashing
 // list for one colour choice. The live value is previewed locally so the
 // swatch still tracks the drag; `onChange` fires once, on blur/close, and only
-// if the colour actually changed.
+// if the colour actually changed. Accepted, not overlooked: there is no
+// flush-on-unmount, so a pick abandoned by the component disappearing mid-drag
+// is dropped. Native colour pickers are modal on both targets here (iOS Safari
+// and desktop), so nothing can unmount underneath one — machinery for that
+// would be guarding a path the platform does not offer.
 function Swatch({color,onChange}) {
   const ref=useRef();
   const [live,setLive]=useState(null);
@@ -539,7 +543,13 @@ function EditName({name,onSave}) {
     setEd(false);
     const next=val.trim();
     if(next===(name??""))return;   // unchanged — nothing to assert
-    onSave(next||name);
+    // The RAW trimmed value, empty included. It used to fall back to `name`,
+    // which made "clear the field" a no-op everywhere and left the account
+    // page's clear-branch unreachable: blanking a nickname re-saved the
+    // nickname. Every caller handles empty on its own terms — the account
+    // page and the payee line store null (reset), the category alias stores
+    // "" which reads back as the raw label, and renameEntity ignores it.
+    onSave(next);
   };
   if(ed) return (
     <input ref={ref} value={val} onChange={e=>setVal(e.target.value)}

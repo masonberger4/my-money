@@ -431,7 +431,11 @@ export function invalidateEnvelopeSpending() {}
 export function isEnvelopeSchemaMissing() { return false; }
 export async function getEnvPace() { return false; }
 export async function setEnvPace() {}
-// Mirrors the façade: returns the MERGED map, like updateRecIgnore.
+// A STUB, not a mirror: it returns {} whatever it is given, where the real one
+// returns the merged map. The walk never toggles pace, so nothing exercises it
+// — but if a future step does, Dashboard's `.then(merged=>setEnvPace(merged))`
+// would wipe the optimistic toggle. Make it stateful (like the updateRecIgnore
+// mock above) before adding such a step.
 export async function updateEnvPace() { return {}; }
 // Startup batch (the façade shape: raw Dashboard-owned rows in `values`, the
 // two adapter-owned rows parsed).
