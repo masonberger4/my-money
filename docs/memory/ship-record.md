@@ -284,6 +284,16 @@ Conventions / Gotchas. An entry here is a pointer, not a home for rules.
   key row; why the phone sees it at all, and why it is not CORS: the
   "TypeError: Load failed" Gotcha.
 
+- **Header collapses into a gear menu; pull-to-refresh on every tab
+  (2026-09-08)** — the four separate header controls (quick-add/theme/
+  refresh/Sign out) are now one gear `.nbtn` opening `GearMenu`, and every
+  tab gains a touch/wheel pull-to-refresh gesture sharing the menu's
+  `refreshNow`. Rules: the `src/components/Dashboard.jsx` and
+  `src/pullRefresh.js` Key-files rows, the Theme Convention's segmented
+  control, the `src/ui.css` row's `overscroll-behavior-y` note, the
+  2026-09-08 "header collapses into a gear menu" decision-journal entry, and
+  `test/headerMenu.test.js` + `test/pullRefresh.test.js`.
+
 ## Pending branches
 
 None in code, and **no migration is outstanding**: every file in

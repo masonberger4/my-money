@@ -99,6 +99,16 @@ const WALK = [
   // Not a view of its own.
   [null, '[data-mm-plan-group]', 'opening a plan group'],
   ['spending', '[data-mm-nav=spending]'],
+  // The header's four buttons became ONE gear (2026-09-08), so the quick-add
+  // row, the Auto/Light/Dark segmented control, the Refresh row and Sign out
+  // now live inside a closed-by-default panel — they render for NOBODY here
+  // unless the walk opens it, the same blind spot as the search panel below.
+  // Opened on SPENDING because the Add-transaction row is tab-gated to it, so
+  // this is the one step where the whole panel is in the tree. Closed via the
+  // backdrop hook so the search toggle below isn't swallowed by the overlay.
+  // Neither step is a view of its own.
+  [null, '[data-mm-gear]', 'opening the header gear menu'],
+  [null, '[data-mm-gear-close]', 'closing the header gear menu'],
   // The Spending refine panel is collapsed behind the magnifier, so its input,
   // filter row AND (since 2026-08-17) the account + category chip rows render
   // for nobody unless we open it. Not a view of its own.

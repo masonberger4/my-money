@@ -11,7 +11,15 @@
   Spending=`transactions`, Accounts=`accounts`+`debt` (segment chips), and
   Reflect=`reflect` (a hub of link cards) + `categories`/`trends`/`recurring`/
   `tax`/`ask` (each with a `‹ Reflect` back button).
-- **Theme selection**: Auto/Light/Dark toggle in the header. The preference is
+- **Theme selection**: a three-way Auto/Light/Dark segmented control inside
+  the header's gear menu (`GearMenu`, opened by the single `data-mm-gear`
+  `.nbtn` — see the Key-files row). Picking a segment calls `useTheme`'s
+  `setPref` directly with that value. The wording that stood here before
+  2026-09-08 — a tap-to-cycle theme button living directly in the header — is
+  retired: a three-state control that only cycles FORWARD makes reaching the
+  one setting you want a guessing game (Auto → Light → Dark → Auto, up to two
+  extra taps to land), where a picker reaches any of the three in one tap. The
+  preference is
   `mm:theme` in **localStorage, NOT the `settings` table** — `settings` is
   household-shared under one login, so storing it there would flip the other
   person's phone; localStorage also reads synchronously, which is what lets

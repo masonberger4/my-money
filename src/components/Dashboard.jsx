@@ -39,6 +39,7 @@ import ReceiptSection from "./ReceiptSection.jsx";
 import { getSetting, setSetting } from "../db.js";
 import { ASSISTANT_MODELS, EFFORT_LEVELS, DEFAULT_MODEL, DEFAULT_EFFORT, estimateCostRange, formatCents } from "../assistantModels.js";
 import { useTheme, readToken, THEME_PREFS } from "../theme.js";
+import { createPullRefresh, PULL_DEFAULTS } from "../pullRefresh.js";
 import { chipStyle, markColor, readableInk } from "../paletteContrast.js";
 
 const DEFAULT_COLORS = {
@@ -95,8 +96,9 @@ const ENTITY_CHIP = "#639922";
 // amount/date filter row. Normalization lives in src/searchFilters.js.
 const EMPTY_SEARCH_FILTERS = { amtMin: "", amtMax: "", dateFrom: "", dateTo: "" };
 
-// Three-state theme control: system -> light -> dark -> system. An icon alone
-// can't say which of THREE states is active, so each one carries a label too.
+// The labels and glyphs the gear menu's theme segmented control renders. An
+// icon alone can't say which of THREE states is active, so each one carries
+// a label too.
 const THEME_UI = {
   system: {icon:"◐",label:"Auto"}, light: {icon:"☀",label:"Light"}, dark: {icon:"☾",label:"Dark"},
 };
@@ -389,6 +391,100 @@ function useEscClose(onClose){
   },[onClose]);
 }
 
+// Pull-to-refresh: the gesture math lives in src/pullRefresh.js (pure, no
+// DOM) so it's testable without touch events; this hook is just the DOM
+// wiring. progress/busy are scoped to a LEAF component (PullRefresh, below)
+// rather than lifted into Dashboard state — a touchmove fires far too often
+// to re-render an 8,000-line component on every one.
+function usePullRefresh({blocked,loading,onTrigger}){
+  const m=useRef(null); if(!m.current)m.current=createPullRefresh();
+  const [progress,setProgress]=useState(0);
+  const [busy,setBusy]=useState(false);
+  const latest=useRef({blocked,onTrigger}); latest.current={blocked,onTrigger};
+
+  // Bind once: the listeners are DOM plumbing around the pure state machine
+  // and don't need to rebind when blocked/onTrigger change — each handler
+  // reads the mutable ref fresh instead. {passive:true} everywhere and never
+  // preventDefault or touch-action: the gesture is purely additive on top of
+  // native scrolling, which is what keeps it jank-free and avoids Chrome's
+  // scroll-blocking warning — ui.css's overscroll-behavior-y:contain is what
+  // stops Chrome Android's OWN pull-to-refresh from firing underneath this one.
+  useEffect(()=>{
+    const env=()=>({scrollY:window.scrollY,now:Date.now(),blocked:latest.current.blocked});
+    // A wheel gesture has no release event, so a burst that stops BELOW the
+    // threshold leaves a half-filled indicator with nothing left to arrive and
+    // clear it. Touch can't strand it (touchEnd zeroes progress), but the
+    // wheel path needs this timer: once the stream has been idle for one
+    // wheelIdleMs window — the same clock pullRefresh.js uses to decide a
+    // burst is over — the abandoned pull retracts.
+    let idle=null;
+    const clearIdle=()=>{if(idle){clearTimeout(idle);idle=null;}};
+    const fire=r=>{
+      clearIdle();
+      setProgress(r.progress);
+      if(r.shouldTrigger){setBusy(true);latest.current.onTrigger();return;}
+      if(r.progress>0)idle=setTimeout(()=>{idle=null;setProgress(0);},PULL_DEFAULTS.wheelIdleMs);
+    };
+    // Only single-touch gestures count — a second finger ends the pull.
+    const onTouchStart=e=>{
+      if(e.touches.length!==1)return;
+      fire(m.current.touchStart({y:e.touches[0].clientY,...env()}));
+    };
+    const onTouchMove=e=>{
+      if(e.touches.length!==1){fire(m.current.touchEnd());return;}
+      fire(m.current.touchMove({y:e.touches[0].clientY,...env()}));
+    };
+    const onTouchEnd=()=>fire(m.current.touchEnd());
+    const onTouchCancel=()=>fire(m.current.touchEnd());
+    const onWheel=e=>{
+      let deltaY=e.deltaY;
+      if(e.deltaMode===1)deltaY*=16;                       // lines -> px
+      else if(e.deltaMode===2)deltaY*=window.innerHeight;  // pages -> px
+      fire(m.current.wheel({deltaY,...env()}));
+    };
+    window.addEventListener("touchstart",onTouchStart,{passive:true});
+    window.addEventListener("touchmove",onTouchMove,{passive:true});
+    window.addEventListener("touchend",onTouchEnd,{passive:true});
+    window.addEventListener("touchcancel",onTouchCancel,{passive:true});
+    window.addEventListener("wheel",onWheel,{passive:true});
+    return ()=>{
+      clearIdle();
+      window.removeEventListener("touchstart",onTouchStart);
+      window.removeEventListener("touchmove",onTouchMove);
+      window.removeEventListener("touchend",onTouchEnd);
+      window.removeEventListener("touchcancel",onTouchCancel);
+      window.removeEventListener("wheel",onWheel);
+    };
+  },[]);
+
+  // settle() only once the caller's OWN loading flag drops — cooldown must
+  // outlive the trigger call itself, or the tail of the same gesture (wheel
+  // inertia especially) could cross threshold again before the refresh it
+  // already started has finished.
+  useEffect(()=>{if(busy&&!loading){m.current.settle();setBusy(false);setProgress(0);}},[busy,loading]);
+
+  return {progress,busy};
+}
+
+// Renders nothing until a pull is in progress or a triggered refresh is
+// still busy. `p` is 1 while busy — pullRefresh.js zeroes progress the
+// instant it fires the trigger — so the chip stays fully shown and spinning
+// through the fetch instead of snapping back to hidden mid-refresh.
+function PullRefresh({blocked,loading,onTrigger}){
+  const {progress,busy}=usePullRefresh({blocked,loading,onTrigger});
+  if(progress<=0&&!busy)return null;
+  const p=busy?1:progress;
+  return (
+    <div role="status" style={{position:"fixed",top:"calc(env(safe-area-inset-top, 0px) + 10px)",left:"50%",
+      zIndex:60,pointerEvents:"none",width:36,height:36,borderRadius:"50%",background:"var(--card)",
+      border:"1px solid var(--border)",boxShadow:"0 4px 12px var(--shadow)",color:"var(--text)",
+      display:"flex",alignItems:"center",justifyContent:"center",opacity:p,
+      transform:`translate(-50%, ${Math.round(p*44-44)}px) rotate(${busy?0:progress*360}deg)`}}>
+      <span aria-hidden="true" style={{fontSize:16,lineHeight:1,display:"inline-block",animation:busy?"spin 1s linear infinite":"none"}}>↻</span>
+    </div>
+  );
+}
+
 // One direction of the gross flow view — the entityLedger/PropertySheet shape
 // (head + itemised rows), which is the app's existing precedent for "every
 // dollar that moved, split by direction". Magnitudes, not signed values: the
@@ -458,6 +554,82 @@ function MonthJumpSheet({year,month,now,maxAhead,onPick,onClose}) {
           })}
         </div>
         <button onClick={onClose} className="ibtn" style={{width:"100%",justifyContent:"center",marginTop:14}}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
+// The header's gear (PR-something re-theme): 390px leaves no room for four
+// icon buttons beside the page title, so quick-add/theme/refresh/sign-out
+// collapsed into one settings menu. It is a MENU, not a modal — a transparent
+// backdrop over a panel anchored under the gear, so the page stays legible
+// underneath instead of being dimmed away. Row order mirrors the old header's
+// left-to-right reading order. The Dashboard-level capture-phase Escape effect
+// (~2983-3001) is inert while this is open: the gear lives in the header,
+// which no sheet can ever be open over, so `useEscClose` here is always the
+// only listener that matters.
+function GearMenu({tab,themePref,themeResolved,onTheme,loading,lastUpd,onRefresh,onQuickAdd,onSignOut,onClose}) {
+  useEscClose(onClose);
+  // 14px of vertical padding around a 14px/1.2 label puts every row at ~45px:
+  // these are thumb targets on a phone, and 11px left them at 39-41px (the
+  // 390x844 measurement). The repo's recorded 32px floor is the minimum a
+  // control may be, not what a full-width menu row should settle for.
+  const rowStyle={display:"flex",alignItems:"center",gap:10,width:"100%",background:"none",border:"none",
+    padding:"14px 16px",fontFamily:"inherit",fontSize:14,fontWeight:500,textAlign:"left",color:"var(--text)",cursor:"pointer"};
+  const glyphStyle={width:16,flexShrink:0,color:"var(--muted)",textAlign:"center"};
+  return (
+    <div className="overlay" data-mm-gear-close="" onClick={onClose} style={{background:"transparent"}}>
+      <div className="card" role="dialog" aria-modal="true" aria-label="Settings" onClick={e=>e.stopPropagation()}
+        style={{position:"absolute",top:"calc(env(safe-area-inset-top, 0px) + 66px)",
+          right:"max(16px, calc((100vw - 720px) / 2 + 16px))",width:260,maxWidth:"calc(100vw - 32px)",
+          padding:"6px 0",boxShadow:"0 8px 24px var(--shadow)"}}>
+        {tab==="transactions"&&(
+          <button style={rowStyle} onClick={()=>{onClose();onQuickAdd();}}>
+            <span aria-hidden="true" style={glyphStyle}>＋</span>
+            Add transaction
+          </button>
+        )}
+        <div style={{padding:"8px 16px 4px",fontSize:11,fontWeight:600,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em"}}>Theme</div>
+        <div role="group" aria-label="Theme" style={{display:"flex",gap:6,padding:"2px 16px 10px"}}>
+          {THEME_PREFS.map(p=>{
+            const active=p===themePref;
+            const ui=THEME_UI[p]||THEME_UI.system;
+            return (
+              <button key={p} aria-pressed={active} onClick={()=>onTheme(p)}
+                style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:2,padding:"8px 4px",
+                  borderRadius:10,fontFamily:"inherit",fontSize:11,cursor:"pointer",
+                  // The active fill is --card, not --input-bg: the light accent
+                  // reaches only 4.24:1 on --input-bg but clears AA on the card
+                  // (the same reason recorded on .bnav in ui.css).
+                  ...(active
+                    ?{border:"1px solid var(--accent)",background:"var(--card)",color:"var(--accent)",fontWeight:700}
+                    :{border:"1px solid var(--border)",background:"var(--input-bg)",color:"var(--muted)",fontWeight:500})}}>
+                <span aria-hidden="true" style={{fontSize:14,lineHeight:1}}>{ui.icon}</span>
+                {ui.label}
+              </button>
+            );
+          })}
+        </div>
+        {themePref==="system"&&(
+          <div style={{padding:"0 16px 10px",fontSize:11,color:"var(--muted)"}}>Following your device — {themeResolved} right now</div>
+        )}
+        <button style={{...rowStyle,justifyContent:"space-between"}} disabled={loading} onClick={()=>{onClose();onRefresh();}}>
+          <span style={{display:"flex",alignItems:"center",gap:10}}>
+            <span aria-hidden="true" style={{...glyphStyle,display:"inline-block",animation:loading?"spin 1s linear infinite":"none"}}>↻</span>
+            Refresh
+          </span>
+          {lastUpd&&(
+            <span style={{fontSize:11,color:"var(--muted)",fontVariantNumeric:"tabular-nums"}}>
+              updated {lastUpd.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}
+            </span>
+          )}
+        </button>
+        {/* Shared household login — the WORD stays: an icon-only sign-out on a
+            shared login is a mis-tap hazard. */}
+        <button style={{...rowStyle,borderTop:"1px solid var(--border)"}} onClick={()=>{onClose();onSignOut();}}>
+          <span aria-hidden="true" style={glyphStyle}>⏻</span>
+          Sign out
+        </button>
       </div>
     </div>
   );
@@ -2112,11 +2284,8 @@ export default function Dashboard({ refreshTick = 0 }) {
   // the unsubscribe, so an explicit choice is never overridden. Declared BEFORE
   // useSurfaces so its effect applies the theme first and the tokens below are
   // read after the change, not before it.
-  const {pref:themePref,resolved:themeResolved,cycleTheme}=useTheme();
+  const {pref:themePref,resolved:themeResolved,setPref:setThemePref}=useTheme();
   const surf=useSurfaces(themeResolved);
-  const themeUi=THEME_UI[themePref]||THEME_UI.system;
-  const themeNext=THEME_UI[THEME_PREFS[(THEME_PREFS.indexOf(themePref)+1)%THEME_PREFS.length]]||THEME_UI.system;
-  const themeTitle=`Theme: ${themeUi.label}${themePref==="system"?` — following your device, ${themeResolved} right now`:""}. Tap for ${themeNext.label}.`;
 
   useEffect(()=>{chatEndRef.current?.scrollIntoView({behavior:"smooth"});},[chatMsgs,chatBusy]);
   useEffect(()=>{writeStoredChat(chatMsgs);},[chatMsgs]);
@@ -2570,6 +2739,19 @@ export default function Dashboard({ refreshTick = 0 }) {
     setAcctTxEpoch(e=>e+1);
   },[reloadData]);
 
+  // The ONE refresh: the gear menu's Refresh row and the pull-to-refresh gesture
+  // both call this, so the two can never drift apart on what "refresh" means
+  // (sync:"refresh" is the contract that survives a throttled pull — see fetchData).
+  const refreshNow=useCallback(()=>fetchData(year,month,{sync:"refresh"}),[fetchData,year,month]);
+
+  // Shared household login — confirm so a stray tap can't sign the whole
+  // household out on this device. App.jsx's onAuthStateChange renders the
+  // Login screen once the session ends.
+  async function confirmSignOut(){
+    if(!window.confirm("Sign out on this device? You'll need the household password to sign back in."))return;
+    try{await signOut();}catch(e){alert("Sign-out failed: "+friendlyError(e));}
+  }
+
   useEffect(()=>{
     if(!ready)return;
     const syncFirst=!didInitialSync.current;
@@ -2961,6 +3143,7 @@ export default function Dashboard({ refreshTick = 0 }) {
   const [connectingSfin,setConnectingSfin]=useState(false);
   const [monthPicker,setMonthPicker]=useState(false);
   const [quickAdd,setQuickAdd]=useState(false); // manual transaction quick-add sheet
+  const [gearOpen,setGearOpen]=useState(false); // header gear menu — a registered overlay (declared above anySheetOpen per the TDZ rule)
   const [quickAddBusy,setQuickAddBusy]=useState(false);
   // The detail sheet's two local panels, keyed by TRANSACTION ID rather than
   // booleans: opening a different row can never inherit an open type menu or
@@ -3048,7 +3231,7 @@ export default function Dashboard({ refreshTick = 0 }) {
   // window used to push a racing entry and then be flash-closed by the landing
   // pop — and (b) lets onMount consume an {mmSheet:true} entry stranded by a
   // reload-with-sheet-open, so the first back gesture isn't a dead press.
-  const anySheetOpen=!!(selTx||catPickerFor||catDrill||incomeDrill||taxDrill||schedDebtId||monthPicker||importing||connectingSfin||quickAdd||targetEdit||moveFrom||addingCat||rulesOpen);
+  const anySheetOpen=!!(selTx||catPickerFor||catDrill||incomeDrill||taxDrill||schedDebtId||monthPicker||importing||connectingSfin||quickAdd||targetEdit||moveFrom||addingCat||rulesOpen||gearOpen);
   const anySheetOpenRef=useRef(false);
   anySheetOpenRef.current=anySheetOpen;
   const sheetHistRef=useRef(null);
@@ -3062,6 +3245,7 @@ export default function Dashboard({ refreshTick = 0 }) {
     setSelTx(null);setCatDrill(null);setIncomeDrill(null);setTaxDrill(null);setSchedDebtId(null);setMonthPicker(false);
     setImporting(false);setConnectingSfin(false);setQuickAdd(false);
     setTargetEdit(null);setMoveFrom(null);setCatPickerFor(null);setAddingCat(false);setRulesOpen(false);
+    setGearOpen(false);
   },[]);
   useEffect(()=>{
     let st=null;
@@ -4359,16 +4543,21 @@ export default function Dashboard({ refreshTick = 0 }) {
   return (
     <div style={{fontFamily:"var(--font-sans)",background:"var(--bg)",minHeight:"100vh",
       color:"var(--text)"}}>
+      {/* Gated on anySheetOpen because sheets scroll internally, and on
+          loading so a refresh already in flight cannot be stacked. */}
+      <PullRefresh blocked={anySheetOpen||loading} loading={loading} onTrigger={refreshNow}/>
       {/* 96px bottom padding keeps the fixed bottom nav clear of the last row. */}
       <div style={{maxWidth:720,margin:"0 auto",padding:"24px 16px 96px"}}>
 
         {/* Header (PR F): the page title IS the header — the eyebrow is gone —
             with the month pill under it on month-scoped screens ONLY (the
             month cursor's STATE is untouched; elsewhere the label was just
-            noise about a month the screen ignores). Theme + refresh collapse
-            to icon buttons (labels live in title/aria-label); Sign out keeps
-            its word — an icon-only sign-out on a shared login is a mis-tap
-            hazard, and the confirm text is the safety net. */}
+            noise about a month the screen ignores). The four right-hand
+            buttons (quick-add/theme/refresh/sign-out) moved into ONE gear
+            button: at 390px, a fifth icon button had no room left, and each
+            new one only shrank the ones already there. The gear opens an
+            anchored panel rather than a modal, so the settings it exposes
+            never has to fight the page title for space again. */}
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:10,marginBottom:16}}>
           <div style={{minWidth:0}}>
             <h1 style={{fontSize:30,fontWeight:700,letterSpacing:"-.03em",lineHeight:1.15,color:"var(--text)"}}>{pageTitle(tab)}</h1>
@@ -4385,30 +4574,8 @@ export default function Dashboard({ refreshTick = 0 }) {
             )}
           </div>
           <div style={{display:"flex",alignItems:"center",gap:8,marginLeft:"auto",flexShrink:0}}>
-            {/* Per-screen action: quick-add on Spending (was PR C's in-body
-                title row, folded up here when the global title landed). */}
-            {tab==="transactions"&&(
-              <button className="nbtn" title="Add transaction" aria-label="Add transaction"
-                onClick={()=>setQuickAdd(true)}>＋</button>
-            )}
-            <button className="nbtn" onClick={cycleTheme} title={themeTitle} aria-label={themeTitle}>
-              <span aria-hidden="true" style={{fontSize:14,lineHeight:1}}>{themeUi.icon}</span>
-            </button>
-            <button className="nbtn" onClick={()=>fetchData(year,month,{sync:"refresh"})} disabled={loading}
-              title={lastUpd?`Refresh · updated ${lastUpd.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}`:"Refresh"}
-              aria-label="Refresh">
-              <span style={{display:"inline-block",animation:loading?"spin 1s linear infinite":"none"}}>↻</span>
-            </button>
-            {/* Shared household login — confirm so a stray tap can't sign the
-                whole household out on this device. App.jsx's onAuthStateChange
-                renders the Login screen once the session ends. */}
-            <button className="ibtn" title="Sign out" aria-label="Sign out" style={{minHeight:36,flexShrink:0}}
-              onClick={async()=>{
-                if(!window.confirm("Sign out on this device? You'll need the household password to sign back in."))return;
-                try{await signOut();}catch(e){alert("Sign-out failed: "+friendlyError(e));}
-              }}>
-              Sign out
-            </button>
+            <button className="nbtn" data-mm-gear="" aria-label="Settings" title="Settings"
+              aria-haspopup="dialog" aria-expanded={gearOpen} onClick={()=>setGearOpen(true)}>⚙︎</button>
           </div>
         </div>
 
@@ -4417,6 +4584,11 @@ export default function Dashboard({ refreshTick = 0 }) {
             maxAhead={tab==="budget"?12:0}
             onPick={(y,m)=>{setYear(y);setMonth(m);setMonthPicker(false);}}
             onClose={()=>setMonthPicker(false)}/>
+        )}
+        {gearOpen&&(
+          <GearMenu tab={tab} themePref={themePref} themeResolved={themeResolved} onTheme={setThemePref}
+            loading={loading} lastUpd={lastUpd} onRefresh={refreshNow} onQuickAdd={()=>setQuickAdd(true)}
+            onSignOut={confirmSignOut} onClose={()=>setGearOpen(false)}/>
         )}
 
         {error&&<div style={{background:"var(--danger-bg)",border:"1px solid var(--danger-border)",borderRadius:10,padding:"12px 16px",fontSize:13,color:"var(--danger)",marginBottom:14}}>{error}</div>}
