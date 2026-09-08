@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from "react";
-import { getOverview, getSpending, getBiggestMovers, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES, ACCOUNT_SUBTYPES, setCategoryRule, applyCategoryRuleToHistory, listCategoryRules, countCategoryRuleMatches, deleteCategoryRule, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, getActualIncome, resolveBudgetIncome, invalidateEnvelopeSpending, isEnvelopeSchemaMissing, targetNeed, readyToAssign, envelopePace, setEnvPace as persistEnvPace, updateRecIgnore, getStartupSettings, monthKey, getEntities, createEntity, updateEntity, getTaxYearTransactions, getMileage, addMileage, deleteMileage, getReceiptTxIds, getDebts, getBalanceSnapshots, getNetWorthSeries, addManualTransaction, createManualAccount, updateManualBalance, getDataCoverage, getFeedCoverageGaps, FEED_GAP_SCAN_CAP, getReconciliation, getRestoreRecord, signOut, autoFillMonth, setTargetOverride, effectiveTarget, getExpectedTransactions, addExpected, dismissExpected, matchExpectedManually, getSavedChats, saveChatToApp, deleteSavedChat, addRegistryEntry, updateRegistryParent, removeRegistryEntry, updateCategoryColor, updateCategoryAlias } from "../dataAdapter.js";
+import { getOverview, getSpending, getBiggestMovers, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES, ACCOUNT_SUBTYPES, setCategoryRule, applyCategoryRuleToHistory, listCategoryRules, countCategoryRuleMatches, deleteCategoryRule, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, getActualIncome, resolveBudgetIncome, invalidateEnvelopeSpending, isEnvelopeSchemaMissing, targetNeed, readyToAssign, envelopePace, updateEnvPace as persistEnvPace, updateRecIgnore, getStartupSettings, monthKey, getEntities, createEntity, updateEntity, getTaxYearTransactions, getMileage, addMileage, deleteMileage, getReceiptTxIds, getDebts, getBalanceSnapshots, getNetWorthSeries, addManualTransaction, createManualAccount, updateManualBalance, getDataCoverage, getFeedCoverageGaps, FEED_GAP_SCAN_CAP, getReconciliation, getRestoreRecord, signOut, autoFillMonth, setTargetOverride, effectiveTarget, getExpectedTransactions, addExpected, dismissExpected, matchExpectedManually, getSavedChats, saveChatToApp, deleteSavedChat, addRegistryEntry, updateRegistryParent, removeRegistryEntry, updateCategoryColor, updateCategoryAlias } from "../dataAdapter.js";
 import { FLOW_LABELS } from "../reconciliation.js";
 import { clampSeries } from "../netWorth.js";
 // Pure cores imported directly (never Supabase — the mock-harness alias rule
@@ -489,34 +489,72 @@ function Donut({data,size=130}) {
   );
 }
 
+// Commits when the picker CLOSES, not on every step of it. A native colour
+// input fires `change` continuously while the user drags, and each one was a
+// database write plus (before the account page derived its account) a refetch
+// of that account's whole transaction list — a burst of UPDATEs and a flashing
+// list for one colour choice. The live value is previewed locally so the
+// swatch still tracks the drag; `onChange` fires once, on blur/close, and only
+// if the colour actually changed. Accepted, not overlooked: there is no
+// flush-on-unmount, so a pick abandoned by the component disappearing mid-drag
+// is dropped. Native colour pickers are modal on both targets here (iOS Safari
+// and desktop), so nothing can unmount underneath one — machinery for that
+// would be guarding a path the platform does not offer.
 function Swatch({color,onChange}) {
   const ref=useRef();
+  const [live,setLive]=useState(null);
+  const shown=live??color;
+  const commit=()=>{
+    setLive(null);
+    if(live&&live!==color)onChange(live);
+  };
   // The fill is the STORED colour, shown truthfully — this is the colour picker,
   // so it must never be contrast-adjusted. The outline is --muted (>=3:1 on the
   // card in both themes) rather than the --border hairline, which disappears
   // against a swatch in either theme.
   return (
     <div onClick={()=>ref.current?.click()} title="Click to change color"
-      style={{width:14,height:14,borderRadius:3,background:color,cursor:"pointer",flexShrink:0,
+      style={{width:14,height:14,borderRadius:3,background:shown,cursor:"pointer",flexShrink:0,
         outline:"1.5px solid var(--muted)",transition:"transform .1s",position:"relative"}}
       onMouseEnter={e=>e.currentTarget.style.transform="scale(1.3)"}
       onMouseLeave={e=>e.currentTarget.style.transform="scale(1)"}>
-      <input ref={ref} type="color" value={color} onChange={e=>onChange(e.target.value)}
+      <input ref={ref} type="color" value={shown} onChange={e=>setLive(e.target.value)} onBlur={commit}
         style={{position:"absolute",opacity:0,width:1,height:1,pointerEvents:"none"}}/>
     </div>
   );
 }
 
+// `onSave` fires only when the value actually CHANGED. Committing an unchanged
+// value is not a harmless no-op wherever the displayed `name` is DERIVED: the
+// account page shows `acctLabel(account)` — "Name ··1234" — so opening the
+// field and pressing Enter stored the mask inside the nickname, after which
+// every surface said "Name ··1234 ··1234" and no UI action could clear it. The
+// transaction sheet had the same shape: it displays the bank's own payee, so an
+// unchanged commit wrote that text as a user override of itself. Blanking still
+// commits (an empty value is how a nickname is cleared), and Escape still
+// cancels — this only removes the write that asserts nothing.
 function EditName({name,onSave}) {
   const [ed,setEd]=useState(false);
   const [val,setVal]=useState(name);
   const ref=useRef();
   useEffect(()=>{setVal(name);},[name]);
   useEffect(()=>{if(ed)ref.current?.select();},[ed]);
+  const commit=()=>{
+    setEd(false);
+    const next=val.trim();
+    if(next===(name??""))return;   // unchanged — nothing to assert
+    // The RAW trimmed value, empty included. It used to fall back to `name`,
+    // which made "clear the field" a no-op everywhere and left the account
+    // page's clear-branch unreachable: blanking a nickname re-saved the
+    // nickname. Every caller handles empty on its own terms — the account
+    // page and the payee line store null (reset), the category alias stores
+    // "" which reads back as the raw label, and renameEntity ignores it.
+    onSave(next);
+  };
   if(ed) return (
     <input ref={ref} value={val} onChange={e=>setVal(e.target.value)}
-      onBlur={()=>{setEd(false);onSave(val.trim()||name);}}
-      onKeyDown={e=>{if(e.key==="Enter"){setEd(false);onSave(val.trim()||name);}if(e.key==="Escape"){e.stopPropagation();setEd(false);setVal(name);}}}
+      onBlur={commit}
+      onKeyDown={e=>{if(e.key==="Enter"){commit();}if(e.key==="Escape"){e.stopPropagation();setEd(false);setVal(name);}}}
       style={{font:"inherit",fontSize:13,fontWeight:500,color:"var(--text)",background:"var(--bg)",
         border:"1px solid var(--border)",borderRadius:4,padding:"1px 6px",width:"100%",outline:"none"}}/>
   );
@@ -583,6 +621,13 @@ function AssignEdit({value,onSave}) {
   );
 }
 
+// Cancel is a real button here, not just Escape. This editor has no
+// blur-commit — deliberately, since blurring toward one of the two scope
+// buttons must not fire the other one — so on iOS, which has no Escape key,
+// tapping "＋ set income" to see what it did left NO way out but a write:
+// "This month" with the pre-filled value, or an empty field, which DELETES the
+// month's override. A look must never cost a change.
+//
 // The TYPED income for the month — what the month in progress (and any future
 // month) budgets against, since its paychecks haven't all landed yet. Once the
 // month is over, RTA switches to actual measured income and this figure
@@ -603,8 +648,10 @@ function IncomeEdit({value,isDefault,onSave}) {
         onKeyDown={e=>{if(e.key==="Enter")commit("month");if(e.key==="Escape"){e.stopPropagation();setEd(false);setVal(value!=null?String(value):"");}}}
         style={{font:"inherit",fontSize:16,width:96,color:"var(--text)",background:"var(--card)",
           border:"1px solid var(--accent)",borderRadius:6,padding:"2px 7px",outline:"none",textAlign:"right"}}/>
-      <button className="ibtn" style={{fontSize:10,padding:"3px 8px"}} onClick={()=>commit("month")}>This month</button>
-      <button className="ibtn" style={{fontSize:10,padding:"3px 8px"}} onClick={()=>commit("default")}>Every month</button>
+      <button className="ibtn" style={{fontSize:10,padding:"3px 8px",minHeight:32}} onClick={()=>commit("month")}>This month</button>
+      <button className="ibtn" style={{fontSize:10,padding:"3px 8px",minHeight:32}} onClick={()=>commit("default")}>Every month</button>
+      <button className="ibtn" style={{fontSize:10,padding:"3px 8px",minHeight:32}}
+        onClick={()=>{setEd(false);setVal(value!=null?String(value):"");}}>Cancel</button>
     </span>
   );
   return (
@@ -1788,7 +1835,20 @@ export default function Dashboard({ refreshTick = 0 }) {
   // of those three lives inside the panel), so cross-month results can never
   // render with no visible input explaining or clearing them.
   const [searchOpen,setSearchOpen]=useState(false);
-  const [selAcct,setSelAcct]=useState(null);
+  // The account page holds an ID and DERIVES its account from `accounts`, so
+  // it can never be a frozen snapshot. Holding the object meant two bugs at
+  // once: reloadData refreshed `accounts` and left the open page showing a
+  // stale balance and "as of" until it was closed and reopened (the tile
+  // behind it disagreed, which the feedback guide calls always a bug), while
+  // every rename/colour/hide replaced the object and re-ran the effect below,
+  // refetching all 500 rows and flashing skeletons under the user's hands.
+  const [selAcctId,setSelAcctId]=useState(null);
+  // Bumped only when NEW ROWS may have arrived — a completed sync, or the
+  // explicit Refresh. The account page's list is not month-scoped, so a plain
+  // month tap must not refetch its 500 rows; but a pull that just wrote
+  // transactions must reach it, or the open page keeps showing yesterday while
+  // the tile behind it moves on.
+  const [acctTxEpoch,setAcctTxEpoch]=useState(0);
   const [acctTxs,setAcctTxs]=useState(null);
   const [acctHasMore,setAcctHasMore]=useState(false);
   const [acctLoading,setAcctLoading]=useState(false);
@@ -1853,6 +1913,15 @@ export default function Dashboard({ refreshTick = 0 }) {
   // never throws, so a failure is simply zero gaps and nothing renders.
   const [feedGaps,setFeedGaps]=useState(null);   // null = not fetched yet; {gaps,reachDays,truncated}
   const feedGapSeq=useRef(0);
+  // Keyed on a stable SIGNATURE of the fed accounts rather than the array's
+  // identity: every optimistic edit (a rename, a colour, a hidden toggle)
+  // mints a new `accounts` array, and this scan queries first-transaction-date
+  // per SimpleFIN account — so typing a nickname re-ran the whole sweep. The
+  // signature changes only when the set of scannable accounts does, which is
+  // the only thing the answer depends on.
+  const feedGapKey=useMemo(
+    ()=>accounts.filter(a=>isSimpleFinAccount(a)&&!a.hidden).map(a=>a.id).sort().join(","),
+    [accounts]);
   useEffect(()=>{
     if(tab!=="accounts"||!accounts.length) return;
     const seq=++feedGapSeq.current;
@@ -1860,7 +1929,9 @@ export default function Dashboard({ refreshTick = 0 }) {
       const r=await getFeedCoverageGaps(accounts);
       if(feedGapSeq.current===seq) setFeedGaps(r);
     })();
-  },[tab,accounts,refreshTick]);
+    // accounts is read inside but deliberately NOT a dep — feedGapKey is the
+    // part of it this answer depends on.
+  },[tab,feedGapKey,refreshTick]);
 
   // --- Debt tab (lazy like recurring) ---
   const [debtData,setDebtData]=useState(null);   // {debts,totalDebt,totalMinimums,hasDebtColumns}
@@ -1888,6 +1959,20 @@ export default function Dashboard({ refreshTick = 0 }) {
   // changes a dependency, so every invalidation mints a new taxSeq and the
   // seq check drops whatever was in flight.
   const [taxEpoch,setTaxEpoch]=useState(0);
+  // Recurring and Debt cache the same way the Tax tab does, and for the same
+  // recorded reason: "null means refetch" is NOT a reliable invalidation.
+  // When the value is ALREADY null — i.e. the first load is still in flight —
+  // React bails on the identical value, the effect never re-runs, and the
+  // in-flight request paints a PRE-SYNC snapshot with nothing left to
+  // supersede it. Open Recurring or Debt in the first seconds after launch,
+  // while the startup pull is still running, and the list cached rows from
+  // before it: a charge that just posted is missing, or a card balance is a
+  // day stale and the next edit patches that stale cache. An epoch always
+  // mints a new sequence, so the newer response wins.
+  const [recEpoch,setRecEpoch]=useState(0);
+  const recSeq=useRef(0);
+  const [debtEpoch,setDebtEpoch]=useState(0);
+  const debtSeq=useRef(0);
   const [mileage,setMileage]=useState([]);
   // Set of transaction ids that have a receipt photo, for the capital-expense
   // no-receipt nag + the CSV column; null = the migration isn't installed, so
@@ -2430,8 +2515,11 @@ export default function Dashboard({ refreshTick = 0 }) {
       // Outside the eseq guard: envelope writes never move transactions, so a
       // write completing mid-reload can't have made this snapshot stale.
       if(ai!==undefined)setActualInc({y,m,amount:ai.amount,coverageStart:ai.coverageStart});
-      setRecurring(null); // recompute lazily on next Recurring-tab visit
-      setDebtData(null);  // same: refetch balances/liability fields on next Debt-tab visit
+      // Clear AND bump: the clear is what makes the next visit refetch, the
+      // bump is what supersedes a load already in flight (a null set over a
+      // null is a no-op React bails on — the recorded gotcha).
+      setRecurring(null); setRecEpoch(e=>e+1);
+      setDebtData(null);  setDebtEpoch(e=>e+1);
       setLastUpd(new Date());
     }catch(err){
       if(seq!==loadSeq.current)return false;
@@ -2476,6 +2564,9 @@ export default function Dashboard({ refreshTick = 0 }) {
     if(allThrottled&&sync!=="refresh")return;
     const[cy,cm]=monthRef.current.split("-").map(Number);
     await reloadData(cy,cm);
+    // The pull may have written rows onto whatever account is open behind the
+    // month view; its list is the one thing reloadData does not cover.
+    setAcctTxEpoch(e=>e+1);
   },[reloadData]);
 
   useEffect(()=>{
@@ -2545,7 +2636,13 @@ export default function Dashboard({ refreshTick = 0 }) {
   // opens (a ~40-month query — CANDIDATE_WINDOW_MONTHS, sized for annual),
   // cached until the next data reload.
   useEffect(()=>{
-    if(tab!=="recurring"||recurring||recLoading)return;
+    // The in-flight flag (recLoading) is NOT in this guard: gating on it
+    // suppresses exactly the superseding load a sequence guard exists for,
+    // which is what makes the STALE response the winner — the recorded
+    // variant of this gotcha, and the reason the seq check below does the
+    // work instead.
+    if(tab!=="recurring"||recurring)return;
+    const seq=++recSeq.current;
     setRecLoading(true);
     // Clock for dueStatus: the real wall-clock day, computed local (not the
     // viewed month), because "is this subscription overdue?" is a question
@@ -2553,10 +2650,10 @@ export default function Dashboard({ refreshTick = 0 }) {
     const d=new Date();
     const today=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
     getRecurringCandidates()
-      .then(res=>setRecurring(detectRecurring(res.transactions,today)))
-      .catch(err=>{console.error(err);setRecurring([]);})
-      .finally(()=>setRecLoading(false));
-  },[tab,recurring,recLoading]);
+      .then(res=>{if(seq===recSeq.current)setRecurring(detectRecurring(res.transactions,today));})
+      .catch(err=>{console.error(err);if(seq===recSeq.current)setRecurring([]);})
+      .finally(()=>{if(seq===recSeq.current)setRecLoading(false);});
+  },[tab,recurring,recEpoch]);
 
   // Expected transactions load lazily on the tabs that render them.
   // getExpectedTransactions is NOT a pure read — it runs the auto-match pass
@@ -2593,7 +2690,8 @@ export default function Dashboard({ refreshTick = 0 }) {
   // liability fields, plus a year of balance snapshots for the history chart
   // (best-effort — the table may not exist yet; the adapter returns []).
   useEffect(()=>{
-    if(tab!=="debt"||debtData||debtLoading)return;
+    if(tab!=="debt"||debtData)return;
+    const seq=++debtSeq.current;
     setDebtLoading(true);
     getDebts()
       .then(async d=>{
@@ -2612,11 +2710,11 @@ export default function Dashboard({ refreshTick = 0 }) {
           const since=new Date(Date.now()-365*86400000).toISOString().slice(0,10);
           setNwSeries(await getNetWorthSeries(since));
         }catch(err){console.error("net worth load failed",err);setNwSeries([]);}
-        setDebtData(d);
+        if(seq===debtSeq.current)setDebtData(d);
       })
-      .catch(err=>{console.error("debt load failed",err);setDebtData({debts:[],totalDebt:0,totalMinimums:0,hasDebtColumns:false});})
-      .finally(()=>setDebtLoading(false));
-  },[tab,debtData,debtLoading]);
+      .catch(err=>{console.error("debt load failed",err);if(seq===debtSeq.current)setDebtData({debts:[],totalDebt:0,totalMinimums:0,hasDebtColumns:false});})
+      .finally(()=>{if(seq===debtSeq.current)setDebtLoading(false);});
+  },[tab,debtData,debtEpoch]);
 
   // Optimistic save for a hand-entered liability field (apr / minimum_payment /
   // credit_limit / next_payment_due_date). Patches the debt cache — including
@@ -2701,7 +2799,7 @@ export default function Dashboard({ refreshTick = 0 }) {
       await createManualAccount({name,subtype:kind,balance});
       setAddDebt(false);
       setDebtSnaps([]);
-      setDebtData(null);
+      setDebtData(null); setDebtEpoch(e=>e+1); // supersede any load in flight
       reloadData(year,month);
     }catch(err){
       console.error("manual debt add failed",err);
@@ -2790,20 +2888,26 @@ export default function Dashboard({ refreshTick = 0 }) {
   }
 
   // Drill-in: load all transactions for the selected account
+  // Keyed on the ID, never the object: an edit to the account's NAME or COLOUR
+  // is not a reason to refetch its transactions.
   useEffect(()=>{
-    if(!selAcct){setAcctTxs(null);setAcctHasMore(false);return;}
+    if(!selAcctId){setAcctTxs(null);setAcctHasMore(false);return;}
     let cancelled=false;
     setAcctLoading(true);
-    getAccountTransactions(selAcct.id)
+    getAccountTransactions(selAcctId)
       .then(res=>{if(!cancelled){setAcctTxs(res.transactions);setAcctHasMore(res.hasMore);}})
       .catch(err=>{console.error(err);if(!cancelled)setAcctTxs([]);})
       .finally(()=>{if(!cancelled)setAcctLoading(false);});
     return ()=>{cancelled=true;};
-  },[selAcct]);
+  },[selAcctId,acctTxEpoch]);
 
   // Account badge helpers: nickname (or name) + color identify which account
   // a transaction came from, on every tab.
   const acctById=useCallback(id=>accounts.find(a=>a.id===id),[accounts]);
+  // The open account page's account, DERIVED — so a reload, the startup sync's
+  // follow-up, a foreground return and the other phone's writes all reach it
+  // for free, and the page can never disagree with the tile behind it.
+  const selAcct=useMemo(()=>(selAcctId?accounts.find(a=>a.id===selAcctId)||null:null),[accounts,selAcctId]);
   const acctLabel=useCallback(a=>a?(a.nickname||`${a.name}${a.mask?" ··"+a.mask:""}`):null,[]);
   const acctInst=useCallback(a=>a?.institutions?.display_name||a?.institutions?.name||"",[]);
   const acctColor=useCallback(a=>{
@@ -2830,15 +2934,15 @@ export default function Dashboard({ refreshTick = 0 }) {
   // would leave a mistyped card counting purchases as household spending with
   // the screen showing the corrected type.
   async function saveAccount(id,fields){
+    // ONE optimistic copy. The open account page derives from `accounts`, so
+    // patching that list is the whole update and the rollback is the whole
+    // undo — there is no second object to keep in step.
     const prevAccounts=accounts;
-    const prevSel=selAcct;
     setAccounts(prev=>prev.map(a=>a.id===id?{...a,...fields}:a));
-    if(selAcct?.id===id)setSelAcct(prev=>({...prev,...fields}));
     try{await updateAccount(id,fields);}
     catch(err){
       console.error("account update failed",err);
       setAccounts(prevAccounts);
-      if(prevSel?.id===id)setSelAcct(cur=>cur?.id===id?prevSel:cur);
       window.alert(`Couldn't save that account change: ${err.message||err}`);
     }
   }
@@ -2894,6 +2998,26 @@ export default function Dashboard({ refreshTick = 0 }) {
     window.addEventListener("keydown",h,true);
     return ()=>window.removeEventListener("keydown",h,true);
   },[selTx,addingCat,catPickerFor]);
+
+  // The open transaction sheet is a SNAPSHOT taken when the row was tapped, and
+  // teaching a merchant rewrites that row's automatic category underneath it.
+  // The sheet then offered "Remove my category (back to Uncategorized)" — false
+  // once the rule exists — and tapping it patched the stale snapshot to
+  // Uncategorized while the SAME patch on the fresh list row yielded the taught
+  // category: sheet and list disagreed until the sheet was closed and reopened.
+  // Re-resolve by id whenever the month's rows change. A row the current month
+  // no longer contains keeps the object it has (a month switch, a filter), and
+  // an _unpairedShape row is left alone — it was deliberately built outside the
+  // month's list and there is nothing fresher to find.
+  useEffect(()=>{
+    if(!selTx||selTx._unpairedShape)return;
+    // `transactions` is the month's RESULT OBJECT ({transactions:[...]}), and
+    // it is null until the first load — not an array. (Caught by the render
+    // gate, which is the only check that evaluates this component in a
+    // browser: npm test and vite build both pass a TypeError in a callback.)
+    const fresh=transactions?.transactions?.find(t=>t.id===selTx.id);
+    if(fresh&&fresh!==selTx)setSelTx(fresh);
+  },[transactions,selTx]);
 
   // Taught-rules screen. `rules` is null both before the first load AND when
   // the category_rules table is missing (listCategoryRules returns null, the
@@ -3065,7 +3189,7 @@ export default function Dashboard({ refreshTick = 0 }) {
             .catch(err=>console.error("account list refresh failed",err))
         : Promise.resolve(),
     ]);
-  },[searchQ,searchFilters,selAcct]);
+  },[searchQ,searchFilters,selAcctId]);
 
   async function learnMerchant(){
     if(!learnPrompt)return;
@@ -3199,7 +3323,7 @@ export default function Dashboard({ refreshTick = 0 }) {
   // make the tax records?".
   function jumpToTax(entityId){
     const t=selTx;
-    setSelTx(null);setCatDrill(null);setSelAcct(null);
+    setSelTx(null);setCatDrill(null);setSelAcctId(null);
     const y=Number((t?.transaction_date||"").slice(0,4));
     if(y&&y!==taxYear&&y<=now.getFullYear()){setTaxYear(y);invalidateTax();}
     setTaxDrill(entityId);
@@ -3289,7 +3413,7 @@ export default function Dashboard({ refreshTick = 0 }) {
       // The server just hid (or deleted) the bank's rows — a write reloadData
       // no longer invalidates for, so drop the memoised ranges here.
       invalidateEnvelopeSpending();
-      setSelAcct(null);
+      setSelAcctId(null);
       setTxAcctFilter(null);
       // The removed bank's rows no longer appear (both kinds hide them), so a
       // category filter set from them may now describe nothing.
@@ -3942,7 +4066,7 @@ export default function Dashboard({ refreshTick = 0 }) {
   // never inside it (a button inside a button is invalid and swallows one of
   // the two taps). `body` is a thunk: a collapsed section must not pay to build
   // rows nobody can see.
-  function envSectionNode({sectionKey,label,color,swatch=null,roll,count,onDrill,drillTitle,note,body}){
+  function envSectionNode({sectionKey,label,color,swatch=null,roll,count,onDrill,drillTitle,note,noteWhenEmpty=false,body}){
     const okCard=inkOn(OK_MONEY,surf.card),overCard=inkOn(OVER_MONEY,surf.card);
     const open=planOpen.includes(sectionKey);
     const bar=envelopeBar(roll);
@@ -3989,8 +4113,14 @@ export default function Dashboard({ refreshTick = 0 }) {
           <DrillNum onClick={onDrill} title={drillTitle}>{fmtAuto(roll.spent)} spent</DrillNum>
           {/* The note explains what is INSIDE the section, so it earns its line
               only once the section is open — collapsed, the heading stays one
-              name, one bar and one number. */}
-          {open&&note&&(<><span>·</span><span>{note}</span></>)}
+              name, one bar and one number. ONE opt-in exception
+              (`noteWhenEmpty`): a section with zero categories whose note is
+              the only thing that can explain why a $0 heading exists at all —
+              day one, where every row is Uncategorized and so unbudgetable.
+              Opt-in rather than blanket, because a real group's note ("assign
+              in each") describes rows INSIDE it and reads as nonsense on a
+              section that has none. */}
+          {(open||(count===0&&noteWhenEmpty))&&note&&(<><span>·</span><span>{note}</span></>)}
         </div>
         {open&&body()}
       </div>
@@ -4121,11 +4251,20 @@ export default function Dashboard({ refreshTick = 0 }) {
   // Pace warning is a pure display preference (never touches the walk), so its
   // toggle writes settings directly and optimistically — no runEnvelopeWrite,
   // no envelope refetch.
+  // Optimistic at render, but the WRITE is a single-key read-merge-write
+  // (updateEnvPace) for the reason its rec:ignore twin below records: this is
+  // HOUSEHOLD data the other phone reads, and persisting the whole map rebuilt
+  // from local state let a stale mount-time read wipe every opt-in the other
+  // phone had made, silently, on the first ⏱ tap. Adopt the merged server map
+  // — it may carry keys the other phone added since this one mounted.
   function togglePace(category){
+    const on=!envPace[category];
     const next={...envPace};
-    if(next[category])delete next[category];else next[category]=true;
+    if(on)next[category]=true;else delete next[category];
     setEnvPace(next);
-    persistEnvPace(next).catch(err=>console.error("saving pace opt-in failed",err));
+    persistEnvPace(category,on)
+      .then(merged=>{if(merged)setEnvPace(merged);})
+      .catch(err=>console.error("saving pace opt-in failed",err));
   }
   // Ignore/unignore a recurring charge. Optimistic at render like togglePace,
   // but the WRITE is a single-key read-merge-write (updateRecIgnore): this is
@@ -4190,7 +4329,7 @@ export default function Dashboard({ refreshTick = 0 }) {
   // future month, so leaving it snaps back.
   const go=(t)=>{
     setTab(t);
-    if(t!=="accounts")setSelAcct(null);
+    if(t!=="accounts")setSelAcctId(null);
     if(t!=="budget"&&isFuture)goCurrentMonth();
   };
   // The Spending item's badge: the viewed month's Uncategorized rows (the
@@ -5107,7 +5246,14 @@ export default function Dashboard({ refreshTick = 0 }) {
                 </div>
               )}
 
-              {envRows.length===0&&(
+              {/* Gated on the BUDGETABLE rows, not on envRows. On day one every
+                  transaction is Uncategorized — which IS an envRow, just an
+                  unbudgetable one — so `envRows.length===0` was false and this
+                  hint, the only thing on the tab that says what to do, never
+                  rendered. What the household saw instead was a collapsed
+                  "Ungrouped · 0 categories · $0" heading sitting over a full
+                  month of spending. */}
+              {budgetableRows.length===0&&(
                 <div style={{fontSize:12,color:"var(--muted)",textAlign:"center",padding:"20px 12px",lineHeight:1.6}}>
                   No envelopes yet. Make a category below, then assign it some money.
                 </div>
@@ -5176,6 +5322,10 @@ export default function Dashboard({ refreshTick = 0 }) {
                 // looseRoll); an unbudgetable one renders below them and says
                 // so on its own row, but the count would lie without this.
                 note:`not part of any group${looseUnbudgetable>0?` · ${looseUnbudgetable} that can't be budgeted`:""}`,
+                // Day one: no budgetable categories yet, but a month of
+                // Uncategorized spending sits inside. The note is the only
+                // thing on the collapsed heading that explains the $0.
+                noteWhenEmpty:true,
                 // Indented like a group's children: they are not subcategories,
                 // but they ARE this section's contents, and an unindented row
                 // under an open caret reads as a sibling of the heading.
@@ -5535,7 +5685,7 @@ export default function Dashboard({ refreshTick = 0 }) {
               const renderTile=a=>{const i=ri++;const bal=displayBalance(a.current_balance,a.type);return (
                 <div key={a.id} className="tx" style={{cursor:"pointer",padding:"13px 0",gap:10,
                   animationDelay:i*.03+"s",opacity:a.hidden?.5:1}}
-                  onClick={()=>setSelAcct(a)}>
+                  onClick={()=>setSelAcctId(a.id)}>
                   <span aria-hidden="true" style={{width:10,height:10,borderRadius:3,flexShrink:0,
                     background:markOn(acctColor(a),surf.card)}}/>
                   <div style={{flex:1,minWidth:0}}>
@@ -5961,7 +6111,7 @@ export default function Dashboard({ refreshTick = 0 }) {
         {tab==="accounts"&&selAcct&&(
           <div className="card">
             <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:4}}>
-              <button className="nbtn" onClick={()=>setSelAcct(null)} title="Back to accounts">‹</button>
+              <button className="nbtn" onClick={()=>setSelAcctId(null)} title="Back to accounts">‹</button>
               <div style={{flex:1,minWidth:0}}>
                 {/* The account's naming controls live HERE since 2026-08-28 —
                     the list's tiles became pure navigation, so the swatch (tap
@@ -5971,7 +6121,17 @@ export default function Dashboard({ refreshTick = 0 }) {
                 <div style={{display:"flex",alignItems:"center",gap:8}}>
                   <Swatch color={acctColor(selAcct)} onChange={hex=>saveAccount(selAcct.id,{color:hex})}/>
                   <span style={{display:"flex",flex:1,minWidth:0,fontSize:15,fontWeight:600}}>
-                    <EditName name={acctLabel(selAcct)} onSave={v=>saveAccount(selAcct.id,{nickname:v})}/>
+                    {/* The field shows acctLabel — nickname, or the derived
+                        "name ··mask". Saving that derived string back would
+                        bake the mask into the nickname permanently, so a value
+                        equal to the derived label (or empty) clears the
+                        nickname instead, which is also the only way to get
+                        back to the bank's own name. */}
+                    <EditName name={acctLabel(selAcct)} onSave={v=>{
+                      const derived=`${selAcct.name}${selAcct.mask?" ··"+selAcct.mask:""}`;
+                      const next=(v||"").trim();
+                      saveAccount(selAcct.id,{nickname:next&&next!==derived?next:null});
+                    }}/>
                   </span>
                 </div>
                 <div style={{fontSize:11,color:"var(--muted)",marginTop:2}}>

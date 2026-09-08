@@ -16,6 +16,7 @@ import { pad2, shiftMonth, isMissingTableError } from './shared.js';
 import { monthKey, planMove, planAutoFill } from '../envelopes.js';
 import { isBudgetableCategory } from '../categoryMap.js';
 import { getSettings, getSetting, setSetting, deleteSetting } from '../db.js';
+import { makeSerializedUpdater } from '../serializedUpdater.js';
 
 // Budgets: one monthly dollar limit per category. No row = no budget.
 // RLS scopes reads to the household; household_id fills in server-side via
@@ -195,6 +196,39 @@ export async function setEnvPace(map) {
   for (const [k, v] of Object.entries(map || {})) if (v) clean[k] = true;
   await setSetting(ENV_PACE_KEY, JSON.stringify(clean));
 }
+
+// ONE KEY at a time, read-merge-write — the same discipline `rec:ignore` got,
+// and for the same reason. `env:pace` is HOUSEHOLD data both phones read, and
+// the toggle used to persist the whole map rebuilt from local state: a phone
+// whose mount-time read failed (or that simply loaded before the other one's
+// opt-ins) held a stale map, and its first ⏱ tap wrote that map back over
+// everything. The other phone's warnings vanished on its next launch, with
+// nothing on screen to say so. Returns the MERGED stored map so the caller can
+// adopt keys the other phone added since mount, exactly like updateRecIgnore.
+// A FACTORY over an injectable db, like makeSettingsChains — the chain has to
+// be testable without a network, and binding it to the module's own getSetting
+// would make it exactly the thing the test can't reach.
+export function makeEnvPaceChain(db) {
+  const read = async () => parseEnvPace(await db.getSetting(ENV_PACE_KEY));
+  const write = async map => {
+    const clean = {};
+    for (const [k, v] of Object.entries(map || {})) if (v) clean[k] = true;
+    await db.setSetting(ENV_PACE_KEY, JSON.stringify(clean));
+  };
+  const run = makeSerializedUpdater(read, write);
+  return {
+    updateEnvPace: (category, on) =>
+      run(current => {
+        const next = { ...(current || {}) };
+        if (on) next[category] = true;
+        else delete next[category];
+        return next;
+      }),
+  };
+}
+
+const envPaceChain = makeEnvPaceChain({ getSetting, setSetting });
+export const updateEnvPace = envPaceChain.updateEnvPace;
 
 // Assigns dollars to a category for one month. Blank or zero removes the
 // assignment entirely (which is what keeps "no row = assigned 0" true) —

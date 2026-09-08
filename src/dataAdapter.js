@@ -48,6 +48,7 @@ export {
   setBudgetIncome,
   getEnvPace,
   setEnvPace,
+  updateEnvPace,
   setAssigned,
   setTargetOverride,
   autoFillMonth,
