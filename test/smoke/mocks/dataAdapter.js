@@ -667,5 +667,12 @@ export async function getExpectedTransactions() {
 export async function addExpected(fields) { return { row: { id: 'xn', status: 'pending', ...fields }, duplicate: false }; }
 export async function dismissExpected() {}
 export async function matchExpectedManually() {}
-export async function getExistingTxIds() { return new Set(); }
+// { ids, sources } — the real signature. This returned a BARE Set, so
+// `const { ids } = await getExistingTxIds(...)` gave undefined and the very
+// next `existingIds.size` threw: picking any account that already holds rows
+// took the whole app to the ErrorBoundary inside the harness. Found by the UI
+// verifier while trying to render the overlap path, which this made
+// unreachable — the second mock/façade drift in this audit, after
+// getBiggestMovers.
+export async function getExistingTxIds() { return { ids: new Set(), sources: new Set() }; }
 export async function importCsvTransactions() { return { inserted: 0 }; }

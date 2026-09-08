@@ -1805,7 +1805,7 @@ function BatchQueue({ queue, summary, sectionLabel, onOpenAlone }) {
                 and the File object is right here — so the fix is a button, not
                 a sentence telling them to go find it again. */}
             {onOpenAlone && (it.status === "failed" || it.status === "skipped" || it.status === "needs-template") && it.file && (
-              <button className="ibtn" style={{ fontSize: 11, flexShrink: 0 }} onClick={() => onOpenAlone(it.file)}>Open alone</button>
+              <button className="ibtn" style={{ fontSize: 11, flexShrink: 0, minHeight: 32 }} onClick={() => onOpenAlone(it.file)}>Open alone</button>
             )}
           </div>
         ))}
