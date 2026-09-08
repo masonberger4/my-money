@@ -104,6 +104,16 @@ select
           where table_schema = 'public' and table_name = 'transactions'
             and column_name = 'user_type')                          as transactions_user_type,
 
+  -- 20260908000001 — editable dates (user_date + the generated
+  -- effective_date the month reads use). Both, because with user_date alone
+  -- a date edit would save and then change nothing on screen.
+  exists (select 1 from information_schema.columns
+          where table_schema = 'public' and table_name = 'transactions'
+            and column_name = 'user_date')                          as transactions_user_date,
+  exists (select 1 from information_schema.columns
+          where table_schema = 'public' and table_name = 'transactions'
+            and column_name = 'effective_date')                     as transactions_effective_date,
+
   -- 20260731000001 — receipts Storage. The bucket row, and the storage.objects
   -- policy that can fail with 42501 and be downgraded to an unseen NOTICE.
   -- If receipts_objects_policy is false, create the policy by hand in

@@ -8059,11 +8059,33 @@ export default function Dashboard({ refreshTick = 0 }) {
               <div style={{fontSize:11,color:"var(--muted)"}}>Account</div>
               {a?<Pill label={acctLabel(a)} color={acctColor(a)} surface={surf.card}/>:<span style={{fontSize:12,color:"var(--muted)"}}>—</span>}
             </div>
-            {/* Date is display-only — date editing does not exist today and is
-                deliberately deferred, not forgotten (the spec's deferred list). */}
+            {/* Date is EDITABLE (Mason, 2026-09-08): a purchase that posts a
+                day into the next month, or one the household simply wants
+                counted elsewhere, moves by picking a date. Only `user_date`
+                is written; the generated effective_date column follows, and
+                every month list/total reads that (updateTransaction key row). Same blur-commit + year
+                floor as the placed-in-service input below: a date input
+                yields a "complete" garbage year per keystroke. */}
             <div style={{padding:"12px 0",display:"flex",alignItems:"center",justifyContent:"space-between",gap:10}}>
-              <div style={{fontSize:11,color:"var(--muted)"}}>Date</div>
-              <div style={{fontSize:13,fontWeight:500,color:"var(--text)"}}>{longDate(selTx.transaction_date)}</div>
+              <div style={{fontSize:11,color:"var(--muted)"}}>Date
+                {selTx.user_date&&selTx.bank_date&&selTx.bank_date!==selTx.user_date&&(
+                  <div style={{marginTop:2,fontSize:10}}>Posted {longDate(selTx.bank_date)} ·{" "}
+                    <button onClick={()=>saveTx({user_date:null})}
+                      style={{background:"none",border:"none",padding:0,fontSize:10,color:"var(--accent)",cursor:"pointer",fontFamily:"inherit"}}>reset</button>
+                  </div>
+                )}
+              </div>
+              <input type="date" key={selTx.id+":"+selTx.transaction_date} defaultValue={selTx.transaction_date||""}
+                aria-label="Transaction date"
+                onBlur={ev=>{const raw=ev.target.value||null;const v=raw&&raw.slice(0,4)>="1900"?raw:null;
+                  // An empty/abandoned value keeps the current date — a
+                  // transaction can't have NO date, unlike placed-in-service.
+                  if(!v){ev.target.value=selTx.transaction_date||"";return;}
+                  if(v===selTx.transaction_date)return;
+                  // Picking the bank's own date again is a reset, not an override.
+                  saveTx({user_date:v===selTx.bank_date?null:v});}}
+                style={{padding:"6px 8px",borderRadius:8,border:"1px solid var(--border)",background:"var(--input-bg)",
+                  color:"var(--text)",fontSize:13,fontWeight:500,fontFamily:"inherit",outline:"none"}}/>
             </div>
             </div>
 
