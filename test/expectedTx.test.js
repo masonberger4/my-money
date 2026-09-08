@@ -341,3 +341,12 @@ test('matchExpected does not match an unrelated merchant just because two string
   };
   assert.deepEqual(matchExpected([exp], [tx]), []);
 });
+
+test('matchExpected does not match two wordless descriptors on an empty merchant key', () => {
+  // merchantKey drops numeric tokens, so both of these key to '' — without a
+  // guard, '' === '' passes the descriptor gate and an unrelated charge marks
+  // the bill paid.
+  const exp = { id: 'e1', description: '1234', amount: 40, due_date: '2026-06-10', cadence: 'monthly', account_id: null };
+  const tx = { id: 't1', transaction_date: '2026-06-10', amount: 40, account_id: 'a1', merchant_name: '9999', description: '9999' };
+  assert.deepEqual(matchExpected([exp], [tx]), []);
+});
