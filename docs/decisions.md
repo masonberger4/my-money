@@ -386,3 +386,40 @@ a Helvetica-SF grotesque with headings well past DM Sans's 600 ceiling.
   #1D9E75, a green from the DATA palette — the "manifest theme_color
   inconsistency" the YNAB redesign recorded as deferred. Fixed here because
   this PR is the one that moves every other colour that flanks it.
+
+## 2026-09-08 — Writes that die on the wire are re-sent; network failures get a sentence
+
+Mason's iPhone alerted "Couldn't save that change: TypeError: Load failed" when
+he picked a category on a transaction. That is not a server error: it is
+Safari's wording for a fetch that never got a response, and on iOS it is
+overwhelmingly a PWA resuming from the background (or the phone hopping cells)
+sending its first request on an HTTP/2 socket the OS already closed. The next
+request works, which is why the same session's reads looked fine — supabase-js
+re-sends GET/HEAD/OPTIONS for itself and nothing else, so only writes ever
+reached the alert. The alert then showed the raw exception text, which tells a
+person nothing they can act on.
+
+Decided:
+- **Retry PATCH/PUT/DELETE only.** A PostgREST write with the same filter and
+  payload leaves the same row state however many times it lands, so re-sending
+  one is free. Reads are already covered by postgrest-js's own
+  `RETRYABLE_METHODS` budget and stacking a second budget on top would only
+  multiply the wait on a phone that really is offline. POST is excluded on
+  purpose: a plain insert sent twice is a duplicate row, and a re-sent auth
+  refresh can burn a single-use refresh token.
+- **Two short waits (400 ms, 1200 ms — ~1.6 s worst case.)** Long enough to
+  cover a socket that died between screens, short enough that a genuinely
+  offline phone still gets its answer promptly instead of appearing hung.
+- **The retry lives in the fetch layer under supabase-js**, wired as
+  `global.fetch` when the client is created, so every adapter write inherits it
+  in one place.
+- **`friendlyError` is the one error-to-alert-text mapping.** A network failure
+  becomes "couldn't reach the server. Check the connection and try again."; any
+  other error keeps its own message, which is the behaviour the alerts already
+  had.
+
+Rejected:
+- **Retrying at each dataAdapter call site** — dozens of sites, and the next
+  write added would silently not have it. The wrapper cannot be forgotten.
+- **Retrying POST** — the two failure modes above (duplicate rows, a burnt
+  refresh token) are worse than the alert the retry would prevent.

@@ -12,6 +12,7 @@ import { SCHEDULE_E_LINES, RENTS_KEY, DEFAULT_SCHEDULE_E_MAP, scheduleEReport, e
 import { merchantKey, matchLearnedRule, isKeyPrefix } from "../txClassify.js";
 import { trimChatMsgs, buildSavedChat } from "../savedChats.js";
 import { patchTxShape } from "../spending.js";
+import { friendlyError } from "../netRetry.js";
 import { detectRecurring } from "../recurring.js";
 import { unlinkInstitution, restoreImportedInstitution, askAssistant, getSimpleFinStatus } from "../apiClient.js";
 import { restorableIds } from "../unlinkRestore.js";
@@ -2267,7 +2268,7 @@ export default function Dashboard({ refreshTick = 0 }) {
     catch(err){
       console.error("saving the category color failed",err);
       setCustomColors(prev);
-      window.alert(`Couldn't save that color: ${err.message||err}`);
+      window.alert(`Couldn't save that color: ${friendlyError(err)}`);
     }
   }
   async function saveName(cat,alias){
@@ -2277,7 +2278,7 @@ export default function Dashboard({ refreshTick = 0 }) {
     catch(err){
       console.error("saving the category name failed",err);
       setCustomNames(prev);
-      window.alert(`Couldn't save that name: ${err.message||err}`);
+      window.alert(`Couldn't save that name: ${friendlyError(err)}`);
     }
   }
 
@@ -2307,7 +2308,7 @@ export default function Dashboard({ refreshTick = 0 }) {
     }catch(err){
       console.error("adding the category failed",err);
       setCustomCats(prevCats);setCustomColors(prevColors);
-      window.alert(`Couldn't save the new category: ${err.message||err}`);
+      window.alert(`Couldn't save the new category: ${friendlyError(err)}`);
     }
   }
   // Change or remove a category's parent. Registry-only: no transaction, budget,
@@ -2322,7 +2323,7 @@ export default function Dashboard({ refreshTick = 0 }) {
     catch(err){
       console.error("saving the category parent failed",err);
       setCustomCats(prev);
-      window.alert(`Couldn't save that change: ${err.message||err}`);
+      window.alert(`Couldn't save that change: ${friendlyError(err)}`);
     }
   }
   // Retiring one only takes the name out of the pickers. Its colour, its target
@@ -2336,7 +2337,7 @@ export default function Dashboard({ refreshTick = 0 }) {
     catch(err){
       console.error("retiring the category failed",err);
       setCustomCats(prev);
-      window.alert(`Couldn't retire the category: ${err.message||err}`);
+      window.alert(`Couldn't retire the category: ${friendlyError(err)}`);
     }
   }
   function saveAsstModel(m){setAsstModel(m);setSetting("asst:model",m).catch(()=>{});}
@@ -2353,7 +2354,7 @@ export default function Dashboard({ refreshTick = 0 }) {
     catch(err){
       console.error("saving tax maps failed",err);
       setTaxMaps(prev);
-      window.alert(`Couldn't save that tax mapping: ${err.message||err}`);
+      window.alert(`Couldn't save that tax mapping: ${friendlyError(err)}`);
     }
   }
   // A fresh entity's Schedule E mapping starts from the conservative defaults;
@@ -2381,7 +2382,7 @@ export default function Dashboard({ refreshTick = 0 }) {
       invalidateTax();
     }catch(err){
       console.error("creating the property failed",err);
-      window.alert(`Couldn't add the property: ${err.message||err}\n\nIf this is a fresh deploy, the rental-tax migration may not have been applied yet.`);
+      window.alert(`Couldn't add the property: ${friendlyError(err)}\n\nIf this is a fresh deploy, the rental-tax migration may not have been applied yet.`);
     }
   }
   // Both entity edits are optimistic with rollback + alert (the
@@ -2396,7 +2397,7 @@ export default function Dashboard({ refreshTick = 0 }) {
     catch(err){
       console.error("renaming the property failed",err);
       setEntities(prev);
-      window.alert(`Couldn't rename the property: ${err.message||err}`);
+      window.alert(`Couldn't rename the property: ${friendlyError(err)}`);
     }
   }
   async function setEntityArchived(id,archived){
@@ -2407,7 +2408,7 @@ export default function Dashboard({ refreshTick = 0 }) {
     catch(err){
       console.error("archiving the property failed",err);
       setEntities(prev);
-      window.alert(`Couldn't ${archived?"archive":"unarchive"} the property: ${err.message||err}`);
+      window.alert(`Couldn't ${archived?"archive":"unarchive"} the property: ${friendlyError(err)}`);
     }
   }
   async function handleAddMileage(){
@@ -2421,7 +2422,7 @@ export default function Dashboard({ refreshTick = 0 }) {
       setMileForm(null);
     }catch(err){
       console.error("adding mileage failed",err);
-      window.alert(`Couldn't save the drive: ${err.message||err}`);
+      window.alert(`Couldn't save the drive: ${friendlyError(err)}`);
     }
   }
   async function handleDeleteMileage(id){
@@ -2431,7 +2432,7 @@ export default function Dashboard({ refreshTick = 0 }) {
     catch(err){
       console.error("deleting mileage failed",err);
       setMileage(prev); // rollback: the row is still in the DB
-      window.alert(`Couldn't delete the drive: ${err.message||err}`);
+      window.alert(`Couldn't delete the drive: ${friendlyError(err)}`);
     }
   }
 
@@ -2741,7 +2742,7 @@ export default function Dashboard({ refreshTick = 0 }) {
     updateAccount(id,fields).catch(err=>{
       console.error("debt field save failed",err);
       setDebtData(prevDebt);
-      window.alert(`Couldn't save that debt field: ${err.message||err}`);
+      window.alert(`Couldn't save that debt field: ${friendlyError(err)}`);
     });
   }
 
@@ -2784,7 +2785,7 @@ export default function Dashboard({ refreshTick = 0 }) {
     }).catch(err=>{
       console.error("manual balance save failed",err);
       patchBal(prevBal,prevAt);
-      window.alert(`Couldn't save that balance: ${err.message||err}`);
+      window.alert(`Couldn't save that balance: ${friendlyError(err)}`);
     });
   }
 
@@ -2803,7 +2804,7 @@ export default function Dashboard({ refreshTick = 0 }) {
       reloadData(year,month);
     }catch(err){
       console.error("manual debt add failed",err);
-      window.alert(`Couldn't add that debt: ${err.message||err}`);
+      window.alert(`Couldn't add that debt: ${friendlyError(err)}`);
     }finally{
       setAddDebtBusy(false);
     }
@@ -2943,7 +2944,7 @@ export default function Dashboard({ refreshTick = 0 }) {
     catch(err){
       console.error("account update failed",err);
       setAccounts(prevAccounts);
-      window.alert(`Couldn't save that account change: ${err.message||err}`);
+      window.alert(`Couldn't save that account change: ${friendlyError(err)}`);
     }
   }
 
@@ -3165,7 +3166,7 @@ export default function Dashboard({ refreshTick = 0 }) {
       invalidateRules();
     }catch(err){
       console.error("rule delete failed",err);
-      alert(`Couldn't forget that rule — ${err.message||err}`);
+      alert(`Couldn't forget that rule — ${friendlyError(err)}`);
     }
   }
 
@@ -3216,7 +3217,7 @@ export default function Dashboard({ refreshTick = 0 }) {
       console.error("learning the merchant failed",err);
       setLearnPrompt(null);
       setLearnedNote(null);
-      window.alert(`Couldn't save that rule: ${err.message||err}`);
+      window.alert(`Couldn't save that rule: ${friendlyError(err)}`);
     }finally{
       setLearning(false);
     }
@@ -3278,7 +3279,7 @@ export default function Dashboard({ refreshTick = 0 }) {
     }catch(err){
       console.error("transaction update failed",err);
       rollback();
-      window.alert(`Couldn't save that change: ${err.message||err}`);
+      window.alert(`Couldn't save that change: ${friendlyError(err)}`);
     }
     reloadData(year,month);
   }
@@ -3310,7 +3311,7 @@ export default function Dashboard({ refreshTick = 0 }) {
       await reloadData(year,month); // canonical totals + ordering
     }catch(err){
       console.error("manual transaction add failed",err);
-      window.alert(`Couldn't add that transaction: ${err.message||err}`);
+      window.alert(`Couldn't add that transaction: ${friendlyError(err)}`);
     }finally{
       setQuickAddBusy(false);
     }

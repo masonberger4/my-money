@@ -1,4 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
+import { makeRetryingFetch } from './netRetry.js';
 
 // `import.meta.env` is always defined under Vite; guard it so importing this
 // module in a plain Node context (the CSV-import dry-run harness) doesn't throw
@@ -23,7 +24,13 @@ export const configError =
       'enabled for this deployment type, then redeploy).'
     : null;
 
-export const supabase = configError ? null : createClient(url, anonKey);
+// global.fetch: every sub-client (REST, auth, storage) sends through this.
+// makeRetryingFetch re-sends a PATCH/PUT/DELETE that died on the wire — the
+// iOS "TypeError: Load failed" on a category pick (src/netRetry.js has the
+// whole story); supabase-js only ever retries reads on its own.
+export const supabase = configError
+  ? null
+  : createClient(url, anonKey, { global: { fetch: makeRetryingFetch() } });
 
 export async function getAccessToken() {
   if (!supabase) return null;

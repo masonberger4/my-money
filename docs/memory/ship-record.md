@@ -278,6 +278,12 @@ Conventions / Gotchas. An entry here is a pointer, not a home for rules.
   from Mason's screenshots — the dark one, then his light reference the same
   day — so nothing here was invented to fill a gap.
 
+- **iOS "Load failed" write retry (2026-09-08)** — a PATCH/PUT/DELETE that dies
+  on the wire is re-sent under the Supabase client's own fetch, and every error
+  alert now goes through one text mapping. Scope rules: the `src/netRetry.js`
+  key row; why the phone sees it at all, and why it is not CORS: the
+  "TypeError: Load failed" Gotcha.
+
 ## Pending branches
 
 None in code, and **no migration is outstanding**: every file in

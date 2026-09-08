@@ -217,6 +217,22 @@
   woff2 `<link rel=preload>` tags require `crossorigin` EVEN same-origin —
   font fetches are CORS-mode, and without it the preload is wasted and the
   font double-fetched.
+- **"TypeError: Load failed" on the phone is a request that DIED ON THE WIRE, not
+  a server error.** It is Safari's wording for a fetch that never got a response
+  (Chrome says "Failed to fetch"); on iOS it is usually the PWA resuming from the
+  background or the phone hopping cells, sending the first request on an HTTP/2
+  socket the OS already closed — that request is lost and the next one succeeds.
+  supabase-js re-sends only GET/HEAD/OPTIONS itself, so reads self-heal and only a
+  WRITE ever surfaced it (the category pick alerted "Couldn't save that change:
+  TypeError: Load failed"). Fixed 2026-09-08 by `makeRetryingFetch` — the
+  `src/netRetry.js` key row has the scope rules. The shape to recognise while
+  debugging: postgrest-js hands the app a plain object —
+  `{message: "TypeError: Load failed", details, hint, code: ""}`, the error's
+  name folded into the message, no status, not a real TypeError — so match on
+  the MESSAGE, never
+  `instanceof`. Do NOT diagnose it as CORS/CSP: `vercel.json`'s `connect-src`
+  already allows `*.supabase.co`, and reads against the same origin were working
+  seconds earlier.
 - **A build-toolchain upgrade can silently raise the app's BROWSER FLOOR, and
   neither CI job can see it.** Vite 5 defaulted to es2020/edge88/firefox78/
   chrome87/safari14; Vite 6 changed the default to baseline-widely-available
