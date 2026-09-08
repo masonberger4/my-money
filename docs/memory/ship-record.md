@@ -261,6 +261,14 @@ Conventions / Gotchas. An entry here is a pointer, not a home for rules.
   exited 0. The durable rule it produced is the browser-floor Gotcha; `package.json`
   now declares the Node floor Vite 8 introduced.
 
+- **Free static checks in CI (2026-09-08)** — a third REQUIRED job, `static
+  checks` (eslint, actionlint, shellcheck), plus two advisory workflows: CodeQL
+  and dependency review. All free, none spending Claude tokens. The eslint run
+  found a conditionally-called `useMemo` in the PDF template editor on its first
+  pass — the exact class the render gate cannot reach. Rules and the
+  required-check coupling: docs/memory/workflow.md; every rule choice and its
+  reason: `eslint.config.js`.
+
 - **One typeface + the near-black indigo dark theme (2026-09-08)** — Inter
   400–800 (one self-hosted variable file) replaced DM Sans and both DM Mono
   weights, and the dark tokens were re-sampled from Mason's reference

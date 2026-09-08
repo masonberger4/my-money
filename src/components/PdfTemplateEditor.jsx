@@ -103,8 +103,27 @@ export default function PdfTemplateEditor({ pages, template, onChange, rowCount 
     if (!applied?.rowMeta?.length) return;
     const first = applied.rowMeta[0].page;
     setPageIdx(p => (pages[p]?.page === first ? p : Math.max(0, pages.findIndex(pg => pg.page === first))));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // Deliberately keyed on `pages` alone: re-running when `applied` changes
+    // would fight the user's own page selection on every template edit.
   }, [pages]);
+
+  // Sample cell values for the current page's first matching row, so each
+  // column selector shows what it is actually capturing.
+  // ABOVE the early return, and null-guarded, because it is a HOOK: sitting
+  // below it, the render that bailed on a null template called one hook fewer
+  // than the next one, which is the "rendered more hooks than during the
+  // previous render" crash. Every reset path happens to clear `pages`/
+  // `template` and the editor's own visibility in the same batch today, so
+  // nothing reached it — a caller that nulls the template while this stays
+  // mounted would. Found by the linter (2026-09-08); the comment above the
+  // useSurface calls had already stated the rule.
+  const sample = useMemo(() => {
+    if (!page || !template) return null;
+    const lines = groupIntoLines(page.runs);
+    const meta = applied?.rowMeta?.find(m => m.page === page.page);
+    const line = meta ? lines.find(l => Math.abs(l.y - meta.y) < 1.5) : null;
+    return line ? splitLineIntoCells(line, template.boundaries || [], page.width) : null;
+  }, [page, template, applied]);
 
   if (!page || !template) return null;
 
@@ -166,15 +185,6 @@ export default function PdfTemplateEditor({ pages, template, onChange, rowCount 
     const nextRoles = roles.filter((_, j) => j !== i + 1);
     set({ boundaries: next, roles: nextRoles });
   }
-
-  // Sample cell values for the current page's first matching row, so each
-  // column selector shows what it is actually capturing.
-  const sample = useMemo(() => {
-    const lines = groupIntoLines(page.runs);
-    const meta = applied?.rowMeta?.find(m => m.page === page.page);
-    const line = meta ? lines.find(l => Math.abs(l.y - meta.y) < 1.5) : null;
-    return line ? splitLineIntoCells(line, boundaries, page.width) : null;
-  }, [page, boundaries, applied]);
 
   const rowsOnPage = applied?.rowMeta?.filter(m => m.page === page.page) || [];
   const rowYs = new Set(rowsOnPage.map(m => Math.round(m.y)));

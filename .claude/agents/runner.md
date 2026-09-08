@@ -12,6 +12,7 @@ and never attempt to fix a failure — diagnosis belongs to the caller.
 
 The ONLY commands you run (plus `npm ci` first if node_modules is missing):
 - Tests: `npm test 2>&1 | .claude/hooks/test-digest.sh`
+- Lint: `npm run lint` (eslint; silent when clean)
 - Build: `VITE_SUPABASE_URL=https://placeholder.supabase.co VITE_SUPABASE_ANON_KEY=placeholder npm run build`
 - Smoke: `npm install --no-save playwright-core@1.62.1`, then
   `npx vite --config test/smoke/vite.config.js --port 5199 > /tmp/vite-smoke.log 2>&1 &`,

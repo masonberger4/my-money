@@ -4,7 +4,7 @@ import { applyRuleToHistory, isRangeExhaustedError } from './ruleHistory.js';
 import { markInternalTransfers, isIncome, cashIncome, cashSpending } from './cashFlow.js';
 import { walkEnvelopes, monthKey } from './envelopes.js';
 import { matchExpected, rollForwardDate, isDuplicateExpected, isDuplicateRollForward } from './expectedTx.js';
-import { isSpend, sumSpending, spendingToDate, spendingGroups, biggestMovers, toTxShape, aggregateEnvelopeSpending } from './spending.js';
+import { sumSpending, spendingToDate, spendingGroups, biggestMovers, toTxShape, aggregateEnvelopeSpending } from './spending.js';
 import { createRangeMemo } from './monthMemo.js';
 import { setSyncCompletionHook } from './sync.js';
 import { amountOrClause, searchIsActive } from './searchFilters.js';

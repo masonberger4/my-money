@@ -22,6 +22,9 @@
 [ $# -gt 0 ] || { echo "usage: $0 <file> [<file> ...]" >&2; exit 2; }
 
 JS='^[[:space:]]*(export[[:space:]]+)?(default[[:space:]]+)?(async[[:space:]]+)?function[[:space:]]+[A-Za-z_$]|^[[:space:]]*(export[[:space:]]+)?(const|let|class)[[:space:]]+[A-Za-z_$][A-Za-z0-9_$]*[[:space:]]*=[[:space:]]*(async[[:space:]]*)?(\(|function|use[A-Z]|React\.memo|forwardRef|memo\()|^[[:space:]]*(export[[:space:]]+)?class[[:space:]]+[A-Za-z_$]|^[[:space:]]*(useEffect|useLayoutEffect)\(|tab==="[a-z]+"&&|^[[:space:]]*\{/\*.*\*/\}[[:space:]]*$|^[[:space:]]*//[[:space:]]*(-{3,}|={3,}|#{2,})|^[[:space:]]*(describe|test|it)\('
+# shellcheck disable=SC2016  # the single quotes are the POINT: this is a grep
+# pattern, and the backticks in it are literal. Double-quoting would make
+# `[^`]+` a command substitution.
 MD='^#{1,4} |^\| `[^`]+` \|'
 SQL='^[[:space:]]*(create|alter|drop|insert|grant|revoke|--[[:space:]]*(={3,}|-{3,}))'
 JSON='^  "[^"]+":'

@@ -10,7 +10,9 @@ skill):
    `git rev-list --count HEAD..origin/main`. If non-zero:
    `git merge origin/main` (MERGE, never rebase — the branch may be pushed),
    resolve, and only then continue. Other sessions land work mid-session.
-2. **Tests**: `npm test 2>&1 | .claude/hooks/test-digest.sh` — must be green.
+2. **Tests + lint**: `npm test 2>&1 | .claude/hooks/test-digest.sh` then
+   `npm run lint` — both green. Lint is the `static checks` required job, so a
+   red one found after the push is a red required check.
 3. **Build**: `VITE_SUPABASE_URL=https://placeholder.supabase.co VITE_SUPABASE_ANON_KEY=placeholder npm run build` — must succeed.
 4. **Smoke + screenshots**: if the diff touches src/components/ or
    src/ui.css, delegate to the **ui-verifier** agent (walk + 390×844

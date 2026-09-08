@@ -88,7 +88,7 @@ test('amountOrClause output stays PostgREST-safe for parseAmount outputs', () =>
   for (const raw of ['$1,234.56', '99999999', '0.005', '-42']) {
     const min = parseAmount(raw);
     const clause = amountOrClause(min, min * 2);
-    assert.ok(!/[^a-z0-9.,()\-]/.test(clause), clause);
+    assert.ok(!/[^a-z0-9.,()-]/.test(clause), clause);
     assert.ok(!clause.includes('(('), clause);
   }
 });

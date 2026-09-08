@@ -331,3 +331,13 @@
   off different bases once regressed production (the "iphone-app" incident).
 - If pushes stop deploying and GitHub API calls 503, check githubstatus.com
   before debugging webhooks/Vercel — GitHub-side outages happen.
+
+- **A file-scanning tool reports nothing for a file it never parsed — which
+  reads exactly like "clean".** The first eslint baseline taken here counted 17
+  findings; the real number was 24, and every miss sat in `src/components/`,
+  because `.jsx` is not in eslint's default file set and the run had simply
+  skipped the 8,000-line component. The undercount was invisible from the
+  output: a shorter list looks like better news. Before trusting any such
+  tool's verdict, check the FILE COUNT it reports against the repo's own
+  (`eslint . --format json` returns one entry per file linted) — the tool that
+  scanned nothing and the tool that found nothing print the same summary.

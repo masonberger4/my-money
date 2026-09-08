@@ -31,7 +31,7 @@ on:
 
 jobs:
   # This job name must NEVER become one of the branch ruleset's required checks
-  # ("tests + build", "render check"). Claude answers a mention; it is not a gate,
+  # ("tests + build", "render check", "static checks"). Claude answers a mention; it is not a gate,
   # and a required check that only sometimes runs reports pending FOREVER rather
   # than passing — the same mechanic that refuted paths-ignore on docs/.
   claude:

@@ -37,7 +37,7 @@ on:
 
 jobs:
   # Must never join the branch ruleset's required checks ("tests + build",
-  # "render check"). This is advice on a bot's PR, not a gate — and a required
+  # "render check", "static checks"). This is advice on a bot's PR, not a gate — and a required
   # check that only runs on some PRs reports pending forever on the rest.
   review:
     name: dependabot review
@@ -102,9 +102,10 @@ jobs:
             Review this Dependabot pull request for the one class of risk this
             repo's CI cannot see. Read the diff with `gh pr diff`.
 
-            Do NOT re-report anything CI already proves. The `tests + build` and
-            `render check` jobs already ran the full suite, the production build,
-            and an 11-view render walk. "Tests pass" is noise, not a review.
+            Do NOT re-report anything CI already proves. The `tests + build`,
+            `render check` and `static checks` jobs already ran the full suite,
+            the production build, an 11-view render walk, and eslint over every
+            source file. "Tests pass" is noise, not a review.
 
             Answer in order, and stop as soon as one answer settles it:
 

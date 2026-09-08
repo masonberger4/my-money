@@ -27,8 +27,8 @@ function jsFiles(dir) {
 function json500Args(src) {
   const args = [];
   const re = /\.status\(500\)\s*\.json\(/g;
-  let m;
-  while ((m = re.exec(src))) {
+  // The match object is never read — the walk below works from re.lastIndex.
+  while (re.exec(src)) {
     let depth = 1;
     let i = re.lastIndex;
     while (i < src.length && depth > 0) {

@@ -277,6 +277,61 @@ them:
   browser.** It caught a TypeError that `npm test` and `vite build` both
   passed. That is the third time this failure shape is on the record.
 
+## 2026-09-08 — Free static checks join CI (no Claude tokens)
+
+Mason asked for "more CI checks that won't use Claude tokens … nothing
+redundant. Just … as much free code checking as possible." The audit of what
+was ALREADY covered did most of the work: the RLS harness replays every
+migration on a throwaway Postgres inside `npm test`, and Dependabot alerts,
+secret scanning and push protection have been on since 2026-08-30 — so a
+migration job, `npm audit` and a secret scanner were all rejected as duplicates
+before anything was written.
+
+Decided:
+- **A third REQUIRED check, `static checks`** in ci.yml: `npm run lint`,
+  shellcheck over the `.claude/hooks/*.sh` pair, and actionlint over the
+  workflows (which also pipes every `run:` block through shellcheck). Mason
+  adds the name to the ruleset by hand; until he does it runs and reports but
+  gates nothing.
+- **Every job in ci.yml is a required check; advisory work lives in its own
+  workflow file.** Makes the gate readable at a glance, and is why CodeQL and
+  dependency review are separate files rather than ci.yml jobs.
+- **CodeQL and dependency review are ADVISORY and must stay so** — a false
+  positive must not hold a merge that CI proved. CodeQL gets no cron: its
+  purpose is re-scanning UNCHANGED code as query packs improve, and main moves
+  most days. It is also mutually exclusive with GitHub's "default setup".
+- **The eslint config is a bug tool, not a style tool.** Recommended rules plus
+  ONE hooks rule; no formatting rules, no Prettier, and `eslint-plugin-react`
+  is unnecessary because core eslint already tracks JSX identifiers. Globals
+  are declared per runtime so `process` in src/ stays a real error.
+- **exhaustive-deps stays OFF by design**, not "for now": effects here key on
+  epoch counters and signatures (the Wave C fixes), so its "fix" would restore
+  the bug the epochs exist to prevent. Its three stale disable comments were
+  deleted — a directive for a rule that cannot fire is a lie the next reader
+  believes, so unused directives are themselves an error.
+- **The baseline was fixed, never suppressed** (24 findings). The one that
+  justified the whole change: a `useMemo` called BELOW an early return in the
+  PDF template editor — a "rendered more hooks than during the previous render"
+  crash, in a file whose own comment already said hooks must stay above that
+  return. Unreachable today only because every reset path happens to clear the
+  template and the editor's visibility in the same batch. `npm test` and `vite
+  build` both passed it, and the render gate never opened that editor.
+- Also shipped, from the 2026-08-04 backlog: ci.yml declares
+  `permissions: contents: read`, and each required job `name:` carries a
+  comment saying the ruleset matches on that exact string. SHA-pinning the
+  actions is still NOT done and stays a backlog item.
+
+Rejected: `npm audit` and gitleaks (Dependabot alerts, secret scanning and push
+protection already cover both); Prettier (style, not bugs, and it would rewrite
+every file); a typecheck (nothing is typed); `eslint-plugin-react` (core covers
+JSX identifiers); the hooks plugin's `recommended` preset (it bundles
+React-Compiler rules that flag legitimate patterns here); zizmor (would re-flag
+claude.yml's documented, deliberate write scopes); OSSF Scorecard (nags on
+decisions already recorded here); a `dependabot.yml` (security-only remains the
+standing ruling); a weekly CodeQL cron; a migration-replay job (`test/rls.test.js`
+already is one); and SHA-pinning `actions/*`, which stays coupled to the ruleset
+switch it would unlock.
+
 ## 2026-09-08 — One typeface (Inter), and a near-black indigo dark theme
 
 Mason's ask was "copy the font and color scheme to be used by the app", with a

@@ -301,7 +301,6 @@ export function mileageRate(isoDate) {
 export function mileageDeduction(logRows) {
   const byRate = new Map();
   let miles = 0;
-  let amount = 0;
   let unratedMiles = 0;
   for (const row of Array.isArray(logRows) ? logRows : []) {
     if (!row) continue;
@@ -313,7 +312,6 @@ export function mileageDeduction(logRows) {
       continue;
     }
     miles += m;
-    amount += m * rate;
     const cur = byRate.get(rate) || { rate, miles: 0, amount: 0 };
     cur.miles += m;
     cur.amount += m * rate;
