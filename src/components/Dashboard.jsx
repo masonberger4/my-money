@@ -3427,7 +3427,7 @@ export default function Dashboard({ refreshTick = 0 }) {
       console.error("unlink failed",err);
       // Prefer the human message the sanitized 500 body carries (the Ask tab
       // pattern) — detail.error is the stable machine code, not display text.
-      window.alert(`Removing that bank failed: ${err.detail?.message||err.detail?.error||err.message}`);
+      window.alert(`Removing that bank failed: ${err.detail?.message||err.detail?.error||friendlyError(err)}`);
     }finally{
       setUnlinking(false);
     }
@@ -3495,7 +3495,7 @@ export default function Dashboard({ refreshTick = 0 }) {
         : "Nothing to restore — those accounts are already visible.");
     }catch(err){
       console.error("restore imported failed",err);
-      window.alert(`Restore failed: ${err.detail?.message||err.detail?.error||err.message}`);
+      window.alert(`Restore failed: ${err.detail?.message||err.detail?.error||friendlyError(err)}`);
     }finally{
       setRestoring(false);
     }
@@ -4405,7 +4405,7 @@ export default function Dashboard({ refreshTick = 0 }) {
             <button className="ibtn" title="Sign out" aria-label="Sign out" style={{minHeight:36,flexShrink:0}}
               onClick={async()=>{
                 if(!window.confirm("Sign out on this device? You'll need the household password to sign back in."))return;
-                try{await signOut();}catch(e){alert("Sign-out failed: "+(e?.message||e));}
+                try{await signOut();}catch(e){alert("Sign-out failed: "+friendlyError(e));}
               }}>
               Sign out
             </button>

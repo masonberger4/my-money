@@ -3,10 +3,16 @@
 // is Plaid-specific any more, and a file named for a vendor it no longer talks
 // to is worse than no name at all.
 import { getAccessToken } from './supabaseClient.js';
+import { makeRetryingFetch } from './netRetry.js';
+
+// Same wire-death retry the Supabase client gets (src/netRetry.js): a GET or
+// the one DELETE here is re-sent if it never got a response; the POST routes
+// (sync, unlink, claim, assistant) are never re-sent.
+const retryingFetch = makeRetryingFetch();
 
 async function request(method, url, body) {
   const token = await getAccessToken();
-  const res = await fetch(url, {
+  const res = await retryingFetch(url, {
     method,
     headers: {
       ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),

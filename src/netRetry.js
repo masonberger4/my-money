@@ -16,7 +16,12 @@
 //     returned untouched; PostgREST error handling stays supabase-js's job)
 //     and never an aborted one. Only PATCH, PUT and DELETE are retried: a
 //     PostgREST write with the same filter and payload lands the same row
-//     state however many times it arrives. GET/HEAD/OPTIONS are deliberately
+//     state however many times it arrives (every `.update()` in the adapter
+//     layer sets absolute values, never increments — keep it that way). The
+//     wrapper also fronts the auth and storage sub-clients: auth's own
+//     PUT/PATCH (`updateUser`, passkeys) are absolute-value writes this app
+//     does not call today, and storage's DELETE is a remove — re-check here
+//     before adding a call to either. GET/HEAD/OPTIONS are deliberately
 //     NOT here — postgrest-js already re-sends those itself (its
 //     RETRYABLE_METHODS, on by default), which is exactly why reads on the
 //     phone self-heal and only writes ever showed the alert; stacking a

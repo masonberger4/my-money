@@ -116,7 +116,7 @@ test('handleUnlink alert prefers detail.message over the stable code', () => {
   assert.notEqual(start, -1, 'fixture assumption: handleUnlink exists');
   const body = dash.slice(start, dash.indexOf('const cats=', start));
   assert.ok(
-    body.includes('err.detail?.message||err.detail?.error||err.message'),
-    'the unlink failure alert must read detail.message first (the Ask tab / describeError pattern)'
+    body.includes('err.detail?.message||err.detail?.error||friendlyError(err)'),
+    'the unlink failure alert must read detail.message first, then fall back to friendlyError (a wire death reads as "couldn'\''t reach the server")'
   );
 });
