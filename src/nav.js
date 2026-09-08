@@ -50,3 +50,14 @@ const TITLES = {
 export function pageTitle(tab) {
   return TITLES[tab] || 'Home';
 }
+
+// ---------------------------------------------------------------------------
+// TEMPORARY — DELIBERATE LINT ERROR. This PR is a test of the `static checks`
+// merge gate and must NEVER be merged; it is closed as soon as the gate is
+// confirmed to block. The reference below is a misspelled constant, the exact
+// typo class that reaches production as a ReferenceError: `npm test` never
+// executes this dead function and `vite build` does not resolve free
+// identifiers, so both stay green. Only eslint's no-undef sees it.
+export function gateProbe(tab) {
+  return NAV_ITEMS_TPYO[tab] ?? null;
+}
