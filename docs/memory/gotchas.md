@@ -357,3 +357,9 @@
   tool's verdict, check the FILE COUNT it reports against the repo's own
   (`eslint . --format json` returns one entry per file linted) — the tool that
   scanned nothing and the tool that found nothing print the same summary.
+- `.overlay` is `position: fixed; inset: 0`, so NOTHING inside a sheet inherits
+  the body's safe-area padding from index.html. A full-screen sheet therefore
+  needs its own `padding-top: env(safe-area-inset-top)` (`.sheet-full` carries
+  it since 2026-09-08 — the tx sheet's × close sat under the iPhone status bar,
+  where iOS swallows taps, so it read as both "too high" and "broken"). Desktop
+  and the 390×844 smoke shots see an inset of 0, so neither will show the bug.
