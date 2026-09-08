@@ -50,21 +50,28 @@
    script in index.html) => force that theme, in BOTH directions. */
 
 :root {
-  /* light palette */
-  --light-bg: #F7F6F2;
+  /* light palette — Mason's 2026-09-08 light reference, sampled from the
+     capture and converted Display P3 -> sRGB like its dark counterpart. The
+     warm ground and white card survive from the palette it replaces; what
+     changed is the INK (near-black -> black, and a much darker muted that
+     finally clears AA on small labels — see the Conventions doc, where the
+     old "light small labels still fail AA" note is now retired) and the
+     accent, which swung from lavender to the reference's blue. Ratios below
+     measured with src/paletteContrast.js. */
+  --light-bg: #F4F2EA;
   --light-card: #FFFFFF;
-  --light-text: #1a1a18;
-  --light-muted: #888780;
+  --light-text: #000000;         /* 21.00:1 on --card */
+  --light-muted: #51504D;        /* 8.06:1 on --card (was 3.61:1 and failing) */
   --light-border: #E4E2DC;
-  --light-accent: #7F77DD;
-  --light-accent-text: #FFFFFF;
+  --light-accent: #465AFA;       /* 5.12:1 on --card, 4.57:1 on --bg */
+  --light-accent-text: #FFFFFF;  /* 5.12:1 on --accent */
   --light-danger: #A32D2D;
   --light-danger-bg: #FCEBEB;
   --light-danger-border: #F09595;
   --light-warn: #8A6D1F;
   --light-warn-bg: #FDF6E3;
   --light-warn-border: #E8D9A8;
-  --light-input-bg: #F7F6F2;
+  --light-input-bg: #EBEAE2;     /* the reference's inset surface: input fills and the active nav pill */
   --light-track: #E4E2DC;
   --light-shadow: rgba(0, 0, 0, .08);
   --light-overlay: rgba(0, 0, 0, .45);
@@ -219,18 +226,21 @@ body { font-family: var(--font-sans); }
 /* Bottom navigation (Dashboard, PR B of the YNAB redesign). Fixed, floating.
    z-index 50 sits UNDER .overlay (100) so every sheet covers it; the content
    column adds bottom padding so the bar never covers the last row. The
-   ACTIVE label stays var(--text): the accent fails 4.5:1 on the light bg
-   (3.48:1), so the accent tint is carried by the icon (.bnav-ico), a
-   non-text mark held to the 3:1 floor. */
+   ACTIVE label stays var(--text), and the surface that decides this is now
+   the PILL (--input-bg), not --bg: the 2026-09-08 light accent does clear
+   4.5:1 on the page (4.57:1) but only reaches 4.24:1 on the pill it would
+   actually sit on. So the accent tint stays on the icon (.bnav-ico), a
+   non-text mark held to the 3:1 floor. Both references show a blue active
+   label; this is the one place the copy stops, and 4.24:1 is why. */
 .bnav { position: fixed; bottom: calc(10px + env(safe-area-inset-bottom)); left: 50%; transform: translateX(-50%); width: min(688px, calc(100vw - 24px)); background: var(--card); border: 1px solid var(--border); border-radius: 24px; box-shadow: 0 4px 16px var(--shadow); z-index: 50; display: flex; padding: 6px; gap: 2px; }
 .bnav-item { flex: 1; background: none; border: none; cursor: pointer; font-family: inherit; display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 6px 0 5px; border-radius: 18px; font-size: 11px; font-weight: 500; color: var(--muted); transition: all .15s; line-height: 1.2; }
 /* Emoji ignore CSS color, so the inactive/active tint is a grayscale filter
    instead — muted icons on idle items, full color on the active one. */
 .bnav-item .bnav-ico { font-size: 17px; line-height: 1; filter: grayscale(1); opacity: .75; }
-/* The active pill sits on --input-bg, not --bg: in light mode those are the
-   same value, so nothing changes there, while the dark theme gets the LIFTED
-   pill the reference screenshot shows (a pill darker than the bar reads as a
-   hole once the page itself is near-black). */
+/* The active pill sits on --input-bg, not --bg. Both references show the pill
+   as its own surface rather than a hole punched to the page colour: LIFTED in
+   dark (lighter than the bar, which a near-black page could not do) and INSET
+   in light (a warm grey on the white bar). One token expresses both. */
 .bnav-item.active { background: var(--input-bg); color: var(--text); font-weight: 600; }
 .bnav-item.active .bnav-ico { color: var(--accent); filter: none; opacity: 1; }
 .bnav-item:hover:not(.active) { color: var(--text); }

@@ -32,7 +32,7 @@ const CATEGORY_COLORS = ['#7F77DD', '#1D9E75', '#D85A30', '#378ADD', '#FAC775', 
 // Surfaces a chip can sit on. These are TEST FIXTURES mirroring --bg/--card/
 // --input-bg/--border in src/ui.css, which stays the single source of truth —
 // the module itself hardcodes no surface; callers read them at runtime.
-const LIGHT_SURFACES = ['#F7F6F2', '#FFFFFF', '#E4E2DC'];
+const LIGHT_SURFACES = ['#F4F2EA', '#FFFFFF', '#EBEAE2', '#E4E2DC'];
 // #6E7188 is the dark --track: the mid-grey the budget rails, the 6-month bars
 // and the cash-flow bars are painted on, and the only surface in the app with
 // headroom in neither direction — so it is the one that exercises readableInk's

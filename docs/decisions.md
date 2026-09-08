@@ -297,9 +297,10 @@ a Helvetica-SF grotesque with headings well past DM Sans's 600 ceiling.
   `--font-mono` survives as the SYSTEM stack and is for RAW data only (the CSV
   importer's source columns, the SimpleFIN token, the PDF template overlay),
   where a monospace says "the file's text, not ours".
-- **Dark tokens come from the screenshot; light is untouched in this pass** —
-  Mason is providing a light-mode reference, and inventing one meanwhile would
-  have to be redone. Ink got safer (text 14.21→18.43:1 on the card, muted
+- **Both palettes come from screenshots** — the dark one first, then Mason's
+  light reference the same day, sampled and converted the same way. Nothing was
+  invented to fill the gap, which is why the two themes are tonally related
+  rather than merely both-present. Ink got safer (text 14.21→18.43:1 on the card, muted
   6.52→10.74:1); the accent got bluer and therefore DARKER, so its ratio fell
   — 6.90→5.60:1 on the card, 7.73→6.16:1 on the page — which is the one number
   this re-theme spends rather than gains. It clears 4.5:1 on both surfaces, so
@@ -312,3 +313,21 @@ a Helvetica-SF grotesque with headings well past DM Sans's 600 ceiling.
 - **Heading weight 700 is now reachable**, so the page `h1` and the Reflect
   headline take it. This retires the YNAB redesign's deferred "font weights
   past 600 (the variable font's ceiling)" item.
+- **Light ink got a real fix, not a re-tint.** Text went near-black → black and
+  muted #888780 → #51504D, which takes small light-mode labels from 3.61:1 to
+  8.06:1 and RETIRES the "light small labels still fail AA — a palette
+  decision, not a bug" note that stood in Conventions. Both themes pass now, so
+  a low-contrast light label is a bug again.
+- **`--light-input-bg` stopped equalling `--light-bg`.** It is the reference's
+  inset surface (#EBEAE2) — input fills and the active nav pill — which is what
+  lets ONE token express a pill that is LIFTED in dark and INSET in light.
+  A session assuming the old equality (it made the nav change a light no-op
+  when the dark half shipped) will now be wrong.
+- **The active nav label stays `--text` in both themes**, and the surface that
+  decides it is now the PILL, not the page: the new light accent clears 4.5:1
+  on the page (4.57:1) but reaches only 4.24:1 on the pill. Both references
+  show a blue active label; this is the one place the copy deliberately stops.
+- **`manifest.webmanifest` follows `--light-bg`.** Its `theme_color` had been
+  #1D9E75, a green from the DATA palette — the "manifest theme_color
+  inconsistency" the YNAB redesign recorded as deferred. Fixed here because
+  this PR is the one that moves every other colour that flanks it.
