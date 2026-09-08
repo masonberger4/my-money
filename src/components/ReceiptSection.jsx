@@ -114,7 +114,6 @@ export default function ReceiptSection({ txId, onChanged }) {
 
   return (
     <>
-      <div style={{ borderTop: "1px solid var(--border)", margin: "12px 0" }} />
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
         {(receipts || []).map(r => (
           urls[r.id]

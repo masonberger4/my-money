@@ -8066,7 +8066,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                 every month list/total reads that (updateTransaction key row). Same blur-commit + year
                 floor as the placed-in-service input below: a date input
                 yields a "complete" garbage year per keystroke. */}
-            <div style={{padding:"12px 0",display:"flex",alignItems:"center",justifyContent:"space-between",gap:10}}>
+            <div style={{padding:"12px 0",borderBottom:"1px solid var(--border)",display:"flex",alignItems:"center",justifyContent:"space-between",gap:10}}>
               <div style={{fontSize:11,color:"var(--muted)"}}>Date
                 {selTx.user_date&&selTx.bank_date&&selTx.bank_date!==selTx.user_date&&(
                   <div style={{marginTop:2,fontSize:10}}>Posted {longDate(selTx.bank_date)} ·{" "}
@@ -8087,15 +8087,14 @@ export default function Dashboard({ refreshTick = 0 }) {
                 style={{padding:"6px 8px",borderRadius:8,border:"1px solid var(--border)",background:"var(--input-bg)",
                   color:"var(--text)",fontSize:13,fontWeight:500,fontFamily:"inherit",outline:"none"}}/>
             </div>
-            </div>
-
-            {/* Receipt photos. Owns its own load/state (not a transactions
-                column, so it's outside the saveTx patch discipline); receipt
-                changes only need the tax cache dropped for the no-receipt
-                nag. key remounts on row change so state can't bleed. */}
-            <div className="card">
-              <div style={{fontSize:11,color:"var(--muted)",marginBottom:4}}>Photo</div>
+            {/* Receipt photos, as the row after Date. Owns its own load/state
+                (not a transactions column, so it's outside the saveTx patch
+                discipline); receipt changes only need the tax cache dropped
+                for the no-receipt nag. key remounts on row change so state
+                can't bleed. The "Photo" tile is its own label — no row header. */}
+            <div style={{padding:"12px 0"}}>
               <ReceiptSection key={selTx.id} txId={selTx.id} onChanged={invalidateTax}/>
+            </div>
             </div>
 
             {/* Everything below the fold: the raw bank text, the rental/tax
