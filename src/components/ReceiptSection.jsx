@@ -112,22 +112,29 @@ export default function ReceiptSection({ txId, onChanged }) {
 
   const tile = { width: 44, height: 44, borderRadius: 6, border: "1px solid var(--border)", background: "var(--bg)", objectFit: "cover", flexShrink: 0, cursor: "pointer" };
 
+  const canAdd = !busy && receipts !== null;
+  const openPicker = () => { if (canAdd) fileRef.current?.click(); };
+
   return (
     <>
       {/* Laid out like the Date row above it: a plain muted "Photo" label on
-          the left (the label IS the add control — no box, no icon) and the
-          thumbnails on the right. */}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
-        <button onClick={() => fileRef.current?.click()} disabled={busy || receipts === null}
-          style={{ padding: 0, border: "none", background: "none", color: "var(--muted)", fontFamily: "inherit",
-            fontSize: 11, cursor: "pointer", textAlign: "left" }}>
-          {busy ? "Saving…" : "Photo"}
-        </button>
+          the left and the thumbnails on the right. The WHOLE row is the add
+          control (Mason, 2026-09-09: tapping only the word was too small a
+          target) — a thumbnail tap stops propagation and opens the viewer
+          instead. Negative margins cancel the Dashboard wrapper's 12px vertical
+          and the .card's 20px horizontal padding, matching padding restores
+          them, so the tap area is the full row edge to edge. */}
+      <div role="button" tabIndex={canAdd ? 0 : -1} aria-label="Add photo" onClick={openPicker}
+        onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openPicker(); } }}
+        style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10,
+          minHeight: 20, margin: "-12px -20px", padding: "12px 20px", cursor: canAdd ? "pointer" : "default" }}>
+        <div style={{ fontSize: 11, color: "var(--muted)" }}>{busy ? "Saving…" : "Photo"}</div>
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
           {(receipts || []).map(r => (
             urls[r.id]
-              ? <img key={r.id} src={urls[r.id]} alt="Receipt" style={tile} onClick={() => setViewing(r)} />
-              : <div key={r.id} style={{ ...tile, cursor: "default" }} />
+              ? <img key={r.id} src={urls[r.id]} alt="Receipt" style={tile}
+                  onClick={e => { e.stopPropagation(); setViewing(r); }} />
+              : <div key={r.id} style={{ ...tile, cursor: "default" }} onClick={e => e.stopPropagation()} />
           ))}
         </div>
       </div>
