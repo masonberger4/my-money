@@ -373,7 +373,13 @@ export function toTxShape(t) {
     account_id: t.account_id,
     merchant_name: displayName(t),
     description: t.description,
+    // The EFFECTIVE date: every month read runs through withEffectiveDate()
+    // (dataAdapter), which puts coalesce(user_date, date) in `date` and the
+    // bank's own date in `bank_date` — so one column buckets, and the sheet's
+    // "posted on" line + reset have the bank date to show and go back to.
     transaction_date: t.date,
+    user_date: t.user_date ?? null,
+    bank_date: t.bank_date ?? t.date,
     amount: t.amount,
     // The PRESENTED category (displayCategory): a Transfer/Card-payment row
     // reads as the transfer bucket whatever it stores. auto_category stays the
@@ -447,6 +453,9 @@ export function patchTxShape(t, fields) {
         : next.user_category || t.auto_category;
   }
   if ('user_description' in fields) next.merchant_name = fields.user_description || t.auto_description;
+  // A date edit moves the row the same way the generated column does:
+  // effective = override, else the bank's date.
+  if ('user_date' in fields) next.transaction_date = fields.user_date || t.bank_date;
   return next;
 }
 

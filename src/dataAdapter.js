@@ -138,7 +138,7 @@ export {
 } from './spending.js';
 
 const TX_COLUMNS =
-  'id, plaid_tx_id, account_id, date, amount, merchant_name, description, mapped_category, raw_category, user_category, user_description, excluded, pending, user_type';
+  'id, plaid_tx_id, account_id, date, amount, merchant_name, description, mapped_category, raw_category, user_category, user_description, excluded, pending, user_type, user_date, effective_date';
 
 // The 4-type override column (20260815000001). It lives IN the column lists
 // so test/recurringColumns.test.js can pin it as an isSpend input; before the
@@ -149,9 +149,38 @@ const TX_COLUMNS =
 // the Budget tab. The server (api/_lib/spendingContext.js) deliberately has
 // no equivalent — see the comment there.
 let transactionsHaveUserType = true;
-const stripUserType = cols =>
-  cols.split(',').map(s => s.trim()).filter(c => c !== 'user_type').join(', ');
-const txCols = cols => (transactionsHaveUserType ? cols : stripUserType(cols));
+// The user-date columns (20260908000001): `user_date` is the override and
+// `effective_date` the STORED generated coalesce(user_date, date) — the ONE
+// date every month list, total and search buckets on. `date` itself stays
+// the BANK's date (sync restates it; the CSV/PDF dedup ids hash it; the
+// feed-coverage, reconciliation and coverage-gap reads below deliberately
+// keep reading it). Every TX_COLUMNS read goes through withEffectiveDate()
+// so downstream code — the spending folds, the pairing, toTxShape — keeps
+// reading `date` and gets the effective one; the bank's date rides along as
+// `bank_date` for the sheet's "posted on" line and the reset link. Same
+// pre-migration degrade as user_type: until the paste, txDateCol() is
+// 'date' and nothing is overridden.
+let transactionsHaveUserDate = true;
+const USER_DATE_COLUMNS = ['user_date', 'effective_date'];
+const stripCols = (cols, drop) =>
+  cols.split(',').map(s => s.trim()).filter(c => !drop.includes(c)).join(', ');
+const txCols = cols => {
+  let out = cols;
+  if (!transactionsHaveUserType) out = stripCols(out, ['user_type']);
+  if (!transactionsHaveUserDate) out = stripCols(out, USER_DATE_COLUMNS);
+  return out;
+};
+// The column the MONTH reads range/sort on. Never use it for a bank-date read.
+const txDateCol = () => (transactionsHaveUserDate ? 'effective_date' : 'date');
+// Month-read rows: `date` becomes the effective date, the bank's moves aside.
+export const withEffectiveDate = rows =>
+  (rows || []).map(r =>
+    r && 'effective_date' in r && r.effective_date
+      ? { ...r, bank_date: r.date, date: r.effective_date }
+      : r
+  );
+const isMissingUserDateError = error =>
+  USER_DATE_COLUMNS.some(c => isMissingColumnError(error, c));
 
 // The rental-tax columns (20260730000001) ride along on every transaction read
 // so the detail sheet can show and edit them from ANY list — transactions tab,
@@ -183,9 +212,9 @@ async function fetchRawBetween(start, end, columns) {
         .from('transactions')
         .select(`${cols}, ${join}`)
         .eq('accounts.hidden', false)
-        .gte('date', start)
-        .lte('date', end)
-        .order('date', { ascending: false })
+        .gte(txDateCol(), start)
+        .lte(txDateCol(), end)
+        .order(txDateCol(), { ascending: false })
         // Tiebreaker: date alone is not a stable sort, so without it a page
         // boundary landing inside a run of same-dated rows can drop or repeat
         // one. Reachable now that the envelope walk can span years.
@@ -194,7 +223,7 @@ async function fetchRawBetween(start, end, columns) {
     );
   };
   try {
-    return await fetchAll(!columns && transactionsHaveEntity);
+    return withEffectiveDate(await fetchAll(!columns && transactionsHaveEntity));
   } catch (error) {
     // Each branch flips its flag and RE-ENTERS so the other flag still gets
     // its own retry when both columns are missing (a fresh install mid-replay).
@@ -204,6 +233,10 @@ async function fetchRawBetween(start, end, columns) {
     }
     if (transactionsHaveUserType && isMissingColumnError(error, 'user_type')) {
       transactionsHaveUserType = false;
+      return await fetchRawBetween(start, end, columns);
+    }
+    if (transactionsHaveUserDate && isMissingUserDateError(error)) {
+      transactionsHaveUserDate = false;
       return await fetchRawBetween(start, end, columns);
     }
     throw error;
@@ -273,7 +306,7 @@ async function getTransactionsBetween(start, end, { columns } = {}) {
 // the 4-type override isSpend reads (and the pairing pool drops). isLoanAccount
 // reads accounts.type, which the inner join already selects.
 const SPEND_TX_COLUMNS =
-  'id, account_id, date, amount, description, merchant_name, mapped_category, user_category, excluded, user_type';
+  'id, account_id, date, amount, description, merchant_name, mapped_category, user_category, excluded, user_type, user_date, effective_date';
 
 // The recurring candidate fetch (~40 months — the app's largest query) needs
 // only what detectRecurring reads off the toTxShape rows: the spending
@@ -379,7 +412,8 @@ export async function getBiggestMovers({ year, month }) {
 }
 
 // fields: { user_category } (null reverts to the automatic category),
-// { user_description } (null reverts to the bank's name), and/or { excluded }.
+// { user_description } (null reverts to the bank's name), { user_date } (null
+// reverts to the bank's posted date), and/or { excluded }.
 // The rental-tax fields ride the same allowlist: { entity_id } (null reverts
 // to the account's default entity), { is_capital }, { placed_in_service },
 // { useful_life_years }. All user-owned — sync never writes any of them.
@@ -390,6 +424,10 @@ export async function updateTransaction(id, fields) {
   if ('excluded' in fields) allowed.excluded = fields.excluded;
   // The 4-type override; null = back to automatic (the user_category shape).
   if ('user_type' in fields) allowed.user_type = fields.user_type;
+  // The date override; null = back to the bank's date. Only `user_date` is
+  // written — the trigger (20260908000001) moves `date` to match, so the
+  // effective date has ONE writer and a sync re-pull can't undo the edit.
+  if ('user_date' in fields) allowed.user_date = fields.user_date;
   if ('entity_id' in fields) allowed.entity_id = fields.entity_id;
   if ('is_capital' in fields) allowed.is_capital = fields.is_capital;
   if ('placed_in_service' in fields) allowed.placed_in_service = fields.placed_in_service;
@@ -592,7 +630,7 @@ export async function getAccountTransactions(accountId, { limit = 500 } = {}) {
       .from('transactions')
       .select(`${txCols(withEntity ? TX_COLUMNS + TX_TAX_COLUMNS : TX_COLUMNS)}, accounts(type)`)
       .eq('account_id', accountId)
-      .order('date', { ascending: false })
+      .order(txDateCol(), { ascending: false })
       .limit(limit + 1);
   let { data, error } = await attempt(transactionsHaveEntity);
   if (error && transactionsHaveEntity && isMissingColumnError(error, 'entity_id')) {
@@ -603,10 +641,14 @@ export async function getAccountTransactions(accountId, { limit = 500 } = {}) {
     transactionsHaveUserType = false;
     ({ data, error } = await attempt(transactionsHaveEntity));
   }
+  if (error && transactionsHaveUserDate && isMissingUserDateError(error)) {
+    transactionsHaveUserDate = false;
+    ({ data, error } = await attempt(transactionsHaveEntity));
+  }
   if (error) throw error;
   const hasMore = data.length > limit;
   return {
-    transactions: data.slice(0, limit).map(toTxShape),
+    transactions: withEffectiveDate(data.slice(0, limit)).map(toTxShape),
     hasMore,
   };
 }
@@ -1089,10 +1131,10 @@ export async function searchTransactions(query, { limit = 200, offset = 0, filte
       .eq('accounts.hidden', false);
     if (textOr) b = b.or(textOr);
     if (amtOr) b = b.or(amtOr);
-    if (filters?.dateFrom) b = b.gte('date', filters.dateFrom);
-    if (filters?.dateTo) b = b.lte('date', filters.dateTo);
+    if (filters?.dateFrom) b = b.gte(txDateCol(), filters.dateFrom);
+    if (filters?.dateTo) b = b.lte(txDateCol(), filters.dateTo);
     return b
-      .order('date', { ascending: false })
+      .order(txDateCol(), { ascending: false })
       .order('id', { ascending: false })
       .range(offset, offset + limit);
   };
@@ -1105,13 +1147,17 @@ export async function searchTransactions(query, { limit = 200, offset = 0, filte
     transactionsHaveUserType = false;
     ({ data, error } = await attempt(transactionsHaveEntity));
   }
+  if (error && transactionsHaveUserDate && isMissingUserDateError(error)) {
+    transactionsHaveUserDate = false;
+    ({ data, error } = await attempt(transactionsHaveEntity));
+  }
   if (error) {
     if (isRangeExhaustedError(error)) return { transactions: [], hasMore: false };
     throw error;
   }
 
   const hasMore = data.length > limit;
-  return { transactions: data.slice(0, limit).map(toTxShape), hasMore };
+  return { transactions: withEffectiveDate(data.slice(0, limit)).map(toTxShape), hasMore };
 }
 
 // Actual income for one month, for the Budget tab's hybrid income rule
@@ -1469,6 +1515,8 @@ export async function getExistingTxIds(accountId) {
 // prefix is written unconditionally, whereas `source` degrades to the legacy
 // `'plaid'` default whenever the column is absent (see `txHaveSource` in
 // api/sync.js and `transactionsHaveSource` here).
+// BANK-date read, deliberately: this is the feed-vs-statement overlap
+// boundary, so it must not move when the household re-dates a row.
 export async function getFeedCoverageStart(accountId) {
   if (!accountId) return null;
   const { data, error } = await supabase
@@ -1486,6 +1534,8 @@ export async function getFeedCoverageStart(accountId) {
 // (comparison mode, Phase 2). Returns the columns reconcileCsv compares — not
 // the shaped toTxShape form — scoped to the CSV's period so a one-month CSV
 // isn't compared against years of feed history.
+// BANK-date read, deliberately: reconciliation compares against the
+// statement's own dates, which know nothing about a user's month pick.
 export async function getAccountTransactionsInRange(accountId, start, end) {
   if (!accountId || !start || !end) return [];
   const rows = await pagedRows((from, to) =>
@@ -1631,10 +1681,14 @@ export async function addManualTransaction(
     transactionsHaveUserType = false;
     ({ data, error } = await attempt(transactionsHaveSource));
   }
+  if (error && transactionsHaveUserDate && isMissingUserDateError(error)) {
+    transactionsHaveUserDate = false;
+    ({ data, error } = await attempt(transactionsHaveSource));
+  }
   if (error) throw error;
 
   invalidateEnvelopeSpending(); // a new row exists — every memoised read is stale
-  return toTxShape(data);
+  return toTxShape(withEffectiveDate([data])[0]);
 }
 
 // --- Rental entities + tax lens ---------------------------------------------

@@ -45,8 +45,8 @@ doc covering your work area BEFORE editing, and maintain it in the same PR
 - Never rename or drop `plaid_tx_id` / `plaid_account_id` — adapter-agnostic
   external ids (`sfin:` / `csv:` / `manual:`), both upsert conflict targets.
 - Sync upserts OMIT user-owned columns (nickname, color, hidden, type on
-  existing rows, `user_category`, `user_type`, `excluded`, debt columns) so
-  edits survive pulls. Never restate them in a uniform upsert payload.
+  existing rows, `user_category`, `user_type`, `user_date`, `excluded`, debt
+  columns) so edits survive pulls. Never restate them in a uniform upsert.
 - Migrations: additive-only on live data; a DROP inverts paste order (paste
   AFTER deploy); every file must also replay on a fresh EMPTY database; PROD
   is NEVER linked to the Supabase CLI. Use the /migration skill.

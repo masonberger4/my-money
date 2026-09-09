@@ -374,10 +374,35 @@
   "Discover Tire and Auto" vanished from the dashboard.
 - Sync upserts deliberately OMIT user-owned columns (nickname, color, hidden,
   type/subtype on existing rows, user_category, user_description, excluded,
-  user_type, and the hand-entered debt columns APR / minimum payment /
-  credit_limit / due-date) so edits survive syncs. For `user_type` the
-  omission is pinned by a source scan in `test/txType.test.js` (sync + CSV;
-  the manual writer's pin lives in `test/manualTx.test.js`).
+  user_type, user_date, and the hand-entered debt columns APR / minimum
+  payment / credit_limit / due-date) so edits survive syncs. For `user_type`
+  the omission is pinned by a source scan in `test/txType.test.js` (sync +
+  CSV; the manual writer's pin lives in `test/manualTx.test.js`); for
+  `user_date` in `test/txDate.test.js`.
+- **Two dates, one bucketing verdict** (2026-09-08, migration
+  `20260908000001`): `transactions.date` is the BANK's date and every feed
+  keeps restating it; `user_date` is the household's override ("count this
+  in July"); `effective_date` is the STORED generated
+  `coalesce(user_date, date)`. MONTH-bucketing reads (`fetchRawBetween`,
+  `searchTransactions`, `getAccountTransactions`, both
+  `api/_lib/spendingContext.js` reads) range/sort on `effective_date` and run
+  rows through `withEffectiveDate()` so downstream code — the folds, the
+  pairing, `toTxShape` — keeps reading `date` and gets the effective one
+  (`bank_date` rides along for the sheet's "Posted" line + reset). BANK-date
+  reads stay on `date` by design: `getFeedCoverageStart` (the CSV/feed overlap
+  boundary), `getAccountTransactionsInRange` (reconciliation against a
+  statement's own dates), the coverage-gap probes, and every dedup id that
+  hashes the date, and `getActualIncome`'s earliest-depository-row coverage
+  probe (a "how far back does the ledger reach" question). A trigger
+  rewriting `date` in place was rejected — it would have moved those
+  boundaries invisibly. Pinned in `test/txDate.test.js`.
+  Accepted trade, deliberate: the internal-transfer pairing window
+  (`INTERNAL_MATCH_WINDOW_DAYS`) and recurring-cadence detection ALSO see the
+  effective date, because they run on the same month rows. Re-dating one leg
+  of a real transfer more than 4 days from its partner un-pairs it (both legs
+  then count) and a re-dated bill shifts its apparent cadence — the row now
+  lives where the household put it, and the sheet's "Posted" line shows the
+  bank date to move it back. Pinned (the crossing case) in `test/txDate.test.js`.
 - `api/` 500 handlers return a GENERIC string + a stable code — never raw
   error bodies (no error leakage; `test/apiErrorSanitize.test.js`).
 - Account labels: `nickname || "name ··mask"`; badge color from `ACCOUNT_COLORS`
