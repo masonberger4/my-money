@@ -537,3 +537,17 @@ recorded on `.bnav` in `src/ui.css`.
   table under an ACCESS EXCLUSIVE lock). Verified by the
   `transactions_user_date` / `transactions_effective_date` booleans in
   `supabase/bootstrap_household.sql`.
+## 2026-09-09 — screen roots are `.screen`, never `min-height: 100vh`
+
+Mason: "the scroll bar appears while on a transaction page even if the screen
+isn't scrolling because all information is already being shown." Cause:
+index.html pads the body by the iPhone safe-area insets, and every screen root
+declared `min-height: 100vh` INSIDE that padding, so the page was ~93px taller
+than the PWA viewport on every screen; it only showed on a Spending month
+short enough to fit. Settled: one `.screen` class in `src/ui.css`
+(100dvh minus both insets) on all five roots — Dashboard, Login, EmptyState,
+App's ConfigErrorScreen and StartupSkeleton. Rejected: patching Dashboard alone
+(the four centered screens overflow identically) and dropping the min-height
+(the four centered screens need it to center). The gotchas entry sits next to
+the 2026-09-08 sheet-padding one — same blind spot, opposite direction.
+
