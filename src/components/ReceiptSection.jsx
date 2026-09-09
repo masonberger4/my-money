@@ -110,21 +110,26 @@ export default function ReceiptSection({ txId, onChanged }) {
     }
   }
 
-  const tile = { width: 72, height: 72, borderRadius: 8, border: "1px solid var(--border)", background: "var(--bg)", objectFit: "cover", flexShrink: 0, cursor: "pointer" };
+  const tile = { width: 44, height: 44, borderRadius: 6, border: "1px solid var(--border)", background: "var(--bg)", objectFit: "cover", flexShrink: 0, cursor: "pointer" };
 
   return (
     <>
-      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-        {(receipts || []).map(r => (
-          urls[r.id]
-            ? <img key={r.id} src={urls[r.id]} alt="Receipt" style={tile} onClick={() => setViewing(r)} />
-            : <div key={r.id} style={{ ...tile, cursor: "default" }} />
-        ))}
+      {/* Laid out like the Date row above it: a plain muted "Photo" label on
+          the left (the label IS the add control — no box, no icon) and the
+          thumbnails on the right. */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
         <button onClick={() => fileRef.current?.click()} disabled={busy || receipts === null}
-          style={{ width: 72, height: 72, borderRadius: 8, border: "1px dashed var(--border)", background: "none",
-            color: "var(--muted)", fontFamily: "inherit", fontSize: 11, cursor: "pointer", lineHeight: 1.3 }}>
+          style={{ padding: 0, border: "none", background: "none", color: "var(--muted)", fontFamily: "inherit",
+            fontSize: 11, cursor: "pointer", textAlign: "left" }}>
           {busy ? "Saving…" : "Photo"}
         </button>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
+          {(receipts || []).map(r => (
+            urls[r.id]
+              ? <img key={r.id} src={urls[r.id]} alt="Receipt" style={tile} onClick={() => setViewing(r)} />
+              : <div key={r.id} style={{ ...tile, cursor: "default" }} />
+          ))}
+        </div>
       </div>
       {/* NO capture attribute: its mere presence makes iOS open the rear
           camera directly, skipping the Take Photo / Photo Library chooser —
