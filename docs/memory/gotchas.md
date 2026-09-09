@@ -373,3 +373,10 @@
   `txDateCol()` and fold through `withEffectiveDate()` for anything that
   buckets by month; read plain `date` only where the bank's date is the
   point (the two-dates Convention lists those).
+- The mirror-image trap: the body's safe-area padding is OUTSIDE any screen
+  root, so a root with `min-height: 100vh` is ~93px taller than the iPhone PWA
+  viewport on every screen — a Spending month that fit still scrolled, and the
+  scroll indicator appeared with nothing to reveal (2026-09-09). Screen roots
+  use the `.screen` class (`src/ui.css`: visible height = 100dvh minus both
+  insets), never an inline `100vh`. Same blind spot: desktop and the smoke
+  shots resolve the insets to 0, so reproduce by injecting body padding.

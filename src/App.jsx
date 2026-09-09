@@ -11,8 +11,8 @@ import ErrorBoundary from './components/ErrorBoundary.jsx';
 function ConfigErrorScreen() {
   return (
     <div
+      className="screen"
       style={{
-        minHeight: '100vh',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
@@ -64,8 +64,8 @@ function SkBlock({ w = '100%', h = 16 }) {
 function StartupSkeleton() {
   return (
     <div
+      className="screen"
       style={{
-        minHeight: '100vh',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',

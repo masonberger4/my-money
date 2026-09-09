@@ -37,8 +37,8 @@ export default function Login() {
 
   return (
     <div
+      className="screen"
       style={{
-        minHeight: '100vh',
         background: 'var(--bg)',
         color: 'var(--text)',
         fontFamily: "var(--font-sans)",

@@ -235,6 +235,16 @@ html, body { overscroll-behavior-y: contain; }
    Mason: "the x box … does not work and is too high"). The inset is 0 on
    desktop, so the layout there is unchanged. */
 
+/* Full-viewport screen root (Dashboard, Login, EmptyState, App's two startup
+   screens). The VISIBLE height, not 100vh: index.html pads the body by the
+   iPhone safe-area insets, so a `min-height: 100vh` box inside it overflowed
+   the PWA viewport by the insets (~93px) on EVERY screen — a Spending month
+   that fit still scrolled, and the scroll indicator appeared with nothing to
+   reveal (Mason, 2026-09-09: "the scroll bar appears … even if the screen
+   isn't scrolling"). dvh rather than vh so in-browser Safari's URL bar can't
+   do the same. Desktop resolves both env() to 0, so this IS 100dvh there. */
+.screen { min-height: calc(100dvh - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px)); }
+
 /* Bottom navigation (Dashboard, PR B of the YNAB redesign). Fixed, floating.
    z-index 50 sits UNDER .overlay (100) so every sheet covers it; the content
    column adds bottom padding so the bar never covers the last row. The

@@ -4541,7 +4541,7 @@ export default function Dashboard({ refreshTick = 0 }) {
   };
 
   return (
-    <div style={{fontFamily:"var(--font-sans)",background:"var(--bg)",minHeight:"100vh",
+    <div className="screen" style={{fontFamily:"var(--font-sans)",background:"var(--bg)",
       color:"var(--text)"}}>
       {/* Gated on anySheetOpen because sheets scroll internally, and on
           loading so a refresh already in flight cannot be stacked. */}
