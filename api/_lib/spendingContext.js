@@ -101,12 +101,15 @@ async function fetchBudgetInputs(supabase, householdId, visibleIds, year, month)
         // the Ask tab would contradict every screen. No 42703 degrade here
         // (unlike the client): the migration pastes before the merge, and a
         // LOUD assistant failure beats a silent fork of the totals.
-        .select('account_id, date, amount, description, merchant_name, mapped_category, user_category, excluded, user_type')
+        // effective_date (20260908000001) is aliased INTO `date` so the
+        // shared folds bucket on the user's month pick like every screen —
+        // this read never needs the bank date. Same no-degrade stance.
+        .select('account_id, date:effective_date, amount, description, merchant_name, mapped_category, user_category, excluded, user_type')
         .eq('household_id', householdId)
         .in('account_id', visibleIds)
-        .gte('date', `${earliestKey}-01`)
-        .lt('date', `${shiftMonthKey(targetKey, 1)}-01`)
-        .order('date', { ascending: true })
+        .gte('effective_date', `${earliestKey}-01`)
+        .lt('effective_date', `${shiftMonthKey(targetKey, 1)}-01`)
+        .order('effective_date', { ascending: true })
         .order('id', { ascending: true })
         .range(from, from + page - 1);
       if (error) {
@@ -174,11 +177,11 @@ export async function buildSpendingContext(householdId, { today = null } = {}) {
       .from('transactions')
       // user_type rides for the same reason as the envelope read above — the
       // shared model reads it; same deliberate no-degrade stance.
-      .select('account_id, date, amount, merchant_name, description, mapped_category, user_category, user_description, excluded, user_type')
+      .select('account_id, date:effective_date, amount, merchant_name, description, mapped_category, user_category, user_description, excluded, user_type')
       .eq('household_id', householdId)
       .in('account_id', visibleIds)
-      .gte('date', sinceStr)
-      .order('date', { ascending: false })
+      .gte('effective_date', sinceStr)
+      .order('effective_date', { ascending: false })
       // id as the tiebreak: `date` alone leaves same-day rows in whatever order
       // Postgres happens to return, which both reorders the transaction list and
       // (at the 1500 cap) can change WHICH rows arrive — the two ways the text

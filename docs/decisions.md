@@ -512,3 +512,28 @@ Also settled: the segmented theme control's active-segment fill is `--card`,
 not `--input-bg` — the 2026-09-08 light accent reaches only 4.24:1 on
 `--input-bg` but clears AA on the card, the same contrast measurement already
 recorded on `.bnav` in `src/ui.css`.
+
+## 2026-09-08 — Transaction dates are editable (user_date + generated effective_date)
+
+- **A transaction's date can be changed from the detail sheet** so a
+  purchase that posts a day into the next month — or one the household
+  simply wants counted elsewhere — moves months. The sheet's Date row is a
+  blur-commit `<input type="date">` (the placed-in-service pattern) with a
+  "Posted <bank date> · reset" line while an override is set.
+- **Storage: `user_date` (user-owned, sync-omitted) + a STORED generated
+  `effective_date = coalesce(user_date, date)`; `date` stays the bank's.**
+  The month-bucketing reads range on `effective_date` and fold it into
+  `date` via `withEffectiveDate()`; the feed-coverage / reconciliation /
+  dedup reads keep the bank date. Rules in the two-dates Convention.
+- **Rejected: a BEFORE trigger rewriting `date` in place** (architect
+  review). It would have kept every query untouched, but by turning the
+  bank date into the user's pick at exactly the reads that must mean "when
+  the bank says it happened" (the CSV overlap boundary, reconciliation),
+  and with two silent stale-`posted_date` branches. Rejected too: renaming
+  `date` (destructive, inverts paste order) and a shape-time shift with no
+  column (a row moved outside the fetched range never appears).
+- Migration `20260908000001_transaction_user_date.sql` is additive: paste
+  BEFORE the merge, when no sync is running (the STORED column rewrites the
+  table under an ACCESS EXCLUSIVE lock). Verified by the
+  `transactions_user_date` / `transactions_effective_date` booleans in
+  `supabase/bootstrap_household.sql`.

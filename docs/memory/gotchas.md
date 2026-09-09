@@ -363,3 +363,13 @@
   it since 2026-09-08 — the tx sheet's × close sat under the iPhone status bar,
   where iOS swallows taps, so it read as both "too high" and "broken"). Desktop
   and the 390×844 smoke shots see an inset of 0, so neither will show the bug.
+- `transactions.date` is the BANK's date, not the one on screen. Since the
+  editable-date migration (`20260908000001`) a row can be re-dated by the
+  household, and only `effective_date` reflects that. Raw rows coming out of
+  the month reads have ALREADY been through `withEffectiveDate()` (so `date`
+  there is the effective one and `bank_date` the bank's), but a NEW query
+  that selects `date` and ranges on it will silently count a moved row in
+  the bank's month while the list shows it in the user's. Range on
+  `txDateCol()` and fold through `withEffectiveDate()` for anything that
+  buckets by month; read plain `date` only where the bank's date is the
+  point (the two-dates Convention lists those).

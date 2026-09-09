@@ -40,6 +40,7 @@ function raw(date, amount, desc, cat, acct = 'a1', extra = {}) {
     id: 't' + seq, plaid_tx_id: 'sfin:t' + seq, account_id: acct,
     date, amount, description: desc, mapped_category: cat,
     user_category: null, user_description: null, excluded: false, user_type: null,
+    user_date: null, effective_date: date,
     raw_category: extra.raw_category || null, entity_id: null,
     is_capital: false, placed_in_service: null, useful_life_years: null,
     accounts: { type: acctType(acct), subtype: ACCTS.find(a => a.id === acct)?.subtype },

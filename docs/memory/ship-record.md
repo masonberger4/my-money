@@ -5,7 +5,9 @@ Conventions / Gotchas. An entry here is a pointer, not a home for rules.
 
 - **Transaction editing** — `user_category`/`excluded`/`user_description`
   columns; rules in the effective-category + sync-omit Conventions and the
-  `saveTx` Gotcha.
+  `saveTx` Gotcha. Editable DATE since 2026-09-08 (`user_date` +
+  generated `effective_date`, migration `20260908000001`; the two-dates
+  Convention).
 - **Budgets** — per-category monthly limits; `budgets` table; envelope
   Conventions.
 - **Recurring** — `src/recurring.js` key row.
