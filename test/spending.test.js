@@ -1,4 +1,4 @@
-// Totals stress suite for the purchase-based spending model (src/spending.js,
+// Totals stress suite for the unified spending model (src/spending.js,
 // extracted from dataAdapter.js) against a synthetic multi-account household
 // (test/helpers/ledger.js) covering every transaction type the app handles.
 //
@@ -61,7 +61,7 @@ test('group amounts sum exactly to sumSpending and to the hand-computed total', 
 
 // --- Scenario 2: the loan-account guard --------------------------------------
 
-test('a loan account contributes NOTHING to purchase-based spending', () => {
+test('a loan account contributes NOTHING to spending', () => {
   const visible = standardLedger().visibleRows();
   const noLoan = visible.filter(t => t.accounts.type !== 'loan');
   assert.ok(noLoan.length < visible.length, 'fixture sanity: loan rows exist and one is a positive debit');

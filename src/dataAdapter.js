@@ -253,7 +253,7 @@ async function fetchRawBetween(start, end, columns) {
 // navigation, which reuses warm entries (Mason, 2026-08-04). Reuse is safe
 // because callers never see the memo's rows: they get per-row shallow COPIES —
 // pipelines below mutate rows (top-level fields only), and shared rows would
-// leak getCashFlow's `_internal` marks into the purchase-based model.
+// leak getCashFlow's `_internal` marks into the spending model.
 const rangeMemo = createRangeMemo((start, end) => fetchRawBetween(start, end));
 
 // The ONE paged-loop discipline (exported for tests). Every whole-table /
