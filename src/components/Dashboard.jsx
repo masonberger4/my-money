@@ -4408,7 +4408,7 @@ export default function Dashboard({ refreshTick = 0 }) {
   // order (the walk sorts by raw label, then the appended empty rows) for its
   // other readers; ranking by it made a category jump from the empty tail to
   // the top the moment it got its first dollar, setting or spending, so the
-  // next tap landed on a different envelope. The Budget list isn't sorted by
+  // next tap landed on a different envelope. The Plan list isn't sorted by
   // magnitude, so a group takes the position of its earliest-placed member —
   // the group sits where its children already sat, never dragged to the tail
   // because a heading parent has no envelope row of its own.

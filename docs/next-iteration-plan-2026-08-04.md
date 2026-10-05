@@ -655,8 +655,10 @@ nothing from Mason.
 > and 86 were buildable without a ruling. Review run `wf_b7dbd80f-f88`, build
 > run `wf_45ee6a52-0dd`. The build ships as THREE PRs — **A**: Dashboard
 > state, refresh and screens; **B**: the data layer, the server and the pure
-> cores; **C**: statement import and the PWA shell — and every commit carries
-> a `Findings:` trailer naming its ids (F01–F105, the audit's own numbering).
+> cores; **C**: statement import and the PWA shell — and every fix commit
+> names its ids (F01–F105, the audit's own numbering) in a `Findings:` trailer
+> or, on PR A's first ten commits, as the body's leading `Fnn:` lines; a
+> review-repair trailer may carry a tag such as `F72-HANG` instead.
 > Each line below is the failure that was fixed; the rule it produced lives
 > in the memory docs, the reasoning in the 2026-10-05 decision-journal entry.
 

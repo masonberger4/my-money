@@ -203,9 +203,9 @@ test('orderGroups sorts a non-numeric key last instead of corrupting the order',
   assert.deepEqual(orderGroups(gs, (g) => g.v).map((g) => g.name), ['C', 'B', 'A']);
 });
 
-test('REGRESSION: on the Budget tab a group takes its earliest member position', () => {
-  // envRows is walk order followed by appended empty rows; the parent has no
-  // budget_months row, so it is appended last.
+test('REGRESSION: on the Plan tab a group takes its earliest member position in the one category list', () => {
+  // The positions stand for the one category list's order (rankByList over
+  // userCats); the parent has no row of its own in it, so it is appended last.
   const order = ['Groceries', 'Rent', 'Dining out', 'Everyday'];
   const pos = new Map(order.map((n, i) => [n, i]));
   const node = { name: 'Everyday', children: ['Groceries', 'Dining out'] };
