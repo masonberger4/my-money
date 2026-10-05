@@ -152,3 +152,41 @@ test('an envelope write that lands after a month tap re-reads the viewed month\'
   assert.ok(elseBranch.includes('getBudgetIncome('),
     'the month-moved branch bumps envSeq, which makes the in-flight reload skip setIncome — it must re-read income itself');
 });
+
+// --- F15: an hour-plus foreground return re-pulls (quietly) ------------------
+// The refreshTick re-run passed sync:false, so a PWA opened at 8am and
+// foregrounded at 6pm re-read the DB but never pulled the day's charges, and
+// a feed that broke at noon raised no banner (the status check sat behind
+// syncFirst). The deferred item's one constraint: the hour-gated pull must
+// NOT paint the sync-failure banner — the user didn't ask for it.
+
+const EFFECT = ['const syncFirst=!didInitialSync.current', '},[year,month,ready,refreshTick,fetchData]'];
+
+test('a refreshTick re-run more than an hour after the last pull starts a quiet "foreground" sync', () => {
+  const { body } = slice(...EFFECT);
+  assert.match(body, /foregroundSyncDue\(lastSyncAt\.current,Date\.now\(\)\)/,
+    'the effect must ask the pure hour gate with the last pull\'s start time');
+  assert.ok(body.includes('"foreground"'), 'the hour-gated pull runs in the quiet "foreground" mode');
+  const { body: fetch } = slice(...FETCH);
+  assert.match(fetch, /if\(sync\)lastSyncAt\.current=Date\.now\(\)/,
+    'every pull fetchData starts (startup, Refresh, foreground) restarts the hour');
+});
+
+test('a failed foreground pull never paints the sync-failure banner', () => {
+  const { body } = slice(...FETCH);
+  assert.match(body, /if\(sync!=="foreground"\)setError\(SYNC_FAILED_MSG\)/,
+    'the runSync catch must skip the banner for the quiet foreground pull');
+  // The F13 re-assert is reachable only on sync:"refresh" — a failed pull
+  // (res null) is allThrottled, which returns for every other mode.
+  assert.match(body, /if\(allThrottled&&sync!=="refresh"\)return;/,
+    'the throttled/failed early return stays for every mode but Refresh');
+});
+
+test('feed health is re-checked after any effect-started pull, and a healthy answer clears the banner', () => {
+  const { body } = slice(...EFFECT);
+  assert.ok(body.includes('getSimpleFinStatus()'), 'fixture assumption: the status check lives in the effect');
+  assert.ok(!/if\(!syncFirst\)return;/.test(body),
+    'gating the status check on syncFirst alone means a foreground pull never re-checks feed health');
+  assert.match(body, /setFeedHealth\([^;]*:null\)/,
+    'a re-check that finds the feed healthy must clear a banner an earlier check raised');
+});

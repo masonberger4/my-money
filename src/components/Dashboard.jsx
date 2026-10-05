@@ -29,7 +29,7 @@ import { groupByDay, longDate } from "../txList.js";
 import { TX_TYPES, txTypeLabel, allowedUserTypes } from "../txType.js";
 import { breakdownSegments, incomeVsSpendingInsight, incomeSections } from "../reflect.js";
 import { createSheetHistory } from "../sheetHistory.js";
-import { runSync } from "../sync.js";
+import { runSync, foregroundSyncDue } from "../sync.js";
 // Lazy: both are modals rendered only on user action, and CsvImport reaches the
 // whole statement-import stack — no reason for either in the initial bundle.
 // A failed chunk load throws during render; App's ErrorBoundary is the net.
@@ -2284,9 +2284,13 @@ export default function Dashboard({ refreshTick = 0 }) {
   // value so the initial load doesn't double-invalidate (the first fetch has
   // no warm cache to drop).
   const lastRefreshTick=useRef(refreshTick);
+  // When this device last STARTED a pull through fetchData (startup, Refresh,
+  // or the hour-gated foreground pull) — the foregroundSyncDue clock.
+  const lastSyncAt=useRef(0);
   // {last_pulled_at,last_error} when the SimpleFIN feed looks unhealthy —
-  // checked ONCE per mount, after the initial sync (never a status fetch on
-  // every dashboard load; that was the LinkAccount antipattern).
+  // checked after the startup sync and after each hour-gated foreground pull
+  // (never a status fetch on every dashboard load or app switch; that was the
+  // LinkAccount antipattern). A healthy re-check clears it.
   const [feedHealth,setFeedHealth]=useState(null);
 
   // Theme. useTheme owns the persistence (localStorage, NOT the shared
@@ -2740,10 +2744,13 @@ export default function Dashboard({ refreshTick = 0 }) {
     // the whole Bridge pull) bought nothing. The sync runs concurrently and
     // ONE follow-up reload chains off its promise HERE — never a second
     // setSyncCompletionHook: that slot is single and dataAdapter already
-    // holds it (cache invalidation).
+    // holds it (cache invalidation). sync:"foreground" is the hour-gated pull
+    // on a foreground return (the fetchData effect): nobody asked for it, so
+    // its failure only logs — no banner over numbers the user didn't refresh.
+    if(sync)lastSyncAt.current=Date.now();
     const syncP=sync?runSync().catch(err=>{
       console.error("sync failed",err);
-      setError(SYNC_FAILED_MSG);
+      if(sync!=="foreground")setError(SYNC_FAILED_MSG);
       return null;
     }):null;
     // No setLoading(false) here: the reload that wins loadSeq clears it
@@ -2802,19 +2809,27 @@ export default function Dashboard({ refreshTick = 0 }) {
     // rows while the un-memoised balance reads freshen — the two halves of the
     // screen disagree until a manual Refresh. Ref-compared so a re-run caused
     // by year/month/ready (plain month navigation) still reuses the caches.
-    if(refreshTick!==lastRefreshTick.current){
+    const tick=refreshTick!==lastRefreshTick.current;
+    if(tick){
       lastRefreshTick.current=refreshTick;
       invalidateEnvelopeSpending();
     }
-    fetchData(year,month,{sync:syncFirst}).then(()=>{
-      if(!syncFirst)return;
+    // A foreground return more than an hour after this device last pulled
+    // also PULLS — quietly ("foreground": a failure logs, never a banner),
+    // or the day's charges wait for a manual Refresh. The server throttle
+    // still decides whether SimpleFIN is actually asked.
+    const sync=syncFirst||(tick&&foregroundSyncDue(lastSyncAt.current,Date.now())?"foreground":false);
+    fetchData(year,month,{sync}).then(()=>{
+      if(!sync)return;
       // The sync response can't answer "is the feed stale?" — a clean pull
-      // carries no last_pulled_at — so ask /api/simplefin-status once, in the
-      // same flow, after the sync has had its chance to freshen the watermark.
+      // carries no last_pulled_at — so ask /api/simplefin-status in the same
+      // flow, after the sync has had its chance to freshen the watermark:
+      // at startup and after each hour-gated foreground pull, so a feed that
+      // breaks mid-day raises the banner and a recovered one clears it.
       getSimpleFinStatus().then(s=>{
         if(!s?.connected)return;
         const stale=s.last_pulled_at&&Date.now()-new Date(s.last_pulled_at).getTime()>3*86_400_000;
-        if(s.last_error||stale)setFeedHealth({last_pulled_at:s.last_pulled_at,last_error:s.last_error||null});
+        setFeedHealth(s.last_error||stale?{last_pulled_at:s.last_pulled_at,last_error:s.last_error||null}:null);
       }).catch(err=>console.error("feed status check failed",err));
     });
   },[year,month,ready,refreshTick,fetchData]);
@@ -4654,9 +4669,9 @@ export default function Dashboard({ refreshTick = 0 }) {
 
         {/* Feed health — amber, not red: the data on screen is fine, it's just
             getting stale. last_error is already sanitized server-side. The ×
-            clears it for this session only (plain state — the status check runs
-            once per mount, so it stays gone until the next app load; a broken
-            feed re-raises it then, which is the point). */}
+            clears it until the next status check (plain state — the check runs
+            at app load and after each hour-gated foreground pull; a feed still
+            broken then re-raises it, which is the point). */}
         {feedHealth&&(
           <div style={{background:"var(--warn-bg)",border:"1px solid var(--warn-border)",borderRadius:10,padding:"12px 16px",fontSize:13,color:"var(--warn)",marginBottom:14,lineHeight:1.5,display:"flex",alignItems:"flex-start",gap:8}}>
             <div style={{flex:1}}>
