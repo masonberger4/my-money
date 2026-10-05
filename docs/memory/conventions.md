@@ -124,8 +124,10 @@
   in Dashboard.jsx, plus the assistant context in
   `api/_lib/spendingContext.js`, which must match or the Ask tab contradicts the
   screen. (An earlier "exactly four" count went stale the day the Debt tab
-  merged — count with grep, don't trust a number here.) `fmtX` renders
-  negatives as −$1,234.56.
+  merged — count with grep, don't trust a number here.) `fmtX`
+  (`src/format.js`) renders negatives as −$1,234.56, and its sign reads the
+  DISPLAYED digits, so an amount that rounds to zero prints $0.00 — never
+  −$0.00 or +$0 (a refunded category's float residue did).
   Manual-debt balance edits go through `updateManualBalance(account, balance)`
   — NEVER `updateAccount`, whose column whitelist DELIBERATELY omits
   `current_balance` (a fed balance is restated by every pull; adding the
@@ -162,10 +164,13 @@
   Budget tab, the donut and every pill. Renaming is a DISPLAY ALIAS in
   `dash:names`, never a rewrite of the registry name: that raw label is what
   `user_category` / `budgets` / `budget_months` are all keyed by, and rewriting
-  it orphans every one of them. Adding and retiring live in the "+ Add
+  it orphans every one of them. Names must be unique as DISPLAYED too: add
+  and rename both refuse a live category's alias (`isDuplicateCategoryName`,
+  the `src/categoryList.js` row). Adding and retiring live in the "+ Add
   category" sheet rather than on the rows, and `src/categoryList.js` derives
   the ONE list every tab reads. All three registry rows
-  (`dash:cats`/`dash:colors`/`dash:names`) are written through serialized
+  (`dash:cats`/`dash:colors`/`dash:names`) — and, since 2026-10-05, the Tax
+  tab's `tax:maps` (Rental Conventions) — are written through serialized
   read-merge-write updaters in `settingsIO.js` (the `updateRecIgnore`
   discipline; `test/settingsChains.test.js`) with rollback+alert at the
   Dashboard handlers — never a whole value rebuilt from component state, which
@@ -206,9 +211,14 @@
     parent with no rows of its own lands in the appended zero-spend tail and
     dragged its children below every tiny leaf. `orderGroups` re-ranks after
     grouping — by rollup on the Categories tab, by `earliestMemberRank` (the
-    earliest member's walk position) on the Budget tab, whose list isn't
-    ordered by magnitude. Bars divide by the largest TOP-LEVEL value, since a
-    rollup can exceed every single leaf.
+    earliest member's position in the ONE list's display-name order —
+    `rankByList` over `userCats`, mechanism rows last) on the Plan tab, whose
+    list isn't ordered by magnitude. The "walk position" wording that stood
+    here until 2026-10-05 is WRONG now: the walk is budgeted-first by raw
+    label, so a row jumped to the top on its first dollar. Bars divide by the
+    largest TOP-LEVEL value, since a rollup can exceed every single leaf,
+    floored at a positive 1 (`barScale`) so an all-refund month draws empty
+    bars, not full ones.
 - **`toTxShape` stamps `counted`** = the shared `isSpend()` verdict for that
   row. Anything that lists transactions behind a total (the category drill-in)
   must split on it rather than re-deriving the rule, or the list's own sum
@@ -298,10 +308,13 @@
 - **Manual quick-add** (`QuickAddSheet`) mints `plaid_tx_id='manual:'+uuid` —
   NOT a CSV-style content hash, because a hand-typed row has no file to
   re-import against (a session "unifying" dedup ids would break this) — with
-  `source='manual'` and the shared `classifyDescription` precedence. Gated to
-  manual + non-SimpleFIN accounts, and EXCLUDES loan-typed manual accounts
-  (`isLoanAccount` — a cash purchase parked on a loan account would vanish
-  from every total, since loan rows never count as spending).
+  `source='manual'` and the shared `classifyDescription` precedence. Its
+  targets are `quickAddTargets` (dataAdapter.js): manual + non-SimpleFIN
+  accounts, EXCLUDING loan-typed ones (a cash purchase parked on a loan
+  account would vanish from every total, since loan rows never count as
+  spending) and HIDDEN ones (hidden accounts are excluded at the query level,
+  so the row would show and then vanish on the reload) — depository first, so
+  the sheet defaults to cash, not a card.
   `test/manualTx.test.js`.
 - **Cross-month category browse is deliberately NOT built** (refuted, don't
   re-propose): it would add a fourth never-refetched list for
@@ -643,6 +656,12 @@ category's own first assignment; the pure core is `src/envelopes.js`.
   Pre-migration: a 42703 naming `target_override` retries the old columns
   inside `getAssignmentsThrough` and must NEVER trip `isEnvelopeSchemaMissing`
   (which reads 42703 as "envelopes not installed" and would kill the tab).
+- **The Plan headline target sums `monthlyAsk`** (2026-10-05): the override
+  when set, else a by-date target's share for THIS month (floored at 0), else
+  the monthly target. A by-date amount is a multi-month total — summing it
+  read "of $6,600 targeted" beside a $600 month. Which rows count is
+  unchanged; a past-date target asks for its whole remainder (`monthsUntil`
+  clamps to 1), which does NOT settle Group 7's past-date question.
 - **Auto-fill copies ASSIGNED only** (`planAutoFill`): pull viewed−1 into the
   viewed month, skip zeros (0 row ≡ no row) and categories already assigned —
   never `monthly_limit`, never targets. Two-step (plan → confirm), and the
@@ -661,7 +680,14 @@ category's own first assignment; the pure core is `src/envelopes.js`.
   return null pre-migration (`getReceiptTxIds` pattern); the Dashboard cache
   is an epoch counter, and a failed load RETURNS the epoch (seq-guarded) so a
   transient error retries on the next tab visit instead of hiding the feature
-  for the session.
+  for the session. Since 2026-10-05 the epoch also moves after a pull's
+  follow-up reload and on a foreground return — ONE pass per return, after
+  its pull settles when it pulls (`refreshTickPlan`/`pullFollowUp`,
+  `src/loadPipeline.js`), so the bill a pull brought in matches without a
+  manual Refresh. More passes widen the stale-pass race (a pass that read a
+  row before the other phone skipped or stopped it flips it back to matched);
+  the status-guarded match write that closes it is audit PR B's F35, and until
+  that merges the write is keyed on id alone.
 
 **The HYBRID income rule (Mason, 2026-08-13 — opens the old "income wall"
 halfway; the pure hand-entered rule that stood here is superseded):** Ready to
@@ -684,8 +710,12 @@ ONLY when the ledger covers it (coverageStart — the earliest visible
 depository row — on/before the month's 1st; else missing history would read as
 $0 income), and a failed/absent actual read falls back to manual rather than
 blanking RTA. Pre-backfill months (before ~Feb 2026) therefore stay manual
-forever. The Dashboard's `actualInc` state is MONTH-TAGGED (`{y,m,…}` — the
-movers month-tagging lesson).
+forever. The Dashboard's `actualInc` AND typed `income` states are
+MONTH-TAGGED (`{y,m,…}` — the movers month-tagging lesson): render reads the
+typed figure through `incomeForMonth`, so one failed income read can't price
+Ready to Assign with the previous month's figure, and an envelope write that
+lands after a month tap re-reads the viewed month's income with its
+envelopes.
 
 ### Rental tracking + tax lens (Tax tab — decided, don't relitigate)
 - **Entities are a LENS, not an exclusion.** A transaction tagged to a rental
@@ -715,8 +745,14 @@ movers month-tagging lesson).
   instead of silently dropping rows (Quicken's tax export drops unmapped rows;
   that is the bug not to copy). Unmapped money IN on an entity counts as rents
   received by default. Category→line mappings live per entity under the ONE
-  `tax:maps` settings key (`{emap:{entityId:{cat:line|'rents'}},dmap:{...}}`)
-  and are **entirely user-made** — `DEFAULT_SCHEDULE_E_MAP` was EMPTIED to
+  `tax:maps` settings key (`{emap:{entityId:{cat:line|'rents'}},dmap:{...}}`),
+  written ONE entry at a time through the settingsIO chain
+  (`setTaxMapEntry`/`setDeductionMapEntry` over the pure `parseTaxMaps` +
+  `setEmapEntryIn`/`setDmapEntryIn`; null deletes) since 2026-10-05 — a whole
+  map rebuilt from component state let one failed Tax-tab read plus one edit
+  wipe every mapping, and a phone holding an older read erase the other's; a
+  Tax-tab read that may predate an in-flight edit is not adopted
+  (`taxMapsWrites`). They are **entirely user-made** — `DEFAULT_SCHEDULE_E_MAP` was EMPTIED to
   `{}` with the taxonomy (2026-08-05): the constant survives as the callers'
   `??` fallback meaning "no mappings"; no category is pre-mapped to a line. The Schedule E
   category→line PICKER filters on `isBudgetableCategory` PLUS any category
@@ -731,7 +767,9 @@ movers month-tagging lesson).
   floors, no depreciation schedules, no estimated-tax computation. The UI says
   "not tax advice" and it should stay true. `MILEAGE_RATES` in
   `src/taxReport.js` is effective-dated DATA that goes stale — verify against
-  irs.gov each January (2026 split mid-year: 72.5¢ → 76¢ on Jul 1).
+  irs.gov each January (2026 split mid-year: 72.5¢ → 76¢ on Jul 1). The
+  Mileage card's footnote is built from it for the viewed year
+  (`mileageFootnote`), never hand-typed.
 - The `entities` table allows `kind='business'` (schema only) so a future
   side-business/Schedule C build can reuse all of this without a migration;
   the UI is rental-first on purpose. CSV export goes through the share sheet
@@ -764,7 +802,9 @@ The app's ONLY use of Supabase **Storage** — everything else is Postgres.
 - **The storage object does NOT cascade with the row.** Storage objects aren't
   foreign-keyable, so the UI deletes the OBJECT FIRST, then the row: a
   half-finished delete leaves a listed receipt whose image 404s until retried,
-  never an invisible orphan. Rare orphans (~200 KB) are accepted rather than
+  never an invisible orphan. Retrying is reachable: an unavailable tile opens
+  the viewer with Retry and Delete (until 2026-10-05 it was an inert grey
+  tile, counted as attached by the Tax tab). Rare orphans (~200 KB) are accepted rather than
   reconciliation machinery.
 - **User-owned by construction** — sync and the importers never touch receipts,
   so attachments survive re-pulls without needing an omit-from-upsert rule.

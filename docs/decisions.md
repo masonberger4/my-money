@@ -551,3 +551,121 @@ App's ConfigErrorScreen and StartupSkeleton. Rejected: patching Dashboard alone
 (the four centered screens need it to center). The gotchas entry sits next to
 the 2026-09-08 sheet-padding one — same blind spot, opposite direction.
 
+## 2026-10-05 — Audit PR A: Dashboard state, refresh and screen fixes
+
+Mason asked for a review: "review the app, fix bugs, look for refactoring
+opportunities, easy app upgrades". **The findings — what each of the three
+PRs ships, the buildable leftovers, and the questions that wait for him —
+live in docs/next-iteration-plan-2026-08-04.md's "Improvement backlog
+(2026-10-05 audit)"**; the rules are in the memory docs. This entry records
+what PR A DECIDED, as opposed to fixed.
+
+- **The load that wins `loadSeq` owns the spinner.** reloadData clears
+  `loading` after each sequence guard it survives; fetchData only raises it.
+  Rejected: clearing it in fetchData when its own reload won — a newer reload
+  (the startup pull's follow-up, any post-write reload) superseded it and
+  nothing cleared the flag. Rejected too: a smoke-walk repro of that race; it
+  needs a pull to land mid-tap, which would make the required render gate
+  flaky, so the rule is source-pinned.
+- **Every reload after an await goes through `reloadViewed()`** (monthRef),
+  never the closure's `reloadData(year,month)`. Rejected: a drop-if-the-month-
+  moved guard inside reloadData — it would discard the post-write refresh
+  instead of aiming it at the month on screen.
+- **Plain month taps keep the lazy tab caches** (`invalidate:false`) —
+  Recurring, Debt, Tax, Trends cash flow and the Accounts-tab panels depend
+  on no viewed month. Extends the 2026-08-04 month-navigation caching ruling;
+  every other reload still drops them.
+- **`refreshing` spans the bank pull.** The pull chip, its gate and the
+  gear's Refresh stay busy until the pull a refresh started (and its
+  follow-up) settles. This amends the 2026-09-08 gear-menu entry's
+  `blocked={anySheetOpen||loading}` gate (that entry stands as written; the
+  operative rule is the Dashboard key row). Each hold lets go by itself after
+  60s, because runSync has no client timeout and a PWA suspended mid-pull can
+  leave it hung. Rejected: a client timeout or AbortController on runSync (it
+  changes every caller — the forced re-sync after a type change, the link
+  flows) and counting only an explicit Refresh (one that joins a hung startup
+  pull would still strand the controls).
+- **A foreground return more than an hour after this device last started a
+  pull re-pulls, QUIETLY** — the 2026-09-08 deferred item, built under its
+  recorded constraint: the hour-gated pull never paints the sync-failure
+  banner, since nobody asked for it. Feed health is re-checked after it and a
+  healthy answer clears the amber banner, so a dismissed feed banner returns
+  on the next hourly re-check while the feed is still broken. An explicit
+  Refresh still does not re-check feed health (unchanged).
+- **A failed explicit Refresh keeps its banner**: the copy is one constant,
+  re-asserted after the follow-up reload's clear without overwriting a load
+  error that reload raised itself.
+- **One expected-bill pass per foreground return, after its pull settles.**
+  Rejected: an in-flight gate on the expected effect (the recorded Gotcha —
+  in-flight gating is what lets the stale response win). Accepted residual: a
+  foreground pull that never settles runs no pass on that return. The extra
+  passes widen the stale-pass race that PR B's status-guarded match write
+  (F35) closes, so PR B should follow this one closely.
+- **The pipeline's decisions are pure and unit-tested** (`src/loadPipeline.js`);
+  Dashboard keeps only wiring scans. Rejected: a React renderer in the test
+  deps to test the loading rule behaviourally (zero test-framework deps).
+- **The typed budget income is month-tagged** like the measured one. A tag
+  mismatch shows the existing "set income" prompt until the next read.
+  Rejected: a skeleton, which would stick with no retry path.
+- **A Spending account filter on a hidden account is derived away at render,
+  not cleared.** Rejected: clearing it when the account is hidden — transient
+  state, blind to a hide made on the other phone, and `saveAccount` swallows
+  failures so a clear would drop the filter on a failed hide. Accepted:
+  unhiding the account revives the filter.
+- **A date edit re-sorts the lists stably by date alone** — no id tiebreak
+  (the reads have none, so one would reshuffle unmoved same-day rows) — and a
+  date-filtered search keeps the edited row, as a renamed row stays in a text
+  search.
+- **Formatters and wall-clock dates live in `src/format.js`, one copy**, and
+  an amount that rounds to zero prints unsigned. CsvImport's UTC `todayIso`
+  stays out on purpose. Rejected: a Math.round pre-round (toLocaleString
+  rounds half away from zero; pre-rounding turned −2.5 into −2).
+- **Home's ring, its legend and Reflect's breakdown are one arrangement**: the
+  top six positive groups plus All Others; refunded categories are left to
+  the Categories tab. Rejected: the old renormalised top-seven ring beside a
+  top-six legend (an unnamed seventh wedge, a refunded category with no
+  wedge).
+- **Overdue bills stay on Home**, labelled in the over ink beside the
+  next-7-days count — nothing auto-dismisses, so the unmatched bill is the
+  alarm. Rejected: dropping them. Names and a tap-through stay deferred (the
+  Plan tab shows overdue rows only in the current month, so a tap needs month
+  handling).
+- **Plan rows follow the one category list.** Rejected: the walk's
+  budgeted-first raw-label order (a row jumped on its first dollar, so the
+  next tap hit another envelope) and re-sorting the walk itself (its other
+  readers depend on that order).
+- **The Plan headline target sums each row's ask for THIS month.** What a
+  past-date by-date target should do stays the open Group 7 question.
+- **`tax:maps` joins the read-merge-write set**, one entry per edit against the
+  stored row. The 2026-09-08 entry calling `env:pace` "the last household
+  settings row written as a whole map" was wrong: `tax:maps` still was.
+- **Date EDIT inputs revert garbage on blur, never save it and never turn it
+  into a clear**; 5- and 6-digit years are rejected; record edits keep a 1900
+  floor (a placed-in-service date can predate 1990) while search keeps 1990.
+- **A rule that saved is reported as saved** even when the history rewrite
+  fails; choosing Always again is the retry. Rejected: a Retry button (a UX
+  addition nobody ruled on).
+- **All-digit payees teach by their description**; masked payees were already
+  covered by the shaping layer's bank-name fallback, so only the empty-key
+  case needed it.
+- **Category add AND rename refuse a live category's display alias and a case
+  variant of an in-use name**; the EXACT in-use name stays addable (re-adding
+  that raw key is the retire-and-re-add path), and a retired category's
+  leftover alias blocks nothing.
+- **Quick-add excludes hidden accounts and defaults to cash.** Left unbuilt on
+  purpose: an adapter-level guard against writing to a hidden account, which
+  would also cover the other phone hiding the account while the sheet is open
+  — a race nobody has hit, not worth widening the diff for.
+- **A Budget-tab figure that is only looked at writes nothing.** That closes
+  the no-op half of the two-phone envelope race; real concurrent edits still
+  race last-writer-wins, which stays Mason's ruling.
+- **`Swatch` commits on the native `change` event**, with blur as a fallback:
+  the 2026-09-08 blur-only commit never fired on the laptop.
+- **One `summarizeDebts`, one sparkline scale, one carry-forward fold.**
+  `debtRate` stays despite having no reader, because dataAdapter's return
+  shapes are kept stable (preferred over the verifier's drop-it-and-compute-
+  at-render alternative).
+- **The mileage footnote derives from the rate table for the viewed year**, and
+  a drive saved outside that year says where it went. The date still defaults
+  to today: defaulting into the viewed year is unruled.
+
