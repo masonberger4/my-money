@@ -15,6 +15,7 @@ import {
   EXPECTED_WINDOW_DAYS, EXPECTED_STALE_DAYS, EXPECTED_DUP_TOL_DAYS,
 } from '../src/expectedTx.js';
 import { walkEnvelopes } from '../src/envelopes.js';
+import { detectRecurring } from '../src/recurring.js';
 
 let seq = 0;
 const exp = (over = {}) => ({
@@ -231,6 +232,25 @@ test('seedFromRecurring seeds the LAST amount, not the median', () => {
     due_date: '2026-09-04',
     cadence: 'monthly',
   });
+});
+
+test('a >20% price hike seeds the NEW price, so the next bill can match (F26)', () => {
+  // Detection used to drop the $13 charge (outside the ±20% band), seed $10,
+  // and the $13 bill could then never match — it went overdue, then "missed?".
+  const charge = (date, amount) => tx({ transaction_date: date, amount, merchant_name: 'HIKE BOX', account_id: 'a1' });
+  const rows = ['2026-03-03', '2026-04-02', '2026-05-02', '2026-06-01', '2026-07-01', '2026-07-31', '2026-08-30']
+    .map(d => charge(d, 10))
+    .concat(charge('2026-09-29', 13));
+  const [item] = detectRecurring(rows, '2026-10-01');
+  const seed = seedFromRecurring(item);
+  assert.equal(seed.amount, 13);
+  assert.equal(seed.recurring_key, 'HIKE BOX');
+  assert.equal(seed.due_date, '2026-10-29');
+  const next = charge('2026-10-29', 13);
+  const matches = matchExpected([exp({ ...seed, id: 'seeded' })], [next]);
+  assert.deepEqual(matches, [{ expectationId: 'seeded', txId: next.id }], 'the next $13 bill matches the seeded expectation');
+  // The old-price seed could never have matched it.
+  assert.deepEqual(matchExpected([exp({ ...seed, id: 'old', amount: 10 })], [next]), []);
 });
 
 test('dup-gate: same key within the cadence tolerance is a duplicate — seeding twice is idempotent', () => {

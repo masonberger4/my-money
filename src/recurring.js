@@ -8,7 +8,10 @@
 // gap 7±2 days), monthly (28±4, the original detector, thresholds unchanged)
 // or annual (365±15) — with most gaps near the median (tolerance scaled to
 // the band) and similar amounts (within ±20% of the median). Gaps outside
-// every band (biweekly ~14, quarterly ~91) stay undetected.
+// every band (biweekly ~14, quarterly ~91) stay undetected. A price change
+// bigger than the ±20% band is read as a PRICE STEP (priceStep below) rather
+// than as variable spend, so a hiked sub keeps its key and reports its new
+// price instead of vanishing for months.
 
 import { TRANSFER_CATEGORY, RETURN_CATEGORY, UNCATEGORIZED } from './categoryMap.js';
 
@@ -141,37 +144,122 @@ export function detectRecurring(transactions, today = null) {
     groups.get(key).push(t);
   }
 
+  const todayDay = today ? dayNumber(today) : null;
   const out = [];
   for (const [key, group] of groups) {
     if (group.length < 3) continue;
     const all = [...group].sort(
       (a, b) => dayNumber(a.transaction_date) - dayNumber(b.transaction_date)
     );
-    const newestDay = dayNumber(all[all.length - 1].transaction_date);
+    const hit = evaluateGroup(all);
+    if (!hit) continue;
+    const item = buildItem(key, hit, todayDay);
+    if (item) out.push(item);
+  }
 
-    // Try each cadence over its own recency slice (evalDays above). The bands
-    // don't overlap, so on any one slice at most one band can match — the
-    // first hit wins and the scan is deterministic. On histories shorter than
-    // every evalDays the slices all equal the whole group, which makes this
-    // byte-identical to the original single-pass detector.
-    let hit = null;
-    for (const c of CADENCES) {
-      const windowed =
-        c.evalDays == null
-          ? all
-          : all.filter(t => newestDay - dayNumber(t.transaction_date) <= c.evalDays);
-      if (windowed.length < 3) continue;
+  // Monthly-equivalent cost so mixed cadences rank sensibly ($10/wk beats
+  // $20/mo). For an all-monthly input this is byte-identical to the original
+  // monthlyAmount sort.
+  return out.sort((a, b) => b.monthlyEquivalent - a.monthlyEquivalent);
+}
 
-      // Similar amounts: keep charges within ±20% of the median; a group where
-      // fewer than ~80% qualify is variable spend (groceries), not a subscription.
-      const amounts = windowed.map(t => t.amount).sort((a, b) => a - b);
-      const medAmount = median(amounts);
-      const kept = windowed.filter(t => Math.abs(t.amount - medAmount) <= 0.2 * medAmount);
-      if (kept.length < 3 || kept.length < 0.8 * windowed.length) continue;
+const withinBand = (amount, center) => Math.abs(amount - center) <= 0.2 * center;
+const medianOf = rows => median(rows.map(t => t.amount).sort((a, b) => a - b));
 
+// A PRICE STEP — the ±20% amount gate's blind spot (F26). A hike or cut larger
+// than the band fails it on the very charges that matter: in the step month
+// the new-price charge is dropped (lastDate/lastAmount come from the month
+// before, so a live sub reads "overdue" at the old price and priceCreep can
+// never fire), and once a couple of new-price charges are in the slice the
+// 80% gate fails outright and the sub vanishes until the new price is the
+// slice's median (four months, for a monthly sub).
+//
+// A step is the slice's NEWEST charges all at one new price (each within ±20%
+// of their own median), every older charge clear of that price, the older
+// ones passing the ordinary ±20%/80% gate among themselves, and the two
+// prices more than 20% apart (anything closer is the plain gate's job). The
+// split lands between two different days, so input order can't move it.
+// "Every older charge clear of the new price" is what tells a step from a
+// SECOND subscription at the same merchant: a new $10.99 sub beside a $2.99
+// one keeps sending $2.99 charges after its own first $10.99, so it is never
+// a clean step.
+// One side must carry the >=3-charge evidence the detector always demands:
+// the old price (a fresh step) or the new one (a settled step whose old-price
+// tail is down to one or two charges in the slice).
+//
+// Returns { kept, baseline, current } or null. `current` (the new price) is
+// what the item reports as its amount — seeding and the /mo headline must use
+// the price the next bill will be. `baseline` is the priceCreep reference:
+// the OLD price while old-price charges are still the majority of the slice
+// (a fresh hike flags "was $10.00 now $13.00"), the new one once it dominates
+// — the same moment the plain path's slice median would flip over.
+function priceStep(windowed) {
+  const n = windowed.length;
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (let k = 1; k < n; k++) {
+    // All within ±20% of one median means max ≤ 1.5 × min, and a longer
+    // suffix only widens its range — so variable spend stops here in a few
+    // steps instead of scanning a 40-month group.
+    lo = Math.min(lo, windowed[n - k].amount);
+    hi = Math.max(hi, windowed[n - k].amount);
+    if (hi > 1.5 * lo) break;
+    const prefix = windowed.slice(0, n - k);
+    const suffix = windowed.slice(n - k);
+    if (dayNumber(prefix[prefix.length - 1].transaction_date) >= dayNumber(suffix[0].transaction_date)) continue;
+    const current = medianOf(suffix);
+    if (!suffix.every(t => withinBand(t.amount, current))) continue;
+    if (prefix.some(t => withinBand(t.amount, current))) continue;
+    const old = medianOf(prefix);
+    if (withinBand(current, old)) continue;
+    const prefixKept = prefix.filter(t => withinBand(t.amount, old));
+    if (prefixKept.length < 0.8 * prefix.length) continue;
+    if (prefixKept.length < 3 && suffix.length < 3) continue;
+    return {
+      // An established old price is real evidence of the cadence (a fresh
+      // step's one or two new charges can't show one alone); a one- or
+      // two-charge old-price tail is dropped, as the plain gate drops it.
+      kept: prefixKept.length >= 3 ? [...prefixKept, ...suffix] : suffix,
+      baseline: prefixKept.length >= suffix.length ? old : current,
+      current,
+    };
+  }
+  return null;
+}
+
+// Try each cadence over its own recency slice (evalDays above). The bands
+// don't overlap, so on any one slice at most one band can match — the first
+// hit wins and the scan is deterministic. On histories shorter than every
+// evalDays the slices all equal the whole group, which makes this
+// byte-identical to the original single-pass detector. `all` is date-sorted.
+function evaluateGroup(all) {
+  const newestDay = dayNumber(all[all.length - 1].transaction_date);
+  for (const c of CADENCES) {
+    const windowed =
+      c.evalDays == null
+        ? all
+        : all.filter(t => newestDay - dayNumber(t.transaction_date) <= c.evalDays);
+    if (windowed.length < 3) continue;
+
+    // Similar amounts: keep charges within ±20% of the median; a group where
+    // fewer than ~80% qualify is variable spend (groceries), not a subscription.
+    const medAmount = medianOf(windowed);
+    const kept = windowed.filter(t => withinBand(t.amount, medAmount));
+    const plainOk = kept.length >= 3 && kept.length >= 0.8 * windowed.length;
+    // The price-step reading is tried only where the plain gate fails or drops
+    // a charge on the NEWEST day, so every item the gate already reads whole
+    // is byte-identical to before.
+    const candidates = [];
+    if (!plainOk || windowed.some(t => dayNumber(t.transaction_date) === newestDay && !kept.includes(t))) {
+      const step = priceStep(windowed);
+      if (step) candidates.push(step);
+    }
+    if (plainOk) candidates.push({ kept, baseline: medAmount, current: null });
+
+    for (const cand of candidates) {
       // Steady cadence: the median gap must land inside this band, and most
       // gaps must sit within the band's tolerance of the median.
-      const days = kept.map(t => dayNumber(t.transaction_date)).sort((a, b) => a - b);
+      const days = cand.kept.map(t => dayNumber(t.transaction_date)).sort((a, b) => a - b);
       const gaps = [];
       for (let i = 1; i < days.length; i++) gaps.push(days[i] - days[i - 1]);
       if (!gaps.length) continue;
@@ -179,68 +267,66 @@ export function detectRecurring(transactions, today = null) {
       if (medGap < c.minGap || medGap > c.maxGap) continue;
       const near = gaps.filter(g => Math.abs(g - medGap) <= c.gapTol).length;
       if (near < Math.ceil((gaps.length * 2) / 3)) continue;
-      hit = { spec: c, kept, days, gaps, medGap, medAmount };
-      break;
+      return { spec: c, kept: cand.kept, days, gaps, medGap, medAmount: cand.baseline, current: cand.current };
     }
-    if (!hit) continue;
-    const { spec, kept, days, gaps, medGap, medAmount } = hit;
-
-    const keptAmounts = kept.map(t => t.amount).sort((a, b) => a - b);
-    const lastDay = days[days.length - 1];
-    // Tie-break same-day charges on amount so the pick is input-order
-    // independent (the output-ordering test feeds reversed input).
-    const lastAmount = kept.reduce((best, t) => {
-      const dt = dayNumber(t.transaction_date), db = dayNumber(best.transaction_date);
-      return dt > db || (dt === db && t.amount > best.amount) ? t : best;
-    }).amount;
-    const nextDay = lastDay + Math.round(medGap);
-    const todayDay = today ? dayNumber(today) : null;
-    // Lapsed: more than staleDays past the expected charge means cancelled,
-    // not overdue — drop the item rather than flag it. Only with a clock; the
-    // pure no-clock call still returns every detected group.
-    if (todayDay != null && todayDay - nextDay > spec.staleDays) continue;
-    out.push({
-      key,
-      name: mostFrequent(kept.map(t => t.merchant_name)) || titleCase(key),
-      // UNCATEGORIZED, never a real category: the app has shipped no taxonomy
-      // since 2026-08-05, and 'Shopping and gear' — a category a household
-      // actually uses — stood here as the fallback, which is precisely the
-      // "we don't know" that reads like a confident answer.
-      category: mostFrequent(kept.map(t => t.category)) || UNCATEGORIZED,
-      account_id: mostFrequent(kept.map(t => t.account_id)) || null,
-      // Historical name: the median PER-CHARGE amount (for monthly the two are
-      // the same thing, which is where the name came from). For weekly/annual
-      // it is the per-cycle charge — use monthlyEquivalent for a per-month
-      // figure; consumers that render it should suffix by cadence.
-      monthlyAmount: median(keptAmounts),
-      monthlyEquivalent: median(keptAmounts) * spec.perMonth,
-      cadence: spec.cadence,
-      count: kept.length,
-      lastDate: isoFromDayNumber(lastDay),
-      nextDate: isoFromDayNumber(nextDay),
-      avgGapDays: Math.round(gaps.reduce((s, g) => s + g, 0) / gaps.length),
-      lastAmount,
-      // The value priceCreep compares against — surfaced so the UI can say
-      // "was $20.00, now $21.20" instead of a bare flag.
-      medianAmount: medAmount,
-      // Strictly more than PRICE_CREEP_PCT over the median: exactly 5% is not creep.
-      priceCreep: lastAmount > (1 + PRICE_CREEP_PCT) * medAmount,
-      dueSoon: todayDay == null ? null : nextDay >= todayDay && nextDay - todayDay <= spec.dueSoonDays,
-      overdue: todayDay == null ? null : nextDay < todayDay,
-      // One-field summary of the two booleans above; a nextDate more than the
-      // cadence's due-soon window out is null even with a clock.
-      dueStatus:
-        todayDay == null ? null
-        : nextDay < todayDay ? 'overdue'
-        : nextDay - todayDay <= spec.dueSoonDays ? 'due-soon'
-        : null,
-    });
   }
+  return null;
+}
 
-  // Monthly-equivalent cost so mixed cadences rank sensibly ($10/wk beats
-  // $20/mo). For an all-monthly input this is byte-identical to the original
-  // monthlyAmount sort.
-  return out.sort((a, b) => b.monthlyEquivalent - a.monthlyEquivalent);
+// The item for one detected group, or null when it has lapsed (with a clock).
+function buildItem(key, hit, todayDay) {
+  const { spec, kept, days, gaps, medGap, medAmount, current } = hit;
+  const keptAmounts = kept.map(t => t.amount).sort((a, b) => a - b);
+  // A price step reports the NEW price; otherwise the kept charges' median.
+  const amount = current ?? median(keptAmounts);
+  const lastDay = days[days.length - 1];
+  // Tie-break same-day charges on amount so the pick is input-order
+  // independent (the output-ordering test feeds reversed input).
+  const lastAmount = kept.reduce((best, t) => {
+    const dt = dayNumber(t.transaction_date), db = dayNumber(best.transaction_date);
+    return dt > db || (dt === db && t.amount > best.amount) ? t : best;
+  }).amount;
+  const nextDay = lastDay + Math.round(medGap);
+  // Lapsed: more than staleDays past the expected charge means cancelled,
+  // not overdue — drop the item rather than flag it. Only with a clock; the
+  // pure no-clock call still returns every detected group.
+  if (todayDay != null && todayDay - nextDay > spec.staleDays) return null;
+  return {
+    key,
+    name: mostFrequent(kept.map(t => t.merchant_name)) || titleCase(key),
+    // UNCATEGORIZED, never a real category: the app has shipped no taxonomy
+    // since 2026-08-05, and 'Shopping and gear' — a category a household
+    // actually uses — stood here as the fallback, which is precisely the
+    // "we don't know" that reads like a confident answer.
+    category: mostFrequent(kept.map(t => t.category)) || UNCATEGORIZED,
+    account_id: mostFrequent(kept.map(t => t.account_id)) || null,
+    // Historical name: the median PER-CHARGE amount (for monthly the two are
+    // the same thing, which is where the name came from). For weekly/annual
+    // it is the per-cycle charge — use monthlyEquivalent for a per-month
+    // figure; consumers that render it should suffix by cadence.
+    monthlyAmount: amount,
+    monthlyEquivalent: amount * spec.perMonth,
+    cadence: spec.cadence,
+    count: kept.length,
+    lastDate: isoFromDayNumber(lastDay),
+    nextDate: isoFromDayNumber(nextDay),
+    avgGapDays: Math.round(gaps.reduce((s, g) => s + g, 0) / gaps.length),
+    lastAmount,
+    // The value priceCreep compares against — surfaced so the UI can say
+    // "was $20.00, now $21.20" instead of a bare flag.
+    medianAmount: medAmount,
+    // Strictly more than PRICE_CREEP_PCT over the median: exactly 5% is not creep.
+    priceCreep: lastAmount > (1 + PRICE_CREEP_PCT) * medAmount,
+    dueSoon: todayDay == null ? null : nextDay >= todayDay && nextDay - todayDay <= spec.dueSoonDays,
+    overdue: todayDay == null ? null : nextDay < todayDay,
+    // One-field summary of the two booleans above; a nextDate more than the
+    // cadence's due-soon window out is null even with a clock.
+    dueStatus:
+      todayDay == null ? null
+      : nextDay < todayDay ? 'overdue'
+      : nextDay - todayDay <= spec.dueSoonDays ? 'due-soon'
+      : null,
+  };
 }
 
 // --- Ignore list -------------------------------------------------------------
