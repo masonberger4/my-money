@@ -1,4 +1,4 @@
-import { Component, Suspense } from "react";
+import { Component, Suspense, useEffect } from "react";
 import { createPortal } from "react-dom";
 
 // Backstop for anything unguarded that throws during render — without one a
@@ -49,6 +49,18 @@ export default class ErrorBoundary extends Component {
 // vendor-react then imported — so vendor-react's hash followed app code and
 // stopped being byte-stable across deploys. Measured, 2026-10-05.
 function ModalLoadFailed({ onClose }) {
+  // Escape closes it, like every other overlay — the modal's own Escape
+  // handler lives in the chunk that failed to load. Nothing is in flight here,
+  // so unlike CsvImport/SimpleFinConnect there is no busy gate.
+  useEffect(() => {
+    const h = e => {
+      if (e.key !== "Escape") return;
+      e.stopImmediatePropagation();
+      onClose();
+    };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, [onClose]);
   return createPortal(
     <div className="overlay" onClick={onClose}>
       <div className="modal" role="alertdialog" aria-modal="true" aria-label="Couldn't open this" onClick={e => e.stopPropagation()} style={{ maxWidth: "92vw", color: "var(--text)" }}>

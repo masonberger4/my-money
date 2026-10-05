@@ -127,3 +127,21 @@ test('every lazy modal renders inside LazyModal, never a bare Suspense', () => {
     assert.doesNotMatch(text, /<Suspense\b/, `${file}: a bare <Suspense> leaves a failed load to App's whole-screen boundary`);
   }
 });
+
+// The failed-load card is an overlay like any other, so it gets the overlay
+// trio's Escape-to-close. The modal's own Escape handler can't stand in: it
+// lives in the chunk that failed to load.
+test('the failed-load card closes on Escape', () => {
+  const text = read('src/components/ErrorBoundary.jsx');
+  const start = text.indexOf('function ModalLoadFailed');
+  assert.ok(start >= 0, 'ModalLoadFailed not found');
+  const end = text.indexOf('\nexport function LazyModal', start);
+  assert.ok(end > start, 'LazyModal must follow ModalLoadFailed');
+  const body = text.slice(start, end);
+  assert.match(body, /role="alertdialog"[^>]*aria-modal="true"/, 'dialog semantics');
+  assert.match(body, /e\.key !== "Escape"\) return;\s*e\.stopImmediatePropagation\(\);\s*onClose\(\);/,
+    'an Escape keydown must call onClose (and claim the press, one layer per press)');
+  assert.match(body, /window\.addEventListener\("keydown", h\);/);
+  assert.match(body, /return \(\) => window\.removeEventListener\("keydown", h\);\s*\}, \[onClose\]\);/,
+    'the listener is torn down on close and re-registered with the current onClose');
+});
