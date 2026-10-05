@@ -16,6 +16,8 @@ export default function ReceiptSection({ txId, onChanged }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState(null);
   const [viewing, setViewing] = useState(null);   // receipt being shown full-size
+  const [failed, setFailed] = useState({});       // receipt id → true when its URL couldn't be minted
+  const [retrying, setRetrying] = useState(false);
   const fileRef = useRef(null);
   const seq = useRef(0);
   // Object URLs minted for just-added photos (existing receipts use signed
@@ -23,11 +25,21 @@ export default function ReceiptSection({ txId, onChanged }) {
   // URL keeps its blob alive until revoked, and an installed PWA session
   // lives long enough for ~300 KB per photo to add up.
   const objectUrls = useRef([]);
-  useEffect(() => () => { for (const u of objectUrls.current) URL.revokeObjectURL(u); }, []);
+  // False once the sheet closes (or Dashboard's key={selTx.id} remounts this
+  // for another row) — an upload can still be in flight then. Set in the
+  // effect BODY so StrictMode's dev re-run turns it back on.
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      for (const u of objectUrls.current) URL.revokeObjectURL(u);
+    };
+  }, []);
 
   useEffect(() => {
     const s = ++seq.current;
-    setReceipts(null); setUrls({}); setErr(null); setViewing(null);
+    setReceipts(null); setUrls({}); setFailed({}); setErr(null); setViewing(null);
     for (const u of objectUrls.current) URL.revokeObjectURL(u);
     objectUrls.current = [];
     getReceipts(txId)
@@ -35,12 +47,18 @@ export default function ReceiptSection({ txId, onChanged }) {
         if (s !== seq.current) return;
         setReceipts(rows);
         // Signed URLs mint sequentially-ish per row; failures render as a
-        // grey tile rather than killing the section.
+        // grey tile rather than killing the section. The tile still opens the
+        // viewer, which offers Retry + Delete — the viewer holds the only
+        // Delete, so a tile that couldn't open it (a half-finished delete
+        // whose object is gone) was a permanent dead end.
         for (const r of rows) {
           try {
             const u = await getReceiptUrl(r.storage_path);
             if (s === seq.current) setUrls(prev => ({ ...prev, [r.id]: u }));
-          } catch (e) { console.error("receipt url failed", e); }
+          } catch (e) {
+            console.error("receipt url failed", e);
+            if (s === seq.current) setFailed(prev => ({ ...prev, [r.id]: true }));
+          }
         }
       })
       .catch(e => {
@@ -73,9 +91,16 @@ export default function ReceiptSection({ txId, onChanged }) {
     ev.target.value = ""; // same file re-pickable after a failure
     if (!file || busy) return;
     setBusy(true); setErr(null);
+    // The sheet can close (or switch rows) while this awaits. Then nothing
+    // here renders any more: the row is saved but there is no list to add it
+    // to, and a preview URL minted now would outlive the unmount cleanup that
+    // already revoked the list — so skip it.
+    const s = seq.current;
+    const gone = () => !mounted.current || s !== seq.current;
     try {
       const { blob, mime } = await compressReceipt(file);
       const row = await addReceipt(txId, blob, mime);
+      if (gone()) { onChanged?.(); return; } // the Tax tab's nag still needs to hear it
       setReceipts(prev => [...(prev || []), row]);
       try {
         const u = URL.createObjectURL(blob);
@@ -89,9 +114,36 @@ export default function ReceiptSection({ txId, onChanged }) {
       // POST (never retried), so a dead iOS socket surfaced storage-js's raw
       // "Load failed". compressReceipt's own sentences pass through unchanged.
       const text = friendlyError(e);
+      // Closed mid-upload: an in-sheet error would land on an unmounted
+      // component and vanish, leaving the user sure the receipt is attached
+      // (and the paper copy binned). Say it out loud instead.
+      if (gone()) { window.alert(`Couldn't save the receipt photo: ${text}`); return; }
       setErr(typeof text === "string" && text ? text[0].toUpperCase() + text.slice(1) : "Couldn't save the receipt");
     } finally {
-      setBusy(false);
+      if (mounted.current) setBusy(false);
+    }
+  }
+
+  // Re-mint one receipt's signed URL from the viewer (an offline blip at
+  // mount is not permanent — Retry before anyone deletes a real receipt).
+  async function onRetryUrl(r) {
+    if (retrying) return;
+    const s = seq.current;
+    setRetrying(true); setErr(null);
+    try {
+      const u = await getReceiptUrl(r.storage_path);
+      if (mounted.current && s === seq.current) {
+        setUrls(prev => ({ ...prev, [r.id]: u }));
+        setFailed(prev => { const next = { ...prev }; delete next[r.id]; return next; });
+      }
+    } catch (e) {
+      console.error("receipt url retry failed", e);
+      if (mounted.current && s === seq.current) {
+        setFailed(prev => ({ ...prev, [r.id]: true }));
+        setErr(`Couldn't load the photo: ${friendlyError(e)}`);
+      }
+    } finally {
+      if (mounted.current) setRetrying(false);
     }
   }
 
@@ -139,7 +191,8 @@ export default function ReceiptSection({ txId, onChanged }) {
             urls[r.id]
               ? <img key={r.id} src={urls[r.id]} alt="Receipt" style={tile}
                   onClick={e => { e.stopPropagation(); setViewing(r); }} />
-              : <div key={r.id} style={{ ...tile, cursor: "default" }} onClick={e => e.stopPropagation()} />
+              : <div key={r.id} role="button" aria-label="Receipt (image unavailable)" style={tile}
+                  onClick={e => { e.stopPropagation(); setViewing(r); }} />
           ))}
         </div>
       </div>
@@ -156,8 +209,22 @@ export default function ReceiptSection({ txId, onChanged }) {
         <div data-mm-topmost="" role="dialog" aria-modal="true" aria-label="Receipt photo" onClick={() => setViewing(null)}
           style={{ position: "fixed", inset: 0, background: "var(--overlay)", zIndex: 60,
             display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: 16 }}>
-          <img src={urls[viewing.id]} alt="Receipt"
-            style={{ maxWidth: "100%", maxHeight: "80vh", borderRadius: 10, background: "#fff" }} />
+          {urls[viewing.id]
+            ? <img src={urls[viewing.id]} alt="Receipt"
+                style={{ maxWidth: "100%", maxHeight: "80vh", borderRadius: 10, background: "#fff" }} />
+            : <div style={{ width: 240, maxWidth: "100%", padding: "36px 16px", borderRadius: 10, background: "var(--card)",
+                color: "var(--muted)", fontSize: 13, textAlign: "center" }}>
+                {failed[viewing.id] ? "Couldn't load this photo" : "Loading…"}
+                {failed[viewing.id] && (
+                  <div>
+                    <button onClick={ev => { ev.stopPropagation(); onRetryUrl(viewing); }} disabled={retrying}
+                      style={{ marginTop: 12, padding: "6px 16px", borderRadius: 8, border: "1px solid var(--border)",
+                        background: "none", color: "var(--text)", fontFamily: "inherit", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
+                      {retrying ? "Retrying…" : "Retry"}
+                    </button>
+                  </div>
+                )}
+              </div>}
           <button onClick={ev => { ev.stopPropagation(); onDelete(viewing); }} disabled={busy}
             style={{ marginTop: 12, padding: "8px 18px", borderRadius: 8, border: "1px solid var(--danger)",
               background: "none", color: "var(--danger)", fontFamily: "inherit", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
