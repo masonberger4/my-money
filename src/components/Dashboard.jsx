@@ -9,7 +9,7 @@ import { buildSearchFilters, searchIsActive, sanitizeDateInput, dateCommit, EDIT
 import { expectedByCategory, expectedStatus, isMissedExpected, seedFromRecurring, projectFutureCycles, homeBillsWindow } from "../expectedTx.js";
 import { payoffWhatIf, debtFreeMonth, isMortgage, amortizationSchedule, addMonths, MAX_MONTHS, payoffProgress, utilization, summarizeDebts } from "../debtPayoff.js";
 import { SCHEDULE_E_LINES, RENTS_KEY, DEFAULT_SCHEDULE_E_MAP, scheduleEReport, entityMonthly, entityLedger, personalDeductionReport, DEDUCTION_BUCKETS, DEFAULT_DEDUCTION_MAP, mileageDeduction, scheduleECsv, parseTaxMaps, setEmapEntryIn, setDmapEntryIn, savedOutsideYear, mileageFootnote } from "../taxReport.js";
-import { merchantKey, matchLearnedRule, isKeyPrefix } from "../txClassify.js";
+import { merchantKey, matchLearnedRule, isKeyPrefix, teachDescriptor } from "../txClassify.js";
 import { trimChatMsgs, buildSavedChat } from "../savedChats.js";
 import { patchTxShape } from "../spending.js";
 import { friendlyError } from "../netRetry.js";
@@ -3405,8 +3405,10 @@ export default function Dashboard({ refreshTick = 0 }) {
 
   // The string the classifier actually sees at write time — merchant_name is
   // SimpleFIN's `payee`, description its raw descriptor. Must match the write
-  // path or a taught rule wouldn't fire on the next pull.
-  const txDescriptor=useCallback(t=>t?(t.merchant_name||t.description||""):"",[]);
+  // path or a taught rule wouldn't fire on the next pull. teachDescriptor
+  // falls back to the description when the payee keys to nothing (an
+  // all-digit "76"), which otherwise left the row unteachable.
+  const txDescriptor=useCallback(t=>t?teachDescriptor(t):"",[]);
 
   // count is a NUMBER when the preview ran, or null when it couldn't — the two
   // must stay distinguishable. Folding a failure into 0 renders identically to
