@@ -869,33 +869,36 @@ export async function applyCategoryRuleToHistory(descriptor, category, { dryRun 
   // see applyRuleToHistory's `rules` contract). getCategoryRules degrades to
   // {} pre-migration, which bagWithRule treats as "only the taught rule".
   const rules = await getCategoryRules();
-  const result = await applyRuleToHistory({
-    descriptor,
-    category,
-    amount,
-    dryRun,
-    rules,
-    fetchPage: (pat, from, to) =>
-      supabase
-        .from('transactions')
-        // `amount` is selected because an amount-scoped rule is re-matched
-        // against the ROW's amount — without the column it would match nothing.
-        .select('id, description, merchant_name, mapped_category, amount')
-        .or(`description.ilike.${pat},merchant_name.ilike.${pat}`)
-        // Same tiebreaker reasoning as getTransactionsBetween: paging an
-        // unordered result set can drop or repeat rows across the boundary,
-        // and a dropped row here is a transaction the rule silently fails to
-        // fix.
-        .order('id', { ascending: true })
-        .range(from, to),
-    updateBatch: (ids, cat) =>
-      supabase.from('transactions').update({ mapped_category: cat }).in('id', ids),
-  });
-  // A real apply rewrites other rows' mapped_category — a write, so it is an
-  // invalidation moment (spend sums shift when categories move between
-  // spending and the transfer bucket's veto).
-  if (!dryRun) invalidateEnvelopeSpending();
-  return result;
+  try {
+    return await applyRuleToHistory({
+      descriptor,
+      category,
+      amount,
+      dryRun,
+      rules,
+      fetchPage: (pat, from, to) =>
+        supabase
+          .from('transactions')
+          // `amount` is selected because an amount-scoped rule is re-matched
+          // against the ROW's amount — without the column it would match nothing.
+          .select('id, description, merchant_name, mapped_category, amount')
+          .or(`description.ilike.${pat},merchant_name.ilike.${pat}`)
+          // Same tiebreaker reasoning as getTransactionsBetween: paging an
+          // unordered result set can drop or repeat rows across the boundary,
+          // and a dropped row here is a transaction the rule silently fails to
+          // fix.
+          .order('id', { ascending: true })
+          .range(from, to),
+      updateBatch: (ids, cat) =>
+        supabase.from('transactions').update({ mapped_category: cat }).in('id', ids),
+    });
+  } finally {
+    // A real apply rewrites other rows' mapped_category — a write, so it is an
+    // invalidation moment (spend sums shift when categories move between
+    // spending and the transfer bucket's veto). From a finally: the batches
+    // before a mid-loop failure are already committed.
+    if (!dryRun) invalidateEnvelopeSpending();
+  }
 }
 
 // --- Envelope budgeting (YNAB rules 1–3) -------------------------------------
@@ -1584,25 +1587,31 @@ export async function importCsvTransactions(accountId, rows, source = 'csv') {
 
   const batchSize = 500;
   let written = 0;
-  for (let i = 0; i < rows.length; i += batchSize) {
-    const slice = rows.slice(i, i + batchSize).map(r => ({ ...r, account_id: accountId }));
+  try {
+    for (let i = 0; i < rows.length; i += batchSize) {
+      const slice = rows.slice(i, i + batchSize).map(r => ({ ...r, account_id: accountId }));
 
-    const attempt = async withSource => {
-      const payload = withSource ? slice.map(r => ({ ...r, source })) : slice;
-      return supabase
-        .from('transactions')
-        .upsert(payload, { onConflict: 'account_id,plaid_tx_id' });
-    };
+      const attempt = async withSource => {
+        const payload = withSource ? slice.map(r => ({ ...r, source })) : slice;
+        return supabase
+          .from('transactions')
+          .upsert(payload, { onConflict: 'account_id,plaid_tx_id' });
+      };
 
-    let { error } = await attempt(transactionsHaveSource);
-    if (error && transactionsHaveSource && isMissingColumnError(error, 'source')) {
-      transactionsHaveSource = false;
-      ({ error } = await attempt(false));
+      let { error } = await attempt(transactionsHaveSource);
+      if (error && transactionsHaveSource && isMissingColumnError(error, 'source')) {
+        transactionsHaveSource = false;
+        ({ error } = await attempt(false));
+      }
+      if (error) throw error;
+      written += slice.length;
     }
-    if (error) throw error;
-    written += slice.length;
+  } finally {
+    // New rows exist — every memoised read is stale. From a finally (the sync
+    // hook's discipline): a batch that throws mid-loop leaves the earlier
+    // batches COMMITTED, and an upsert whose answer was lost may have landed.
+    invalidateEnvelopeSpending();
   }
-  invalidateEnvelopeSpending(); // new rows exist — every memoised read is stale
   return written;
 }
 

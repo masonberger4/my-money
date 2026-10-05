@@ -63,6 +63,21 @@ for (const name of WRITE_PATHS) {
   });
 }
 
+// A multi-batch write that throws partway has still COMMITTED its earlier
+// batches (500-row import upserts, 200-row history-apply updates): the
+// invalidation must ride a finally, like the sync hook below, or the warm
+// caches serve pre-write totals until some unrelated invalidation.
+for (const name of ['importCsvTransactions', 'applyCategoryRuleToHistory']) {
+  test(`multi-batch write ${name} invalidates from a finally — partial failures too`, () => {
+    const body = stripComments(exportedFunction(adapter, name));
+    assert.match(
+      body,
+      /finally\s*\{[^}]*invalidateEnvelopeSpending\(\)/,
+      `${name} must call invalidateEnvelopeSpending() from a finally`
+    );
+  });
+}
+
 test('invalidateEnvelopeSpending is the ONE invalidator: no bare rangeMemo.clear() anywhere else', () => {
   // A site that clears only the range memo strands spendCache on pre-edit
   // sums (or vice versa). Exactly one clear() call exists — inside the
