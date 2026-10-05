@@ -30,7 +30,7 @@ import { TX_TYPES, txTypeLabel, allowedUserTypes } from "../txType.js";
 import { breakdownSegments, incomeVsSpendingInsight, incomeSections } from "../reflect.js";
 import { createSheetHistory } from "../sheetHistory.js";
 import { runSync, foregroundSyncDue } from "../sync.js";
-import { refreshTickPlan, pullFollowUp } from "../loadPipeline.js";
+import { refreshTickPlan, pullFollowUp, createSyncHold } from "../loadPipeline.js";
 // Lazy: both are modals rendered only on user action, and CsvImport reaches the
 // whole statement-import stack — no reason for either in the initial bundle.
 // A failed chunk load throws during render; App's ErrorBoundary is the net.
@@ -1922,14 +1922,16 @@ export default function Dashboard({ refreshTick = 0 }) {
   const [month,setMonth]=useState(now.getMonth()+1);
   const [tab,setTab]=useState("overview");
   const [loading,setLoading]=useState(true);
-  // A bank pull fetchData started is still running — counted, because the
-  // startup pull and a Refresh can overlap. The pull chip, its gate and the
-  // gear's Refresh ride loading||refreshing, so they last until the pull (and
-  // its follow-up reload) settles instead of stopping after the cache read in
-  // front of it; the page skeletons stay on `loading` alone — the screen is
+  // A bank pull fetchData started is still running — a counted hold
+  // (createSyncHold), because the startup pull and a Refresh can overlap. The
+  // pull chip, its gate and the gear's Refresh ride loading||refreshing, so
+  // they last until the pull (and its follow-up reload) settles instead of
+  // stopping after the cache read in front of it — capped at SYNC_HOLD_CAP_MS
+  // per hold, so a pull that never settles can't disable them for the
+  // session. The page skeletons stay on `loading` alone — the screen is
   // painted while the sync runs.
   const [refreshing,setRefreshing]=useState(false);
-  const syncsInFlight=useRef(0);
+  const [holdRefreshing]=useState(()=>createSyncHold(setRefreshing));
   const [lastUpd,setLastUpd]=useState(null);
   const [error,setError]=useState(null);
   const [overview,setOverview]=useState(null);
@@ -2792,8 +2794,10 @@ export default function Dashboard({ refreshTick = 0 }) {
     // holds it (cache invalidation). sync:"foreground" is the hour-gated pull
     // on a foreground return (the fetchData effect): nobody asked for it, so
     // its failure only logs — no banner over numbers the user didn't refresh.
-    // Every pull holds `refreshing` until it settles (the finally below).
-    if(sync){lastSyncAt.current=Date.now();syncsInFlight.current++;setRefreshing(true);}
+    // Every pull holds `refreshing` until it settles (the finally below) or
+    // the hold's cap lets go first.
+    if(sync)lastSyncAt.current=Date.now();
+    const release=sync?holdRefreshing():null;
     try{
       const syncP=sync?runSync().catch(err=>{
         console.error("sync failed",err);
@@ -2829,7 +2833,7 @@ export default function Dashboard({ refreshTick = 0 }) {
       // invalidateExpected: that callback is declared below (TDZ).
       if(next.bumpExpected)setExpEpoch(e=>e+1);
     }finally{
-      if(sync&&--syncsInFlight.current===0)setRefreshing(false);
+      release?.();
     }
   },[reloadData,reloadViewed]);
 

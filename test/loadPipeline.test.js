@@ -2,9 +2,9 @@
 // and the fetchData effect (App.jsx's foreground-return refreshTick lands
 // there). Two halves:
 //  - BEHAVIOR: the pipeline's decisions live in src/loadPipeline.js (pure) —
-//    which effect run pulls and drops the lazy caches (refreshTickPlan) and
-//    what a settled pull earns (pullFollowUp) — and are unit-tested here as
-//    decision tables.
+//    which effect run pulls and drops the lazy caches (refreshTickPlan), what
+//    a settled pull earns (pullFollowUp), and the capped `refreshing` hold
+//    (createSyncHold) — and are unit-tested here as decision tables.
 //  - WIRING: Dashboard is a component nothing in Node can mount, and these
 //    failures are SILENT on every surface — a spinner that never comes down,
 //    an old month's totals under the new month's header — so the rest is a
@@ -17,7 +17,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { refreshTickPlan, pullFollowUp } from '../src/loadPipeline.js';
+import { refreshTickPlan, pullFollowUp, createSyncHold, SYNC_HOLD_CAP_MS } from '../src/loadPipeline.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const dashboard = readFileSync(join(root, 'src', 'components', 'Dashboard.jsx'), 'utf8');
@@ -293,14 +293,89 @@ test('feed health is re-checked after any effect-started pull, and a healthy ans
 // started is still running; the pull chip and the gear's spinner settled on
 // it, and the pulled rows painted seconds later with no signal.
 
-test('fetchData holds `refreshing` for the whole pull, cleared in a finally once no pull is left', () => {
+test('fetchData holds `refreshing` for the whole pull, released in a finally', () => {
   const { body } = slice(...FETCH);
-  assert.match(body, /if\(sync\)\{[^}]*syncsInFlight\.current\+\+;[^}]*setRefreshing\(true\);/,
-    'a pull raises refreshing (counted — the startup pull and a Refresh can overlap)');
-  assert.match(body, /finally\{\s*if\(sync&&--syncsInFlight\.current===0\)setRefreshing\(false\);\s*\}/,
-    'the clear must ride a finally (every early return included) and wait for the LAST overlapping pull');
-  assert.ok(body.indexOf('setRefreshing(true)') < body.indexOf('runSync('),
-    'refreshing is raised before the pull starts');
+  assert.match(body, /const release=sync\?holdRefreshing\(\):null;/,
+    'a pull takes a hold on refreshing (counted — the startup pull and a Refresh can overlap)');
+  assert.match(body, /finally\{\s*release\?\.\(\);\s*\}/,
+    'the release must ride a finally (every early return included)');
+  assert.ok(body.indexOf('holdRefreshing()') < body.indexOf('runSync('), 'refreshing is raised before the pull starts');
+  assert.match(code, /const \[holdRefreshing\]=useState\(\(\)=>createSyncHold\(setRefreshing\)\);/,
+    'ONE hold for the component\'s life, on the default (capped) createSyncHold');
+  assert.ok(!/setRefreshing\(/.test(code),
+    'refreshing moves only through the hold — a direct setRefreshing has no cap and can strand the controls');
+});
+
+// --- createSyncHold: the counted, capped `refreshing` flag -------------------
+function harness() {
+  const busy = [];
+  const timers = new Map();
+  let id = 0;
+  const hold = createSyncHold(v => busy.push(v), {
+    capMs: 1000,
+    setTimer: (fn, ms) => { timers.set(++id, { fn, ms }); return id; },
+    clearTimer: t => { timers.delete(t); },
+  });
+  const fire = t => { const x = timers.get(t); assert.ok(x, `timer ${t} is pending`); timers.delete(t); x.fn(); };
+  return { busy, timers, hold, fire, last: () => busy[busy.length - 1] };
+}
+
+test('createSyncHold: one hold raises the flag and its release drops it, once', () => {
+  const h = harness();
+  const release = h.hold();
+  assert.equal(h.last(), true);
+  release();
+  assert.equal(h.last(), false);
+  assert.equal(h.timers.size, 0, 'a release clears its own cap timer');
+  release();
+  assert.deepEqual(h.busy, [true, false], 'a second release is a no-op');
+});
+
+test('createSyncHold: overlapping holds keep the flag up until the LAST lets go', () => {
+  const h = harness();
+  const a = h.hold();
+  const b = h.hold();
+  a();
+  assert.equal(h.last(), true, 'the startup pull settling must not stop a Refresh still pulling');
+  a();
+  assert.equal(h.last(), true, 'a repeated release cannot release someone else\'s hold');
+  b();
+  assert.equal(h.last(), false);
+});
+
+test('createSyncHold: a hold that never settles lets go by itself at the cap', () => {
+  const h = harness();
+  const hung = h.hold();
+  assert.equal([...h.timers.values()][0].ms, 1000, 'the cap timer runs for capMs');
+  h.fire([...h.timers.keys()][0]);
+  assert.equal(h.last(), false, 'a hung pull no longer disables Refresh and pull-to-refresh');
+  // The hung pull settling much later is harmless, and the next hold works.
+  hung();
+  assert.deepEqual(h.busy, [true, false]);
+  const next = h.hold();
+  assert.equal(h.last(), true);
+  hung();
+  assert.equal(h.last(), true, 'the old hold\'s late release cannot drop the new hold');
+  next();
+  assert.equal(h.last(), false);
+});
+
+test('createSyncHold: a capped hold and a live one — the live one still owns the flag', () => {
+  const h = harness();
+  h.hold();
+  const live = h.hold();
+  h.fire([...h.timers.keys()][0]);
+  assert.equal(h.last(), true, 'one hold capped out; the other pull is still running');
+  live();
+  assert.equal(h.last(), false);
+});
+
+test('createSyncHold: the default cap is a minute, on the real timers', () => {
+  assert.equal(SYNC_HOLD_CAP_MS, 60_000);
+  const busy = [];
+  const release = createSyncHold(v => busy.push(v))();
+  release();   // clears the real timer — the test process must not wait a minute
+  assert.deepEqual(busy, [true, false]);
 });
 
 test('the pull chip, its gate and the gear\'s Refresh read loading||refreshing; page skeletons stay on loading', () => {

@@ -51,3 +51,32 @@ export function pullFollowUp(sync, res) {
   const reload = !allThrottled || sync === 'refresh';
   return { reload, reassertError: reload && !res, bumpExpected: reload || sync === 'foreground' };
 }
+
+// A COUNTED busy flag with a per-hold cap — Dashboard's `refreshing`, which
+// keeps the pull chip, its gate and the gear's Refresh spinning until the pull
+// a refresh started has settled. `hold()` raises the flag and returns an
+// idempotent `release`; the flag drops when the LAST hold lets go, because
+// pulls overlap (the startup pull and a Refresh that joins runSync's
+// single-flight). Every hold also lets go BY ITSELF after `capMs`: runSync has
+// no client timeout and its single-flight hands each later caller the SAME
+// promise, so one request that never settles (in flight when iOS suspended
+// the PWA) would otherwise leave Refresh and pull-to-refresh disabled for the
+// rest of the session. The cap only stops the spinner — the pull is not
+// cancelled, and its follow-up still runs if it ever settles.
+export const SYNC_HOLD_CAP_MS = 60_000;
+export function createSyncHold(setBusy, { capMs = SYNC_HOLD_CAP_MS, setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
+  let held = 0;
+  return function hold() {
+    if (held++ === 0) setBusy(true);
+    let done = false;
+    let timer = null;
+    const release = () => {
+      if (done) return;
+      done = true;
+      clearTimer(timer);
+      if (--held === 0) setBusy(false);
+    };
+    timer = setTimer(release, capMs);
+    return release;
+  };
+}
