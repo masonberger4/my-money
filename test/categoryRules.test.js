@@ -27,6 +27,7 @@ import {
   deleteCategoryRule,
   listCategoryRules,
 } from '../src/dataAdapter.js';
+import { loadCategoryRules } from '../api/sync.js';
 import { effectiveCategory } from '../src/spending.js';
 import { analyzeCsv } from '../src/csvImport.js';
 import { TRANSFER_CATEGORY, FALLBACK_CATEGORY } from '../src/categoryMap.js';
@@ -729,6 +730,66 @@ test('listCategoryRules pages in a TOTAL order: merchant_key, then amount nulls 
   assert.ok(calls[0].range, 'paged');
 });
 
+// PostgREST clamps every read at max-rows (1000): an unpaged rules read past
+// that silently dropped an arbitrary subset and those merchants imported
+// Uncategorized. Both sides of the wire page.
+const thousandRules = () =>
+  Array.from({ length: 1000 }, (_, i) => ({ merchant_key: `M${String(i).padStart(4, '0')}`, category: 'C', amount: null }));
+const TOTAL_ORDER = [
+  ['merchant_key', { ascending: true }],
+  ['amount', { ascending: true, nullsFirst: true }],
+];
+
+test('getCategoryRules pages past max-rows: a full page is followed by the next', async () => {
+  const calls = [];
+  const client = fakeRulesClient([
+    { data: thousandRules(), error: null },
+    { data: [{ merchant_key: 'M1100', category: 'Groceries', amount: '12.50' }], error: null },
+  ], calls);
+  const rules = await getCategoryRules({ client });
+  assert.equal(Object.keys(rules).length, 1001);
+  assert.deepEqual(rules.M1100, [{ amount: 12.5, category: 'Groceries' }]);
+  assert.deepEqual(calls.map(c => c.range), [[0, 999], [1000, 1999]]);
+  assert.deepEqual(calls[0].orders, TOTAL_ORDER);
+});
+
+test('getCategoryRules: an exact page multiple ends on PGRST103, never throws', async () => {
+  const client = fakeRulesClient([
+    { data: thousandRules(), error: null },
+    { data: null, error: { code: 'PGRST103', message: 'Requested range not satisfiable' } },
+  ]);
+  assert.equal(Object.keys(await getCategoryRules({ client })).length, 1000);
+});
+
+test('api/sync loadCategoryRules pages, totally orders, and scopes to the household', async () => {
+  const calls = [];
+  const client = fakeRulesClient([
+    { data: thousandRules(), error: null },
+    { data: [{ merchant_key: 'ZELLE', category: 'Rent', amount: '1800.00' }], error: null },
+  ], calls);
+  const rules = await loadCategoryRules(client, 'hh1');
+  assert.equal(Object.keys(rules).length, 1001);
+  assert.deepEqual(rules.ZELLE, [{ amount: 1800, category: 'Rent' }]);
+  assert.deepEqual(calls.map(c => c.range), [[0, 999], [1000, 1999]]);
+  for (const c of calls) assert.deepEqual(c.filters, [['eq', 'household_id', 'hh1']]);
+  assert.deepEqual(calls[0].orders, TOTAL_ORDER);
+});
+
+test('api/sync loadCategoryRules: a missing amount COLUMN redoes the page narrower; a missing TABLE is {}', async () => {
+  const calls = [];
+  const client = fakeRulesClient([
+    { data: null, error: amountMissingError },
+    { data: [{ merchant_key: 'SAFEWAY', category: 'Groceries' }], error: null },
+  ], calls);
+  assert.deepEqual(await loadCategoryRules(client, 'hh1'), { SAFEWAY: [{ amount: null, category: 'Groceries' }] });
+  assert.doesNotMatch(calls[1].columns, /amount/);
+  assert.deepEqual(calls[1].orders, [['merchant_key', { ascending: true }]], 'the amount order goes with the column');
+  assert.deepEqual(calls[1].range, [0, 999]);
+
+  const missing = { code: '42P01', message: 'relation "category_rules" does not exist' };
+  assert.deepEqual(await loadCategoryRules(fakeRulesClient([{ data: null, error: missing }]), 'hh1'), {});
+});
+
 // --- pre-migration degrade (flips the module flag — keep LAST) ---------------
 
 test('getCategoryRules degrades when the amount COLUMN is missing', async () => {
@@ -740,6 +801,7 @@ test('getCategoryRules degrades when the amount COLUMN is missing', async () => 
   const rules = await getCategoryRules({ client });
   assert.match(calls[0].columns, /amount/);
   assert.doesNotMatch(calls[1].columns, /amount/);
+  assert.deepEqual(calls[1].orders, [['merchant_key', { ascending: true }]], 'the amount order goes with the column');
   assert.deepEqual(rules, { SAFEWAY: [{ amount: null, category: 'Groceries' }] });
 });
 

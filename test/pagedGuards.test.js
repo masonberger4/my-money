@@ -1,8 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { pagedRows, isMissingColumnError } from '../src/dataAdapter.js';
+import { join } from 'node:path';
+import { pagedRows, isMissingColumnError, getMileage } from '../src/dataAdapter.js';
 import { isRangeExhaustedError } from '../src/ruleHistory.js';
 
 // ---- pagedRows: the ONE paged-loop discipline -------------------------------
@@ -102,6 +103,74 @@ test('source scan: every paged read in dataAdapter.js is TOTALLY ordered', () =>
       }
     }
   }
+});
+
+// ---- PostgREST's max-rows cap ------------------------------------------------
+// Every read is clamped at max-rows (1000) server-side, whatever .limit() asks
+// for — so a .limit(1500) silently returns 1000. Past the cap, page.
+
+const root = fileURLToPath(new URL('..', import.meta.url));
+function sourceFiles(dir) {
+  const out = [];
+  for (const e of readdirSync(join(root, dir), { withFileTypes: true })) {
+    const rel = `${dir}/${e.name}`;
+    if (e.isDirectory()) out.push(...sourceFiles(rel));
+    else if (/\.(js|jsx|mjs)$/.test(e.name)) out.push(rel);
+  }
+  return out;
+}
+
+test('source scan: no .limit() above PostgREST max-rows anywhere in src/ or api/', () => {
+  const files = [...sourceFiles('src'), ...sourceFiles('api')];
+  assert.ok(files.length > 20, `scan regressed: ${files.length} files`);
+  for (const f of files) {
+    const src = readFileSync(join(root, f), 'utf8');
+    for (const m of src.matchAll(/\.limit\(\s*(\d+)\s*\)/g)) {
+      assert.ok(Number(m[1]) <= 1000, `${f}: .limit(${m[1]}) is clamped to 1000 by PostgREST — page it`);
+    }
+  }
+});
+
+test('source scan: every category_rules READ pages, on both sides of the wire', () => {
+  let reads = 0;
+  for (const f of ['src/dataAdapter.js', 'api/sync.js']) {
+    const src = readFileSync(join(root, f), 'utf8');
+    for (const m of src.matchAll(/from\('category_rules'\)\s*\.select\(/g)) {
+      reads++;
+      const chain = src.slice(m.index, m.index + 600);
+      assert.match(chain, /\.range\(/, `${f}: unpaged category_rules read:\n${chain.slice(0, 300)}`);
+    }
+  }
+  assert.ok(reads >= 2, `scan regressed: found ${reads} category_rules reads`);
+});
+
+test('getMileage pages past max-rows in a total order', async () => {
+  const calls = [];
+  const client = {
+    from() {
+      const q = { orders: [], range: null };
+      const b = {
+        select() { return b; },
+        gte() { return b; },
+        lte() { return b; },
+        order(c, o) { q.orders.push([c, o]); return b; },
+        range(f, t) { q.range = [f, t]; return b; },
+        limit(n) { q.range = [0, n - 1]; return b; },
+        then(resolve, reject) {
+          calls.push(q);
+          const [f, t] = q.range;
+          const n = Math.max(0, Math.min(t + 1, 1200) - f);
+          const data = Array.from({ length: Math.min(n, 1000) }, (_, i) => ({ id: f + i }));
+          return Promise.resolve({ data, error: null }).then(resolve, reject);
+        },
+      };
+      return b;
+    },
+  };
+  const { mileage } = await getMileage(2026, { client });
+  assert.equal(mileage.length, 1200);
+  assert.deepEqual(calls.map(c => c.range), [[0, 999], [1000, 1999]]);
+  assert.deepEqual(calls[0].orders, [['on_date', { ascending: false }], ['id', { ascending: false }]]);
 });
 
 // ---- isMissingColumnError: the name check -----------------------------------

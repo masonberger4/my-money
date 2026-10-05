@@ -17,6 +17,7 @@ import {
   INCLUDE_PENDING,
 } from './_lib/simplefin.js';
 import { classifyDescription } from '../src/txClassify.js';
+import { isRangeExhaustedError } from '../src/ruleHistory.js';
 
 // depository + credit fund the spending/cash-flow views; loan lets linked
 // debts (mortgage, student/personal loans) sync their balances for the debt
@@ -87,19 +88,42 @@ export function isMissingTableError(error, table) {
 // is a SEPARATE test from a missing TABLE (conflating them would read a column
 // problem as "no rules at all" and silently revert every taught merchant on
 // the next pull).
-async function loadCategoryRules(supabase, householdId) {
-  const read = cols =>
-    supabase.from('category_rules').select(cols).eq('household_id', householdId);
-  let { data, error } = await read('merchant_key, category, amount');
-  if (error && isMissingColumnError(error, 'amount')) {
-    ({ data, error } = await read('merchant_key, category'));
-  }
-  if (error) {
-    if (isMissingTableError(error, 'category_rules')) return {};
-    throw error;
+//
+// PAGED and TOTALLY ORDERED, mirroring the client's readRuleRows
+// (src/dataAdapter.js — api/ can't import it): PostgREST clamps any single read
+// at max-rows (1000), so past that an unpaged read dropped an ARBITRARY subset
+// of rules and those merchants imported Uncategorized; merchant_key then
+// amount nulls first is a total order (the two partial unique indexes), so a
+// page boundary can't drop or repeat one. The amount order goes with the
+// amount column pre-migration; 416/PGRST103 on an exact multiple is
+// end-of-data. Exported for test/categoryRules.test.js only.
+export async function loadCategoryRules(supabase, householdId) {
+  const page = 1000;
+  let withAmount = true;
+  const rows = [];
+  for (let from = 0; ; from += page) {
+    let q = supabase
+      .from('category_rules')
+      .select(withAmount ? 'merchant_key, category, amount' : 'merchant_key, category')
+      .eq('household_id', householdId)
+      .order('merchant_key', { ascending: true });
+    if (withAmount) q = q.order('amount', { ascending: true, nullsFirst: true });
+    const { data, error } = await q.range(from, from + page - 1);
+    if (error) {
+      if (isRangeExhaustedError(error)) break;
+      if (withAmount && isMissingColumnError(error, 'amount')) {
+        withAmount = false;
+        from -= page; // redo this page with the narrower select
+        continue;
+      }
+      if (isMissingTableError(error, 'category_rules')) return {};
+      throw error;
+    }
+    rows.push(...(data || []));
+    if (!data || data.length < page) break;
   }
   const rules = {};
-  for (const r of data || []) {
+  for (const r of rows) {
     const amt = r.amount == null || r.amount === '' ? null : Number(r.amount);
     (rules[r.merchant_key] ||= []).push({
       amount: Number.isFinite(amt) ? amt : null,

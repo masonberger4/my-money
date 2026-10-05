@@ -679,32 +679,60 @@ let rulesHaveAmount = true;
 // production callers pass nothing.
 export async function getCategoryRules({ client = supabase } = {}) {
   if (!hasCategoryRules) return {};
-  const read = cols => client.from('category_rules').select(cols);
-  let { data, error } = await read(
-    rulesHaveAmount ? 'merchant_key, category, amount' : 'merchant_key, category'
-  );
-  if (error && rulesHaveAmount && isMissingColumnError(error, 'amount')) {
-    rulesHaveAmount = false;
-    ({ data, error } = await read('merchant_key, category'));
-  }
-  if (error) {
-    if (isMissingTableError(error)) {
-      hasCategoryRules = false;
-      return {};
-    }
-    throw error;
-  }
+  // null = the table is missing; {} is load-bearing for the classify callers.
+  const rows = await readRuleRows(client, 'merchant_key, category');
   const rules = {};
-  for (const r of data || []) {
-    // PostgREST hands numerics back as strings often enough that coercing here
-    // is the only place it needs handling — the matcher compares numbers.
-    const amount = r.amount == null || r.amount === '' ? null : Number(r.amount);
-    (rules[r.merchant_key] ||= []).push({
-      amount: Number.isFinite(amount) ? amount : null,
-      category: r.category,
-    });
+  for (const r of rows || []) {
+    (rules[r.merchant_key] ||= []).push({ amount: r.amount, category: r.category });
   }
   return rules;
+}
+
+// The ONE category_rules row read, shared by getCategoryRules (the classify
+// bag) and listCategoryRules (the Taught-rules screen) so their degrades can't
+// drift apart. PAGED: PostgREST clamps any single read at max-rows (1000), and
+// past that the old unpaged read silently dropped an ARBITRARY subset of rules
+// — those merchants imported Uncategorized. ORDERED by merchant_key, then
+// amount nulls first while the column exists: merchant_key alone ties once
+// amount-scoped rules exist, and the two partial unique indexes make the pair
+// a TOTAL order (an OFFSET page boundary inside a tie can drop or repeat a
+// row). Degrades, checked in this order and name-checked so a column problem
+// can never read as "the feature isn't installed": a missing amount COLUMN
+// redoes the page without it (and without its order, which fails the same
+// way); a missing TABLE returns null. 416/PGRST103 on an exact page multiple
+// is end-of-data. Rows come back with `amount` coerced to a number or null.
+async function readRuleRows(client, columns) {
+  const rows = [];
+  const page = 1000;
+  for (let from = 0; ; from += page) {
+    let q = client
+      .from('category_rules')
+      .select(rulesHaveAmount ? `${columns}, amount` : columns)
+      .order('merchant_key', { ascending: true });
+    if (rulesHaveAmount) q = q.order('amount', { ascending: true, nullsFirst: true });
+    const { data, error } = await q.range(from, from + page - 1);
+    if (error) {
+      if (isRangeExhaustedError(error)) break;
+      if (rulesHaveAmount && isMissingColumnError(error, 'amount')) {
+        rulesHaveAmount = false;
+        from -= page; // redo this page with the narrower select
+        continue;
+      }
+      if (isMissingTableError(error)) {
+        hasCategoryRules = false;
+        return null;
+      }
+      throw error;
+    }
+    for (const r of data || []) {
+      // PostgREST hands numerics back as strings often enough that coercing
+      // here is the only place it needs handling — the matcher compares numbers.
+      const amount = r.amount == null || r.amount === '' ? null : Number(r.amount);
+      rows.push({ ...r, amount: Number.isFinite(amount) ? amount : null });
+    }
+    if (!data || data.length < page) break;
+  }
+  return rows;
 }
 
 // Teach a merchant. household_id fills in from its column default — never send
@@ -785,46 +813,8 @@ export async function deleteCategoryRule(merchantKeyValue, amount = null, { clie
 // sentinel; the entry link keys on it and doesn't render at all pre-migration).
 export async function listCategoryRules({ client = supabase } = {}) {
   if (!hasCategoryRules) return null;
-  const rows = [];
-  const page = 500;
-  for (let from = 0; ; from += page) {
-    let q = client
-      .from('category_rules')
-      .select(rulesHaveAmount
-        ? 'merchant_key, category, amount, source, updated_at'
-        : 'merchant_key, category, source, updated_at')
-      // Ordered paging: an unordered result set can drop or repeat rows across
-      // the boundary (the Session A guard class). merchant_key alone is NOT a
-      // total order once amount-scoped rules exist (several rows per key);
-      // (merchant_key, amount nulls first) is, via the two partial unique
-      // indexes. Pre-migration the amount order goes with the amount column.
-      .order('merchant_key', { ascending: true });
-    if (rulesHaveAmount) q = q.order('amount', { ascending: true, nullsFirst: true });
-    const { data, error } = await q.range(from, from + page - 1);
-    if (error) {
-      // 416 on an exact-page-multiple result set is end-of-data, not failure.
-      if (isRangeExhaustedError(error)) break;
-      // Pre-migration the amount column isn't there yet: retry this same page
-      // without it. Checked BEFORE the missing-table test and name-checked, so
-      // a column problem can never read as "the feature isn't installed".
-      if (rulesHaveAmount && isMissingColumnError(error, 'amount')) {
-        rulesHaveAmount = false;
-        from -= page; // redo this page with the narrower select
-        continue;
-      }
-      if (isMissingTableError(error)) {
-        hasCategoryRules = false;
-        return null;
-      }
-      throw error;
-    }
-    rows.push(...(data || []).map(r => ({
-      ...r,
-      amount: r.amount == null || r.amount === '' ? null : Number(r.amount),
-    })));
-    if (!data || data.length < page) break;
-  }
-  return rows;
+  // Paged + totally ordered, with both degrades — see readRuleRows.
+  return readRuleRows(client, 'merchant_key, category, source, updated_at');
 }
 
 // "How many transactions does this rule match at all?" — the on-demand count
