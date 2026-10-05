@@ -254,9 +254,30 @@ export function detectHeader(rows) {
 // "$1,234.50" | "(45.00)" | "-45" | "" → number magnitude/sign. Returns 0 for
 // blank. Parentheses and a leading minus both denote negatives (used only for
 // the single-amount fallback; Debit/Credit columns are positive magnitudes).
+//
+// Trailing direction markers, as card statements and some banks print them:
+// "45.00-" is a trailing minus (same as a leading one); "45.00 CR" NEGATES and
+// "45.00 DR" is the unmarked direction. CR is read as "the opposite of this
+// column's unmarked values": a statement that prints CR marks its credits
+// (refunds, payments) against unmarked charges, which is exactly the
+// out_positive reading the PDF default and a card CSV use, so the refund lands
+// as money in. A marker COMBINED with parentheses or a leading sign is NaN —
+// two directions on one value is ambiguous, and guessing it wrong mints a
+// wrong-signed row that can never be deduped away.
+const TRAILING_MARK_RE = /^(.*\d.*?)\s*(CR|DR|-)$/i;
 export function parseMoney(raw) {
   let v = String(raw ?? '').trim();
   if (v === '') return 0;
+  const mark = v.match(TRAILING_MARK_RE);
+  if (mark) {
+    const core = mark[1].trim();
+    // Any sign, parenthesis or second marker in what is left is a second
+    // direction on the same value.
+    if (/[-+()]/.test(core) || TRAILING_MARK_RE.test(core)) return NaN;
+    const n = parseMoney(core);
+    if (!Number.isFinite(n)) return NaN;
+    return mark[2].toUpperCase() === 'DR' || n === 0 ? n : -n;
+  }
   let neg = false;
   if (/^\(.*\)$/.test(v)) {
     neg = true;

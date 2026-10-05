@@ -58,10 +58,19 @@ export function looksLikeDate(s) {
 }
 
 // A money cell: optional sign/parens, optional $, digits with optional
-// thousands separators and cents. Requires a digit. "- $69.31" and "$1,234.56"
-// and "(45.00)" all qualify; a bare "2026" does not (no separator/decimal and
-// four digits is far more likely a year — statements always show cents).
-const MONEY_RE = /^[-+−–—(]?\s*\$?\s*\d{1,3}(?:,\d{3})*(?:\.\d{2})?\s*\)?$|^[-+−–—(]?\s*\$?\s*\d+\.\d{2}\s*\)?$/;
+// thousands separators and cents, and an optional TRAILING direction marker —
+// "CR", "DR" or a trailing minus, as card statements print refunds ("23.10 CR")
+// and some banks print debits ("500.00-"); parseMoney owns what each means.
+// Requires a digit. "- $69.31", "$1,234.56", "(45.00)" and "23.10 CR" all
+// qualify; a bare "2026" does not (no separator/decimal and four digits is far
+// more likely a year — statements always show cents), and neither does
+// "2026-" or "7 CR".
+const MONEY_MARK = '(?:\\s*(?:CR|DR|-))?';
+const MONEY_RE = new RegExp(
+  `^[-+−–—(]?\\s*\\$?\\s*\\d{1,3}(?:,\\d{3})*(?:\\.\\d{2})?\\s*\\)?${MONEY_MARK}$` +
+  `|^[-+−–—(]?\\s*\\$?\\s*\\d+\\.\\d{2}\\s*\\)?${MONEY_MARK}$`,
+  'i'
+);
 
 export function looksLikeMoney(s) {
   // Normalize FIRST: some statement generators print a Unicode minus (U+2212)
@@ -73,8 +82,9 @@ export function looksLikeMoney(s) {
   if (!/\d/.test(v)) return false;
   if (!MONEY_RE.test(v)) return false;
   // Reject a bare integer with no cents and no currency marker (e.g. a year or
-  // a count) unless it carries $ / , / sign — statements print cents.
-  if (/^\d+$/.test(v)) return false;
+  // a count) unless it carries $ / , / sign — statements print cents. A
+  // trailing direction marker doesn't make one money ("2026-", "7 CR").
+  if (/^\d+\s*(?:CR|DR|-)?$/i.test(v)) return false;
   return Number.isFinite(parseMoney(v));
 }
 

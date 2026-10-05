@@ -118,6 +118,70 @@ test('parseMoney: "(-45.00)" double-flips to POSITIVE — documented current beh
   assert.equal(parseMoney('(-45.00)'), 45);
 });
 
+// --- 2026-10 import audit (F83): trailing CR / DR / minus ------------------
+// Card statements print a refund as "23.10 CR" and some banks print a
+// trailing minus ("500.00-"). Both failed the money shape, so the row was
+// dropped with no skipped-row entry the UI ever shows — card spending
+// overstated by every refund. CR means "the opposite of this column's
+// unmarked values" (a CR-marked card line is a credit against unmarked
+// charges), DR is the unmarked direction, a trailing minus is a leading one.
+test('parseMoney: trailing CR / DR / minus markers', () => {
+  assert.equal(parseMoney('45.00-'), -45);
+  assert.equal(parseMoney('45.00 CR'), -45);
+  assert.equal(parseMoney('1,234.56CR'), -1234.56);
+  assert.equal(parseMoney('$45.00 cr'), -45, 'case-insensitive');
+  assert.equal(parseMoney('45.00 DR'), 45);
+  assert.ok(Number.isNaN(parseMoney('(45.00) CR')), 'parens AND a marker is ambiguous');
+  assert.ok(Number.isNaN(parseMoney('-45.00-')), 'two signs is ambiguous');
+  assert.ok(Number.isNaN(parseMoney('-45.00 CR')), 'a sign AND a marker is ambiguous');
+  assert.ok(Number.isNaN(parseMoney('CR')));
+  assert.ok(Number.isNaN(parseMoney('-')));
+});
+
+test('looksLikeMoney accepts the trailing-marker shapes and still rejects bare integers', () => {
+  for (const v of ['23.10 CR', '500.00-', '1,234.56CR', '$45.00 DR', '45.00 cr']) {
+    assert.equal(looksLikeMoney(v), true, v);
+  }
+  for (const v of ['CR', '2026-', '123-', '7 CR', 'DR', '-']) {
+    assert.equal(looksLikeMoney(v), false, v);
+  }
+});
+
+test('a CR refund and a trailing-minus payment import as money IN instead of vanishing', () => {
+  const pg = page(1, [
+    ...textLine(60, [['Statement Period: Jul 1, 2026 - Jul 31, 2026', 40]]),
+    run('Date', 40, 200), run('Description', 120, 200), run('Amount', 500, 200),
+    run('Jul 2', 40, 220), run('STARBUCKS STORE 123', 120, 220), run('5.45', 520, 220),
+    run('Jul 9', 40, 236), run('AMAZON RETURN', 120, 236), run('23.10 CR', 505, 236),
+    run('Jul 20', 40, 252), run('PAYMENT RECEIVED', 120, 252), run('500.00-', 505, 252),
+  ]);
+  const tpl = { version: 1, boundaries: [0.18, 0.8], roles: ['date', 'description', 'amount'], amountMode: 'signed', amountSign: 'out_positive', startAnchor: 'Date Description Amount', stopAnchor: '', pages: null };
+  const applied = applyTemplate([pg], tpl);
+  assert.deepEqual(applied.skipped.map(s => s.text), [], 'nothing silently dropped');
+  const { rows } = buildRows(applied.grid, applied.buildOpts);
+  assert.deepEqual(rows.map(r => [r.description, r.amount]), [
+    ['STARBUCKS STORE 123', 5.45],
+    ['AMAZON RETURN', -23.1],
+    ['PAYMENT RECEIVED', -500],
+  ]);
+  assert.deepEqual(rowTotals(rows), { out: 5.45, in: 523.1 });
+});
+
+test('REGRESSION: a dated "New Balance … CR" summary line outside the anchored table is still excluded', () => {
+  const pg = cardStatementPage([['May 26', 'May 27', 'RIVER GROCERY', '45.00'], ['May 30', 'May 31', 'STORE REFUND', '12.00 CR']]);
+  // A summary line ABOVE the start anchor that now passes the money shape.
+  pg.runs.push(run('Jun 23', CARD.x.trans, 70), run('New Balance', CARD.x.desc, 70), runRight('1,234.56 CR', CARD.x.amountRight, 70));
+  const res = applyTemplate([pg], cardTemplate());
+  assert.deepEqual(res.grid.map(r => [r[1], r[4]]), [['RIVER GROCERY', '45.00'], ['STORE REFUND', '12.00 CR']]);
+  const { rows } = buildRows(res.grid, res.buildOpts);
+  assert.deepEqual(rows.map(r => r.amount), [45, -12]);
+});
+
+test('a CR in a Debit/Credit pair moves to the other column (normalizeDebitCredit)', () => {
+  assert.deepEqual(normalizeDebitCredit('45.00 CR', ''), { debit: '', credit: '45.00' });
+  assert.deepEqual(normalizeDebitCredit('', '45.00 DR'), { debit: '', credit: '45.00' });
+});
+
 test('parseDate: the two-digit-year pivot is at 70', () => {
   assert.equal(parseDate('12/31/69'), '2069-12-31', '< 70 → 2000s');
   assert.equal(parseDate('1/1/70'), '1970-01-01', '≥ 70 → 1900s');
