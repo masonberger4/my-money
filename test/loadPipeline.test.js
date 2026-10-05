@@ -98,3 +98,24 @@ test('reloadData takes a fresh date, never the mount-time `now`', () => {
   assert.ok(!/\bnow\./.test(body),
     'a `now.` read inside the []-dep reloadData is the mount-time date — stale after a month rollover');
 });
+
+// --- F13: a failed explicit Refresh still says so ----------------------------
+// The runSync catch paints the banner, but on sync:"refresh" a failed pull
+// still earns the follow-up reload, whose FIRST statement is setError(null) —
+// in the same tick, so React never painted the banner and cached numbers read
+// as current exactly when the user asked for fresh ones.
+
+test('the sync-failure copy lives in ONE constant', () => {
+  assert.equal((code.match(/Bank sync failed/g) || []).length, 1,
+    'the banner text must be defined once (SYNC_FAILED_MSG) so the catch and the re-assert cannot drift');
+  assert.match(code, /const SYNC_FAILED_MSG="Bank sync failed\. Showing cached data\.";/);
+});
+
+test('fetchData re-asserts the sync-failure banner after the follow-up reload of a failed pull', () => {
+  const { body } = slice(...FETCH);
+  const follow = body.indexOf('await reloadViewed()');
+  assert.ok(follow > 0, 'fixture assumption: the follow-up reload goes through reloadViewed');
+  assert.ok(body.slice(0, follow).includes('SYNC_FAILED_MSG'), 'the runSync catch paints the banner');
+  assert.match(body.slice(follow), /if\([^)]*!res[^)]*\)setError\([^;]*SYNC_FAILED_MSG/,
+    'after the follow-up reload (which cleared the error), a failed pull (res null) must set the banner again');
+});

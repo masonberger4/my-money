@@ -1910,6 +1910,11 @@ function Pill({label,color,surface}) {
   </span>;
 }
 
+// The ONE copy of the failed-pull banner: fetchData's runSync catch paints it,
+// and an explicit Refresh re-asserts it after its follow-up reload (whose
+// first act is setError(null)) — two sites that must never drift apart.
+const SYNC_FAILED_MSG="Bank sync failed. Showing cached data.";
+
 export default function Dashboard({ refreshTick = 0 }) {
   const now = new Date();
   const [year,setYear]=useState(now.getFullYear());
@@ -2732,7 +2737,7 @@ export default function Dashboard({ refreshTick = 0 }) {
     // holds it (cache invalidation).
     const syncP=sync?runSync().catch(err=>{
       console.error("sync failed",err);
-      setError("Bank sync failed. Showing cached data.");
+      setError(SYNC_FAILED_MSG);
       return null;
     }):null;
     // No setLoading(false) here: the reload that wins loadSeq clears it
@@ -2754,7 +2759,13 @@ export default function Dashboard({ refreshTick = 0 }) {
     // loadSeq and win.
     const allThrottled=!res||(res.results||[]).every(r=>r?.skipped==="throttled");
     if(allThrottled&&sync!=="refresh")return;
-    await reloadViewed();
+    const live=await reloadViewed();
+    // A failed pull reaches here only on an explicit Refresh, and that
+    // reload's first act cleared the banner the catch above painted — in the
+    // same tick, so it never showed and cached numbers read as fresh exactly
+    // when the user asked for fresh. Re-assert it, unless the reload was
+    // superseded or failed with its own (more urgent) load error.
+    if(!res&&live!==false)setError(e=>e??SYNC_FAILED_MSG);
     // The pull may have written rows onto whatever account is open behind the
     // month view; its list is the one thing reloadData does not cover.
     setAcctTxEpoch(e=>e+1);
