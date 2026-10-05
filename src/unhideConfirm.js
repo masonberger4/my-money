@@ -3,9 +3,12 @@
 // New SimpleFIN accounts arrive hidden, and unhiding is THE deliberate act
 // that confirms the account's guessed TYPE (CLAUDE.md architecture rule): the
 // type is inferred from the account name at first insert, and a credit card
-// mistyped as checking makes every purchase count as household cash spending.
-// This module builds the confirm text the Unhide button shows, so the guess is
-// surfaced at exactly the moment the rule says it must be eyeballed.
+// mistyped as a bank account miscounts at READ time: its refunds become income
+// instead of netting, a purchase worded like a card payment is vetoed out of
+// spending, and its balance counts as an asset (conventions.md, "Why the type
+// matters"). Its purchases count either way. This module builds the confirm
+// text the Unhide button shows, so the guess is surfaced at exactly the moment
+// the rule says it must be eyeballed.
 // Dashboard.jsx passes the result to window.confirm; the pure layer keeps the
 // wording testable.
 
@@ -36,7 +39,8 @@ export function unhideConfirmMessage(account) {
   return (
     `Unhide "${label}" as ${t}?\n\n` +
     `The type was guessed from the account name and decides how its money counts — ` +
-    `a credit card mistyped as a bank account makes every purchase count as household cash spending.\n\n` +
+    `a credit card mistyped as a bank account counts its refunds as income, can drop purchases that look like ` +
+    `card payments, and shows its balance as money you have instead of money you owe.\n\n` +
     `If ${t} is wrong, fix the type on this screen first, then unhide.`
   );
 }

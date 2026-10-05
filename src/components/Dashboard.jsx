@@ -3309,8 +3309,8 @@ export default function Dashboard({ refreshTick = 0 }) {
   // Optimistic with rollback + alert (the updateManualBalance pattern). This
   // carries the TYPE editor: a dropped type correction is never restated by
   // sync (type is user-owned after first insert), so a silently failed save
-  // would leave a mistyped card counting purchases as household spending with
-  // the screen showing the corrected type.
+  // would leave a mistyped card miscounting its refunds and balance with the
+  // screen showing the corrected type.
   async function saveAccount(id,fields){
     // ONE optimistic copy. The open account page derives from `accounts`, so
     // patching that list is the whole update and the rollback is the whole
@@ -3775,8 +3775,9 @@ export default function Dashboard({ refreshTick = 0 }) {
     if(!selAcct)return;
     // Unhide only: surface the guessed TYPE at the moment CLAUDE.md says it
     // must be confirmed — unhiding is the deliberate act that blesses the
-    // guess, and a card mistyped as checking turns every purchase into
-    // household cash spending. Hiding needs no confirm (rows leave totals).
+    // guess, and a card mistyped as checking turns its refunds into income and
+    // its debt into an asset (conventions.md, "Why the type matters"). Hiding
+    // needs no confirm (rows leave totals).
     if(selAcct.hidden&&!window.confirm(unhideConfirmMessage(selAcct)))return;
     setTogglingHide(true);
     try{

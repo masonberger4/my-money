@@ -42,3 +42,17 @@ test('confirm message prefers the nickname and tolerates sparse rows', () => {
 test('TYPE_LABELS covers exactly the stored account types', () => {
   assert.deepEqual(Object.keys(TYPE_LABELS).sort(), ['credit', 'depository', 'loan']);
 });
+
+// What a card typed as a bank account ACTUALLY breaks (conventions.md, "Why
+// the type matters", corrected 2026-08-06): its purchases count either way —
+// isSpend needs only amount > 0 on a non-loan account — but its refunds turn
+// into income, a purchase worded like a card payment gets vetoed, and its
+// balance reads as an asset. The old sentence claimed "every purchase" would
+// start counting, the retired two-model rule.
+test('confirm message states what a mistyped card really breaks', () => {
+  const msg = unhideConfirmMessage({ name: 'Venture X', type: 'depository', subtype: 'checking' });
+  assert.doesNotMatch(msg, /every\s+purchase/i);
+  assert.match(msg, /refunds as income/);
+  assert.match(msg, /purchases that look like card payments/);
+  assert.match(msg, /balance as money you have instead of money you owe/);
+});

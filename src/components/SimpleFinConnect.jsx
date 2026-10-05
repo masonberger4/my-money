@@ -374,7 +374,8 @@ export default function SimpleFinConnect({ onClose, onConnected }) {
                   <div style={{ ...note, background: "var(--bg)", borderRadius: 8, padding: "10px 12px" }}>
                     New accounts arrive <strong style={{ color: "var(--text)" }}>hidden</strong> and change nothing until
                     you unhide them. SimpleFIN doesn't send an account type, so it's guessed from the name — and a card
-                    mistaken for a checking account turns every purchase into household spending. Check the type on the
+                    mistaken for a bank account counts its refunds as income, can drop purchases that look like card
+                    payments, and shows its balance as money you have instead of money you owe. Check the type on the
                     account screen, then unhide.
                   </div>
                 </>
