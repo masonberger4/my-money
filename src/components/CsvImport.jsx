@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { analyzeCsv, toInsertRow, parseCsv, reconcileCsv, csvDateRange, buildRows, importPlan, planFileBatch, fileKindOf, hasSingleAmountColumn, conflictingSources, resolveTemplateForTarget, withCreatedAccount } from "../csvImport.js";
+import { analyzeCsv, toInsertRow, parseCsv, reconcileCsv, csvDateRange, buildRows, importPlan, planFileBatch, fileKindOf, hasSingleAmountColumn, conflictingSources, resolveTemplateForTarget, withCreatedAccount, ensureImportAccount, readExistingIds, batchFileIds } from "../csvImport.js";
 import { applyTemplate, autoDetectTemplate, defaultTemplate, rowTotals, TEMPLATE_VERSION } from "../pdfImport.js";
 import { createManualAccount, importCsvTransactions, getExistingTxIds, getAccountTransactionsInRange, isManualAccount, isSimpleFinAccount, getCategoryRules, getFeedCoverageStart } from "../dataAdapter.js";
 import { FEED_OVERLAP_DAYS, FEED_REACH_DAYS } from "../coverage.js";
@@ -122,6 +122,13 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
   const reportImported = () => {
     unreportedAcctRef.current = false;
     if (onImported) onImported();
+  };
+  // ensureImportAccount's `adopt`: the ONE place a created account becomes the
+  // target, shared by confirm() and runBatch().
+  const adoptCreated = acct => {
+    setCreatedAcct(acct);
+    setTarget(acct.id);
+    unreportedAcctRef.current = true;
   };
   const [newName, setNewName] = useState("");
   const [newSubtype, setNewSubtype] = useState("checking");
@@ -422,15 +429,13 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
     if (target === "new") { setExistingIds(new Set()); setExistingSources(new Set()); setLoadingIds(false); return; }
     let cancelled = false;
     setLoadingIds(true);
-    getExistingTxIds(target)
-      .then(({ ids, sources }) => { if (!cancelled) { setExistingIds(ids); setExistingSources(sources); } })
-      .catch(err => {
-        console.error("existing-ids lookup failed", err);
-        if (!cancelled) {
-          setExistingIds(new Set());
-          setExistingSources(new Set());
-          setIdsError("Couldn't read the transactions already on this account, so importing isn't safe — the duplicate check and the one-format-per-account check both need them.");
-        }
+    readExistingIds(getExistingTxIds, target)
+      .then(r => {
+        if (r.error) console.error("existing-ids lookup failed", r.cause);
+        if (cancelled) return;
+        setExistingIds(r.ids);
+        setExistingSources(r.sources);
+        setIdsError(r.error);
       })
       .finally(() => { if (!cancelled) setLoadingIds(false); });
     return () => { cancelled = true; };
@@ -744,20 +749,15 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
     setBusy(true);
     setError(null);
     try {
-      let accountId = target;
       let accountName = targetAcct ? (targetAcct.nickname || targetAcct.name) : newName.trim();
-      if (target === "new") {
-        const acct = await createManualAccount({ name: newName.trim(), subtype: newSubtype });
-        accountId = acct.id;
-        accountName = acct.name;
-        // ADOPT it before anything else can fail: with target left on "new"
-        // and the name still filled in, Import again (or "Open alone") created
-        // a second same-named account. The rest of THIS run keeps the local
-        // accountId — the state update isn't visible inside this closure.
-        setCreatedAcct(acct);
-        setTarget(acct.id);
-        unreportedAcctRef.current = true;
-      }
+      // Target "new" is created and ADOPTED before anything else can fail: with
+      // target left on "new" and the name still filled in, Import again (or
+      // "Open alone") created a second same-named account. The rest of THIS
+      // run keeps the local id — the state update isn't visible in this closure.
+      const { id: accountId, created } = await ensureImportAccount({
+        target, name: newName.trim(), subtype: newSubtype, create: createManualAccount, adopt: adoptCreated,
+      });
+      if (created) accountName = created.name;
       const payload = newRows.map(toInsertRow);
       if (overlapFrom && payload.some(r => r.date >= overlapFrom)) {
         throw new Error("internal: a row on/after the feed boundary reached the insert payload");
@@ -878,22 +878,18 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
     const totals = { written: 0, compared: 0, dup: 0, skippedFiles: 0, failedFiles: 0, importedFiles: 0,
       skippedRows: 0, matched: 0, csvOnly: 0, mismatches: 0 };
 
-    let accountId = target;
+    let accountId;
     try {
       // Defence in depth — the same money-costing invariant confirm() restates.
       if (!auditOnly && targetIsSimpleFin && !boundary) {
         throw new Error("internal: no feed boundary — refusing to import into a fed account");
       }
-      if (target === "new") {
-        // One new account for the whole batch, created before the first file,
-        // and ADOPTED as the target — "Open alone" on a failed file afterwards
-        // must import into THIS account, not mint a same-named twin.
-        const acct = await createManualAccount({ name: newName.trim(), subtype: newSubtype });
-        accountId = acct.id;
-        setCreatedAcct(acct);
-        setTarget(acct.id);
-        unreportedAcctRef.current = true;
-      }
+      // One new account for the whole batch, created before the first file,
+      // and ADOPTED as the target — "Open alone" on a failed file afterwards
+      // must import into THIS account, not mint a same-named twin.
+      accountId = (await ensureImportAccount({
+        target, name: newName.trim(), subtype: newSubtype, create: createManualAccount, adopt: adoptCreated,
+      })).id;
     } catch (e) {
       console.error("batch setup failed", e);
       setError(e.message || "Couldn't start the import.");
@@ -920,30 +916,9 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
         // move getFeedCoverageStart, which reads sfin: rows only.) A FAILED
         // fetch fails the file rather than degrading to an empty set — an
         // empty set here means "import everything again".
-        const fetched = await getExistingTxIds(accountId);
-        const freshIds =
-          fetched?.ids instanceof Set ? fetched.ids : fetched instanceof Set ? fetched : null;
-        if (!freshIds) {
-          // Matches the comment above: an unrecognized return shape must FAIL
-          // the file, not degrade to an empty set — an empty set means
-          // "import everything again".
-          throw new Error("couldn't read this account's existing transactions — not importing blind");
-        }
-        // The one-format-per-account guard, re-checked on THIS fetch: the
-        // start-of-batch check read the sources once, and a file must never
-        // write CSV rows into an account whose rows came from PDFs (or the
-        // reverse) on the strength of a read taken before it.
-        if (!auditOnly) {
-          const clash = conflictingSources(
-            fetched?.sources instanceof Set ? fetched.sources : new Set(),
-            kind === "pdf" ? "pdf" : "csv",
-            targetManual
-          );
-          if (clash.length) {
-            const fmt = clash.includes("pdf") ? "PDF" : clash.includes("csv") ? "CSV" : "older imported";
-            throw new Error(`already holds ${fmt} rows — one format per account`);
-          }
-        }
+        // The one-format-per-account guard is re-checked on THIS fetch too,
+        // never on the start-of-batch read (batchFileIds).
+        const freshIds = batchFileIds(await getExistingTxIds(accountId), { kind, auditOnly, targetIsManual: targetManual });
 
         // Each file flows through the SAME pipeline a single file takes:
         // parse → analyzeCsv / applyTemplate+buildRows → importPlan → import.

@@ -20,6 +20,10 @@ import {
   parseDate,
   buildRows,
   withCreatedAccount,
+  ensureImportAccount,
+  readExistingIds,
+  EXISTING_IDS_ERROR,
+  batchFileIds,
 } from '../src/csvImport.js';
 import { TRANSFER_CATEGORY, FALLBACK_CATEGORY } from '../src/categoryMap.js';
 import { pullWasClean } from '../src/sync.js';
@@ -738,16 +742,87 @@ test('withCreatedAccount does not duplicate once the parent has reloaded it, and
   assert.deepEqual(withCreatedAccount(undefined, { id: 'n1' }).map(x => x.id), ['n1']);
 });
 
-test('REGRESSION: every createManualAccount in the import modal adopts the account it creates', () => {
-  const src = read('src/components/CsvImport.jsx');
-  const calls = [...src.matchAll(/await createManualAccount\(/g)];
-  assert.equal(calls.length, 2, 'confirm() and runBatch() — update this pin if a third site appears');
-  for (const m of calls) {
-    const after = src.slice(m.index, m.index + 700);
-    assert.match(after, /setCreatedAcct\(acct\)/, 'the created row must be merged locally until the parent reloads');
-    assert.match(after, /setTarget\(acct\.id\)/, 'target must move off "new" or a retry mints a twin');
-    assert.match(after, /unreportedAcctRef\.current = true/, 'a created account must reach the parent even if no row lands');
+// The create-and-adopt decision lives in ensureImportAccount, so the
+// failure-then-retry path RUNS here: a stand-in for the modal whose `adopt`
+// moves `target` exactly as adoptCreated does, and a write that fails once.
+const modalStandIn = () => {
+  const st = { target: 'new', creates: 0, writes: [] };
+  st.create = async ({ name, subtype }) => ({ id: `n${++st.creates}`, name, subtype });
+  st.adopt = acct => { st.target = acct.id; };
+  st.run = async ({ failWrite = false } = {}) => {
+    const { id } = await ensureImportAccount({ target: st.target, name: 'Chase Card', subtype: 'credit', create: st.create, adopt: st.adopt });
+    if (failWrite) throw new Error('network');
+    st.writes.push(id);
+    return id;
+  };
+  return st;
+};
+
+test('a write that fails after creating "new" retries into the SAME account, never a twin', async () => {
+  const m = modalStandIn();
+  await assert.rejects(m.run({ failWrite: true }), /network/);
+  assert.equal(m.target, 'n1', 'adopted before the write could fail');
+  assert.equal(await m.run(), 'n1', 'the retry imports into the adopted account');
+  assert.equal(await m.run(), 'n1', 'and so does a later file / "Open alone"');
+  assert.equal(m.creates, 1, 'one account, however many runs');
+  assert.deepEqual(m.writes, ['n1', 'n1']);
+});
+
+test('ensureImportAccount: an existing target creates nothing; a failed create adopts nothing', async () => {
+  const adopted = [];
+  const adopt = a => adopted.push(a.id);
+  let creates = 0;
+  const counting = async () => { creates++; return { id: 'x' }; };
+  assert.deepEqual(
+    await ensureImportAccount({ target: 'acct-7', name: 'X', subtype: 'checking', create: counting, adopt }),
+    { id: 'acct-7', created: null }
+  );
+  assert.equal(creates, 0);
+  await assert.rejects(
+    ensureImportAccount({ target: 'new', name: 'X', subtype: 'checking', create: async () => { throw new Error('insert failed'); }, adopt }),
+    /insert failed/
+  );
+  await assert.rejects(
+    ensureImportAccount({ target: 'new', name: 'X', subtype: 'checking', create: async () => null, adopt }),
+    /wasn't created/
+  );
+  assert.deepEqual(adopted, [], 'a target that never got an account stays "new"');
+  const r = await ensureImportAccount({ target: 'new', name: 'Chase Card', subtype: 'credit', create: async o => ({ id: 'n9', ...o }), adopt });
+  assert.equal(r.id, 'n9');
+  assert.deepEqual([r.created.name, r.created.subtype], ['Chase Card', 'credit']);
+  assert.deepEqual(adopted, ['n9']);
+});
+
+// Wiring only — the component can't mount in Node (the abort-ref precedent).
+const csvImportSrc = () => read('src/components/CsvImport.jsx');
+const bodyOf = (src, start, end) => {
+  const i = src.indexOf(start);
+  assert.ok(i >= 0, `anchor moved: ${start}`);
+  const j = src.indexOf(end, i + start.length);
+  assert.ok(j > i, `end anchor moved: ${end}`);
+  return src.slice(i, j);
+};
+
+test('REGRESSION: both import paths create through ensureImportAccount with the one adopt', () => {
+  const src = csvImportSrc();
+  assert.doesNotMatch(src, /await createManualAccount\(/, 'createManualAccount is only ever handed to the helper');
+  const sites = [...src.matchAll(/await ensureImportAccount\(\{[^}]*\}\)/g)].map(m => m[0]);
+  assert.equal(sites.length, 2, 'confirm() and runBatch() — update this pin if a third site appears');
+  for (const site of sites) {
+    assert.match(site, /\btarget,/);
+    assert.match(site, /create: createManualAccount/);
+    assert.match(site, /adopt: adoptCreated/);
   }
+  // ...and before the first write, in both paths.
+  for (const [start, end] of [['async function confirm()', 'setResult('], ['async function runBatch()', 'setBatchSummary(']]) {
+    const body = bodyOf(src, start, end);
+    const create = body.indexOf('await ensureImportAccount(');
+    assert.ok(create >= 0 && create < body.indexOf('importCsvTransactions('), `${start}: create+adopt precede the write`);
+  }
+  const adopt = bodyOf(src, 'const adoptCreated = acct => {', '};');
+  assert.match(adopt, /setCreatedAcct\(acct\)/, 'the created row must be merged locally until the parent reloads');
+  assert.match(adopt, /setTarget\(acct\.id\)/, 'target must move off "new" or a retry mints a twin');
+  assert.match(adopt, /unreportedAcctRef\.current = true/, 'a created account must reach the parent even if no row lands');
   // ...reported on CLOSE, not at the failure: in the first-run EmptyState the
   // parent's refresh swaps this modal for the Dashboard, discarding the
   // adopted target a retry needs.
@@ -768,23 +843,66 @@ test('REGRESSION: every createManualAccount in the import modal adopts the accou
 // permanently (the formats hash differently and there is no delete path).
 // runBatch's own comment already said a failed fetch must fail the file, but
 // its per-file refetch read only `ids` and never re-checked the sources.
-// Source pins: the component can't mount in Node (the abort-ref precedent).
-const csvImportSrc = () => read('src/components/CsvImport.jsx');
-const bodyOf = (src, start, end) => {
-  const i = src.indexOf(start);
-  assert.ok(i >= 0, `anchor moved: ${start}`);
-  const j = src.indexOf(end, i + start.length);
-  assert.ok(j > i, `end anchor moved: ${end}`);
-  return src.slice(i, j);
-};
+test('readExistingIds fails CLOSED: a rejected read is an error with empty Sets', async () => {
+  const r = await readExistingIds(async () => { throw new Error('fetch failed'); }, 'acct-1');
+  assert.equal(r.error, EXISTING_IDS_ERROR);
+  assert.deepEqual([r.ids.size, r.sources.size], [0, 0], 'nothing of the previous target lingers');
+  assert.match(String(r.cause), /fetch failed/);
+  const sync = await readExistingIds(() => { throw new Error('boom'); }, 'acct-1');
+  assert.equal(sync.error, EXISTING_IDS_ERROR, 'a synchronous throw too');
+});
 
-test('REGRESSION: a failed existing-ids read sets an error state instead of an empty set', () => {
+test('readExistingIds treats an unrecognized shape as a failed read, not an empty account', async () => {
+  for (const bad of [undefined, null, {}, { ids: new Set() }, { ids: [], sources: new Set() }, new Set(['csv:a:0'])]) {
+    const r = await readExistingIds(async () => bad, 'acct-1');
+    assert.equal(r.error, EXISTING_IDS_ERROR, String(bad && JSON.stringify(bad)));
+  }
+});
+
+test('readExistingIds passes a good read through for the account asked about', async () => {
+  const ids = new Set(['csv:a:0']);
+  const sources = new Set(['pdf']);
+  let asked;
+  const r = await readExistingIds(async id => { asked = id; return { ids, sources }; }, 'acct-1');
+  assert.equal(asked, 'acct-1');
+  assert.equal(r.ids, ids);
+  assert.equal(r.sources, sources);
+  assert.equal(r.error, null);
+});
+
+test('batchFileIds re-checks the formats on each fresh read and fails the file on a clash', () => {
+  const ids = new Set(['csv:a:0']);
+  assert.throws(() => batchFileIds({ ids, sources: new Set(['pdf']) }, { kind: 'csv', targetIsManual: true }),
+    /already holds PDF rows — one format per account/);
+  assert.throws(() => batchFileIds({ ids, sources: new Set(['csv']) }, { kind: 'pdf', targetIsManual: true }),
+    /already holds CSV rows/);
+  assert.throws(() => batchFileIds({ ids, sources: new Set(['plaid']) }, { kind: 'csv', targetIsManual: true }),
+    /already holds older imported rows/);
+  assert.equal(batchFileIds({ ids, sources: new Set(['pdf']) }, { kind: 'pdf', targetIsManual: true }), ids);
+  assert.equal(batchFileIds({ ids, sources: new Set(['manual', 'csv']) }, { kind: 'csv', targetIsManual: true }), ids,
+    'a quick-add never conflicts');
+  assert.equal(batchFileIds({ ids, sources: new Set(['simplefin', 'csv']) }, { kind: 'csv', targetIsManual: false }), ids,
+    'a fed account holds its own feed rows beside imported history');
+  assert.equal(batchFileIds({ ids, sources: new Set(['pdf']) }, { kind: 'csv', auditOnly: true, targetIsManual: true }), ids,
+    'compare-only writes nothing, so it does not need the format check');
+});
+
+test('batchFileIds fails the file on an unreadable read instead of importing blind', () => {
+  for (const bad of [undefined, null, {}, { ids: [] }]) {
+    assert.throws(() => batchFileIds(bad, { kind: 'csv' }), /not importing blind/);
+  }
+  assert.throws(() => batchFileIds({ ids: new Set() }, { kind: 'csv', targetIsManual: true }), /which formats/,
+    'ids with no sources: the format check cannot run, so a write fails');
+  assert.equal(batchFileIds({ ids: new Set(['x']) }, { kind: 'csv', auditOnly: true }).size, 1);
+});
+
+test('REGRESSION: the modal reads ids through readExistingIds, raises idsError, and Retry re-reads', () => {
   const src = csvImportSrc();
-  assert.doesNotMatch(src, /\.catch\(\(\)\s*=>\s*\{[^}]*setExistingIds\(new Set\(\)\)/,
-    'the silent empty-set catch disarms the one-format-per-account guard');
-  const effect = bodyOf(src, 'getExistingTxIds(target)', '}, [target');
-  assert.match(effect, /\.catch\([\s\S]*setIdsError\(/, 'the catch must raise idsError');
-  assert.match(src, /getExistingTxIds\(target\)[\s\S]{0,900}?\}, \[target, idsEpoch\]\);/, 'Retry (idsEpoch) must re-run the read');
+  assert.doesNotMatch(src, /getExistingTxIds\(target\)/, 'no second, unguarded read');
+  const effect = bodyOf(src, 'readExistingIds(getExistingTxIds, target)', '}, [target');
+  assert.match(effect, /setExistingSources\(r\.sources\)/);
+  assert.match(effect, /setIdsError\(r\.error\)/);
+  assert.match(src, /readExistingIds\(getExistingTxIds, target\)[\s\S]{0,600}?\}, \[target, idsEpoch\]\);/, 'Retry (idsEpoch) must re-run the read');
   assert.match(src, /onClick=\{\(\) => setIdsEpoch\(n => n \+ 1\)\}/, 'the error offers a Retry');
 });
 
@@ -795,9 +913,7 @@ test('REGRESSION: an unreadable account blocks Import and batch start', () => {
   assert.match(bodyOf(src, 'async function confirm()', 'setBusy(true)'), /if \(idsError\) return;/);
 });
 
-test('REGRESSION: every batch file re-checks the account\'s formats on its own refetch', () => {
-  const src = csvImportSrc();
-  const loop = bodyOf(src, 'const fetched = await getExistingTxIds(accountId);', 'let builtRows;');
-  assert.match(loop, /conflictingSources\(/, 'the per-file refetch must re-run the format check');
-  assert.match(loop, /throw new Error\(`already holds/, 'a conflict fails the file rather than writing it');
+test('REGRESSION: every batch file guards its own refetch through batchFileIds', () => {
+  const loop = bodyOf(csvImportSrc(), 'async function runBatch()', 'let builtRows;');
+  assert.match(loop, /const freshIds = batchFileIds\(await getExistingTxIds\(accountId\), \{ kind, auditOnly, targetIsManual: targetManual \}\);/);
 });

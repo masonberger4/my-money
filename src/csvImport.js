@@ -204,6 +204,41 @@ export function withCreatedAccount(accounts, created) {
   return list.some(a => a && a.id === created.id) ? list : [...list, created];
 }
 
+// The account an import writes into. Target "new" CREATES one with `create`
+// and hands it to `adopt` BEFORE anything else can fail — the modal moves its
+// target off "new" onto it — so a retry after a failed write, a later file,
+// or "Open alone" after a batch imports into THIS account instead of minting
+// a same-named twin (createManualAccount has no name dedup). Any other target
+// is used as is and nothing is created. A create that throws, or returns no
+// row, adopts nothing: the target correctly stays "new".
+export async function ensureImportAccount({ target, name, subtype, create, adopt }) {
+  if (target !== 'new') return { id: target, created: null };
+  const acct = await create({ name, subtype });
+  if (!acct || acct.id == null) throw new Error("the new account wasn't created");
+  adopt(acct);
+  return { id: acct.id, created: acct };
+}
+
+// The single-file modal's read of an existing target's ids and sources, which
+// FAILS CLOSED: a rejected read or an unrecognized shape returns `error` with
+// empty Sets (so nothing of the PREVIOUS target lingers) — never two silently
+// empty Sets, which read as "this account holds no other format" and let a
+// CSV import land on an account with PDF history (the formats hash
+// differently; there is no delete path). Never rejects.
+export const EXISTING_IDS_ERROR =
+  "Couldn't read the transactions already on this account, so importing isn't safe — the duplicate check and the one-format-per-account check both need them.";
+export async function readExistingIds(read, accountId) {
+  try {
+    const got = await read(accountId);
+    if (got?.ids instanceof Set && got?.sources instanceof Set) {
+      return { ids: got.ids, sources: got.sources, error: null, cause: null };
+    }
+    throw new Error('unrecognized existing-ids shape');
+  } catch (cause) {
+    return { ids: new Set(), sources: new Set(), error: EXISTING_IDS_ERROR, cause };
+  }
+}
+
 // Which of an account's existing row-sources CONFLICT with the format being
 // imported. The rule is csv-vs-pdf and only that (a bank words the same
 // transaction differently in the two formats, so their dedup hashes differ and
@@ -229,6 +264,28 @@ export function conflictingSources(existingSources, incomingSource, targetIsManu
     ? all.filter(s => !NON_CONFLICTING_SOURCES.has(s))
     : all.filter(s => s === 'csv' || s === 'pdf');
   return relevant.filter(s => s !== incomingSource);
+}
+
+// One batch file's guard on a FRESH read of the target's rows (runBatch
+// re-reads before EVERY file: file N's inserts must be file N+1's dupes).
+// Returns the id Set; THROWS the reason the file fails. An unrecognized shape
+// is not an empty account — an empty id set means "import everything again".
+// For a write, the one-format-per-account rule is re-checked on THIS read,
+// never on the start-of-batch one, and a read with no sources is the same
+// blindness as a failed one. Compare-only writes nothing, so it needs ids alone.
+export function batchFileIds(fetched, { kind, auditOnly = false, targetIsManual = false } = {}) {
+  const ids = fetched?.ids instanceof Set ? fetched.ids : fetched instanceof Set ? fetched : null;
+  if (!ids) throw new Error("couldn't read this account's existing transactions — not importing blind");
+  if (auditOnly) return ids;
+  if (!(fetched?.sources instanceof Set)) {
+    throw new Error("couldn't read which formats this account already holds — not importing blind");
+  }
+  const clash = conflictingSources(fetched.sources, kind === 'pdf' ? 'pdf' : 'csv', targetIsManual);
+  if (clash.length) {
+    const fmt = clash.includes('pdf') ? 'PDF' : clash.includes('csv') ? 'CSV' : 'older imported';
+    throw new Error(`already holds ${fmt} rows — one format per account`);
+  }
+  return ids;
 }
 
 // Does this mapping carry ONE signed Amount column rather than a Debit/Credit
