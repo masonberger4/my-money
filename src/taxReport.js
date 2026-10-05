@@ -238,6 +238,57 @@ export const DEDUCTION_BUCKETS = [
 // via `tax:maps`; unmapped stays visible.
 export const DEFAULT_DEDUCTION_MAP = {};
 
+// ---------------------------------------------------------------------------
+// The `tax:maps` settings row: `{emap:{entityId:{cat:line|'rents'}},dmap:{cat:bucket}}`.
+// Written ONLY through the serialized read-merge-write chain in
+// src/adapters/settingsIO.js (the dash:* / rec:ignore discipline): each edit
+// re-reads the STORED row and applies one entry, so a failed Tax-tab read or
+// the other phone's newer mappings can never be overwritten by a whole map
+// rebuilt from component state (2026-10 audit).
+
+const isPlainObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+
+// Tolerant parse (the parseCatMap idiom): a missing or CORRUPT row reads as
+// "no mappings" — what the worksheet already showed for it — while a FAILED
+// read rejects upstream and never reaches here. Unknown top-level keys are
+// carried through untouched so a newer client's additions survive an edit.
+export function parseTaxMaps(raw) {
+  let v = null;
+  if (typeof raw === 'string' && raw) {
+    try { v = JSON.parse(raw); } catch { v = null; }
+  } else if (isPlainObject(raw)) {
+    v = raw;
+  }
+  const base = isPlainObject(v) ? v : {};
+  return {
+    ...base,
+    emap: isPlainObject(base.emap) ? base.emap : {},
+    dmap: isPlainObject(base.dmap) ? base.dmap : { ...DEFAULT_DEDUCTION_MAP },
+  };
+}
+
+// One Schedule E entry for one entity. A null/undefined value DELETES the key
+// ("Not mapped"). An entity's FIRST edit starts from DEFAULT_SCHEDULE_E_MAP;
+// the defaults are never merged over a stored map — that would resurrect a
+// mapping the user explicitly removed. Pure: returns a new maps object.
+export function setEmapEntryIn(maps, entityId, category, value) {
+  const m = parseTaxMaps(maps);
+  const cur = isPlainObject(m.emap[entityId]) ? m.emap[entityId] : DEFAULT_SCHEDULE_E_MAP;
+  const next = { ...cur };
+  if (value == null) delete next[category];
+  else next[category] = value;
+  return { ...m, emap: { ...m.emap, [entityId]: next } };
+}
+
+// One personal-deduction entry; null/undefined DELETES it. Leaves emap alone.
+export function setDmapEntryIn(maps, category, bucket) {
+  const m = parseTaxMaps(maps);
+  const next = { ...m.dmap };
+  if (bucket == null) delete next[category];
+  else next[category] = bucket;
+  return { ...m, dmap: next };
+}
+
 const DEDUCTION_KEYS = new Set(DEDUCTION_BUCKETS.map((b) => b.key));
 
 // rows: NON-entity transactions for the year; mapping { [category]: bucketKey }.
@@ -292,6 +343,62 @@ export function mileageRate(isoDate) {
     if (r.from <= isoDate && (!found || r.from > found.from)) found = r;
   }
   return found ? found.rate : null;
+}
+
+// The MILEAGE_RATES entries in effect during one calendar year, ascending:
+// the entry in force on Jan 1 (which may be carried forward from an earlier
+// year, exactly as mileageRate prices it) plus every entry starting inside
+// the year. [] when the table doesn't reach the year at all.
+export function ratesForYear(year) {
+  const y = String(year);
+  if (!/^\d{4}$/.test(y)) return [];
+  const jan1 = `${y}-01-01`;
+  let first = null;
+  for (const r of MILEAGE_RATES) {
+    if (r.from <= jan1 && (!first || r.from > first.from)) first = r;
+  }
+  const later = MILEAGE_RATES
+    .filter((r) => r.from > jan1 && r.from.slice(0, 4) === y)
+    .sort((a, b) => (a.from < b.from ? -1 : a.from > b.from ? 1 : 0));
+  return (first ? [first, ...later] : later).map((r) => ({ from: r.from, rate: r.rate }));
+}
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const centsPerMile = (rate) => `${+(rate * 100).toFixed(1)}¢/mi`;
+const monthDay = (iso) => `${MONTHS[Number(iso.slice(5, 7)) - 1]} ${Number(iso.slice(8, 10))}`;
+
+// The Mileage card's rate footnote for the tax year on screen, built from
+// MILEAGE_RATES so it can't name another year's rates (it was hand-typed as
+// the 2026 split on every year's view): "2025: 70¢/mi",
+// "2026: 72.5¢/mi Jan–Jun, 76¢/mi from Jul 1". Month labels come from the
+// ISO strings, never Date.
+export function mileageFootnote(year) {
+  const rates = ratesForYear(year);
+  if (!rates.length) return `no IRS rate on file for ${year} — drives are valued at $0`;
+  const jan1 = `${year}-01-01`;
+  const parts = rates.map((r, i) => {
+    if (r.from > jan1) return `${centsPerMile(r.rate)} from ${monthDay(r.from)}`;
+    const next = rates[i + 1];
+    if (!next) return centsPerMile(r.rate);
+    // In force from Jan 1 until the next change: "Jan–Jun" when that change
+    // lands on a month's 1st, else "before Jul 15".
+    if (next.from.slice(8, 10) !== '01') return `${centsPerMile(r.rate)} before ${monthDay(next.from)}`;
+    const last = Number(next.from.slice(5, 7)) - 2; // index of the month before
+    return `${centsPerMile(r.rate)} ${last <= 0 ? 'in Jan' : `Jan–${MONTHS[last]}`}`;
+  });
+  const newest = MILEAGE_RATES.reduce((m, r) => (r.from > m ? r.from : m), '');
+  const carried = String(year) > newest.slice(0, 4) ? ' (the latest rate on file)' : '';
+  return `${year}: ${parts.join(', ')}${carried}`;
+}
+
+// The year a saved drive (or any dated row) landed in when that is NOT the
+// tax year on screen, else null — the Mileage list shows only the viewed
+// year, so a drive dated outside it has to be announced or it silently
+// vanishes. String slice, never Date (the mileageRate rule above).
+export function savedOutsideYear(isoDate, year) {
+  if (typeof isoDate !== 'string' || !/^\d{4}-/.test(isoDate)) return null;
+  const y = Number(isoDate.slice(0, 4));
+  return y === Number(year) ? null : y;
 }
 
 // logRows: [{ on_date, miles }]. Returns totals plus a per-rate breakdown

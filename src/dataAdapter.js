@@ -14,6 +14,8 @@ import { unlinkSettingsKey, parseRestoreIds } from './unlinkRestore.js';
 import { aggregateCoverage, feedCoverageGaps, FEED_REACH_DAYS } from './coverage.js';
 import { netWorthSeries, clampSeries } from './netWorth.js';
 import { buildReconciliation, reconciliationScope } from './reconciliation.js';
+import { localIsoDate, localTodayIso } from './format.js';
+import { summarizeDebts } from './debtPayoff.js';
 import {
   pad2,
   monthBounds,
@@ -69,6 +71,8 @@ export {
   removeRegistryEntry,
   updateCategoryColor,
   updateCategoryAlias,
+  setTaxMapEntry,
+  setDeductionMapEntry,
 } from './adapters/settingsIO.js';
 export {
   getEntities,
@@ -405,7 +409,7 @@ export async function getBiggestMovers({ year, month }) {
   // fall simply because the prior month had 31 days behind it. A past month is
   // already complete and keeps the full-month comparison (toDate null), so its
   // output is byte-identical to before.
-  const today = localTodayISO();
+  const today = localTodayIso();
   const isCurrent = today.slice(0, 7) === `${year}-${String(month).padStart(2, '0')}`;
   const toDate = isCurrent ? Number(today.slice(8, 10)) : null;
   return { movers: biggestMovers(currRows, prevRows, { toDate }), toDate };
@@ -546,16 +550,13 @@ export async function getDebts() {
       next_payment_due_date: a.next_payment_due_date ?? null,
       interest_rate: a.interest_rate ?? null,
       original_balance: a.original_balance ?? null,
-      // One normalized rate for payoff math — stored as PERCENT; divide by 100
-      // for monthly amortization (src/debtPayoff.js does).
-      debtRate: a.apr ?? a.interest_rate ?? null,
     }));
-  const totalDebt = debts.reduce((s, a) => s + (Number(a.current_balance) || 0), 0);
-  const totalMinimums = debts.reduce((s, a) => s + (Number(a.minimum_payment) || 0), 0);
+  // debtRate (one normalized PERCENT rate) + the two totals come from the
+  // shared summarizeDebts, the same derivation the Debt view's edits use.
   // hasDebtColumns tells the Debt view whether the liability columns exist yet
   // (false pre-migration → it hides the APR/min editors instead of offering
   // edits that can't be written).
-  return { debts, totalDebt, totalMinimums, hasDebtColumns: accountsHaveDebtColumns };
+  return { ...summarizeDebts(debts), hasDebtColumns: accountsHaveDebtColumns };
 }
 
 // Balance history for the debt-over-time chart. Returns an ARRAY of
@@ -858,33 +859,37 @@ export async function applyCategoryRuleToHistory(descriptor, category, { dryRun 
   // see applyRuleToHistory's `rules` contract). getCategoryRules degrades to
   // {} pre-migration, which bagWithRule treats as "only the taught rule".
   const rules = await getCategoryRules();
-  const result = await applyRuleToHistory({
-    descriptor,
-    category,
-    amount,
-    dryRun,
-    rules,
-    fetchPage: (pat, from, to) =>
-      supabase
-        .from('transactions')
-        // `amount` is selected because an amount-scoped rule is re-matched
-        // against the ROW's amount — without the column it would match nothing.
-        .select('id, description, merchant_name, mapped_category, amount')
-        .or(`description.ilike.${pat},merchant_name.ilike.${pat}`)
-        // Same tiebreaker reasoning as getTransactionsBetween: paging an
-        // unordered result set can drop or repeat rows across the boundary,
-        // and a dropped row here is a transaction the rule silently fails to
-        // fix.
-        .order('id', { ascending: true })
-        .range(from, to),
-    updateBatch: (ids, cat) =>
-      supabase.from('transactions').update({ mapped_category: cat }).in('id', ids),
-  });
-  // A real apply rewrites other rows' mapped_category — a write, so it is an
-  // invalidation moment (spend sums shift when categories move between
-  // spending and the transfer bucket's veto).
-  if (!dryRun) invalidateEnvelopeSpending();
-  return result;
+  try {
+    return await applyRuleToHistory({
+      descriptor,
+      category,
+      amount,
+      dryRun,
+      rules,
+      fetchPage: (pat, from, to) =>
+        supabase
+          .from('transactions')
+          // `amount` is selected because an amount-scoped rule is re-matched
+          // against the ROW's amount — without the column it would match nothing.
+          .select('id, description, merchant_name, mapped_category, amount')
+          .or(`description.ilike.${pat},merchant_name.ilike.${pat}`)
+          // Same tiebreaker reasoning as getTransactionsBetween: paging an
+          // unordered result set can drop or repeat rows across the boundary,
+          // and a dropped row here is a transaction the rule silently fails to
+          // fix.
+          .order('id', { ascending: true })
+          .range(from, to),
+      updateBatch: (ids, cat) =>
+        supabase.from('transactions').update({ mapped_category: cat }).in('id', ids),
+    });
+  } finally {
+    // A real apply rewrites other rows' mapped_category — a write, so it is an
+    // invalidation moment (spend sums shift when categories move between
+    // spending and the transfer bucket's veto). In a FINALLY: the rewrite runs
+    // in batches, and a batch that throws after earlier ones already wrote
+    // must not leave the envelope cache serving the pre-write sums.
+    if (!dryRun) invalidateEnvelopeSpending();
+  }
 }
 
 // --- Envelope budgeting (YNAB rules 1–3) -------------------------------------
@@ -1294,6 +1299,23 @@ export function isManualAccount(a) {
   );
 }
 
+// The accounts QuickAddSheet may write a hand-typed row to: manual, not
+// SimpleFIN-fed (a manual: id would collide with the feed's id space), not a
+// loan (a loan's rows never count as spending, so a cash purchase parked there
+// would vanish from every total), and not HIDDEN — hidden accounts are
+// excluded at the query level, so the row would show optimistically and then
+// vanish on the reload, reading as "it didn't save". Depository first: the
+// sheet defaults to the first target, quick-add exists for cash, and
+// getAccounts' type-ascending order would otherwise put a card ahead of the
+// cash account. Stable within each group (getAccounts' name order). Empty when
+// nothing qualifies, which is the sheet's create-an-"Imported"-account path.
+export function quickAddTargets(accounts) {
+  const ok = (accounts || []).filter(
+    a => isManualAccount(a) && !isSimpleFinAccount(a) && a.type !== 'loan' && !a.hidden,
+  );
+  return [...ok.filter(a => a.type === 'depository'), ...ok.filter(a => a.type !== 'depository')];
+}
+
 // Find (or create) the single household-wide "Imported" institution that owns
 // every manual account. status='disabled' keeps api/sync.js from ever
 // processing it (it filters .neq('status','disabled')), so no bogus
@@ -1344,8 +1366,8 @@ export async function getRestoreRecord(institutionId) {
 }
 
 // Create one manual account. kind is 'checking' | 'savings' | 'credit' | 'loan'.
-// checking/savings are depository (and drive the Trends checking-vs-savings
-// split); 'credit' is a credit-card account, for a card whose statements are
+// checking/savings are depository (the subtype is only a label — no total
+// reads it); 'credit' is a credit-card account, for a card whose statements are
 // only available as CSV/PDF — its purchases count as spending by category and
 // its negatives are refunds, which net against spending and are never income —
 // like a SimpleFIN-fed card. 'loan' is a hand-tracked debt (a private loan, a
@@ -1911,7 +1933,7 @@ export async function getReconciliation({ maxMonths = 12 } = {}) {
       }))
     );
 
-    const today = `${now.getFullYear()}-${pad2(curM)}-${pad2(now.getDate())}`;
+    const today = localIsoDate(now);
     const built = buildReconciliation({ monthsRows, snapshots, accounts: visible, today });
     return { ok: true, ...built, scopeCount: scope.length };
   } catch {
@@ -1964,10 +1986,24 @@ function addDaysISO(iso, days) {
   return `${dt.getUTCFullYear()}-${pad2(dt.getUTCMonth() + 1)}-${pad2(dt.getUTCDate())}`;
 }
 
-function localTodayISO() {
-  const now = new Date();
-  return `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}`;
+// The pending rows of `fields`' series, for the roll-forward dup gate: keyed
+// on recurring_key when the row has one, else description + cadence (a
+// hand-typed row's recurring_key is null).
+async function pendingInSeries(client, fields) {
+  let q = client
+    .from('expected_transactions')
+    .select(EXPECTED_COLUMNS)
+    .eq('status', 'pending');
+  q = fields.recurring_key != null
+    ? q.eq('recurring_key', fields.recurring_key)
+    : q.is('recurring_key', null).eq('description', fields.description).eq('cadence', fields.cadence);
+  const { data, error } = await q;
+  if (error) throw error;
+  return data || [];
 }
+
+const isSeriesDuplicate = (fields, rows) =>
+  fields.recurring_key != null ? isDuplicateExpected(fields, rows) : isDuplicateRollForward(fields, rows);
 
 // Insert the NEXT cycle's pending row after a match/dismiss. Dup-gated so two
 // devices matching the same cycle can't double the Upcoming card: on
@@ -1989,25 +2025,7 @@ async function rollForwardExpected(client, row) {
     due_date,
     cadence: row.cadence,
   };
-  if (fields.recurring_key != null) {
-    const { data, error } = await client
-      .from('expected_transactions')
-      .select(EXPECTED_COLUMNS)
-      .eq('status', 'pending')
-      .eq('recurring_key', fields.recurring_key);
-    if (error) throw error;
-    if (isDuplicateExpected(fields, data || [])) return null;
-  } else {
-    const { data, error } = await client
-      .from('expected_transactions')
-      .select(EXPECTED_COLUMNS)
-      .eq('status', 'pending')
-      .is('recurring_key', null)
-      .eq('description', fields.description)
-      .eq('cadence', fields.cadence);
-    if (error) throw error;
-    if (isDuplicateRollForward(fields, data || [])) return null;
-  }
+  if (isSeriesDuplicate(fields, await pendingInSeries(client, fields))) return null;
   const { data, error } = await client
     .from('expected_transactions')
     .insert(fields)
@@ -2017,9 +2035,61 @@ async function rollForwardExpected(client, row) {
   return data;
 }
 
+// Resolve ONE pending expectation — auto-match, Mark paid, or Skip/Stop — and
+// roll its series forward. Two PostgREST calls can't share a transaction, so
+// the ORDER is the safety:
+//  1. The next cycle is inserted FIRST (dup-gated, so a retry never twins).
+//     A failed insert throws before anything changed: the row stays pending
+//     and re-matches on the next visit. The old flip-first order persisted
+//     'matched' and then lost the insert (a POST, never re-sent) — and a
+//     matched row is never rolled again, so the bill silently dropped out of
+//     Upcoming, Expected and the "missed?" alarm for good.
+//  2. The status flip is GUARDED on status='pending' and returns its rows. A
+//     failed flip leaves row + successor; the next pass re-matches the row
+//     and the dup gate absorbs its roll-forward. 0 rows back means another
+//     device resolved the row first (the unguarded flip overwrote the other
+//     phone's Stop and resurrected the bill): withdraw the successor THIS
+//     call minted, unless the winner MATCHED the row and ours is its only
+//     successor (the winner may have deduped against ours).
+// Accepted residual hole until a database function exists (a migration): a
+// Skip on the other phone that deduped against our just-minted successor in
+// the same sub-second window reads as a Stop here and loses its successor.
+// Returns { changed, next } — `next` is this call's surviving successor.
+async function commitExpected(client, row, patch, { roll = true } = {}) {
+  const next = roll ? await rollForwardExpected(client, row) : null;
+  const { data, error } = await client
+    .from('expected_transactions')
+    .update({ ...patch, updated_at: new Date().toISOString() })
+    .eq('id', row.id)
+    .eq('status', 'pending')
+    .select('id');
+  if (error) throw error;
+  if ((data || []).length) return { changed: true, next };
+  if (!next) return { changed: false, next: null };
+  const { data: now, error: readErr } = await client
+    .from('expected_transactions')
+    .select('status')
+    .eq('id', row.id);
+  if (readErr) throw readErr;
+  if (now?.[0]?.status === 'matched') {
+    // Keep ours unless the winner minted its own (two passes both cleared
+    // the dup gate): then ours is the twin.
+    const others = (await pendingInSeries(client, next)).filter(r => r.id !== next.id);
+    if (!isSeriesDuplicate(next, others)) return { changed: false, next };
+  }
+  const { error: delErr } = await client
+    .from('expected_transactions')
+    .delete()
+    .eq('id', next.id)
+    .eq('status', 'pending');
+  if (delErr) throw delErr;
+  return { changed: false, next: null };
+}
+
 // The main read: every pending row plus this month's matched ones, with the
-// auto-match pass run and PERSISTED first (status='matched' + matched_tx_id,
-// then the roll-forward pending row for the next cycle). Matching is the pure
+// auto-match pass run and PERSISTED first (per match, commitExpected: the
+// roll-forward pending row for the next cycle, then the guarded
+// status='matched' + matched_tx_id flip). Matching is the pure
 // matchExpected (greedy nearest-date, deterministic); the transaction window
 // rides getTransactionsBetween, so it shares the reload's range memo and the
 // full pipeline (hidden accounts excluded, marks applied — irrelevant here,
@@ -2029,7 +2099,7 @@ export async function getExpectedTransactions(
   { client = supabase, fetchTxs = getTransactionsBetween } = {}
 ) {
   if (!hasExpectedTx) return null;
-  const day = today || localTodayISO();
+  const day = today || localTodayIso();
   const { start: monthStart, end: monthEnd } = monthBounds(
     Number(day.slice(0, 4)),
     Number(day.slice(5, 7))
@@ -2047,69 +2117,85 @@ export async function getExpectedTransactions(
     }
     throw pendRes.error;
   }
-  const matchedRes = await client
-    .from('expected_transactions')
-    .select(EXPECTED_COLUMNS)
-    .eq('status', 'matched')
-    .gte('due_date', monthStart)
-    .lte('due_date', monthEnd)
-    .order('due_date', { ascending: true });
-  if (matchedRes.error) throw matchedRes.error;
-
   let pending = pendRes.data || [];
-  const matched = matchedRes.data || [];
 
+  // The auto-match's transaction window, or null when nothing is pending (or
+  // the window is entirely in the future — a match needs a posted
+  // transaction, so never past today). It covers every pending due date's
+  // window (earliest−31 covers the widest, annual's 30), clamped to the
+  // lookback floor. ISO strings compare as dates, so the LATER of the two is
+  // the clamp.
+  let fetchStart = null;
   if (pending.length) {
-    // Fetch real rows around the pending due dates (never past today — a
-    // match needs a posted transaction).
     let earliest = pending[0].due_date;
     for (const r of pending) if (r.due_date < earliest) earliest = r.due_date;
-    // Cover every pending due date's window (earliest−31 covers the widest,
-    // annual's 30), clamped to the lookback floor. ISO strings compare as
-    // dates, so the LATER of the two is the clamp.
     const floor = addDaysISO(day, -EXPECTED_MATCH_LOOKBACK_DAYS);
     const wanted = addDaysISO(earliest, -31);
-    const fetchStart = wanted > floor ? wanted : floor;
-    if (fetchStart <= day) {
-      const txs = await fetchTxs(fetchStart, day);
-      // Ids already claimed by a matched expectation can't match again.
-      const claimed = new Set(matched.map(r => r.matched_tx_id).filter(Boolean));
-      const txRows = (txs || [])
-        .filter(t => !claimed.has(t.id))
-        .map(t => ({
-          id: t.id,
-          transaction_date: t.date,
-          amount: Number(t.amount),
-          account_id: t.account_id,
-          merchant_name: t.merchant_name,
-          description: t.user_description || t.description,
-        }));
-      const matches = matchExpected(pending, txRows);
-      if (matches.length) {
-        const byId = new Map(pending.map(r => [r.id, r]));
-        const updatedAt = new Date().toISOString();
-        for (const m of matches) {
-          const row = byId.get(m.expectationId);
-          if (!row) continue;
-          const { error } = await client
-            .from('expected_transactions')
-            .update({ status: 'matched', matched_tx_id: m.txId, updated_at: updatedAt })
-            .eq('id', m.expectationId);
-          if (error) throw error;
+    const start = wanted > floor ? wanted : floor;
+    if (start <= day) fetchStart = start;
+  }
+
+  // The matched read serves two jobs: the DISPLAY list (this month's matched
+  // rows) and the CLAIM set (every transaction a matched row already owns).
+  // The claim set must cover every matched row whose transaction can sit
+  // inside the fetch window, not just this month's: a weekly bill due Sep 29
+  // matched to an Oct 2 charge left that charge unclaimed in October, so the
+  // Oct 6 row matched the SAME charge and the series ran a cycle ahead. A
+  // transaction dated on or after fetchStart belongs to a row due no earlier
+  // than fetchStart−30 (the widest window), and with NO upper bound (a charge
+  // can post before its due date) — so with a window the read reaches back to
+  // fetchStart−31, unbounded above. The RETURNED list stays this month's.
+  let matchedQ = client
+    .from('expected_transactions')
+    .select(EXPECTED_COLUMNS)
+    .eq('status', 'matched');
+  if (fetchStart) {
+    const back = addDaysISO(fetchStart, -31);
+    matchedQ = matchedQ.gte('due_date', back < monthStart ? back : monthStart);
+  } else {
+    matchedQ = matchedQ.gte('due_date', monthStart).lte('due_date', monthEnd);
+  }
+  const matchedRes = await matchedQ.order('due_date', { ascending: true });
+  if (matchedRes.error) throw matchedRes.error;
+  const matchedAll = matchedRes.data || [];
+  const inMonth = r => r.due_date >= monthStart && r.due_date <= monthEnd;
+  const matched = matchedAll.filter(inMonth);
+
+  if (fetchStart) {
+    const txs = await fetchTxs(fetchStart, day);
+    // Ids already claimed by a matched expectation can't match again.
+    const claimed = new Set(matchedAll.map(r => r.matched_tx_id).filter(Boolean));
+    const txRows = (txs || [])
+      .filter(t => !claimed.has(t.id))
+      .map(t => ({
+        id: t.id,
+        transaction_date: t.date,
+        amount: Number(t.amount),
+        account_id: t.account_id,
+        merchant_name: t.merchant_name,
+        description: t.user_description || t.description,
+      }));
+    const matches = matchExpected(pending, txRows);
+    if (matches.length) {
+      const byId = new Map(pending.map(r => [r.id, r]));
+      const resolved = new Set();
+      const minted = [];
+      for (const m of matches) {
+        const row = byId.get(m.expectationId);
+        if (!row) continue;
+        const { changed, next } = await commitExpected(client, row, { status: 'matched', matched_tx_id: m.txId });
+        // No longer pending either way: matched here, or resolved by another
+        // device first (dropped from both lists for this render — the next
+        // read shows what that device did).
+        resolved.add(row.id);
+        if (next) minted.push(next);
+        if (changed) {
           row.status = 'matched';
           row.matched_tx_id = m.txId;
+          if (inMonth(row)) matched.push(row);
         }
-        // Roll each freshly matched row forward, then re-split the lists.
-        const stillPending = pending.filter(r => r.status === 'pending');
-        for (const m of matches) {
-          const row = byId.get(m.expectationId);
-          if (!row) continue;
-          const next = await rollForwardExpected(client, row);
-          if (next) stillPending.push(next);
-          if (row.due_date >= monthStart && row.due_date <= monthEnd) matched.push(row);
-        }
-        pending = stillPending;
       }
+      pending = [...pending.filter(r => !resolved.has(r.id)), ...minted];
     }
   }
 
@@ -2168,7 +2254,10 @@ export async function addExpected(fields, { client = supabase } = {}) {
 // Dismiss one cycle ("not this time"). Rolls the next cycle forward unless
 // { stop: true } — stopping is the user saying the bill itself is gone.
 // NEVER called automatically: a stale unmatched expectation renders "missed?"
-// and waits for a human (the unmatched bill is the alarm).
+// and waits for a human (the unmatched bill is the alarm). Same write order
+// and pending guard as the auto-match (commitExpected); a row another device
+// already resolved is left alone — { changed: false }, and the caller's
+// re-read shows what that device did.
 export async function dismissExpected(id, { stop = false } = {}, { client = supabase } = {}) {
   const { data: row, error: readErr } = await client
     .from('expected_transactions')
@@ -2176,18 +2265,13 @@ export async function dismissExpected(id, { stop = false } = {}, { client = supa
     .eq('id', id)
     .single();
   if (readErr) throw readErr;
-  const { error } = await client
-    .from('expected_transactions')
-    .update({ status: 'dismissed', updated_at: new Date().toISOString() })
-    .eq('id', id);
-  if (error) throw error;
-  if (stop) return { next: null };
-  const next = await rollForwardExpected(client, row);
-  return { next };
+  if (row.status !== 'pending') return { changed: false, next: null };
+  return commitExpected(client, row, { status: 'dismissed' }, { roll: !stop });
 }
 
 // The "Mark paid" picker: the user points an expectation at a real
-// transaction the auto-match missed. Rolls forward like an auto-match.
+// transaction the auto-match missed. Rolls forward like an auto-match, with
+// the same write order and pending guard (commitExpected).
 export async function matchExpectedManually(id, txId, { client = supabase } = {}) {
   const { data: row, error: readErr } = await client
     .from('expected_transactions')
@@ -2195,11 +2279,6 @@ export async function matchExpectedManually(id, txId, { client = supabase } = {}
     .eq('id', id)
     .single();
   if (readErr) throw readErr;
-  const { error } = await client
-    .from('expected_transactions')
-    .update({ status: 'matched', matched_tx_id: txId, updated_at: new Date().toISOString() })
-    .eq('id', id);
-  if (error) throw error;
-  const next = await rollForwardExpected(client, row);
-  return { next };
+  if (row.status !== 'pending') return { changed: false, next: null };
+  return commitExpected(client, row, { status: 'matched', matched_tx_id: txId });
 }

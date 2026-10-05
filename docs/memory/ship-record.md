@@ -296,6 +296,16 @@ Conventions / Gotchas. An entry here is a pointer, not a home for rules.
   2026-09-08 "header collapses into a gear menu" decision-journal entry, and
   `test/headerMenu.test.js` + `test/pullRefresh.test.js`.
 
+- **Dashboard audit fixes — audit PR A (2026-10-05)** — the first of three PRs
+  from the 2026-10-05 review: the load/refresh pipeline (`src/loadPipeline.js`
+  — the winning load owns the spinner, post-write reloads aim at the viewed
+  month, an hour-gated quiet foreground pull), list/sheet/input fixes, Home and
+  Plan fixes with the formatters lifted into `src/format.js` and the donut
+  geometry into `src/donut.js`, and Tax/receipt/debt/teaching fixes. Item list:
+  the plan doc's "Improvement backlog (2026-10-05 audit)"; what was decided and
+  rejected: the 2026-10-05 decision-journal entry; rules: the Key-files rows and
+  Gotchas they name.
+
 ## Pending branches
 
 None in code, and **no migration is outstanding**: every file in

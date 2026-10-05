@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildManualTxRow, addManualTransaction } from '../src/dataAdapter.js';
+import { buildManualTxRow, addManualTransaction, quickAddTargets } from '../src/dataAdapter.js';
 
 // --- buildManualTxRow: pure id / sign / write-time category ------------------
 
@@ -124,4 +124,49 @@ test('a learned rule reaches the persisted mapped_category at write time', async
     { client: fakeClient(manualAcct, capture), getRules: async () => ({ STARBUCKS: 'Dining and drinks' }) },
   );
   assert.equal(capture.payload.mapped_category, 'Dining and drinks');
+});
+
+// --- quickAddTargets: which accounts QuickAddSheet may offer -------------------
+// A row on a HIDDEN account is inserted, shows optimistically, then vanishes on
+// the reload (hidden accounts are excluded at the query level) — it reads as
+// "it didn't save". The sheet defaults to the first target, so order matters
+// too: getAccounts sorts type ascending, which put a card ahead of cash.
+const acct = (id, over = {}) => ({ id, plaid_account_id: `manual:${id}`, is_manual: true, type: 'depository', hidden: false, ...over });
+
+test('quickAddTargets: excludes hidden, loan and SimpleFIN accounts', () => {
+  const ids = quickAddTargets([
+    acct('cash'),
+    acct('old-visa', { type: 'credit', hidden: true }),
+    acct('mortgage', { type: 'loan' }),
+    { id: 'feed', plaid_account_id: 'sfin:abc', type: 'depository', hidden: false },
+    { id: 'feed-flagged', plaid_account_id: 'sfin:def', is_manual: true, type: 'depository', hidden: false },
+    acct('hidden-cash', { hidden: true }),
+  ]).map(a => a.id);
+  assert.deepEqual(ids, ['cash']);
+});
+
+test('quickAddTargets: depository before credit, stable within each group', () => {
+  // getAccounts' order: type ascending (credit < depository), then name.
+  const ids = quickAddTargets([
+    acct('visa-a', { type: 'credit' }),
+    acct('visa-b', { type: 'credit' }),
+    acct('cash'),
+    acct('envelope-jar'),
+  ]).map(a => a.id);
+  assert.deepEqual(ids, ['cash', 'envelope-jar', 'visa-a', 'visa-b']);
+});
+
+test('quickAddTargets: nothing offerable is [] (the create-an-Imported-account path)', () => {
+  assert.deepEqual(quickAddTargets([acct('a', { hidden: true }), acct('b', { type: 'credit', hidden: true })]), []);
+  assert.deepEqual(quickAddTargets([]), []);
+  assert.deepEqual(quickAddTargets(null), []);
+});
+
+test('QuickAddSheet is fed quickAddTargets and defaults to its first entry', async () => {
+  const { readFileSync } = await import('node:fs');
+  const dash = readFileSync(new URL('../src/components/Dashboard.jsx', import.meta.url), 'utf8');
+  assert.match(dash, /const manualAccounts=quickAddTargets\(accounts\);/,
+    'the quick-add account list must come from quickAddTargets, not an inline filter that can drift (it missed hidden)');
+  assert.match(dash, /const \[acctId,setAcctId\]=useState\(manualAccounts\[0\]\?\.id\|\|""\);/,
+    'the default target is the first offered account (depository first)');
 });

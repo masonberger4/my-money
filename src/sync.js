@@ -73,6 +73,19 @@ export function pullWasClean({ results, failures } = {}) {
   return results.every(r => r && !r.error && !r.skipped && !(r.warnings && r.warnings.length));
 }
 
+// Should a foreground return start a pull? The Dashboard asks this on every
+// refreshTick bump (App.jsx's visibility/focus return): a PWA opened at 8am
+// and foregrounded at 6pm must pull the day's charges and re-check feed
+// health without a manual Refresh, but a quick app switch must not fire a
+// pull each time. `lastSyncAt` is when this device last STARTED one (0/null =
+// never). Strictly more than the gap. The server-side throttle (one pull an
+// hour per access URL) still governs what actually reaches SimpleFIN — this
+// only decides whether to ask. Pure so the boundary is testable.
+export const FOREGROUND_SYNC_GAP_MS = 3_600_000;
+export function foregroundSyncDue(lastSyncAt, now, gapMs = FOREGROUND_SYNC_GAP_MS) {
+  return now - (Number(lastSyncAt) || 0) > gapMs;
+}
+
 // opts.force bypasses the server-side SimpleFIN pull throttle (a pull is
 // normally skipped if one ran in the last hour — SimpleFIN only refreshes bank
 // data about once a day). Forced syncs also skip the single-flight dedupe:

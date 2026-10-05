@@ -6,11 +6,15 @@
 > When every item is resolved this doc is DELETED per the maintenance
 > contract (docs/memory/maintenance-contract.md). The memory docs are authoritative wherever the two disagree.
 
-**Where the live work is:** the **Improvement backlog (2026-09-04 audit)**
-section is the newest list and the only one with a Mason ruling on it (he ticked
-the bug fixes 2026-09-08 and deferred the rest); the **Improvement backlog
-(2026-08-13)** section above it is still unbuilt and still live. Items 2/3/4
-under Low-hanging fruit and 1/3/4/5 under Harder are the older live specs.
+**Where the live work is:** the **Improvement backlog (2026-10-05 audit)**
+section is the newest list — what its three PRs ship, the buildable leftovers,
+and the questions that wait for Mason (its "Needs a Mason ruling before code"
+list). The **Improvement backlog (2026-09-04 audit)** section right below it
+carries Mason's 2026-09-08 ruling (he ticked the bug fixes and deferred the
+rest; deferred items the 2026-10-05 audit built are marked SHIPPED in place);
+the **Improvement backlog (2026-08-13)** section above both is still unbuilt
+and still live. Items 2/3/4 under Low-hanging fruit and 1/3/4/5 under Harder
+are the older live specs.
 Everything struck through is a POINTER to a shipped thing, not work — git and
 the named PRs hold the detail.
 
@@ -53,6 +57,11 @@ keep true. None is blocked on a technical unknown.
     here, since they arrived as one reviewed set and Mason deferred them as one.
     Two of them (the card-payment regex pair) are gated on re-running the PR #101
     vocabulary probe before any rule widens.
+12. **The 2026-10-05 audit's open questions** — listed in that backlog's "Needs
+    a Mason ruling before code" list, each with why it is the owner's call and
+    a file anchor; it includes the deferred half of the assistant finding
+    (raising `maxTokens` for the thinking models). Several re-raise items 1 and
+    11 above; one ruling closes both copies.
 
 ## Low-hanging fruit
 
@@ -166,7 +175,10 @@ keep true. None is blocked on a technical unknown.
    Mason says so. Worth noting the redesign PRs (#92–#111) established the
    pure-core-extraction habit — `nav.js`, `txList.js`, `txType.js`,
    `reflect.js`, `reconciliation.js` — without touching the JSX, so the plan's
-   "formatters first" step is half-happening by accident.
+   "formatters first" step is half-happening by accident. **The pure-helper
+   "formatters first" step SHIPPED 2026-10-05 (audit PR A)** as `src/format.js`
+   (plus the donut geometry in `src/donut.js`); no JSX moved, and the
+   decomposition itself stays deferred.
 
 2. ~~**Deriving RTA income (the income wall)**~~ — **SHIPPED 2026-08-13 as the
    HYBRID income rule**: a COMPLETED month reads actual measured income, the
@@ -632,6 +644,307 @@ nothing from Mason.
   rather than assume. What the original framing got right: CI would have caught
   a hard break, so this was a scope call, not a risk call.
 
+## Improvement backlog (2026-10-05 audit)
+
+> **Provenance and status.** Mason asked Claude to "review the app, fix bugs,
+> look for refactoring opportunities, easy app upgrades". Thirteen lens agents
+> read the code and returned 124 raw findings; dedup left 105. Each batch was
+> then checked by two independent verifiers — one for TRUTH (does the premise
+> hold at HEAD; most were reproduced against the real modules) and one for
+> BUILDABILITY (decided behaviour? an owner ruling? a migration?). 102 held,
+> and 86 were buildable without a ruling. Review run `wf_b7dbd80f-f88`, build
+> run `wf_45ee6a52-0dd`. The build ships as THREE PRs — **A**: Dashboard
+> state, refresh and screens; **B**: the data layer, the server and the pure
+> cores; **C**: statement import and the PWA shell — and every fix commit
+> names its ids (F01–F105, the audit's own numbering) in a `Findings:` trailer
+> or, on PR A's first ten commits, as the body's leading `Fnn:` lines; a
+> review-repair trailer may carry a tag such as `F72-HANG` instead.
+> Each line below is the failure that was fixed; the rule it produced lives
+> in the memory docs, the reasoning in the 2026-10-05 decision-journal entry.
+
+### Shipped
+
+**PR A — Dashboard state, refresh and screens (SHIPPED 2026-10-05).**
+
+*Load and refresh pipeline.*
+- F03 — a superseded month load left `loading` stuck (Home skeletons, Refresh
+  disabled); the load that wins owns the spinner.
+- F04 — a write resolving after a month tap reloaded the OLD month under the
+  new header; post-await reloads go through `reloadViewed`.
+- F11 — `reloadData` decided "current month" from the mount-time date (the
+  2026-09-04 Wave A #12 half that never shipped).
+- F13 — a failed explicit Refresh cleared its own sync-failure banner in the
+  same tick; `SYNC_FAILED_MSG` is re-asserted after the follow-up.
+- F15 — a foreground return hours later never re-pulled or re-checked feed
+  health; over an hour after the last pull it now pulls QUIETLY.
+- F72 — the pull chip and the gear's Refresh stopped before the bank pull they
+  started finished; `refreshing` spans the pull, capped at 60s per hold.
+- F12 — the expected-bill auto-match ran once per session; it re-runs after a
+  pull and on a foreground return, one pass per return (F35 below ships with it).
+- F27 — weekly expected bills claimed one charge twice across a month
+  boundary.
+- F33 — a failed roll-forward permanently dropped a recurring bill (the match
+  and the next-cycle insert weren't atomic).
+- F35 — the auto-match updated by id alone, so a stale pass could bring back a
+  bill the other phone stopped. Moved into PR A from PR B because F12's extra passes lean on it.
+- F17 — the typed budget income wasn't month-tagged, so one failed read priced
+  Ready to Assign with the previous month's figure.
+- F19 — "Does it add up?" and Data coverage fetched once per launch, so "try
+  Refresh" did nothing; both are epoch-driven now.
+- F92 — every month tap dropped the Recurring/Debt/Tax/Trends caches; plain
+  navigation keeps them.
+- F21 — the open account page's list didn't refetch on a foreground return
+  (the 2026-09-04 Wave C #20 half that never shipped).
+- F54 — `refetchOpenLists` and the Debt load wrote without the sequence/id
+  guards their effects use.
+
+*Lists, sheets and inputs.*
+- F55 — the load banner blamed a "local cache", a failed cash-flow read said
+  "Not enough measured income yet.", a receipt upload showed raw "Load failed".
+- F20 — hiding the account the Spending list was filtered to stranded the
+  filter with no chip left to clear it.
+- F61 — a date edit left the row under an out-of-order day header on the
+  account page and in search results.
+- F63 — an account chip that emptied a truncated search said "No transactions
+  match" above a live Load more.
+- F64 — three screens said Checking vs Savings changes spending, and two said
+  a mistyped card counts every purchase.
+- F68 — Escape while renaming the Payee closed the whole transaction sheet.
+- F70 — the pull indicator vanished 250ms into a held touch pull.
+- F71 — Ctrl+wheel or a trackpad pinch-zoom at the top of a tab triggered a
+  bank refresh.
+- F105 — iPhone keyboard hints: search Return searches and dismisses with
+  autocorrect off, chat Return says Send; the tax-year steppers and the
+  account back button got accessible names.
+- F01 — `Swatch` never saved on the laptop (the 2026-09-04 Wave C #21 fix was
+  itself broken there).
+- F07 — quick-add offered hidden manual accounts and could default to one.
+- F09 — looking at a Budget-tab figure and tapping away re-wrote it over the
+  other phone's edit.
+- F51 — TargetSheet's "Needed by" was a bare text box with no format hint on
+  desktop Safari and Firefox.
+- F98 — TargetSheet's preview re-derived `monthsUntil` inline, and the two
+  already disagreed on a 13th month.
+- F100 — dead props on QuickAddSheet and TargetSheet; a scan now fails on any
+  prop a component doesn't declare.
+- F10 — the forget-rule confirm opened at the bottom of a long list, out of
+  view.
+
+*Home, Plan and formatters.*
+- F95 — the formatters and date helpers were untested in-component code with
+  a copy in CsvImport; they live in `src/format.js` (Harder 1's first step).
+- F52 — amounts that round to zero printed "−$0" or "+$0".
+- F96 — "today on the wall clock" was hand-rolled in nine places.
+- F08 — the Home donut was blank whenever one category had all the spending.
+- F93 — the Home donut and its legend were two different arrangements; both
+  read Reflect's breakdown now.
+- F16 — the Plan headline added a sinking fund's whole goal to this month's
+  target.
+- F56 — in an all-refund month a refunded category drew a FULL Categories bar.
+- F57 — Home's "bills in the next 7 days" counted every overdue bill however
+  old; upcoming and overdue are split (names and a tap-through still deferred).
+- F58 — Plan rows sorted budgeted-first by raw label and jumped on their first
+  dollar.
+
+*Tax, receipts, debt and teaching.*
+- F02 — `tax:maps` was overwritten whole from a load-time snapshot, so one
+  failed read plus one edit wiped every mapping.
+- F22, F66 — date edits accepted 5-digit years, and a half-typed
+  placed-in-service year deleted the stored date.
+- F67 — a drive logged while viewing a past tax year vanished from the list;
+  the card now says where it went.
+- F69 — the mileage footnote quoted the 2026 rates whatever year was on screen.
+- F23 — closing the sheet mid-upload hid a receipt failure and leaked a
+  preview URL.
+- F65 — an unloadable receipt was an inert tile that couldn't be opened or
+  deleted, yet counted as attached.
+- F62 — payoff projection lines used the raw bank name, not the household's.
+- F91 — the Debt tab re-implemented the net-worth fold inline and its
+  sparkline scale had drifted from the Net-worth card's.
+- F97 — the debt cache's rate and totals were derived in three places.
+- F14 — a rule that saved but whose history rewrite failed was reported as
+  unsaved, and the taught-rules list went stale.
+- F31 — an all-digit payee couldn't be taught or queued.
+- F75 — the duplicate-category guard ignored display names, and rename had
+  no guard at all.
+
+**PR B — data layer, server and pure cores (lands in the next audit PR).**
+- F34 — `setCategoryRule` deleted the old rule before inserting the new one,
+  so a failed insert left the merchant with no rule. *(lands in PR B)*
+- F78 — paged reads without a total ORDER BY could skip or repeat rows at page
+  boundaries. *(lands in PR B)*
+- F79 — `category_rules` was read unpaged on both sides of the wire, and the
+  assistant and mileage limits exceeded PostgREST's 1,000-row cap. *(lands in
+  PR B)*
+- F80 — multi-batch transaction writes that failed partway skipped cache
+  invalidation. *(lands in PR B)*
+- F94 — `updateTransaction`'s comment described a trigger that was rejected.
+  *(lands in PR B)*
+- F89 — the façade still exported whole-map/whole-list writers that contradict
+  the never-write-the-whole-map rule. *(lands in PR B)*
+- F25 — apiClient's GET wasn't re-sent on wire death, contrary to its comment.
+  *(lands in PR B)*
+- F77 — apiClient lost the HTTP status and body on a non-JSON error response.
+  *(lands in PR B)*
+- F36 — a pull that failed after inserting a new bank's accounts lost that
+  bank's older history for good. *(lands in PR B)*
+- F38 — sync bookkeeping wrote status 'active' over a bank removed mid-pull,
+  undoing the Remove-bank tombstone. *(lands in PR B)*
+- F37 — `inferAccountType` read an org field the server never passes, and
+  reading it naively would have typed "Savings and Loan" accounts as loans.
+  *(lands in PR B)*
+- F82 — the manual redirect loop re-sent the bank-feed Authorization header to
+  a different origin. *(lands in PR B)*
+- F39 — the assistant's thinking could spend the whole 4096-token budget and
+  the cut-off was ignored; it is now surfaced (raising the budget is in the
+  ruling list below). *(lands in PR B)*
+- F50 — the Ask-tab cost estimate still priced Sonnet 5 at the old rate.
+  *(lands in PR B)*
+- F60 — reconciliation printed "Unexplained −$0" on a month that balanced.
+  *(lands in PR B)*
+- F24 — every re-dated transaction showed as a fake "Unexplained" residual in
+  two months. *(lands in PR B)*
+- F26 — a subscription price rise over 20% read as overdue at the old price,
+  then vanished for months. *(lands in PR B)*
+- F29 — two subscriptions billed under one merchant name were both missed.
+  *(lands in PR B)*
+
+**PR C — statement import and the PWA shell (lands in the audit PR after B).**
+- F06 — PDF auto-detect read Amount plus Balance columns as a Debit/Credit
+  pair. *(lands in PR C)*
+- F41 — year-less MM/DD PDF dates (most US card statements) never parsed.
+  *(lands in PR C)*
+- F83 — credits printed with a CR suffix or a trailing minus were dropped from
+  PDFs and rejected in CSVs. *(lands in PR C)*
+- F44 — CSV description mapping preferred Memo over Payee and Name.
+  *(lands in PR C)*
+- F40 — Amount plus one stray debit- or credit-worded column imported zero
+  rows with no way to remap. *(lands in PR C)*
+- F42 — an account created for import target "new" was never adopted, so a
+  retry created a same-named twin. *(lands in PR C)*
+- F43 — a failed existing-ids lookup read as an empty account, disarming the
+  mixed-format guard. *(lands in PR C)*
+- F99 — the `useSurface` hook was duplicated in CsvImport and
+  PdfTemplateEditor. *(lands in PR C)*
+- F76 — with storage blocked, an explicit Light/Dark choice was undone by the
+  next OS appearance change. *(lands in PR C)*
+- F45 — a stale lazy chunk after a deploy replaced the Dashboard with
+  "Something broke", and sw.js cached index.html under the dead .js URL.
+  *(lands in PR C)*
+- F48 — a `CACHE_VERSION` bump wiped every fingerprinted asset and cacheFirst
+  never read the precache, so the first offline launch after a bump couldn't
+  boot. *(lands in PR C)*
+- F85 — an offline or lie-fi launch waited on the OS fetch timeout before
+  serving the cached shell. *(lands in PR C)*
+- F86 — the /assets prune evicted the live shell's stable vendor and runtime
+  chunks. *(lands in PR C)*
+- F49 — about forty form controls under 16px made iOS Safari zoom on focus.
+  *(lands in PR C)*
+
+### Needs a Mason ruling before code
+
+Each is real (the truth verifier held it) and each is a choice about behaviour
+or copy the household sees, a recorded rule, or a migration — so it waits.
+
+- **F88 — negative envelope assignments on the iPhone.** The decimal keypad has
+  no minus, so money that exists only as rollover can't go back to Ready to
+  Assign: a ± toggle in `AssignEdit`, a keyboard with a minus, or Ready to
+  Assign as a MoveSheet destination (Decision queue 1)? A new interaction.
+  `src/components/Dashboard.jsx`.
+- **F18 — a collapsed Plan heading nets an overspent child into a green
+  total.** The 2026-09-04 deferred "overspent/needs chips" item: chip copy,
+  colour and tap, tied to what a red heading offers (Cover overspending).
+  `envSectionNode` in `src/components/Dashboard.jsx`.
+- **F05 — Schedule E counts transfers, card payments and loan postings into
+  an entity as rents received.** Fixing it reverses the decided "unmapped
+  money IN counts as rents" rule and adds a worksheet/CSV section; it brushes
+  Decision queue 10. `scheduleEReport` in `src/taxReport.js`.
+- **F30 — the teach preview and history apply re-label rows the write path
+  will never classify that way**, so a taught rule quietly reverts on the next
+  pull. Half A: may an amount-scoped rule outrank the transfer guard (it
+  catches "Zelle Transfer to …" wording)? Re-check the real descriptor first.
+  Half B (re-match on the write path's combined payee+description string)
+  needs no ruling but stops today's permanent relabels outside the pull
+  window. `src/ruleHistory.js`, `src/txClassify.js`.
+- **F53 — the taught-rules "N in <month>" count credits a row to every
+  overlapping rule.** Reach (what the all-time count records by design) or
+  winner attribution — what a user-facing number means. `RulesSheet` in
+  `src/components/Dashboard.jsx`.
+- **F32 — the card-payment veto drops loan, mortgage and bill payments from
+  spending, and a transfer-worded card credit nets as a refund.** The known
+  Group 7 regex pair, gated on re-running the PR #101 vocabulary probe against
+  prod. `src/txClassify.js`.
+- **F28 — a past month's envelope Spent changes with the viewed month**,
+  because transfers pair over the whole walk range. Per-month pairing (Spent
+  matches the Categories bar, past carry-overs move) or walk-plus-slack (stable
+  months, Spent can disagree with the bar)? It touches the envelope walk.
+  `getEnvelopeSpending` in `src/dataAdapter.js`.
+- **F59 — Trends "Avg: $X/mo" divides by six including the half-finished
+  month.** Follows the Group 7 Income-vs-Spending half-month ruling.
+  `getCashFlow` in `src/dataAdapter.js`.
+- **F87 — the sign-in bounce gives no reason.** The 2026-09-04 deferred
+  Phone-shell item: the copy, and whether to tell offline from expiry. Its
+  error-mapping half (Login shows raw "Load failed" because auth-js's status-0
+  error misses `isNetworkError`) needs no ruling. `src/App.jsx`,
+  `src/components/Login.jsx`, `src/netRetry.js`.
+- **F73 — bills due on the 29th–31st slide to the 28th and stay there.** Needs
+  an anchor-day column (a migration); Group 7. Cosmetic: at most three days of
+  "was due" styling. `rollForwardDate` in `src/expectedTx.js`.
+- **F81 — reconnecting after a revoked access URL adds a second connection;
+  the dead row fails every sync while the status reads healthy.** A reconnect
+  policy (retire auth-failed rows, or per-connection health and removal) is a
+  product shape; making the status report the worst row's error needs no
+  ruling. `api/simplefin-claim.js`, `api/simplefin-status.js`.
+- **F46 — a resident PWA runs yesterday's bundle with no update signal.**
+  Silent reload when no sheet is open, or an "Updated — tap to reload" pill,
+  and after how long. `src/main.jsx`, `src/App.jsx`.
+- **F47 — a cold-start institution-count failure falls through to "Connect
+  your first account"**, contradicting the recorded Gotcha; the replacement
+  screen is already reserved for Mason (Refuted list, Group 7). `src/App.jsx`.
+- **F102 — the assistant's model lineup is a generation behind** (the newer
+  Opus costs less than the listed one; the newer Sonnet costs the same).
+  Which models the household sees and pays for; a plain id swap would
+  silently drop saved picks to Haiku, so it needs an alias map.
+  `src/assistantModels.js`.
+- **F39, the deferred half — raise `maxTokens` above 4096 for the thinking
+  models?** Thinking tokens count against it, so a high-effort answer can run
+  out (PR B surfaces the cut-off rather than hiding it). Raising it buys
+  complete answers at a higher cost per question — an Opus answer at max
+  effort goes from roughly 16¢ to 46¢ at 16k, under the Anthropic spend cap —
+  and a longer request (`vercel.json` sets no `maxDuration`; past ~21k the SDK
+  forces streaming). `src/assistantModels.js`, `api/assistant.js`.
+
+### Buildable, not built in this run
+
+- **F84 — CSV `parseDate` rejects YYYY/MM/DD and month-name dates** ("Aug 1,
+  2026", "01-Aug-2026"): unambiguous, no D/M/Y guessing, `src/csvImport.js`.
+  Its third shape, M/D/YYYY with a time, stays rejected by the shipped
+  2026-09-04 Wave B #16 scope (pinned in `test/csvImport.test.js`) unless
+  Mason relaxes it.
+- **F103 — `npm audit fix`** clears four dev-tree advisories with a
+  lockfile-only change; nothing reaches production. A one-off refresh, not the
+  `npm audit` CI step rejected 2026-09-08.
+- The no-ruling halves named above: F30's half B, F87's error mapping and
+  F81's worst-row status.
+
+### Refuted or skipped — do NOT re-propose
+
+- **F74 — a refund should match its amount-scoped purchase rule.** Decided the
+  other way: the sign is significant (the amount-scoped rule Convention;
+  `test/txClassify.test.js`: "a refund must never inherit the payment's
+  rule"). Changing it reverses a Convention — a ruling, not a bug.
+- **F90 — extract the expected-bills month view into `src/expectedTx.js`.** No
+  demonstrated defect; its one payoff, the hardcoded tolerance literal at the
+  Mark-paid picker, belongs to the 2026-08-13 "Cross-month Mark-paid picker"
+  item, which replaces the picker's data source anyway.
+- **F104 — routine in-range dependency bumps (vite, supabase-js,
+  pdfjs-dist).** No named payoff, browser-bundle iOS risk CI can't see, and
+  the standing security-only dependency ruling.
+- **F101 — a post-build check of the dist CSP script hash.** Prospective only:
+  the dist hash matches today on the installed and the next Vite alike. Not on
+  its own; it rides with any future bundler change (the browser-floor Gotcha
+  already demands a re-measure then).
+
 ## Improvement backlog (2026-09-04 audit; Mason picked the bug fixes 2026-09-08)
 
 > **Provenance and status.** Mason asked for "creative ways to make improvements
@@ -665,6 +978,13 @@ descriptions are invented illustrations, never household numbers (public repo).
 > every one of them is a failure shape worth recognising again; nothing here is
 > unbuilt work any more. What each wave actually changed lives in its PR body
 > and in the code comments the fixes carry.
+>
+> **Correction (2026-10-05 audit):** "nothing here is unbuilt" was not quite
+> true. #12's fresh-date half never shipped (`reloadData` still read the
+> mount-time `now`), #20's foreground-return half never shipped (the open
+> account list did not refetch on a refreshTick), and #21's commit-on-close
+> swatch never wrote on the laptop (a hidden colour input never blurs). All
+> three SHIPPED 2026-10-05 (audit PR A); the items below carry the marker.
 >
 > Four things the build learned that the audit could not:
 > - **`envelopeBar`'s fix had to be NARROWED.** Two older tests pin that a ZERO
@@ -748,6 +1068,8 @@ was red before the fix).**
     frozen at mount, so the real new month gets the same until a relaunch. Take
     a fresh date inside the load, and render "—" rather than a fabricated
     balance when no account resolves. `Dashboard.jsx:2339-2362,3403-3410`.
+    **The fresh-date half SHIPPED 2026-10-05 (audit PR A)** — see the
+    correction above.
 
 **Wave B — statement import.**
 
@@ -806,10 +1128,13 @@ Group-5 bugs).**
     balance, "as of" and transaction list stale until the page is closed and
     reopened, so it disagrees with the tile behind it. Derive the account from
     the id at render and refetch open lists. `Dashboard.jsx:2757-2766,5927-5952`.
+    **The foreground-return half SHIPPED 2026-10-05 (audit PR A).**
 21. **Every account edit refetches the whole 500-row list** — S, and the colour
     picker writes on every drag step while the feed-gap scan re-runs on each
     optimistic patch. Key the effects on ids and commit the swatch on close.
-    `Dashboard.jsx:463-478,2796-2800,1827-1834`.
+    `Dashboard.jsx:463-478,2796-2800,1827-1834`. **The swatch commit was
+    RE-FIXED 2026-10-05 (audit PR A)**: the shipped blur commit never fired on
+    the laptop; it now listens for the native `change` event.
 22. **Recurring and Debt still use the null-sentinel cache** — S. A reload landing
     during their first fetch caches a pre-sync snapshot (the documented
     invalidation gotcha); copy the Tax tab's epoch block.
@@ -836,7 +1161,8 @@ evidence so a later session can build it without re-deriving the premise.
 
 **Reliability and data-integrity (the rest of Wave C's original group).**
 Teaching on a flaky connection reports a saved rule as unsaved and leaves the
-taught-rules list stale (`Dashboard.jsx:3037-3059`); `setCategoryRule` deletes
+taught-rules list stale (`Dashboard.jsx:3037-3059`) — **SHIPPED 2026-10-05
+(audit PR A)**; `setCategoryRule` deletes
 the old rule before inserting the new one, so a failed insert leaves the
 merchant with NO rule (`src/dataAdapter.js:660-694` — an update-first rewrite
 also changes the recorded delete-then-insert rule in
@@ -860,10 +1186,12 @@ timeout before serving the cached shell (`public/sw.js:92-105` — keep the
 `fresh.ok` line verbatim, the lockstep test matches it, and bump
 `CACHE_VERSION`); a foreground return after hours away never re-pulls the feed
 or re-checks feed health (`Dashboard.jsx:1984,2452-2479`, **VERIFIED**, and the
-hour-gated case must not paint the sync-failure banner); the load-failure banner
+hour-gated case must not paint the sync-failure banner) — **SHIPPED 2026-10-05
+(audit PR A)**, quiet as required; the load-failure banner
 blames a local cache the app has not had since Dexie was removed, and a failed
 cash-flow read renders as "not enough measured income" rather than an error
-(`Dashboard.jsx:2407-2411,2488-2490,4224,4446-4451`); the sign-in bounce says
+(`Dashboard.jsx:2407-2411,2488-2490,4224,4446-4451`) — **SHIPPED 2026-10-05
+(audit PR A)**; the sign-in bounce says
 nothing about why (`src/App.jsx:104-113`, `src/components/Login.jsx:14-21`);
 sub-16px inputs trigger Safari's focus zoom on roughly fourteen inputs (one
 `@media (pointer: coarse)` rule in `src/ui.css`, then re-screenshot the filter,
@@ -876,15 +1204,18 @@ promising "the app's own guess"; overspent/needs chips on collapsed Plan group
 headings; a warning before Fund-targets writes past Ready to Assign; a tappable
 "needs $X" that funds one envelope; MoveSheet's All chip, per-destination
 balances and overspend-first ordering; Home's bills line split into overdue and
-upcoming with names and a tap; a tappable Home donut; the Trends cash-flow
+upcoming with names and a tap (**the split SHIPPED 2026-10-05, audit PR A**;
+names and a tap-through are still deferred); a tappable Home donut; the Trends cash-flow
 card's pre-unification wording; debt due-date roll-forward, the missing-APR
 notice and a route from a loan's account page to its terms; the two screens
 claiming the Checking/Savings split drives spending totals (it drives labels —
-the Bank/Credit/Loan choice is what moves the three numbers); the hidden-accounts
+the Bank/Credit/Loan choice is what moves the three numbers) — **SHIPPED
+2026-10-05 (audit PR A)**, and it was three screens; the hidden-accounts
 cue explaining that a new account must be opened, type-checked and unhidden;
 Sign out on the first-run screen; the account-chip search that reports "no
-matches" above a Load-more button; and the tax tab's hand-typed mileage
-footnote naming the wrong year.
+matches" above a Load-more button — **SHIPPED 2026-10-05 (audit PR A)**; and
+the tax tab's hand-typed mileage footnote naming the wrong year — **SHIPPED
+2026-10-05 (audit PR A)**.
 
 **Features (Group 6).** Recurring rows tapping through to their charges; recent
 searches and search-this-merchant; Ask-about-this entry points and data-derived
@@ -905,20 +1236,25 @@ spending, and a transfer-worded card credit netting as a refund when its payer
 leg is hidden — both gated on re-running the PR #101 vocabulary probe first, per
 the standing ruling in docs/memory/ship-record.md. Whether "Always" should
 release the taught row's hand pin. What a by-date target does after its date
-passes. The monthly-target wording versus a real refill kind. Whether the
+passes (still open; since 2026-10-05 the Plan headline follows the same
+past-date reading as `targetNeed`, through `monthlyAsk`). The monthly-target
+wording versus a real refill kind. Whether the
 Income-vs-Spending verdict drops the half-finished month. The cold-start
 count-error screen (a decision the refuted list already reserves for Mason).
 Manual bank balances (today ignored by rule). Per-month scoping for the
 reconciliation panel. The month-end bill drift (needs an anchor-day column).
 The two-phone envelope write race (record as accepted, or add a database
-function). An undo-this-import delete path against the soft-hide ruling. Peeling
+function) — its no-op half, a figure that was only looked at being re-written
+on blur over the other phone's edit, SHIPPED 2026-10-05 (audit PR A); real
+concurrent edits still race last-writer-wins, and that is the open question. An undo-this-import delete path against the soft-hide ruling. Peeling
 one layer on the iOS back-swipe. Pull-to-refresh. The tax year default during
 filing season. Home's cash and Ready-to-Assign tiles. A since-you-last-looked
 changelog and a needs-a-look flag pair for two-phone coordination.
 
 **First-run and empty states.** Uncovered months rendering confident $0s across
 Home, Categories and Trends; the SimpleFIN success screen repeating the retired
-subtype rule; the Plan income prompt talking about "the month in progress" on a
+subtype rule (**SHIPPED 2026-10-05, audit PR A** — the same string as the
+Checking/Savings copy above); the Plan income prompt talking about "the month in progress" on a
 month that ended before coverage; and a second smoke-walk pass over the empty,
 all-hidden and post-wipe states, whose mock knobs already exist and are consumed
 by nothing.

@@ -4,7 +4,7 @@
 // stayed invisible: every part of it looks reasonable read one line at a time.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { merchantKey, matchLearnedRule, guessCategory, isCardPaymentDescriptor, isCardPaymentReceived, isKeyPrefix } from '../src/txClassify.js';
+import { merchantKey, matchLearnedRule, guessCategory, isCardPaymentDescriptor, isCardPaymentReceived, isKeyPrefix, teachDescriptor } from '../src/txClassify.js';
 
 // --- merchantKey: what collapses and what stays distinct --------------------
 
@@ -443,4 +443,30 @@ test('REGRESSION: "AMAZON MKTPLACE PMTS" is a merchant, not a payment', () => {
   assert.equal(isCardPaymentReceived('AMAZON MKTPLACE PMTS'), false);
   assert.equal(isCardPaymentReceived('CAPITAL ONE MOBILE PYMT'), true, 'the singular forms still veto');
   assert.equal(isCardPaymentReceived('PMT'), true);
+});
+
+// --- teachDescriptor: a payee that keys to nothing falls back (2026-10 audit) -
+// An all-digit payee ('76', a gas chain) survives looksMasked, so a shaped
+// row's merchant_name stays '76' and merchantKey('76') is ''. The teach path
+// then returned early (no "Always" offer) and the teach queue dropped the row,
+// while sync keys the same row on `${payee} ${description}` — non-empty.
+test('teachDescriptor: an all-digit or punctuation-only payee falls back to the description', () => {
+  assert.equal(teachDescriptor({ merchant_name: '76', description: '76 - 0254 FUEL SEATTLE WA' }), '76 - 0254 FUEL SEATTLE WA');
+  assert.equal(teachDescriptor({ merchant_name: '#', description: 'CORNER STORE' }), 'CORNER STORE');
+  assert.equal(teachDescriptor({ merchant_name: '', description: 'SAFEWAY 1467' }), 'SAFEWAY 1467');
+  assert.equal(teachDescriptor({ merchant_name: '76', description: '' }), '', 'nothing to key on stays empty');
+  assert.equal(teachDescriptor(null), '');
+});
+
+test('teachDescriptor keeps a payee that already keys (current behavior pinned)', () => {
+  assert.equal(teachDescriptor({ merchant_name: 'Starbucks', description: 'X' }), 'Starbucks');
+  assert.equal(teachDescriptor({ merchant_name: 'SAFEWAY #1234', description: 'POS 99' }), 'SAFEWAY #1234');
+});
+
+test('a rule taught from an all-digit-payee row fires on the next sync\'s descriptor', () => {
+  const row = { merchant_name: '76', description: '76 - 0254 FUEL SEATTLE WA', amount: 61.2 };
+  const key = merchantKey(teachDescriptor(row));
+  assert.equal(key, 'FUEL SEATTLE WA');
+  // api/sync.js builds `${payee} ${description}` when they differ.
+  assert.equal(guessCategory('76 76 - 0254 FUEL SEATTLE WA', { rules: { [key]: 'Gas' }, amount: 61.2 }), 'Gas');
 });

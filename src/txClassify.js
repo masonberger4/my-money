@@ -147,6 +147,18 @@ export function merchantKey(descriptor) {
     .join(' ');
 }
 
+// The string a TEACH keys on, from a shaped transaction row: the merchant
+// name, unless merchantKey reduces it to nothing — an all-digit payee such as
+// a "76" gas station, or a punctuation-only one — in which case the raw
+// description. Without the fallback those rows had an empty key: no "Always"
+// offer and no teach-queue entry, while the write path (payee + description)
+// keys them on the description's words. Masked payees never get here:
+// bankName's looksMasked already swapped them for the description.
+export function teachDescriptor(t) {
+  const primary = t?.merchant_name || '';
+  return merchantKey(primary) ? primary : (t?.description || '');
+}
+
 // The trim-the-key editor's guard (the recorded honest fix for the
 // over-specific-key limit — see CLAUDE.md's amount-scoped Convention): the
 // learn confirm lets the user SHORTEN the key they are about to teach, but

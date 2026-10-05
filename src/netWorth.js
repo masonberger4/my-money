@@ -20,24 +20,60 @@
 // date contributes 0 (there is nothing honest to claim for it).
 import { displayBalance } from './accountBalance.js';
 
-export function netWorthSeries(snapshots, accounts) {
-  const typeById = new Map();
-  for (const a of accounts || []) typeById.set(a.id, a.type);
-  const rows = (snapshots || [])
-    .filter(s => typeById.has(s.account_id))
+// The ONE carry-forward fold both series share: sort by captured_on (stable,
+// so same-day rows keep their incoming order), keep each account's LAST value,
+// and emit one point per distinct date whose total sums every account's
+// latest value so far. `valueOf(row)` picks the sign convention.
+function foldCarryForward(rows, valueOf) {
+  const sorted = rows
     .slice()
     .sort((a, b) => (a.captured_on < b.captured_on ? -1 : a.captured_on > b.captured_on ? 1 : 0));
-  const last = new Map(); // account_id -> signed (displayed) balance
+  const last = new Map(); // account_id -> value
   const points = [];
   let cur = null;
-  for (const s of rows) {
-    last.set(s.account_id, displayBalance(s.balance, typeById.get(s.account_id)));
+  for (const s of sorted) {
+    last.set(s.account_id, valueOf(s));
     let total = 0;
     for (const v of last.values()) total += v;
     if (cur && cur.date === s.captured_on) cur.total = total;
     else points.push((cur = { date: s.captured_on, total }));
   }
   return points;
+}
+
+export function netWorthSeries(snapshots, accounts) {
+  const typeById = new Map();
+  for (const a of accounts || []) typeById.set(a.id, a.type);
+  const rows = (snapshots || []).filter(s => typeById.has(s.account_id));
+  return foldCarryForward(rows, s => displayBalance(s.balance, typeById.get(s.account_id)));
+}
+
+// The Debt tab's "Total owed over time": the same carry-forward fold over the
+// debt accounts' snapshots, but in the STORED sign (positive = owed) — the
+// caller flips only at the endpoint labels via displayBalance, never the
+// line. `debtIds` (optional) limits the fold to those accounts; omitted, every
+// row counts. Sorts by date itself instead of trusting the adapter's
+// `.order('captured_on')` (it used to be an inline copy in Dashboard.jsx that
+// did).
+export function debtTotalSeries(snapshots, debtIds) {
+  const ids = debtIds ? new Set(debtIds) : null;
+  const rows = (snapshots || []).filter(s => s && (!ids || ids.has(s.account_id)));
+  return foldCarryForward(rows, s => Number(s.balance) || 0);
+}
+
+// SVG polyline points for a W×H sparkline (2px stroke inset by 4px top and
+// bottom), shared by the Debt and Net-worth cards so their scales can't drift.
+// The span floor is sign-safe (`Math.abs(max)`), so an all-negative series —
+// net worth underwater, or every card in credit — still fills the height
+// instead of squashing into the bottom of the chart. Fewer than 2 values
+// yields '' (nothing to draw a line between).
+export function sparklinePoints(values, W, H) {
+  const v = (values || []).map(x => Number(x) || 0);
+  if (v.length < 2) return '';
+  const max = Math.max(...v);
+  const min = Math.min(...v);
+  const span = Math.max(max - min, Math.abs(max) * 0.02, 1);
+  return v.map((x, i) => `${(i / (v.length - 1)) * W},${H - 4 - ((x - min) / span) * (H - 8)}`).join(' ');
 }
 
 // Clamp a folded series to a display window WITHOUT losing the carry that

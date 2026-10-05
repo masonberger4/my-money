@@ -46,3 +46,62 @@ export function longDate(iso) {
   if (!month || !day) return s;
   return `${month} ${day}, ${m[1]}`;
 }
+
+// The Spending list's account-chip filter AS IT APPLIES NOW: the id when it
+// names a visible account, else null. Hidden accounts are excluded at the
+// query level, so a filter left pointing at one (hidden here, or by the other
+// phone and arriving through a reload) narrowed the list to rows that can't
+// exist — "No transactions for this account" every month — while the chip row,
+// which lists visible accounts only, lost the chip that could clear it (and
+// unmounts entirely with one visible account left). Derived at render, not
+// cleared in an effect: no transient state, and it covers the other phone.
+export function liveAcctFilter(id, accounts) {
+  if (id == null) return null;
+  return (accounts || []).some(a => a && a.id === id && !a.hidden) ? id : null;
+}
+
+// The Spending list's empty-state sentence. `cat` is the category chip's
+// DISPLAY name (or null), `acct` whether an account chip is narrowing, `what`
+// the quoted query or "the filters", `loaded` how many search matches are on
+// hand, `hasMore` whether the server has more pages. The hasMore branch exists
+// so the app never claims a chip has nothing when it only looked at a
+// truncated page of matches — for EITHER chip: an account chip used to fall
+// through to "No transactions match" above a live Load more button.
+export function emptyListMessage({ searchActive, cat = null, acct = false, hasMore = false, loaded = 0, what = '' }) {
+  if (searchActive) {
+    if ((cat || acct) && hasMore) {
+      const subject = `${cat ? `${cat} ` : ''}transactions${acct ? ' for this account' : ''}`;
+      return `No ${subject} in the first ${loaded} matches for ${what} — try Load more.`;
+    }
+    if (cat) return `No ${cat} transactions match ${what}.`;
+    return `No transactions match ${what}.`;
+  }
+  if (cat && acct) return `No ${cat} transactions for this account this month.`;
+  if (cat) return `No ${cat} transactions this month.`;
+  if (acct) return 'No transactions for this account this month.';
+  return 'No transactions for this period.';
+}
+
+// The search header's count. With more pages on the server the number on hand
+// is a lower bound, so it says so ("12+ matches") instead of a flat "0 matches"
+// above a Load more button that could still turn some up.
+export function matchCountLabel(n, hasMore = false) {
+  return `${n}${hasMore ? '+' : ''} match${n === 1 && !hasMore ? '' : 'es'}`;
+}
+
+// Re-sort shaped rows by their EFFECTIVE date, newest first, after an in-place
+// date edit (patchAllTxLists on `user_date`). groupByDay preserves the
+// caller's order by contract, and the account page and search results are
+// never refetched after an edit, so a row whose date moved stayed where it was
+// under its new header — "October 3 | September 29 | October 1". STABLE and
+// date-only on purpose: rows that didn't move keep their exact order (the
+// account page's query has no id tiebreak, so imposing one would reshuffle
+// untouched days), and the moved row lands in its new day by its old relative
+// position. Returns a new array; the input is not mutated.
+export function resortByEffectiveDate(rows) {
+  const key = t => String((t && (t.transaction_date || t.date)) || '');
+  return [...(rows || [])].sort((a, b) => {
+    const da = key(a), db = key(b);
+    return da === db ? 0 : da < db ? 1 : -1;
+  });
+}

@@ -386,3 +386,44 @@ test('isIncome over a real pairing: the washed leg drops out, the paycheck stays
   assert.deepEqual(rows.filter(isIncome), [paycheck]);
   assert.equal(cashIncome(rows), 2200);
 });
+
+// --- No screen may claim the subtype moves a total ----------------------------
+// The unified model above counts savings outflows exactly like checking ones;
+// the subtype is a label. Three screens still told the household the opposite
+// (Mason's deferred 2026-09-08 copy item) — marking an account Savings excluded
+// nothing. Pinned so the retired rule can't come back in UI copy.
+test('UI copy never says Checking/Savings decides what counts as spending', async () => {
+  const { readFileSync } = await import('node:fs');
+  // Code and copy only: a comment recording the OLD wording is history, not UI.
+  const read = p => readFileSync(new URL(`../${p}`, import.meta.url), 'utf8')
+    .replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+  const retired = [
+    /savings<\/em>\s*never does/i,
+    /savings outflows never count/i,
+    /checking\/savings split drives/i,
+    /counts as spending in Trends;\s*money out of/i,
+  ];
+  for (const file of ['src/components/Dashboard.jsx', 'src/components/CsvImport.jsx', 'src/components/SimpleFinConnect.jsx']) {
+    const src = read(file);
+    for (const re of retired) assert.doesNotMatch(src, re, `${file} repeats the retired subtype rule (${re})`);
+  }
+  // The account page says what the type choice does change.
+  assert.match(read('src/components/Dashboard.jsx'), /Checking vs Savings is only a label/);
+});
+
+// Same family, the type rather than the subtype: a card typed as a bank
+// account does NOT start counting its purchases (isSpend needs only amount > 0
+// on a non-loan account, so they count either way). What it breaks is refunds
+// (income instead of netting), payment-worded purchases (vetoed) and the
+// balance sign — conventions.md "Why the type matters". The connect modal's
+// note and the Unhide confirm both still said "every purchase".
+test('UI copy never says a mistyped card turns every purchase into spending', async () => {
+  const { readFileSync } = await import('node:fs');
+  const read = p => readFileSync(new URL(`../${p}`, import.meta.url), 'utf8')
+    .replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+  for (const file of ['src/components/Dashboard.jsx', 'src/components/SimpleFinConnect.jsx', 'src/unhideConfirm.js']) {
+    assert.doesNotMatch(read(file), /every\s+purchase\s+(?:into|counts?)\b/i, `${file} repeats the retired "every purchase" claim`);
+  }
+  // The connect modal's hidden-accounts note says what does go wrong.
+  assert.match(read('src/components/SimpleFinConnect.jsx'), /counts its refunds as income/);
+});

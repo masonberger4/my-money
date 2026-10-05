@@ -320,8 +320,8 @@ export default function SimpleFinConnect({ onClose, onConnected }) {
                     <strong style={{ color: "var(--text)" }}> hidden</strong>, so they don't touch any totals yet.
                     <br /><br />
                     On the Accounts tab: open each one, check its <strong style={{ color: "var(--text)" }}>type</strong> is
-                    right (SimpleFIN doesn't send one — it's guessed from the name, and the checking/savings split drives
-                    Trends), then unhide it.
+                    right (SimpleFIN doesn't send one — it's guessed from the name, and Bank vs Credit card decides how
+                    refunds and payments count), then unhide it.
                   </div>
                   {result.warning && (
                     <div style={{ fontSize: 11, color: "var(--warn)", background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 8, padding: "10px 12px", marginTop: 14, lineHeight: 1.5, textAlign: "left" }}>
@@ -374,7 +374,8 @@ export default function SimpleFinConnect({ onClose, onConnected }) {
                   <div style={{ ...note, background: "var(--bg)", borderRadius: 8, padding: "10px 12px" }}>
                     New accounts arrive <strong style={{ color: "var(--text)" }}>hidden</strong> and change nothing until
                     you unhide them. SimpleFIN doesn't send an account type, so it's guessed from the name — and a card
-                    mistaken for a checking account turns every purchase into household spending. Check the type on the
+                    mistaken for a bank account counts its refunds as income, can drop purchases that look like card
+                    payments, and shows its balance as money you have instead of money you owe. Check the type on the
                     account screen, then unhide.
                   </div>
                 </>

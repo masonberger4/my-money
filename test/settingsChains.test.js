@@ -10,6 +10,7 @@
 // STORED value rather than component state, and the two rows' independence.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import { makeSettingsChains } from '../src/adapters/settingsIO.js';
 import { makeEnvPaceChain } from '../src/adapters/envelopeIO.js';
@@ -215,6 +216,89 @@ test('a CORRUPT registry row reads as empty (tolerant parse), unlike a FAILED re
   assert.deepEqual(await updateCategoryColor('Gas', '#378ADD'), { Gas: '#378ADD' });
 });
 
+// --- tax:maps (2026-10 audit) ---------------------------------------------------
+// The Tax tab wrote this row as a whole map rebuilt from component state: a
+// failed Tax-tab read degraded state to "no mappings" and the first edit then
+// wiped every stored Schedule E line + deduction pick, and a phone holding an
+// older read erased the other phone's newer mapping with no error.
+
+const taxMaps = (emap = {}, dmap = {}) => JSON.stringify({ emap, dmap });
+
+test('WIPE-PREVENTION REGRESSION: a failed read aborts a tax-map edit, and the next edit merges over the stored maps — never a bare singleton', async () => {
+  const t = makeSettingsTable({
+    'tax:maps': taxMaps({ P: { Repairs: 14, Insurance: 9 }, Q: { Rent: 'rents' } }, { Gifts: 'charitable' }),
+  });
+  const { setTaxMapEntry } = makeSettingsChains(t.db);
+
+  t.failNextRead = true;
+  await assert.rejects(() => setTaxMapEntry('P', 'Utilities', 17), /read blip/);
+  assert.deepEqual(t.writes, [], 'nothing may be written off a failed read');
+
+  const merged = await setTaxMapEntry('P', 'Utilities', 17);
+  const want = {
+    emap: { P: { Repairs: 14, Insurance: 9, Utilities: 17 }, Q: { Rent: 'rents' } },
+    dmap: { Gifts: 'charitable' },
+  };
+  assert.deepEqual(merged, want);
+  assert.equal(t.writes.length, 1);
+  assert.deepEqual(JSON.parse(t.writes[0].value), want, 'the write carries every stored mapping');
+});
+
+test('a tax-map edit adopts the other phone\'s mapping instead of erasing it', async () => {
+  // Phone B already stored P.Repairs; phone A (holding an older read) maps
+  // Insurance. The stored row must end with both.
+  const t = makeSettingsTable({ 'tax:maps': taxMaps({ P: { Repairs: 14 } }) });
+  const { setTaxMapEntry } = makeSettingsChains(t.db);
+  const merged = await setTaxMapEntry('P', 'Insurance', 9);
+  assert.deepEqual(merged.emap, { P: { Repairs: 14, Insurance: 9 } });
+  assert.deepEqual(JSON.parse(t.rows['tax:maps']).emap, { P: { Repairs: 14, Insurance: 9 } });
+});
+
+test('two quick same-device tax-map edits serialize and both survive', async () => {
+  const t = makeSettingsTable();
+  t.readDelay = 5;
+  const { setTaxMapEntry, setDeductionMapEntry } = makeSettingsChains(t.db);
+  await Promise.all([
+    setTaxMapEntry('P', 'Repairs', 14),
+    setTaxMapEntry('P', 'Insurance', 9),
+    setDeductionMapEntry('Gifts', 'charitable'),
+  ]);
+  assert.deepEqual(JSON.parse(t.rows['tax:maps']), {
+    emap: { P: { Repairs: 14, Insurance: 9 } },
+    dmap: { Gifts: 'charitable' },
+  });
+});
+
+test('removing a tax mapping deletes only its own key; a dmap edit leaves emap alone and vice versa', async () => {
+  const t = makeSettingsTable({
+    'tax:maps': taxMaps({ P: { Repairs: 14, Insurance: 9 }, Q: { Taxes: 16 } }, { Gifts: 'charitable', Doctor: 'medical' }),
+  });
+  const { setTaxMapEntry, setDeductionMapEntry } = makeSettingsChains(t.db);
+  const a = await setTaxMapEntry('P', 'Repairs', null);
+  assert.deepEqual(a.emap, { P: { Insurance: 9 }, Q: { Taxes: 16 } });
+  assert.deepEqual(a.dmap, { Gifts: 'charitable', Doctor: 'medical' }, 'an emap edit never touches dmap');
+  const b = await setDeductionMapEntry('Doctor', null);
+  assert.deepEqual(b.dmap, { Gifts: 'charitable' });
+  assert.deepEqual(b.emap, { P: { Insurance: 9 }, Q: { Taxes: 16 } }, 'a dmap edit never touches emap');
+});
+
+test('Dashboard writes tax:maps only through the chain, and its load adopts the stored row', () => {
+  const src = readFileSync(new URL('../src/components/Dashboard.jsx', import.meta.url), 'utf8');
+  assert.doesNotMatch(src, /setSetting\(\s*["']tax:maps["']/, 'no whole-map write from component state');
+  assert.match(src, /setTaxMapEntry\(/);
+  assert.match(src, /setDeductionMapEntry\(/);
+  assert.doesNotMatch(src, /getSetting\(\s*["']tax:maps["']\s*\)\.catch\(\s*\(\)\s*=>\s*null\s*\)/,
+    'a FAILED read must not masquerade as "no mappings"');
+  assert.doesNotMatch(src, /if\(prev\)return prev; \/\/ don't clobber/,
+    'a refetch must take up the stored value (the other phone\'s mappings)');
+});
+
+test('a CORRUPT tax:maps row reads as empty (tolerant parse), unlike a FAILED read', async () => {
+  const t = makeSettingsTable({ 'tax:maps': '{not json' });
+  const { setTaxMapEntry } = makeSettingsChains(t.db);
+  assert.deepEqual(await setTaxMapEntry('P', 'Repairs', 14), { emap: { P: { Repairs: 14 } }, dmap: {} });
+});
+
 // --- row independence -------------------------------------------------------------
 
 test('the two sites are independent rows: each chain touches only its own key', async () => {
@@ -228,6 +312,15 @@ test('the two sites are independent rows: each chain touches only its own key', 
   );
   assert.deepEqual(JSON.parse(t.rows['rec:ignore']), ['netflix']);
   assert.deepEqual(JSON.parse(t.rows['asst:chats']).map(c => c.id), ['another', 'saved']);
+});
+
+test('tax:maps is its own row: its chain never touches the dash:* registry rows', async () => {
+  const t = makeSettingsTable({ 'dash:names': JSON.stringify({ Food: 'Dining' }) });
+  const { setTaxMapEntry, updateCategoryAlias } = makeSettingsChains(t.db);
+  await Promise.all([setTaxMapEntry('P', 'Food', 14), updateCategoryAlias('Gas', 'Fuel')]);
+  assert.deepEqual(t.writes.map(w => w.key).sort(), ['dash:names', 'tax:maps']);
+  assert.deepEqual(JSON.parse(t.rows['dash:names']), { Food: 'Dining', Gas: 'Fuel' });
+  assert.deepEqual(JSON.parse(t.rows['tax:maps']).emap, { P: { Food: 14 } });
 });
 
 // --- 2026-09-04 audit: env:pace needed the same discipline as rec:ignore ----
