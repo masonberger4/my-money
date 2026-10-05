@@ -717,35 +717,48 @@ export async function getCategoryRules({ client = supabase } = {}) {
 // unique indexes (`... where amount is null` / `... where amount is not null`,
 // migration 20260805000002), and ON CONFLICT cannot infer a partial index —
 // PostgREST would answer "no unique or exclusion constraint matching the ON
-// CONFLICT specification". So the write deletes the exact
-// (merchant_key, amount) slot and inserts. Teaching a merchant is a rare,
-// deliberate user action, not a hot path, so two round trips are fine — and
-// the delete is slot-scoped, so it can never take out the sibling rule for the
-// same merchant at a different amount.
+// CONFLICT specification". So the write is a slot-scoped UPDATE-then-INSERT:
+// update the exact (merchant_key, amount) slot, and insert only when no row
+// came back. NEVER a delete first — the insert is a POST, which the retrying
+// fetch deliberately never re-sends, so a delete-then-insert whose insert died
+// on the wire left the merchant with NO rule (every new row Uncategorized
+// while the user believed the old rule held). An update leaves the slot
+// either old or new, never empty. A 23505 on the insert is another phone
+// teaching the same slot in the same moment: its row exists now, so re-run
+// the update once (last writer wins, as before) instead of telling this
+// phone "Couldn't save". Slot-scoped either way, so it can never touch the
+// sibling rule for the same merchant at a different amount.
 export async function setCategoryRule(descriptor, category, amount = null, { client = supabase } = {}) {
   const key = merchantKey(descriptor);
   if (!key) throw new Error('Cannot learn a rule from an empty description');
   const amt = amount == null || amount === '' ? null : Number(amount);
   const scoped = amt != null && Number.isFinite(amt);
+  const updatedAt = new Date().toISOString();
 
-  const clearSlot = async () => {
-    const del = client.from('category_rules').delete().eq('merchant_key', key);
-    if (!rulesHaveAmount) return del; // pre-migration: one rule per merchant
-    return scoped ? del.eq('amount', amt) : del.is('amount', null);
-  };
-  let { error: delErr } = await clearSlot();
+  // Pre-migration (no amount column): one rule per merchant, no slot filter.
+  const slot = q => (!rulesHaveAmount ? q : scoped ? q.eq('amount', amt) : q.is('amount', null));
+  const updateSlot = () =>
+    slot(client.from('category_rules').update({ category, updated_at: updatedAt }).eq('merchant_key', key))
+      .select('merchant_key');
+  let { data, error } = await updateSlot();
   // Pre-migration there is no amount column: degrade to the old
   // one-rule-per-merchant behaviour rather than failing the teach outright.
-  if (delErr && rulesHaveAmount && isMissingColumnError(delErr, 'amount')) {
+  if (error && rulesHaveAmount && isMissingColumnError(error, 'amount')) {
     rulesHaveAmount = false;
-    ({ error: delErr } = await clearSlot());
+    ({ data, error } = await updateSlot());
   }
-  if (delErr) throw delErr;
-
-  const row = { merchant_key: key, category, updated_at: new Date().toISOString() };
-  if (scoped && rulesHaveAmount) row.amount = amt;
-  const { error } = await client.from('category_rules').insert(row);
   if (error) throw error;
+  if ((data || []).length) return key;
+
+  const row = { merchant_key: key, category, updated_at: updatedAt };
+  if (scoped && rulesHaveAmount) row.amount = amt;
+  const { error: insErr } = await client.from('category_rules').insert(row);
+  if (insErr) {
+    if (insErr.code !== '23505') throw insErr;
+    const retry = await updateSlot();
+    if (retry.error) throw retry.error;
+    if (!(retry.data || []).length) throw insErr;
+  }
   return key;
 }
 

@@ -497,15 +497,17 @@ test('a scoped rule cannot see amounts if the page omits the column — so the p
 function fakeRulesClient(script, calls = []) {
   return {
     from(table) {
-      const q = { table, op: 'select', payload: null, filters: [], columns: null };
+      const q = { table, op: 'select', payload: null, filters: [], columns: null, returning: null, orders: [], range: null };
       const b = {
-        select(cols) { if (q.op === 'select') q.columns = cols; return b; },
+        // .select() after a write is PostgREST's return=representation.
+        select(cols) { if (q.op === 'select') q.columns = cols; else q.returning = cols; return b; },
         insert(p) { q.op = 'insert'; q.payload = p; return b; },
+        update(p) { q.op = 'update'; q.payload = p; return b; },
         delete() { q.op = 'delete'; return b; },
         eq(c, v) { q.filters.push(['eq', c, v]); return b; },
         is(c, v) { q.filters.push(['is', c, v]); return b; },
-        order() { return b; },
-        range() { return b; },
+        order(c, o) { q.orders.push([c, o ?? null]); return b; },
+        range(f, t) { q.range = [f, t]; return b; },
         then(resolve, reject) {
           calls.push(q);
           if (!script.length) throw new Error(`fakeRulesClient: unscripted ${q.op} on ${q.table}`);
@@ -553,32 +555,139 @@ test('getCategoryRules groups multiple rows per key into { amount, category } en
   assert.equal(matchLearnedRule('ZELLE TRANSFER TO SMITH', rules, 45), 'Transfers');
 });
 
-test('setCategoryRule writes the exact slot: delete .eq(amount) then insert', async () => {
+test('setCategoryRule writes the exact slot: update .eq(amount), insert only when 0 rows came back', async () => {
   const calls = [];
-  const client = fakeRulesClient([{ error: null }, { error: null }], calls);
+  const client = fakeRulesClient([{ data: [], error: null }, { error: null }], calls);
   await setCategoryRule('Zelle Transfer to Smith', 'Rent', 1800, { client });
 
-  assert.equal(calls[0].op, 'delete');
+  assert.equal(calls[0].op, 'update');
   assert.deepEqual(calls[0].filters, [
     ['eq', 'merchant_key', 'ZELLE TRANSFER TO SMITH'],
     ['eq', 'amount', 1800],
   ]);
+  assert.equal(calls[0].payload.category, 'Rent');
+  assert.ok(calls[0].returning, 'the update must return rows, or 0-matched is unknowable');
   assert.equal(calls[1].op, 'insert');
   assert.equal(calls[1].payload.amount, 1800);
   assert.equal(calls[1].payload.category, 'Rent');
   // Never an upsert: ON CONFLICT cannot infer a partial unique index.
   assert.equal(calls.some(c => c.op === 'upsert'), false);
+  // And never a delete: a delete whose follow-up insert dies leaves no rule.
+  assert.equal(calls.some(c => c.op === 'delete'), false);
 });
 
-test('an any-amount setCategoryRule scopes its delete with .is(amount, null)', async () => {
+test('an any-amount setCategoryRule scopes its update with .is(amount, null)', async () => {
   const calls = [];
-  const client = fakeRulesClient([{ error: null }, { error: null }], calls);
+  const client = fakeRulesClient([{ data: [], error: null }, { error: null }], calls);
   await setCategoryRule('Safeway #1234', 'Groceries', null, { client });
   assert.deepEqual(calls[0].filters, [
     ['eq', 'merchant_key', 'SAFEWAY'],
     ['is', 'amount', null],
   ]);
   assert.equal('amount' in calls[1].payload, false);
+});
+
+test('re-teaching an existing slot is ONE update — no insert, no delete', async () => {
+  const calls = [];
+  const client = fakeRulesClient([{ data: [{ merchant_key: 'SAFEWAY' }], error: null }], calls);
+  assert.equal(await setCategoryRule('Safeway', 'Household', null, { client }), 'SAFEWAY');
+  assert.deepEqual(calls.map(c => c.op), ['update']);
+});
+
+test('insert 23505 (another phone taught the same slot first) re-runs the update once', async () => {
+  const dup = { code: '23505', message: 'duplicate key value violates unique constraint "category_rules_any_amount_key"' };
+  const calls = [];
+  const client = fakeRulesClient([
+    { data: [], error: null },
+    { data: null, error: dup },
+    { data: [{ merchant_key: 'SAFEWAY' }], error: null },
+  ], calls);
+  assert.equal(await setCategoryRule('Safeway', 'Groceries', null, { client }), 'SAFEWAY');
+  assert.deepEqual(calls.map(c => c.op), ['update', 'insert', 'update']);
+  assert.deepEqual(calls[2].filters, calls[0].filters, 'the retry is the same slot-scoped update');
+
+  // The retry still matching nothing is a real failure — surfaced, not swallowed.
+  const calls2 = [];
+  const c2 = fakeRulesClient([{ data: [], error: null }, { data: null, error: dup }, { data: [], error: null }], calls2);
+  await assert.rejects(() => setCategoryRule('Safeway', 'Groceries', null, { client: c2 }), e => e === dup);
+});
+
+test('an update error that is not a missing column throws and never inserts', async () => {
+  const denied = { code: '42501', message: 'permission denied for table category_rules' };
+  const calls = [];
+  const client = fakeRulesClient([{ data: null, error: denied }], calls);
+  await assert.rejects(() => setCategoryRule('Safeway', 'Groceries', null, { client }), e => e === denied);
+  assert.equal(calls.length, 1);
+});
+
+// A stateful category_rules table (the datalayer repro shape): filters really
+// select rows, writes really change them, and `failInsert` models the insert
+// POST dying on the wire — the one write netRetry never re-sends.
+function makeRulesTable(rows, { failInsert = false, failUpdate = false } = {}) {
+  const t = { rows: rows.map(r => ({ amount: null, ...r })), ops: [] };
+  t.client = {
+    from() {
+      const q = { op: 'select', payload: null, preds: [] };
+      const b = {
+        select() { return b; },
+        insert(p) { q.op = 'insert'; q.payload = p; return b; },
+        update(p) { q.op = 'update'; q.payload = p; return b; },
+        delete() { q.op = 'delete'; return b; },
+        eq(c, v) { q.preds.push(r => r[c] === v); return b; },
+        is(c, v) { q.preds.push(r => (r[c] ?? null) === v); return b; },
+        order() { return b; },
+        range() { return b; },
+        then(resolve, reject) {
+          t.ops.push(q.op);
+          const hit = r => q.preds.every(p => p(r));
+          const loadFailed = { message: 'TypeError: Load failed', details: '', hint: '', code: '' };
+          let out;
+          if (q.op === 'select') out = { data: t.rows.filter(hit), error: null };
+          else if (q.op === 'delete') { t.rows = t.rows.filter(r => !hit(r)); out = { data: null, error: null }; }
+          else if (q.op === 'update') {
+            if (failUpdate) out = { data: null, error: loadFailed };
+            else {
+              const matched = t.rows.filter(hit);
+              for (const r of matched) Object.assign(r, q.payload);
+              out = { data: matched.map(r => ({ merchant_key: r.merchant_key })), error: null };
+            }
+          } else if (q.op === 'insert') {
+            if (failInsert) out = { data: null, error: loadFailed };
+            else { t.rows.push({ amount: null, ...q.payload }); out = { data: null, error: null }; }
+          }
+          return Promise.resolve(out).then(resolve, reject);
+        },
+      };
+      return b;
+    },
+  };
+  return t;
+}
+
+test('REGRESSION: a re-teach on a flaky connection never leaves the merchant with no rule', async () => {
+  // The delete-then-insert shape deleted COSTCO's rule, then lost the insert:
+  // "rules left for COSTCO: []", every new COSTCO row Uncategorized.
+  const t = makeRulesTable([{ merchant_key: 'COSTCO', category: 'Groceries' }], { failInsert: true });
+  await setCategoryRule('COSTCO', 'Household', null, { client: t.client });
+  assert.deepEqual(t.rows.filter(r => r.merchant_key === 'COSTCO').map(r => r.category), ['Household'],
+    'the existing slot is rewritten in place — the insert is never needed');
+  assert.deepEqual(t.ops, ['update']);
+});
+
+// postgrest-js hands up a plain object, not an Error — match the message.
+const isLoadFailed = e => /Load failed/.test(e?.message);
+
+test('a failed write leaves the prior rule exactly as it was', async () => {
+  // The update itself dies: the old rule stands, the teach reports failure.
+  const t1 = makeRulesTable([{ merchant_key: 'COSTCO', category: 'Groceries' }], { failUpdate: true });
+  await assert.rejects(() => setCategoryRule('COSTCO', 'Household', null, { client: t1.client }), isLoadFailed);
+  assert.deepEqual(t1.rows, [{ merchant_key: 'COSTCO', category: 'Groceries', amount: null }]);
+
+  // A NEW scoped slot whose insert dies: the any-amount sibling is untouched.
+  const t2 = makeRulesTable([{ merchant_key: 'COSTCO', category: 'Groceries' }], { failInsert: true });
+  await assert.rejects(() => setCategoryRule('COSTCO', 'Household', 160, { client: t2.client }), isLoadFailed);
+  assert.deepEqual(t2.rows, [{ merchant_key: 'COSTCO', category: 'Groceries', amount: null }]);
+  assert.deepEqual(t2.ops, ['update', 'insert']);
 });
 
 test('deleteCategoryRule removes only the matching slot', async () => {
@@ -622,9 +731,10 @@ test('getCategoryRules degrades when the amount COLUMN is missing', async () => 
 
 test('with the column missing, writes stop sending and filtering on it', async () => {
   const calls = [];
-  const client = fakeRulesClient([{ error: null }, { error: null }], calls);
+  const client = fakeRulesClient([{ data: [], error: null }, { error: null }], calls);
   await setCategoryRule('Safeway', 'Groceries', 1800, { client });
   // no .is/.eq on amount at all, and the insert omits the column
+  assert.equal(calls[0].op, 'update');
   assert.deepEqual(calls[0].filters, [['eq', 'merchant_key', 'SAFEWAY']]);
   assert.equal('amount' in calls[1].payload, false);
 
@@ -689,7 +799,7 @@ test('an existing longer-key rule keeps its rows through a shorter prefix apply'
 
 test('re-teaching a key replaces its own slot in the bag — legacy string shape included', async () => {
   // The bag's old any-amount entry for the SAME key must be displaced by the
-  // taught one (setCategoryRule's delete-then-insert), not shadow it.
+  // taught one (setCategoryRule's slot-scoped write), not shadow it.
   const rules = { ZELLE: 'Shopping' }; // legacy string shape, still read everywhere
   const db = makeDb([
     { id: 1, description: 'ZELLE TO MOM', amount: 200, mapped_category: 'Shopping' },
