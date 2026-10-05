@@ -715,6 +715,20 @@ test('listCategoryRules returns amount on the rows, coerced to a number', async 
   assert.equal(rows[0].amount, 1800);
 });
 
+test('listCategoryRules pages in a TOTAL order: merchant_key, then amount nulls first', async () => {
+  // merchant_key alone ties once amount-scoped rules exist (several rows per
+  // key), and an OFFSET page boundary inside a tie can list one rule twice
+  // and hide another.
+  const calls = [];
+  const client = fakeRulesClient([{ data: [], error: null }], calls);
+  await listCategoryRules({ client });
+  assert.deepEqual(calls[0].orders, [
+    ['merchant_key', { ascending: true }],
+    ['amount', { ascending: true, nullsFirst: true }],
+  ]);
+  assert.ok(calls[0].range, 'paged');
+});
+
 // --- pre-migration degrade (flips the module flag — keep LAST) ---------------
 
 test('getCategoryRules degrades when the amount COLUMN is missing', async () => {
@@ -751,6 +765,9 @@ test('listCategoryRules drops the amount column rather than reading it as a miss
   ], calls);
   const rows = await listCategoryRules({ client });
   assert.doesNotMatch(calls[0].columns, /amount/);
+  // The amount ORDER goes with the column — ordering on it would fail the
+  // same way selecting it does.
+  assert.deepEqual(calls[0].orders, [['merchant_key', { ascending: true }]]);
   assert.equal(rows[0].amount, null);
   assert.notEqual(rows, null);
 });

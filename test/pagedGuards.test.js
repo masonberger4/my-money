@@ -73,6 +73,37 @@ test('source scan: no unguarded paged loop remains in dataAdapter.js', () => {
   }
 });
 
+test('source scan: every paged read in dataAdapter.js is TOTALLY ordered', () => {
+  // OFFSET paging over an unordered — or ties-ordered — result set lets
+  // Postgres return rows in a different order per request, so a page
+  // boundary can drop or repeat rows (stored rows shown as "new" in the
+  // import preview, a Compare count off by one, a taught rule listed twice
+  // and another hidden). Every chain that ends in .range( must order, and an
+  // order on ONE column must be on a unique one; anything else needs a
+  // tiebreak .order( after it.
+  const src = readFileSync(fileURLToPath(new URL('../src/dataAdapter.js', import.meta.url)), 'utf8');
+  const UNIQUE = new Set(["'id'", "'plaid_tx_id'"]);
+  const def = src.indexOf('export async function pagedRows(');
+  const defEnd = src.indexOf('\n}\n', def);
+  const starts = [
+    ...[...src.matchAll(/for \(let from = 0; ; from \+= page\)/g)].map(m => m.index),
+    ...[...src.matchAll(/\bpagedRows\(/g)].map(m => m.index),
+  ].filter(i => i < def || i > defEnd); // the generic loop itself orders nothing
+  assert.ok(starts.length >= 8, `scan regressed: found ${starts.length} paged reads`);
+  for (const start of starts) {
+    const body = src.slice(start, src.indexOf('\n}\n', start));
+    const chains = body.split('.range(').slice(0, -1);
+    assert.ok(chains.length, `paged read without a .range(:\n${body.slice(0, 300)}`);
+    for (const chain of chains) {
+      const orders = [...chain.matchAll(/\.order\(([^,)]+)/g)].map(m => m[1].trim());
+      assert.ok(orders.length, `unordered paged read:\n${chain.slice(-400)}`);
+      if (orders.length === 1) {
+        assert.ok(UNIQUE.has(orders[0]), `paged read ordered only by non-unique ${orders[0]}:\n${chain.slice(-400)}`);
+      }
+    }
+  }
+});
+
 // ---- isMissingColumnError: the name check -----------------------------------
 
 test('isMissingColumnError matches only when the column NAME appears', () => {

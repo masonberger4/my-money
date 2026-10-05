@@ -788,15 +788,19 @@ export async function listCategoryRules({ client = supabase } = {}) {
   const rows = [];
   const page = 500;
   for (let from = 0; ; from += page) {
-    const { data, error } = await client
+    let q = client
       .from('category_rules')
       .select(rulesHaveAmount
         ? 'merchant_key, category, amount, source, updated_at'
         : 'merchant_key, category, source, updated_at')
       // Ordered paging: an unordered result set can drop or repeat rows across
-      // the boundary (the Session A guard class).
-      .order('merchant_key', { ascending: true })
-      .range(from, from + page - 1);
+      // the boundary (the Session A guard class). merchant_key alone is NOT a
+      // total order once amount-scoped rules exist (several rows per key);
+      // (merchant_key, amount nulls first) is, via the two partial unique
+      // indexes. Pre-migration the amount order goes with the amount column.
+      .order('merchant_key', { ascending: true });
+    if (rulesHaveAmount) q = q.order('amount', { ascending: true, nullsFirst: true });
+    const { data, error } = await q.range(from, from + page - 1);
     if (error) {
       // 416 on an exact-page-multiple result set is end-of-data, not failure.
       if (isRangeExhaustedError(error)) break;
@@ -1491,11 +1495,16 @@ export async function getExistingTxIds(accountId) {
   const sources = new Set();
   if (!accountId) return { ids, sources };
   let selectCols = transactionsHaveSource ? 'plaid_tx_id, source' : 'plaid_tx_id';
+  // Ordered on plaid_tx_id — unique per account (the upsert conflict target),
+  // so a TOTAL order: OFFSET paging an unordered set can drop or repeat a row
+  // at a page boundary, and a dropped id shows a stored row as "new" (or
+  // hides the 'pdf'/'csv' source the mixed-format warning keys on).
   const rows = await pagedRows(async (from, to) => {
     let { data, error } = await supabase
       .from('transactions')
       .select(selectCols)
       .eq('account_id', accountId)
+      .order('plaid_tx_id', { ascending: true })
       .range(from, to);
     if (error && selectCols !== 'plaid_tx_id' && isMissingColumnError(error, 'source')) {
       transactionsHaveSource = false;
@@ -1504,6 +1513,7 @@ export async function getExistingTxIds(accountId) {
         .from('transactions')
         .select(selectCols)
         .eq('account_id', accountId)
+        .order('plaid_tx_id', { ascending: true })
         .range(from, to));
     }
     return { data, error };
@@ -1563,6 +1573,10 @@ export async function getAccountTransactionsInRange(accountId, start, end) {
       .gte('date', start)
       .lte('date', end)
       .order('date', { ascending: true })
+      // Tiebreak: date alone is not a total order, so a page boundary inside
+      // a run of same-dated rows could drop or repeat one and skew Compare's
+      // matched/csvOnly/mismatch counts. plaid_tx_id is unique per account.
+      .order('plaid_tx_id', { ascending: true })
       .range(from, to)
   );
   return rows.map(r => ({ ...r, amount: Number(r.amount) }));
