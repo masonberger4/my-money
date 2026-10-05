@@ -43,6 +43,50 @@ export function resolveToday(value, nowMs = Date.now()) {
   return value;
 }
 
+// The reply body the Ask tab renders, shaped from the Messages API response.
+// Pure and exported for test/assistantModels.test.js.
+//
+// A max_tokens stop is SURFACED, never passed off as a complete answer.
+// Adaptive-thinking tokens are billed as output AND count against max_tokens,
+// so a hard question at high effort can spend the whole budget thinking: the
+// visible text then stops mid-sentence, or never starts. The first used to
+// read as a finished answer; the second fell through to "try rephrasing",
+// which blames the question for a budget problem. `truncated` rides along for
+// any caller that wants to branch on it; the note itself is in `reply`, so
+// the chat panel (which renders `reply` verbatim) needs no change to show it.
+// "Lower effort" is only offered where the model has an effort setting.
+export function shapeAssistantReply(response, { effortCapable = false } = {}) {
+  if (response.stop_reason === 'refusal') {
+    return { reply: "I can't help with that request.", stop_reason: 'refusal' };
+  }
+
+  const text = (response.content || [])
+    .filter(b => b.type === 'text')
+    .map(b => b.text)
+    .join('\n')
+    .trim();
+  const truncated = response.stop_reason === 'max_tokens';
+  const retry = effortCapable
+    ? 'ask again with a lower effort, or a narrower question'
+    : 'try a narrower question';
+
+  let reply;
+  if (!truncated) reply = text || 'I had trouble producing an answer — try rephrasing.';
+  else if (text) reply = `${text}\n\n(Cut off — this answer ran out of room. To get a complete one, ${retry}.)`;
+  else reply = `I ran out of room before I could answer — ${retry}.`;
+
+  return {
+    reply,
+    stop_reason: response.stop_reason,
+    ...(truncated ? { truncated: true } : {}),
+    usage: {
+      input_tokens: response.usage?.input_tokens,
+      output_tokens: response.usage?.output_tokens,
+      cache_read_input_tokens: response.usage?.cache_read_input_tokens,
+    },
+  };
+}
+
 // Per-household request throttle. In-memory and therefore BEST-EFFORT ONLY:
 // serverless instances are ephemeral and don't share memory, so a cold start
 // resets the window and concurrent instances each allow their own quota.
@@ -155,28 +199,7 @@ export default async function handler(req, res) {
 
     const response = await anthropic.messages.create(params);
 
-    if (response.stop_reason === 'refusal') {
-      return res.status(200).json({
-        reply: "I can't help with that request.",
-        stop_reason: 'refusal',
-      });
-    }
-
-    const reply = response.content
-      .filter(b => b.type === 'text')
-      .map(b => b.text)
-      .join('\n')
-      .trim();
-
-    return res.status(200).json({
-      reply: reply || 'I had trouble producing an answer — try rephrasing.',
-      stop_reason: response.stop_reason,
-      usage: {
-        input_tokens: response.usage.input_tokens,
-        output_tokens: response.usage.output_tokens,
-        cache_read_input_tokens: response.usage.cache_read_input_tokens,
-      },
-    });
+    return res.status(200).json(shapeAssistantReply(response, { effortCapable: modelCfg.effort }));
   } catch (err) {
     if (err instanceof Anthropic.AuthenticationError) {
       return res.status(500).json({ error: 'assistant_auth', message: 'Invalid ANTHROPIC_API_KEY.' });
