@@ -28,7 +28,7 @@ import { NAV_ITEMS, REFLECT_TABS, navForTab, pageTitle } from "../nav.js";
 import { groupByDay, longDate, liveAcctFilter, emptyListMessage, matchCountLabel, resortByEffectiveDate } from "../txList.js";
 import { TX_TYPES, txTypeLabel, allowedUserTypes } from "../txType.js";
 import { breakdownSegments, incomeVsSpendingInsight, incomeSections } from "../reflect.js";
-import { periodYM, localTodayIso, ordinalSuffix, monthLabel, shortDate, localShortDate, fmt, fmtX, fmtAuto, signed, monthYear, numericish } from "../format.js";
+import { periodYM, localTodayIso, localIsoDate, addLocalDays, ordinalSuffix, monthLabel, shortDate, localShortDate, fmt, fmtX, fmtAuto, signed, monthYear, numericish } from "../format.js";
 import { createSheetHistory } from "../sheetHistory.js";
 import { runSync, foregroundSyncDue } from "../sync.js";
 import { refreshTickPlan, pullFollowUp, createSyncHold } from "../loadPipeline.js";
@@ -2948,8 +2948,7 @@ export default function Dashboard({ refreshTick = 0 }) {
     // Clock for dueStatus: the real wall-clock day, computed local (not the
     // viewed month), because "is this subscription overdue?" is a question
     // about today, not about whatever month the dashboard is scrolled to.
-    const d=new Date();
-    const today=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+    const today=localTodayIso();
     getRecurringCandidates()
       .then(res=>{if(seq===recSeq.current)setRecurring(detectRecurring(res.transactions,today));})
       .catch(err=>{console.error(err);if(seq===recSeq.current)setRecurring([]);})
@@ -2972,8 +2971,7 @@ export default function Dashboard({ refreshTick = 0 }) {
     if(expLoadedEpoch.current===expEpoch)return;
     expLoadedEpoch.current=expEpoch;
     const seq=++expSeq.current;
-    const d=new Date();
-    const today=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+    const today=localTodayIso();
     getExpectedTransactions({today})
       .then(res=>{if(expSeq.current===seq)setExpected(res);})
       // Transient failure: keep whatever is on screen (undefined hides the
@@ -3016,7 +3014,7 @@ export default function Dashboard({ refreshTick = 0 }) {
           snaps=await getBalanceSnapshots(d.debts.map(a=>a.id),null);
         }catch(err){console.error("balance snapshots load failed",err);}
         try{
-          const since=new Date(Date.now()-365*86400000).toISOString().slice(0,10);
+          const since=addLocalDays(-365);
           series=await getNetWorthSeries(since);
         }catch(err){console.error("net worth load failed",err);}
         if(seq===debtSeq.current){setDebtSnaps(snaps);setNwSeries(series);setDebtData(d);}
@@ -3083,7 +3081,7 @@ export default function Dashboard({ refreshTick = 0 }) {
     patchBal(v,new Date().toISOString());
     updateManualBalance(a,v).then(async()=>{
       // History refresh, best-effort: the write appended a snapshot row.
-      const since=new Date(Date.now()-365*86400000).toISOString().slice(0,10);
+      const since=addLocalDays(-365);
       try{setNwSeries(await getNetWorthSeries(since));}
       catch(err){console.error("net worth refresh failed",err);}
       try{
@@ -4486,7 +4484,7 @@ export default function Dashboard({ refreshTick = 0 }) {
   // spending ahead of pace?" and "is this month over?" are questions about
   // the present moment, so they use today, not the viewed month
   // (envelopePace returns null unless today falls inside the viewed month).
-  const paceToday=(()=>{const d=new Date();return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;})();
+  const paceToday=localTodayIso();
   // Which income figure this month runs on (the hybrid rule, Mason 2026-08-13):
   // the month in progress budgets on the TYPED figure; a completed month reads
   // ACTUAL measured income. The month tag on actualInc rejects a stale month's
@@ -5063,8 +5061,7 @@ export default function Dashboard({ refreshTick = 0 }) {
             {/* At most ONE expected-bills line, only when nonzero; hidden
                 entirely pre-migration (expected null) or before load. */}
             {expected&&(()=>{
-              const limit=(()=>{const d=new Date();d.setDate(d.getDate()+7);
-                return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;})();
+              const limit=addLocalDays(7);
               const due=expected.pending.filter(r=>String(r.due_date)<=limit);
               if(!due.length)return null;
               const tot=due.reduce((s,r)=>s+(Number(r.amount)||0),0);
@@ -6714,7 +6711,7 @@ export default function Dashboard({ refreshTick = 0 }) {
           const extra=Math.max(0,Number(debtExtra)||0);
           const missingMin=included.filter(d=>!(Number(d.minimum_payment)>0));
           const plan=included.length?payoffWhatIf(included,{strategy:debtStrategy,extraMonthly:extra}):null;
-          const debtSince=new Date(Date.now()-365*86400000).toISOString().slice(0,10);
+          const debtSince=addLocalDays(-365);
           const startMonth=`${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,"0")}`;
           const freeMonth=plan?debtFreeMonth(startMonth,plan):null;
           // Total-owed history: carry each account's last-seen snapshot forward
@@ -7517,7 +7514,7 @@ export default function Dashboard({ refreshTick = 0 }) {
           const shownEnts=entities.filter(e=>!e.archived_at||txs.some(t=>t.effective_entity_id===e.id));
           const lineOptions=[["","Not mapped"],[RENTS_KEY,"Rents received (income)"],...SCHEDULE_E_LINES.map(l=>[String(l.line),`${l.line} · ${l.label}`])];
           const selStyleSm={fontSize:11,fontFamily:"inherit",color:"var(--text)",background:"var(--bg)",border:"1px solid var(--border)",borderRadius:8,padding:"4px 6px",cursor:"pointer",outline:"none",maxWidth:180};
-          const localToday=`${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,"0")}-${String(now.getDate()).padStart(2,"0")}`;
+          const localToday=localIsoDate(now);
           const amber=inkOn("#C08A2E",surf.card);
           return (
           <div style={{display:"flex",flexDirection:"column",gap:12}}>

@@ -14,7 +14,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import {
-  periodYM, localTodayIso, ordinalSuffix, monthLabel, shortDate, localShortDate,
+  periodYM, localTodayIso, localIsoDate, addLocalDays, ordinalSuffix, monthLabel, shortDate, localShortDate,
   fmt, fmtX, fmtAuto, signed, monthYear, numericish,
 } from '../src/format.js';
 
@@ -140,4 +140,38 @@ test('the −$0 guard changes no digits: rounding stays half away from zero', ()
   assert.equal(fmtX(-1234.56), '−$1,234.56');
   assert.equal(signed(0.01), '+$0.01');
   assert.equal(signed(-0.01), '−$0.01');
+});
+
+test('localIsoDate reads a Date\'s LOCAL calendar day', () => {
+  assert.equal(localIsoDate(new Date(2026, 9, 31, 23, 30)), '2026-10-31');
+  assert.equal(localIsoDate(new Date(2026, 0, 5)), '2026-01-05', 'zero-padded');
+  // 05:30Z on Nov 1 is still Oct 31, 10:30pm in Los Angeles — the evening
+  // the UTC slice called "tomorrow".
+  const late = new Date('2026-11-01T05:30:00Z');
+  assert.equal(localIsoDate(late), '2026-10-31');
+  assert.equal(late.toISOString().slice(0, 10), '2026-11-01', 'the UTC form this replaces');
+});
+
+test('addLocalDays steps calendar days on the wall clock, across months and DST', () => {
+  assert.equal(addLocalDays(1, new Date(2026, 9, 31, 23, 30)), '2026-11-01');
+  assert.equal(addLocalDays(7, new Date(2026, 9, 28, 12)), '2026-11-04', 'across the Nov 1 DST change');
+  assert.equal(addLocalDays(-1, new Date(2026, 0, 1, 0, 15)), '2025-12-31');
+  assert.equal(addLocalDays(-365, new Date(2026, 9, 5, 12)), '2025-10-05');
+  const base = new Date(2026, 9, 5, 9);
+  addLocalDays(10, base);
+  assert.equal(localIsoDate(base), '2026-10-05', 'never mutates the Date it was handed');
+});
+
+test('ONE copy of the local-day template: no hand-rolled YYYY-MM-DD in Dashboard, apiClient or dataAdapter', () => {
+  // The recorded bug class: a copied site picks up the UTC form (QuickAdd
+  // put entries on tomorrow's date). Every caller now goes through
+  // localIsoDate / localTodayIso / addLocalDays.
+  const fullDate = /getFullYear\(\)\}-\$\{[^`]*getDate\(\)/;
+  for (const f of ['src/components/Dashboard.jsx', 'src/apiClient.js', 'src/dataAdapter.js']) {
+    const src = readFileSync(join(root, f), 'utf8');
+    assert.doesNotMatch(src, fullDate, `${f} hand-rolls the local date template`);
+    assert.doesNotMatch(src, /function localDayIso|function localTodayISO/i, `${f} keeps a private copy`);
+  }
+  const dash = readFileSync(join(root, 'src/components/Dashboard.jsx'), 'utf8');
+  assert.doesNotMatch(dash, /365\*86400000\)\.toISOString\(\)/, 'the year lookbacks read addLocalDays(-365)');
 });

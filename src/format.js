@@ -15,14 +15,24 @@ export function periodYM(start) {
   return { y: Number(s.slice(0, 4)), m: Number(s.slice(5, 7)) };
 }
 
-// TODAY on the WALL CLOCK, never toISOString(): that is UTC, so from ~5pm
-// Pacific onward it is already tomorrow — a quick-added cash entry landed on
-// tomorrow's date (next MONTH on the 31st), fell outside the viewed month, and
-// read as "it didn't save". CsvImport keeps its own UTC `todayIso`
+// A Date's day on the WALL CLOCK as 'YYYY-MM-DD', never toISOString(): that is
+// UTC, so from ~5pm Pacific onward it is already tomorrow — a quick-added cash
+// entry landed on tomorrow's date (next MONTH on the 31st), fell outside the
+// viewed month, and read as "it didn't save". THE ONE COPY of this template:
+// Dashboard, apiClient (the assistant's `today`) and dataAdapter all call it
+// rather than hand-rolling it again. CsvImport keeps its own UTC `todayIso`
 // deliberately, for feed-boundary math; this is the human-facing one.
-export function localTodayIso() {
-  const d = new Date();
+export function localIsoDate(d = new Date()) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+// TODAY on the wall clock.
+export function localTodayIso() { return localIsoDate(); }
+// n CALENDAR days from `d` (negative for back), on the wall clock — setDate,
+// not n*86400000ms, so a DST change can't land it on the wrong day.
+export function addLocalDays(n, d = new Date()) {
+  const x = new Date(d);
+  x.setDate(x.getDate() + n);
+  return localIsoDate(x);
 }
 
 // "8th", "21st" — the movers card says WHICH day the comparison month was cut

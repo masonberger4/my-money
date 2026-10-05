@@ -14,6 +14,7 @@ import { unlinkSettingsKey, parseRestoreIds } from './unlinkRestore.js';
 import { aggregateCoverage, feedCoverageGaps, FEED_REACH_DAYS } from './coverage.js';
 import { netWorthSeries, clampSeries } from './netWorth.js';
 import { buildReconciliation, reconciliationScope } from './reconciliation.js';
+import { localIsoDate, localTodayIso } from './format.js';
 import {
   pad2,
   monthBounds,
@@ -405,7 +406,7 @@ export async function getBiggestMovers({ year, month }) {
   // fall simply because the prior month had 31 days behind it. A past month is
   // already complete and keeps the full-month comparison (toDate null), so its
   // output is byte-identical to before.
-  const today = localTodayISO();
+  const today = localTodayIso();
   const isCurrent = today.slice(0, 7) === `${year}-${String(month).padStart(2, '0')}`;
   const toDate = isCurrent ? Number(today.slice(8, 10)) : null;
   return { movers: biggestMovers(currRows, prevRows, { toDate }), toDate };
@@ -1928,7 +1929,7 @@ export async function getReconciliation({ maxMonths = 12 } = {}) {
       }))
     );
 
-    const today = `${now.getFullYear()}-${pad2(curM)}-${pad2(now.getDate())}`;
+    const today = localIsoDate(now);
     const built = buildReconciliation({ monthsRows, snapshots, accounts: visible, today });
     return { ok: true, ...built, scopeCount: scope.length };
   } catch {
@@ -1979,11 +1980,6 @@ function addDaysISO(iso, days) {
   const [y, m, d] = String(iso).split('-').map(Number);
   const dt = new Date(Date.UTC(y, m - 1, d + days));
   return `${dt.getUTCFullYear()}-${pad2(dt.getUTCMonth() + 1)}-${pad2(dt.getUTCDate())}`;
-}
-
-function localTodayISO() {
-  const now = new Date();
-  return `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}`;
 }
 
 // Insert the NEXT cycle's pending row after a match/dismiss. Dup-gated so two
@@ -2046,7 +2042,7 @@ export async function getExpectedTransactions(
   { client = supabase, fetchTxs = getTransactionsBetween } = {}
 ) {
   if (!hasExpectedTx) return null;
-  const day = today || localTodayISO();
+  const day = today || localTodayIso();
   const { start: monthStart, end: monthEnd } = monthBounds(
     Number(day.slice(0, 4)),
     Number(day.slice(5, 7))
