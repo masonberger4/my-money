@@ -666,6 +666,38 @@ test('buildRows with Amount and only ONE of debit/credit takes the amount path, 
   assert.deepEqual(built.map(r => r.amount), [4.5]);
 });
 
+// --- 2026-10 import audit (F83 repair): a CR/DR marker states its own sign -
+// parseMoney reads CR as "the opposite of the column's unmarked values", which
+// is right under out_positive — but a CSV single-Amount column defaults to
+// in_positive, so a bank file printing "100.00 CR" deposits and "50.00 DR"
+// withdrawals imported EVERY row inverted until the toggle was flipped, and a
+// wrong-signed row hashes apart from its twin, so it can never be deduped
+// away. CR is money in and DR money out on any statement, so a marked cell is
+// read as is (the indicator column's rule, per cell); unmarked cells and a
+// trailing minus still follow the toggle.
+const MARKED = 'Date,Description,Amount\n08/01/2026,PAYROLL ACME,100.00 CR\n08/02/2026,RENT,50.00 DR\n';
+
+test('a CR/DR-marked Amount column reads the same under either sign toggle', () => {
+  for (const amountSign of ['in_positive', 'out_positive']) {
+    const a = analyzeCsv(MARKED, { amountSign });
+    assert.deepEqual(a.rows.map(r => [r.description, r.amount]), [['PAYROLL ACME', -100], ['RENT', 50]], amountSign);
+  }
+  // The default the modal starts on is in_positive — the case that inverted.
+  assert.deepEqual(analyzeCsv(MARKED).rows.map(r => r.amount), [-100, 50]);
+});
+
+test('a marked row hashes like its signed twin, so a re-import of either dedups', () => {
+  const marked = analyzeCsv(MARKED).rows.map(r => r.plaid_tx_id);
+  const signed = analyzeCsv('Date,Description,Amount\n08/01/2026,PAYROLL ACME,100.00\n08/02/2026,RENT,-50.00\n').rows.map(r => r.plaid_tx_id);
+  assert.deepEqual(marked, signed);
+});
+
+test('unmarked cells and a trailing minus still follow the toggle beside marked ones', () => {
+  const card = 'Date,Description,Amount\n08/01/2026,COFFEE,45.00\n08/02/2026,STORE REFUND,23.10 CR\n08/03/2026,PAYMENT,500.00-\n';
+  assert.deepEqual(analyzeCsv(card, { amountSign: 'out_positive' }).rows.map(r => r.amount), [45, -23.1, -500]);
+  assert.deepEqual(analyzeCsv(card, { amountSign: 'in_positive' }).rows.map(r => r.amount), [-45, -23.1, 500]);
+});
+
 // The rescue: a detected header that builds 0 rows had no way out — the
 // mapper only mounted for an UNdetected header. Source pin (the component
 // can't mount in Node): the mapper is gated on a per-file force flag too,

@@ -318,10 +318,20 @@ export function detectHeader(rows) {
 // column's unmarked values": a statement that prints CR marks its credits
 // (refunds, payments) against unmarked charges, which is exactly the
 // out_positive reading the PDF default and a card CSV use, so the refund lands
-// as money in. A marker COMBINED with parentheses or a leading sign is NaN —
-// two directions on one value is ambiguous, and guessing it wrong mints a
-// wrong-signed row that can never be deduped away.
+// as money in. That relative number is what the PDF section flip and
+// normalizeDebitCredit work with; buildRows' single-amount path instead reads
+// a CR/DR-marked cell AS IS, whatever amountSign says (see directionMark). A
+// marker COMBINED with parentheses or a leading sign is NaN — two directions
+// on one value is ambiguous, and guessing it wrong mints a wrong-signed row
+// that can never be deduped away.
 const TRAILING_MARK_RE = /^(.*\d.*?)\s*(CR|DR|-)$/i;
+
+// The explicit direction a money cell prints, if any: 'CR' | 'DR' | null. A
+// trailing minus is a SIGN (the same as a leading one), not a direction.
+function directionMark(raw) {
+  const m = String(raw ?? '').trim().match(TRAILING_MARK_RE);
+  return m && m[2] !== '-' ? m[2].toUpperCase() : null;
+}
 export function parseMoney(raw) {
   let v = String(raw ?? '').trim();
   if (v === '') return 0;
@@ -440,7 +450,9 @@ export function baseHash(dateIso, amount, normDesc) {
 //   headerIndex   — index of the header row (data starts after it)
 //   columns       — { date, description, debit, credit, amount } indices
 //   amountSign    — for single-amount columns: 'in_positive' (bank statement
-//                   default: positive = deposit) or 'out_positive'.
+//                   default: positive = deposit) or 'out_positive'. Not
+//                   consulted for a cell carrying its own CR/DR marker, nor
+//                   beside an indicator column.
 //   existingIds   — Set of plaid_tx_id already in the DB for the target account
 //                   (used to flag duplicates; empty for a brand-new account).
 //   rules         — learned merchant→category rules (see category_rules).
@@ -519,6 +531,18 @@ export function buildRows(rows, opts = {}) {
         if (INDICATOR_DEBIT_RE.test(mark)) amount = Math.abs(signed);
         else if (INDICATOR_CREDIT_RE.test(mark)) amount = -Math.abs(signed);
         else { amount = NaN; noMarker = true; }
+      } else if (directionMark(rawAmt)) {
+        // A cell that prints its own CR/DR marker states its direction, so
+        // amountSign is not consulted (the indicator column's rule, per cell):
+        // CR is a credit to the holder — money in — and DR a debit, on a bank
+        // statement and a card one alike, and parseMoney already returns it in
+        // app orientation (DR +, CR −). Read through the 'in_positive' default
+        // instead, a bank file printing "100.00 CR" deposits and "50.00 DR"
+        // withdrawals imported every row inverted — and a wrong-signed row
+        // hashes apart from its twin, so it can never be deduped away.
+        // Unmarked cells (and a trailing minus, which is a sign) still follow
+        // the toggle.
+        amount = signed;
       } else {
         // amountSign describes what a POSITIVE value in the column means.
         amount = amountSign === 'out_positive' ? signed : -signed;
