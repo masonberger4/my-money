@@ -557,3 +557,38 @@ test('parseDate leaves M/D/Y strict — no D/M/Y guessing', () => {
   assert.equal(parseDate('8/1/2026'), '2026-08-01');
   assert.equal(parseDate('8/1/2026 14:03'), null, 'a slash date with a time is not a shape we claim to know');
 });
+
+// --- 2026-10 import audit (F44): the description column prefers the merchant -
+// The description synonyms were scanned in the order Description, ^Memo$,
+// ^Name$, Payee — so a Memo column beat Payee and Name. `Date,Payee,Memo,
+// Amount` with empty memos then skipped every row ("empty description"), and
+// the US Bank shape (Date,Transaction,Name,Memo,Amount) imported the
+// boilerplate memo as every row's description: rules couldn't match, and the
+// dedup hash was built from boilerplate. A header with a Description column
+// resolves exactly as before, so its rows keep their ids.
+test('description prefers Payee over Memo, and both rows build', () => {
+  const a = analyzeCsv('Date,Payee,Memo,Amount\n08/01/2026,STARBUCKS,,-5.45\n08/02/2026,ACME PAYROLL,,1500.00\n');
+  assert.equal(a.columns.description, 1);
+  assert.deepEqual(a.rows.map(r => r.description), ['STARBUCKS', 'ACME PAYROLL']);
+  assert.equal(a.skipped.length, 0);
+});
+
+test('description prefers Name over a boilerplate Memo (the US Bank shape)', () => {
+  const a = analyzeCsv(
+    '"Date","Transaction","Name","Memo","Amount"\n' +
+    '"2026-08-01","DEBIT","WEB AUTHORIZED PMT VERIZON","Download from usbank.com.","-45.00"\n'
+  );
+  assert.equal(a.columns.description, 2);
+  assert.equal(a.rows[0].description, 'WEB AUTHORIZED PMT VERIZON');
+});
+
+test('REGRESSION: a Description column still wins over every other synonym', () => {
+  assert.equal(detectHeader([['Transaction Date', 'Description', 'Amount']]).columns.description, 1);
+  assert.equal(detectHeader([['Details', 'Posting Date', 'Description', 'Amount', 'Type', 'Balance']]).columns.description, 2);
+  assert.equal(detectHeader([['Date', 'Memo', 'Payee', 'Description', 'Amount']]).columns.description, 3);
+});
+
+test('REGRESSION: a header whose only text column is Memo still maps it', () => {
+  assert.equal(detectHeader([['Date', 'Memo', 'Amount']]).columns.description, 1);
+  assert.equal(detectHeader([['Date', 'Details', 'Memo', 'Amount']]).columns.description, 1, 'Details beats Memo');
+});

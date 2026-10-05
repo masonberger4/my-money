@@ -122,7 +122,12 @@ function isBlankRow(cells) {
 // ---------------------------------------------------------------------------
 const HEADER_SYNONYMS = {
   date: [/^post(ing|ed)?\s*date$/i, /^transaction\s*date$/i, /date/i],
-  description: [/description/i, /^memo$/i, /^name$/i, /payee/i, /^details?$/i, /transaction/i],
+  // Merchant-bearing columns first, Memo late: a Memo column is often blank or
+  // bank boilerplate ("Download from usbank.com."), and preferring it over
+  // Payee/Name imported blank or identical descriptions. The ORDER is part of
+  // the dedup id — the hash includes the normalized description — so any
+  // reorder re-hashes every file whose header lacks a Description column.
+  description: [/description/i, /payee/i, /^name$/i, /^details?$/i, /^memo$/i, /transaction/i],
   debit: [/^debit$/i, /debit/i, /withdrawal/i, /^amount\s*debit$/i, /charges?/i, /money\s*out/i],
   credit: [/^credit$/i, /credit/i, /deposit/i, /^amount\s*credit$/i, /payments?/i, /money\s*in/i],
   amount: [/^amount$/i, /^transaction\s*amount$/i],
