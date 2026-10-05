@@ -589,9 +589,11 @@ what PR A DECIDED, as opposed to fixed.
   pull re-pulls, QUIETLY** — the 2026-09-08 deferred item, built under its
   recorded constraint: the hour-gated pull never paints the sync-failure
   banner, since nobody asked for it. Feed health is re-checked after it and a
-  healthy answer clears the amber banner, so a dismissed feed banner returns
-  on the next hourly re-check while the feed is still broken. An explicit
-  Refresh still does not re-check feed health (unchanged).
+  healthy answer clears the amber banner — so does a not-connected one
+  (`feedHealthVerdict`; an early return there left a raised banner up after a
+  disconnect) — so a dismissed feed banner returns on the next hourly
+  re-check while the feed is still broken. An explicit Refresh still does not
+  re-check feed health (unchanged).
 - **A failed explicit Refresh keeps its banner**: the copy is one constant,
   re-asserted after the follow-up reload's clear without overwriting a load
   error that reload raised itself.

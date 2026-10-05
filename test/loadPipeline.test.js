@@ -17,7 +17,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { refreshTickPlan, pullFollowUp, createSyncHold, SYNC_HOLD_CAP_MS } from '../src/loadPipeline.js';
+import { refreshTickPlan, pullFollowUp, createSyncHold, SYNC_HOLD_CAP_MS, feedHealthVerdict, FEED_STALE_MS } from '../src/loadPipeline.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const dashboard = readFileSync(join(root, 'src', 'components', 'Dashboard.jsx'), 'utf8');
@@ -284,8 +284,33 @@ test('feed health is re-checked after any effect-started pull, and a healthy ans
   assert.ok(body.includes('getSimpleFinStatus()'), 'fixture assumption: the status check lives in the effect');
   assert.ok(!/if\(!syncFirst\)return;/.test(body),
     'gating the status check on syncFirst alone means a foreground pull never re-checks feed health');
-  assert.match(body, /setFeedHealth\([^;]*:null\)/,
-    'a re-check that finds the feed healthy must clear a banner an earlier check raised');
+  assert.match(body, /getSimpleFinStatus\(\)\.then\(s=>setFeedHealth\(feedHealthVerdict\(s,Date\.now\(\)\)\)\)/,
+    'every status answer replaces the banner through feedHealthVerdict — no early return that skips the set');
+});
+
+test('feedHealthVerdict: an error or a stale pull raises the banner; healthy clears it', () => {
+  const now = Date.parse('2026-10-05T12:00:00Z');
+  const fresh = new Date(now - 3_600_000).toISOString();
+  const old = new Date(now - FEED_STALE_MS - 60_000).toISOString();
+  assert.equal(FEED_STALE_MS, 3 * 86_400_000, 'three days without a pull is stale');
+  assert.deepEqual(feedHealthVerdict({ connected: true, last_pulled_at: fresh, last_error: 'bank asked to re-authenticate' }, now),
+    { last_pulled_at: fresh, last_error: 'bank asked to re-authenticate' });
+  assert.deepEqual(feedHealthVerdict({ connected: true, last_pulled_at: old, last_error: null }, now),
+    { last_pulled_at: old, last_error: null });
+  assert.equal(feedHealthVerdict({ connected: true, last_pulled_at: fresh, last_error: null }, now), null);
+  // No watermark yet and no error: nothing to say (an unparseable date neither).
+  assert.equal(feedHealthVerdict({ connected: true, last_pulled_at: null, last_error: null }, now), null);
+  assert.equal(feedHealthVerdict({ connected: true, last_pulled_at: 'not a date', last_error: null }, now), null);
+});
+
+test('REGRESSION: feedHealthVerdict clears the banner once the feed is no longer connected', () => {
+  // The re-check used to `return` on !connected BEFORE setting anything, so a
+  // banner an earlier check raised stayed up after a disconnect until the
+  // next app load. A disconnected feed has nothing left to be unhealthy.
+  const now = Date.parse('2026-10-05T12:00:00Z');
+  assert.equal(feedHealthVerdict({ connected: false }, now), null);
+  assert.equal(feedHealthVerdict({ connected: false, migration_pending: true }, now), null);
+  assert.equal(feedHealthVerdict({ connected: false, last_error: 'stale error from before' }, now), null);
 });
 
 // --- F72: the refresh spinners last until the bank pull settles --------------

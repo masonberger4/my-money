@@ -32,7 +32,7 @@ import { periodYM, localTodayIso, localIsoDate, addLocalDays, ordinalSuffix, mon
 import { createSheetHistory } from "../sheetHistory.js";
 import { donutSlices, donutGeometry } from "../donut.js";
 import { runSync, foregroundSyncDue } from "../sync.js";
-import { refreshTickPlan, pullFollowUp, createSyncHold } from "../loadPipeline.js";
+import { refreshTickPlan, pullFollowUp, createSyncHold, feedHealthVerdict } from "../loadPipeline.js";
 // Lazy: both are modals rendered only on user action, and CsvImport reaches the
 // whole statement-import stack — no reason for either in the initial bundle.
 // A failed chunk load throws during render; App's ErrorBoundary is the net.
@@ -2328,7 +2328,7 @@ export default function Dashboard({ refreshTick = 0 }) {
   // {last_pulled_at,last_error} when the SimpleFIN feed looks unhealthy —
   // checked after the startup sync and after each hour-gated foreground pull
   // (never a status fetch on every dashboard load or app switch; that was the
-  // LinkAccount antipattern). A healthy re-check clears it.
+  // LinkAccount antipattern). A healthy or not-connected re-check clears it.
   const [feedHealth,setFeedHealth]=useState(null);
 
   // Theme. useTheme owns the persistence (localStorage, NOT the shared
@@ -2912,12 +2912,10 @@ export default function Dashboard({ refreshTick = 0 }) {
       // carries no last_pulled_at — so ask /api/simplefin-status in the same
       // flow, after the sync has had its chance to freshen the watermark:
       // at startup and after each hour-gated foreground pull, so a feed that
-      // breaks mid-day raises the banner and a recovered one clears it.
-      getSimpleFinStatus().then(s=>{
-        if(!s?.connected)return;
-        const stale=s.last_pulled_at&&Date.now()-new Date(s.last_pulled_at).getTime()>3*86_400_000;
-        setFeedHealth(s.last_error||stale?{last_pulled_at:s.last_pulled_at,last_error:s.last_error||null}:null);
-      }).catch(err=>console.error("feed status check failed",err));
+      // breaks mid-day raises the banner and a recovered (or disconnected)
+      // one clears it — feedHealthVerdict (src/loadPipeline.js) decides.
+      getSimpleFinStatus().then(s=>setFeedHealth(feedHealthVerdict(s,Date.now())))
+        .catch(err=>console.error("feed status check failed",err));
     });
   },[year,month,ready,refreshTick,fetchData]);
 

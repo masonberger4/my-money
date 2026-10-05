@@ -80,3 +80,20 @@ export function createSyncHold(setBusy, { capMs = SYNC_HOLD_CAP_MS, setTimer = s
     return release;
   };
 }
+
+// What the amber feed banner shows after a /api/simplefin-status re-check
+// (`feedHealth`): {last_pulled_at,last_error} when the feed looks unhealthy —
+// an error on its last pull, or no successful pull for FEED_STALE_MS — else
+// null. Every answer REPLACES the banner, so a healthy re-check clears one an
+// earlier check raised, and so does a feed that is no longer connected: there
+// is no feed left to be unhealthy, and an early return there left a stale
+// "Bank feed problem" up until the next app load.
+export const FEED_STALE_MS = 3 * 86_400_000;
+export function feedHealthVerdict(status, nowMs) {
+  if (!status?.connected) return null;
+  const pulled = status.last_pulled_at ? new Date(status.last_pulled_at).getTime() : NaN;
+  const stale = Number.isFinite(pulled) && nowMs - pulled > FEED_STALE_MS;
+  return status.last_error || stale
+    ? { last_pulled_at: status.last_pulled_at, last_error: status.last_error || null }
+    : null;
+}
