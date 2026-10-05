@@ -5828,8 +5828,14 @@ export default function Dashboard({ refreshTick = 0 }) {
                   unmounts on tab change while the search state persists, so a
                   bare autoFocus would pop the iOS keyboard on every return to
                   Spending with a live search. A toggle-tap mount is always
-                  inactive (collapse clears), so opening still focuses. */}
+                  inactive (collapse clears), so opening still focuses.
+                  Return BLURS (the iPhone keyboard's Search key — the query
+                  already applies as typed, so this only dismisses the keyboard
+                  off the results; no search state changes), and autocorrect
+                  stays off so bank shorthand like "AMZN MKTP" isn't rewritten. */}
               <input value={searchQ} onChange={e=>setSearchQ(e.target.value)} placeholder="Search all transactions…"
+                enterKeyHint="search" autoCorrect="off" autoCapitalize="off" spellCheck={false}
+                onKeyDown={e=>{if(e.key==="Enter")e.currentTarget.blur();}}
                 autoFocus={!searchActive}
                 style={{width:"100%",padding:"9px 34px 9px 12px",borderRadius:8,border:"1px solid var(--border)",
                   background:"var(--bg)",color:"var(--text)",fontSize:16,fontFamily:"inherit",outline:"none"}}/>
@@ -6505,7 +6511,7 @@ export default function Dashboard({ refreshTick = 0 }) {
         {tab==="accounts"&&selAcct&&(
           <div className="card">
             <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:4}}>
-              <button className="nbtn" onClick={()=>setSelAcctId(null)} title="Back to accounts">‹</button>
+              <button className="nbtn" onClick={()=>setSelAcctId(null)} title="Back to accounts" aria-label="Back to accounts">‹</button>
               <div style={{flex:1,minWidth:0}}>
                 {/* The account's naming controls live HERE since 2026-08-28 —
                     the list's tiles became pure navigation, so the swatch (tap
@@ -7171,7 +7177,7 @@ export default function Dashboard({ refreshTick = 0 }) {
               <div ref={chatEndRef}/>
             </div>
             <div style={{display:"flex",gap:8}}>
-              <input value={chatInput} onChange={e=>setChatInput(e.target.value)}
+              <input value={chatInput} onChange={e=>setChatInput(e.target.value)} enterKeyHint="send"
                 onKeyDown={e=>{if(e.key==="Enter")sendChat();}}
                 placeholder="Ask about your spending…" disabled={chatBusy}
                 style={{flex:1,padding:"10px 12px",borderRadius:10,border:"1px solid var(--border)",background:"var(--bg)",
@@ -7570,9 +7576,9 @@ export default function Dashboard({ refreshTick = 0 }) {
             {/* Tax year + framing */}
             <div className="card">
               <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:10}}>
-                <button className="nbtn" onClick={()=>{setTaxYear(y=>y-1);invalidateTax();}}>‹</button>
+                <button className="nbtn" onClick={()=>{setTaxYear(y=>y-1);invalidateTax();}} aria-label="Previous tax year">‹</button>
                 <div style={{fontSize:18,fontWeight:600,minWidth:90,textAlign:"center",color:"var(--text)"}}>{taxYear}</div>
-                <button className="nbtn" disabled={!canNextTax} onClick={()=>{if(canNextTax){setTaxYear(y=>y+1);invalidateTax();}}}>›</button>
+                <button className="nbtn" disabled={!canNextTax} onClick={()=>{if(canNextTax){setTaxYear(y=>y+1);invalidateTax();}}} aria-label="Next tax year">›</button>
               </div>
               <div style={{fontSize:10,color:"var(--muted)",textAlign:"center",marginTop:6,lineHeight:1.5}}>
                 Calendar-year records for your tax preparer — not tax advice. Rental transactions still
