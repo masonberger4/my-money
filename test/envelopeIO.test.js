@@ -285,6 +285,48 @@ test('getExpectedTransactions auto-matches, persists, and rolls the cycle forwar
   assert.deepEqual(res.matched.map(r => r.id), ['e1']);
 });
 
+// A scripted read that honours the due_date range filters the way the
+// database would — so a month-scoped read really can't see last month's row.
+const byDueFilters = rows => q => ({
+  data: rows.filter(r =>
+    q.filters.every(([op, c, v]) =>
+      c !== 'due_date' || (op === 'gte' ? r.due_date >= v : op === 'lte' ? r.due_date <= v : true))),
+  error: null,
+});
+
+test('REGRESSION: a weekly charge claimed by last month\'s row is not re-claimed across the month boundary', async () => {
+  // Sep 29's row matched the Oct 2 charge. On Oct 4 the Oct 6 row is within
+  // the weekly ±4 window of that SAME charge — and a claim set built from
+  // October's matched rows only couldn't see Sep 29's claim, so the series
+  // matched one charge twice and ran a cycle ahead.
+  const base = { recurring_key: 'GYM', description: 'Gym', category: 'Fitness', account_id: null, amount: 15, cadence: 'weekly', created_at: 'x' };
+  const e1 = { ...base, id: 'e1', due_date: '2026-09-29', status: 'matched', matched_tx_id: 't1' };
+  const e2 = { ...base, id: 'e2', due_date: '2026-10-06', status: 'pending', matched_tx_id: null };
+  const calls = [];
+  const client = fakeClient([{ data: [e2], error: null }, byDueFilters([e1])], calls);
+  const fetchTxs = async () => [
+    { id: 't1', date: '2026-10-02', amount: 15, account_id: 'a1', merchant_name: 'GYM', description: 'GYM' },
+  ];
+  const res = await getExpectedTransactions({ today: '2026-10-04' }, { client, fetchTxs });
+
+  assert.equal(calls.length, 2, 'no update and no insert: t1 is already claimed');
+  const gte = calls[1].filters.find(f => f[0] === 'gte' && f[1] === 'due_date');
+  assert.ok(gte && gte[2] <= '2026-08-05', `the claim read reaches back past the window (got ${gte?.[2]})`);
+  assert.equal(calls[1].filters.some(f => f[0] === 'lte'), false, 'no upper bound: a charge can post before its due date');
+  assert.deepEqual(res.pending.map(r => r.id), ['e2']);
+  assert.deepEqual(res.matched, [], "the returned matched list is still this month's only");
+});
+
+test('with nothing pending, the matched read stays month-scoped and no transactions are fetched', async () => {
+  const calls = [];
+  const client = fakeClient([{ data: [], error: null }, { data: [], error: null }], calls);
+  let fetched = false;
+  const res = await getExpectedTransactions({ today: '2026-10-04' }, { client, fetchTxs: async () => { fetched = true; return []; } });
+  assert.deepEqual(calls[1].filters, [['eq', 'status', 'matched'], ['gte', 'due_date', '2026-10-01'], ['lte', 'due_date', '2026-10-31']]);
+  assert.equal(fetched, false);
+  assert.deepEqual(res, { pending: [], matched: [] });
+});
+
 test('addExpected dup-gates the same recurring_key cycle instead of inserting a twin', async () => {
   const existing = {
     id: 'e1',

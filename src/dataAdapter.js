@@ -2064,69 +2064,89 @@ export async function getExpectedTransactions(
     }
     throw pendRes.error;
   }
-  const matchedRes = await client
-    .from('expected_transactions')
-    .select(EXPECTED_COLUMNS)
-    .eq('status', 'matched')
-    .gte('due_date', monthStart)
-    .lte('due_date', monthEnd)
-    .order('due_date', { ascending: true });
-  if (matchedRes.error) throw matchedRes.error;
-
   let pending = pendRes.data || [];
-  const matched = matchedRes.data || [];
 
+  // The auto-match's transaction window, or null when nothing is pending (or
+  // the window is entirely in the future — a match needs a posted
+  // transaction, so never past today). It covers every pending due date's
+  // window (earliest−31 covers the widest, annual's 30), clamped to the
+  // lookback floor. ISO strings compare as dates, so the LATER of the two is
+  // the clamp.
+  let fetchStart = null;
   if (pending.length) {
-    // Fetch real rows around the pending due dates (never past today — a
-    // match needs a posted transaction).
     let earliest = pending[0].due_date;
     for (const r of pending) if (r.due_date < earliest) earliest = r.due_date;
-    // Cover every pending due date's window (earliest−31 covers the widest,
-    // annual's 30), clamped to the lookback floor. ISO strings compare as
-    // dates, so the LATER of the two is the clamp.
     const floor = addDaysISO(day, -EXPECTED_MATCH_LOOKBACK_DAYS);
     const wanted = addDaysISO(earliest, -31);
-    const fetchStart = wanted > floor ? wanted : floor;
-    if (fetchStart <= day) {
-      const txs = await fetchTxs(fetchStart, day);
-      // Ids already claimed by a matched expectation can't match again.
-      const claimed = new Set(matched.map(r => r.matched_tx_id).filter(Boolean));
-      const txRows = (txs || [])
-        .filter(t => !claimed.has(t.id))
-        .map(t => ({
-          id: t.id,
-          transaction_date: t.date,
-          amount: Number(t.amount),
-          account_id: t.account_id,
-          merchant_name: t.merchant_name,
-          description: t.user_description || t.description,
-        }));
-      const matches = matchExpected(pending, txRows);
-      if (matches.length) {
-        const byId = new Map(pending.map(r => [r.id, r]));
-        const updatedAt = new Date().toISOString();
-        for (const m of matches) {
-          const row = byId.get(m.expectationId);
-          if (!row) continue;
-          const { error } = await client
-            .from('expected_transactions')
-            .update({ status: 'matched', matched_tx_id: m.txId, updated_at: updatedAt })
-            .eq('id', m.expectationId);
-          if (error) throw error;
-          row.status = 'matched';
-          row.matched_tx_id = m.txId;
-        }
-        // Roll each freshly matched row forward, then re-split the lists.
-        const stillPending = pending.filter(r => r.status === 'pending');
-        for (const m of matches) {
-          const row = byId.get(m.expectationId);
-          if (!row) continue;
-          const next = await rollForwardExpected(client, row);
-          if (next) stillPending.push(next);
-          if (row.due_date >= monthStart && row.due_date <= monthEnd) matched.push(row);
-        }
-        pending = stillPending;
+    const start = wanted > floor ? wanted : floor;
+    if (start <= day) fetchStart = start;
+  }
+
+  // The matched read serves two jobs: the DISPLAY list (this month's matched
+  // rows) and the CLAIM set (every transaction a matched row already owns).
+  // The claim set must cover every matched row whose transaction can sit
+  // inside the fetch window, not just this month's: a weekly bill due Sep 29
+  // matched to an Oct 2 charge left that charge unclaimed in October, so the
+  // Oct 6 row matched the SAME charge and the series ran a cycle ahead. A
+  // transaction dated on or after fetchStart belongs to a row due no earlier
+  // than fetchStart−30 (the widest window), and with NO upper bound (a charge
+  // can post before its due date) — so with a window the read reaches back to
+  // fetchStart−31, unbounded above. The RETURNED list stays this month's.
+  let matchedQ = client
+    .from('expected_transactions')
+    .select(EXPECTED_COLUMNS)
+    .eq('status', 'matched');
+  if (fetchStart) {
+    const back = addDaysISO(fetchStart, -31);
+    matchedQ = matchedQ.gte('due_date', back < monthStart ? back : monthStart);
+  } else {
+    matchedQ = matchedQ.gte('due_date', monthStart).lte('due_date', monthEnd);
+  }
+  const matchedRes = await matchedQ.order('due_date', { ascending: true });
+  if (matchedRes.error) throw matchedRes.error;
+  const matchedAll = matchedRes.data || [];
+  const inMonth = r => r.due_date >= monthStart && r.due_date <= monthEnd;
+  const matched = matchedAll.filter(inMonth);
+
+  if (fetchStart) {
+    const txs = await fetchTxs(fetchStart, day);
+    // Ids already claimed by a matched expectation can't match again.
+    const claimed = new Set(matchedAll.map(r => r.matched_tx_id).filter(Boolean));
+    const txRows = (txs || [])
+      .filter(t => !claimed.has(t.id))
+      .map(t => ({
+        id: t.id,
+        transaction_date: t.date,
+        amount: Number(t.amount),
+        account_id: t.account_id,
+        merchant_name: t.merchant_name,
+        description: t.user_description || t.description,
+      }));
+    const matches = matchExpected(pending, txRows);
+    if (matches.length) {
+      const byId = new Map(pending.map(r => [r.id, r]));
+      const updatedAt = new Date().toISOString();
+      for (const m of matches) {
+        const row = byId.get(m.expectationId);
+        if (!row) continue;
+        const { error } = await client
+          .from('expected_transactions')
+          .update({ status: 'matched', matched_tx_id: m.txId, updated_at: updatedAt })
+          .eq('id', m.expectationId);
+        if (error) throw error;
+        row.status = 'matched';
+        row.matched_tx_id = m.txId;
       }
+      // Roll each freshly matched row forward, then re-split the lists.
+      const stillPending = pending.filter(r => r.status === 'pending');
+      for (const m of matches) {
+        const row = byId.get(m.expectationId);
+        if (!row) continue;
+        const next = await rollForwardExpected(client, row);
+        if (next) stillPending.push(next);
+        if (inMonth(row)) matched.push(row);
+      }
+      pending = stillPending;
     }
   }
 
