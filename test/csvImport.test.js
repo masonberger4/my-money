@@ -18,6 +18,7 @@ import {
   conflictingSources,
   resolveTemplateForTarget,
   parseDate,
+  buildRows,
 } from '../src/csvImport.js';
 import { TRANSFER_CATEGORY, FALLBACK_CATEGORY } from '../src/categoryMap.js';
 import { pullWasClean } from '../src/sync.js';
@@ -591,4 +592,94 @@ test('REGRESSION: a Description column still wins over every other synonym', () 
 test('REGRESSION: a header whose only text column is Memo still maps it', () => {
   assert.equal(detectHeader([['Date', 'Memo', 'Amount']]).columns.description, 1);
   assert.equal(detectHeader([['Date', 'Details', 'Memo', 'Amount']]).columns.description, 1, 'Details beats Memo');
+});
+
+// --- 2026-10 import audit (F40): Amount + one stray debit/credit column -----
+// buildRows took the Debit/Credit branch when EITHER column was mapped, so an
+// Amount column beside one stray debit- or credit-worded column ("Credit
+// Debit Indicator" — the Navy-Federal shape — or "Payment Method") read a
+// non-numeric cell as money and skipped EVERY row. The header still counted
+// as detected, so ManualMapper never mounted and nothing in the modal could
+// fix it. The pair path now needs BOTH columns (the rule isUsableMapping
+// already stated); a stray column whose cells say Debit/Credit becomes a
+// per-row sign, and any other stray column is dropped.
+const NFCU = [
+  'Posting Date,Transaction Date,Amount,Credit Debit Indicator,type,Type Group,Reference,Description,Category',
+  '08/01/2026,07/31/2026,45.12,Debit,POS,Card,123,STARBUCKS #123,Dining',
+  '08/02/2026,08/02/2026,1500.00,Credit,Deposit,Deposit,124,PAYROLL ACME,Income',
+].join('\n') + '\n';
+
+test('a Debit/Credit INDICATOR column beside Amount signs each row (the NFCU shape)', () => {
+  const a = analyzeCsv(NFCU);
+  assert.deepEqual(
+    { amount: a.columns.amount, indicator: a.columns.indicator, debit: a.columns.debit, credit: a.columns.credit },
+    { amount: 2, indicator: 3, debit: -1, credit: -1 }
+  );
+  assert.equal(a.needsManualMapping, false);
+  assert.deepEqual(a.rows.map(r => [r.description, r.amount]), [['STARBUCKS #123', 45.12], ['PAYROLL ACME', -1500]]);
+  assert.equal(a.skipped.length, 0);
+  assert.equal(hasSingleAmountColumn(a.columns), false, 'the sign is unambiguous — no toggle');
+  // The marker wins over the sign toggle: the same rows either way.
+  assert.deepEqual(analyzeCsv(NFCU, { amountSign: 'out_positive' }).rows.map(r => r.amount), [45.12, -1500]);
+});
+
+test('an indicator row with no readable marker is SKIPPED with a reason, never guessed', () => {
+  const a = analyzeCsv(NFCU + '08/03/2026,08/03/2026,9.99,,POS,Card,125,MYSTERY,Misc\n');
+  assert.equal(a.rows.length, 2);
+  assert.equal(a.skipped.length, 1);
+  assert.match(a.skipped[0].reason, /debit\/credit/);
+});
+
+test('short DR/CR markers and a signed Amount both read through the indicator', () => {
+  const a = analyzeCsv('Date,Description,Amount,Debit/Credit\n08/01/2026,COFFEE,-4.50,DR\n08/02/2026,REFUND,4.50,CR\n');
+  assert.equal(a.columns.indicator, 3);
+  assert.deepEqual(a.rows.map(r => r.amount), [4.5, -4.5]);
+});
+
+test('a stray non-indicator column ("Payment Method") is dropped: one signed Amount, the toggle shows', () => {
+  const a = analyzeCsv('Date,Description,Amount,Payment Method\n08/01/2026,COFFEE SHOP,4.50,Visa\n');
+  assert.equal(a.columns.amount, 2);
+  assert.equal(a.columns.debit, -1);
+  assert.equal(a.columns.credit, -1);
+  assert.ok(!(a.columns.indicator >= 0));
+  assert.equal(hasSingleAmountColumn(a.columns), true);
+  assert.equal(a.rows.length, 1);
+});
+
+test('REGRESSION: Payments and "Payments and Credits" still map to credit', () => {
+  assert.equal(detectHeader([['Date', 'Description', 'Charges', 'Payments']]).columns.credit, 3);
+  assert.equal(detectHeader([['Date', 'Description', 'Charges', 'Payments and Credits']]).columns.credit, 3);
+  assert.equal(detectHeader([['Date', 'Description', 'Charges', 'Payments & Credits']]).columns.credit, 3);
+  assert.equal(detectHeader([['Date', 'Description', 'Charges', 'Payment Method']]), null,
+    '"Payment Method" is not a credit column, so Charges alone is no usable mapping');
+});
+
+test('buildRows with Amount and only ONE of debit/credit takes the amount path, not NaN', () => {
+  const rows = [['Date', 'Description', 'Amount', 'Debit'], ['08/01/2026', 'COFFEE', '4.50', 'n/a']];
+  const { rows: built, skipped } = buildRows(rows, {
+    headerIndex: 0,
+    columns: { date: 0, description: 1, debit: 3, credit: -1, amount: 2 },
+    amountSign: 'out_positive',
+  });
+  assert.equal(skipped.length, 0);
+  assert.deepEqual(built.map(r => r.amount), [4.5]);
+});
+
+// The rescue: a detected header that builds 0 rows had no way out — the
+// mapper only mounted for an UNdetected header. Source pin (the component
+// can't mount in Node): the mapper is gated on a per-file force flag too,
+// the link that sets it exists, and nothing persists it per account
+// (per-account CSV column memory is a deferred feature).
+test('REGRESSION: a detected CSV that builds 0 rows offers "Map columns by hand"', () => {
+  const src = read('src/components/CsvImport.jsx');
+  assert.match(src, /\(analysis\?\.needsManualMapping \|\| forceManual\)\s*&&\s*\(\s*<ManualMapper/,
+    'ManualMapper must mount for a forced remap as well as an undetected header');
+  assert.match(src, /onClick=\{\(\) => setForceManual\(true\)\}[^<]*>\s*Map columns by hand/);
+  assert.match(src, /const canRemap\s*=[^;]*rows\.length === 0[^;]*skipped\.length > 0/);
+  // Reset per file, on both entry points.
+  const load = src.slice(src.indexOf('async function loadSingleFile'), src.indexOf('const isPdf ='));
+  assert.match(load, /setForceManual\(false\)/);
+  const onFile = src.slice(src.indexOf('async function onFile'), src.indexOf('async function loadSingleFile'));
+  assert.match(onFile, /setForceManual\(false\)/);
+  assert.doesNotMatch(src, /setSetting\([^)]*csv/i, 'no per-account CSV column memory');
 });

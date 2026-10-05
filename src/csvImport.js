@@ -129,7 +129,10 @@ const HEADER_SYNONYMS = {
   // reorder re-hashes every file whose header lacks a Description column.
   description: [/description/i, /payee/i, /^name$/i, /^details?$/i, /^memo$/i, /transaction/i],
   debit: [/^debit$/i, /debit/i, /withdrawal/i, /^amount\s*debit$/i, /charges?/i, /money\s*out/i],
-  credit: [/^credit$/i, /credit/i, /deposit/i, /^amount\s*credit$/i, /payments?/i, /money\s*in/i],
+  // Payments only as a whole header ("Payments", "Payments and Credits"): the
+  // loose /payments?/ claimed "Payment Method", a stray text column that then
+  // sent every row down the Debit/Credit path as unreadable.
+  credit: [/^credit$/i, /credit/i, /deposit/i, /^amount\s*credit$/i, /^payments?(\s*(and|&)\s*credits?)?$/i, /money\s*in/i],
   amount: [/^amount$/i, /^transaction\s*amount$/i],
 };
 
@@ -230,6 +233,9 @@ export function conflictingSources(existingSources, incomingSource, targetIsManu
 // the same -1 convention.
 export function hasSingleAmountColumn(columns) {
   if (!columns) return false;
+  // A Debit/Credit INDICATOR column signs every row itself (see
+  // resolveStrayDirection), so its sign is not ambiguous either.
+  if (columns.indicator >= 0) return false;
   return columns.amount >= 0 && !(columns.debit >= 0) && !(columns.credit >= 0);
 }
 
@@ -240,13 +246,46 @@ function isUsableMapping(m) {
   return (hasDebitCredit || hasAmount) && m.description >= 0;
 }
 
+// A per-row direction marker, as an indicator column prints it.
+const INDICATOR_DEBIT_RE = /^(debit|dr|d)$/i;
+const INDICATOR_CREDIT_RE = /^(credit|cr|c)$/i;
+const INDICATOR_SAMPLE_ROWS = 50;
+const INDICATOR_MIN_SHARE = 0.8;
+
+// An Amount column beside ONE stray debit- or credit-worded column is not a
+// Debit/Credit pair. Either the stray column is a per-row direction marker
+// ("Credit Debit Indicator" reading Debit/Credit — the Navy-Federal shape),
+// which is recorded as `indicator`, or it is something else ("Payment
+// Method") and is dropped. Without this, buildRows read the stray column's
+// text as money and skipped EVERY row, on a header that still counted as
+// detected — so no manual mapper ever mounted to fix it. The marker is
+// decided from the column's DATA (most non-blank cells must be a marker),
+// never from its header wording alone.
+function resolveStrayDirection(m, rows, headerIndex) {
+  if (!(m.amount >= 0) || (m.debit >= 0 && m.credit >= 0)) return m;
+  const stray = m.debit >= 0 ? m.debit : m.credit;
+  if (!(stray >= 0)) return m;
+  let seen = 0;
+  let markers = 0;
+  for (let r = headerIndex + 1; r < rows.length && seen < INDICATOR_SAMPLE_ROWS; r++) {
+    if (isBlankRow(rows[r])) continue;
+    const v = String(rows[r][stray] ?? '').trim();
+    if (!v) continue;
+    seen++;
+    if (INDICATOR_DEBIT_RE.test(v) || INDICATOR_CREDIT_RE.test(v)) markers++;
+  }
+  const out = { ...m, debit: -1, credit: -1 };
+  if (seen > 0 && markers / seen >= INDICATOR_MIN_SHARE) out.indicator = stray;
+  return out;
+}
+
 // Scan rows for the header. Returns { headerIndex, columns } or null.
 export function detectHeader(rows) {
   for (let r = 0; r < rows.length; r++) {
     if (isBlankRow(rows[r])) continue;
     const m = mapHeaderRow(rows[r]);
     if (isUsableMapping(m)) {
-      return { headerIndex: r, columns: m };
+      return { headerIndex: r, columns: resolveStrayDirection(m, rows, r) };
     }
   }
   return null;
@@ -430,10 +469,15 @@ export function buildRows(rows, opts = {}) {
     // Compute the signed app amount (positive = money out).
     let amount;
     // No initialiser: every branch below assigns rawDebit before anything reads
-    // it. rawCredit keeps its '' — the single-amount branch never sets it.
+    // it. rawCredit keeps its '' in the single-amount branch, except that an
+    // indicator column's marker rides there so a skipped row shows it.
     let rawDebit;
     let rawCredit = '';
-    if (columns.debit >= 0 || columns.credit >= 0) {
+    let noMarker = false;
+    // The pair path needs BOTH columns — the rule isUsableMapping states. With
+    // only one mapped, the other cell reads '' (0) and an Amount column beside
+    // it was ignored; a lone stray column is the amount path's business.
+    if (columns.debit >= 0 && columns.credit >= 0) {
       rawDebit = String(cell(cells, columns.debit) ?? '').trim();
       rawCredit = String(cell(cells, columns.credit) ?? '').trim();
       const debit = parseMoney(rawDebit);
@@ -452,6 +496,16 @@ export function buildRows(rows, opts = {}) {
       const signed = parseMoney(rawAmt); // may already carry a sign
       if (Number.isNaN(signed)) {
         amount = NaN;
+      } else if (columns.indicator >= 0) {
+        // The row's own Debit/Credit marker decides direction; amountSign is
+        // not consulted (the toggle is hidden for this shape). A row WITHOUT a
+        // readable marker is skipped with a reason rather than guessed — a
+        // wrong-signed row can never be deduped away.
+        const mark = String(cell(cells, columns.indicator) ?? '').trim();
+        rawCredit = mark;
+        if (INDICATOR_DEBIT_RE.test(mark)) amount = Math.abs(signed);
+        else if (INDICATOR_CREDIT_RE.test(mark)) amount = -Math.abs(signed);
+        else { amount = NaN; noMarker = true; }
       } else {
         // amountSign describes what a POSITIVE value in the column means.
         amount = amountSign === 'out_positive' ? signed : -signed;
@@ -460,7 +514,8 @@ export function buildRows(rows, opts = {}) {
 
     const problems = [];
     if (!dateIso) problems.push('unparseable date');
-    if (Number.isNaN(amount)) problems.push('unparseable amount');
+    if (noMarker) problems.push('no debit/credit marker');
+    else if (Number.isNaN(amount)) problems.push('unparseable amount');
     if (!rawDesc) problems.push('empty description');
     // A zero-amount row carries no spend/income signal — skip as noise (e.g.
     // memo/informational lines) rather than inserting a $0 transaction.

@@ -115,6 +115,10 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
   const [fileName, setFileName] = useState(null);
   const [fileText, setFileText] = useState(null);
   const [manualCols, setManualCols] = useState(null); // {headerIndex,date,description,debit,credit,amount}
+  // The user asked to map a DETECTED header by hand (it built no rows). Per
+  // file, never persisted — per-account CSV column memory is a deferred
+  // feature, not this.
+  const [forceManual, setForceManual] = useState(false);
   const [amountSign, setAmountSign] = useState("in_positive");
   const [target, setTarget] = useState("new"); // "new" | accountId
   const [newName, setNewName] = useState("");
@@ -342,6 +346,11 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
   // import as the only exits. Same predicate the batch probe uses.
   const signRelevant = fileKind === "csv" && !!analysis && !analysis.error
     && !analysis.needsManualMapping && hasSingleAmountColumn(analysis.columns);
+  // A header that WAS detected but built nothing (every row skipped) used to be
+  // a dead end: ManualMapper only mounted for an UNdetected header, so "N found,
+  // N skipped" offered no control that changed the outcome. This is the way out.
+  const canRemap = fileKind === "csv" && !!fileText && !!analysis && !analysis.error && !analysis.needsManualMapping
+    && !forceManual && rows.length === 0 && skipped.length > 0;
 
   // An unknown target can only be compared. `compareOnly` is the user's
   // override. `verdict === 'audit'` is the file's own answer: every row is
@@ -470,6 +479,7 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
       setTemplateSource(null);
       setShowEditor(false);
       setManualCols(null);
+      setForceManual(false);
       setResult(null);
       setPdfAdvisory(null);
       setFileName(null);
@@ -531,6 +541,7 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
     setPdfAdvisory(null);
     setResult(null);
     setManualCols(null);
+    setForceManual(false);
     setFileName(f.name);
     setPdfPages(null);
     setPdfTemplate(null);
@@ -1172,6 +1183,12 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                     )}
                   </div>
                 )}
+                {!batchMode && canRemap && (
+                  <div style={{ marginTop: 8, fontSize: 12, color: "var(--muted)", lineHeight: 1.5 }}>
+                    None of its rows could be read with the columns its header suggested.{" "}
+                    <button className="ibtn" style={{ fontSize: 11 }} onClick={() => setForceManual(true)}>Map columns by hand</button>
+                  </div>
+                )}
                 {(analysis?.error || pdfApplyError) && (
                   <div style={{ fontSize: 12, color: "var(--danger)", marginTop: 8 }}>{analysis?.error || pdfApplyError}</div>
                 )}
@@ -1182,9 +1199,12 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                 )}
               </div>
 
-              {/* 1b — Manual column mapping fallback (non-BECU / undetected header) */}
-              {fileKind === "csv" && fileText && analysis?.needsManualMapping && (
-                <ManualMapper fileText={fileText} onApply={setManualCols} amountSign={amountSign} setAmountSign={setAmountSign} selStyle={selStyle} sectionLabel={sectionLabel} />
+              {/* 1b — Manual column mapping: the fallback for an undetected
+                  header, or asked for when a detected one built no rows. */}
+              {fileKind === "csv" && fileText && (analysis?.needsManualMapping || forceManual) && (
+                <ManualMapper fileText={fileText} onApply={setManualCols} amountSign={amountSign} setAmountSign={setAmountSign} selStyle={selStyle} sectionLabel={sectionLabel}
+                  title={analysis?.needsManualMapping ? "Map columns (header not auto-detected)" : "Map columns by hand"}
+                  initial={analysis && !analysis.needsManualMapping && analysis.columns ? { headerIndex: analysis.header, ...analysis.columns } : null} />
               )}
 
               {/* 1c — PDF layout template: auto-detected or previously taught. */}
@@ -1551,10 +1571,16 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
 
 // Fallback when the header can't be auto-detected: show the first parsed rows
 // and let the user assign each column role by index. Feeds the same buildRows.
-function ManualMapper({ fileText, onApply, amountSign, setAmountSign, selStyle, sectionLabel }) {
-  const [headerIndex, setHeaderIndex] = useState(0);
-  const [cols, setCols] = useState({ date: -1, description: -1, debit: -1, credit: -1, amount: -1 });
-  const [mode, setMode] = useState("debitcredit"); // or "amount"
+// `initial` seeds it from a DETECTED mapping when the user asked to remap one,
+// so only the wrong column needs changing.
+function ManualMapper({ fileText, onApply, amountSign, setAmountSign, selStyle, sectionLabel, title = "Map columns (header not auto-detected)", initial = null }) {
+  const idx = v => (Number.isInteger(v) && v >= 0 ? v : -1);
+  const [headerIndex, setHeaderIndex] = useState(() => Math.max(0, idx(initial?.headerIndex)));
+  const [cols, setCols] = useState(() => ({
+    date: idx(initial?.date), description: idx(initial?.description),
+    debit: idx(initial?.debit), credit: idx(initial?.credit), amount: idx(initial?.amount),
+  }));
+  const [mode, setMode] = useState(() => (initial && !(idx(initial.debit) >= 0 && idx(initial.credit) >= 0) && idx(initial.amount) >= 0 ? "amount" : "debitcredit"));
 
   // First few parsed rows as a grid to eyeball while assigning column roles.
   const grid = useMemo(() => parseCsv(fileText).slice(0, 6), [fileText]);
@@ -1574,7 +1600,7 @@ function ManualMapper({ fileText, onApply, amountSign, setAmountSign, selStyle, 
 
   return (
     <div style={{ marginBottom: 18, background: "var(--bg)", borderRadius: 10, padding: 12 }}>
-      <div style={sectionLabel}>Map columns (header not auto-detected)</div>
+      <div style={sectionLabel}>{title}</div>
       <div style={{ overflowX: "auto", marginBottom: 10 }}>
         <table style={{ borderCollapse: "collapse", fontSize: 11 }}>
           <tbody>
