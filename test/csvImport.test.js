@@ -239,7 +239,7 @@ test('importPlan: newRows never contains a row on or after the boundary', () => 
 
 test('importPlan tolerates junk instead of throwing during render', () => {
   // It runs inside a useMemo in CsvImport's body; a throw there is not caught by
-  // ModalErrorBoundary (which that same body renders) and blanks the whole PWA.
+  // the ErrorBoundary that same body renders and blanks the whole PWA.
   for (const junk of [undefined, null, 'nope', 42, {}]) {
     assert.equal(importPlan(junk).verdict, 'empty');
   }

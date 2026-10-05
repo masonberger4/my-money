@@ -1187,11 +1187,13 @@ insert.
 Bank Connections into the full-screen error card (`src/main.jsx:20-24`,
 `Dashboard.jsx:31-35,7811-7836`) — **SHIPPED 2026-10-05 (audit PR C)**: one
 automatic reload, then a card scoped to the modal; a resident PWA runs
-yesterday's bundle with no update signal (`public/sw.js:29-47`); an offline
-launch waits on the OS fetch timeout before serving the cached shell
-(`public/sw.js:92-105` — keep the `fresh.ok` line verbatim, the lockstep test
-matches it, and bump `CACHE_VERSION`) — **SHIPPED 2026-10-05 (audit PR C)**,
-a 3s network budget in sw.js v8; a foreground return after hours away never re-pulls the feed
+yesterday's bundle with no update signal (`public/sw.js:29-47`) — **NOT
+shipped: F46, under the 2026-10-05 backlog's "Needs a Mason ruling before
+code", waits on Mason's ruling**; an offline launch waits on the OS fetch
+timeout before serving the cached shell (`public/sw.js:92-105` — keep the
+`fresh.ok` line verbatim, the lockstep test matches it, and bump
+`CACHE_VERSION`) — **SHIPPED 2026-10-05 (audit PR C)**, a 3s network budget
+in sw.js v8; a foreground return after hours away never re-pulls the feed
 or re-checks feed health (`Dashboard.jsx:1984,2452-2479`, **VERIFIED**, and the
 hour-gated case must not paint the sync-failure banner) — **SHIPPED 2026-10-05
 (audit PR A)**, quiet as required; the load-failure banner
