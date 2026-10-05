@@ -5,7 +5,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { groupByDay, longDate, liveAcctFilter } from '../src/txList.js';
+import { groupByDay, longDate, liveAcctFilter, emptyListMessage, matchCountLabel } from '../src/txList.js';
 
 test('groups consecutive same-day rows under one section, preserving order', () => {
   const rows = [
@@ -86,4 +86,53 @@ test('the Spending list reads the live account filter, never the raw state', () 
   const reads = code.match(/\btxAcctFilter\b/g) || [];
   assert.equal(reads.length, 2,
     'something reads txAcctFilter directly — use acctFilter, or a filter on a hidden account strands the list');
+});
+
+// --- emptyListMessage: every branch of the Spending list's empty state --------
+// The hasMore-aware sentence used to exist for the category chip only, so an
+// account chip over a truncated first page said "No transactions match" above
+// a live Load more button.
+test('emptyListMessage: an account chip over a truncated page says try Load more', () => {
+  const what = '"coffee"';
+  assert.equal(emptyListMessage({ searchActive: true, acct: true, hasMore: true, loaded: 200, what }),
+    'No transactions for this account in the first 200 matches for "coffee" — try Load more.');
+  assert.equal(emptyListMessage({ searchActive: true, cat: 'Groceries', acct: true, hasMore: true, loaded: 200, what }),
+    'No Groceries transactions for this account in the first 200 matches for "coffee" — try Load more.');
+  // The category-only sentence is unchanged, word for word.
+  assert.equal(emptyListMessage({ searchActive: true, cat: 'Groceries', hasMore: true, loaded: 200, what: 'the filters' }),
+    'No Groceries transactions in the first 200 matches for the filters — try Load more.');
+});
+
+test('emptyListMessage: without more pages the plain sentences stand', () => {
+  const what = '"coffee"';
+  assert.equal(emptyListMessage({ searchActive: true, acct: true, hasMore: false, loaded: 12, what }),
+    'No transactions match "coffee".');
+  assert.equal(emptyListMessage({ searchActive: true, cat: 'Groceries', what }), 'No Groceries transactions match "coffee".');
+  assert.equal(emptyListMessage({ searchActive: true, what }), 'No transactions match "coffee".');
+  // No chip narrowing: hasMore can't hide anything the empty page would show.
+  assert.equal(emptyListMessage({ searchActive: true, hasMore: true, loaded: 0, what }), 'No transactions match "coffee".');
+});
+
+test('emptyListMessage: month browse (search inactive) ignores hasMore', () => {
+  assert.equal(emptyListMessage({ searchActive: false, cat: 'Groceries', acct: true, hasMore: true }),
+    'No Groceries transactions for this account this month.');
+  assert.equal(emptyListMessage({ searchActive: false, cat: 'Groceries' }), 'No Groceries transactions this month.');
+  assert.equal(emptyListMessage({ searchActive: false, acct: true }), 'No transactions for this account this month.');
+  assert.equal(emptyListMessage({ searchActive: false }), 'No transactions for this period.');
+});
+
+test('matchCountLabel marks a lower bound while more pages exist', () => {
+  assert.equal(matchCountLabel(0, true), '0+ matches');
+  assert.equal(matchCountLabel(12, true), '12+ matches');
+  assert.equal(matchCountLabel(1, true), '1+ matches');
+  assert.equal(matchCountLabel(1, false), '1 match');
+  assert.equal(matchCountLabel(0, false), '0 matches');
+  assert.equal(matchCountLabel(37), '37 matches');
+});
+
+test('the Spending list renders emptyListMessage and matchCountLabel', () => {
+  const dash = readFileSync(new URL('../src/components/Dashboard.jsx', import.meta.url), 'utf8');
+  assert.match(dash, /return emptyListMessage\(\{searchActive,cat:txCatFilter\?getName\(txCatFilter\):null,acct:!!acctFilter,\s*hasMore:!!searchRes\?\.hasMore,loaded:searchTxs\.length,/);
+  assert.match(dash, /matchCountLabel\(shownSearch\.length,!!searchRes\?\.hasMore\)/);
+  assert.doesNotMatch(dash, /searchActive&&cn&&searchRes\?\.hasMore/, 'the category-only hasMore branch is back inline');
 });

@@ -59,3 +59,32 @@ export function liveAcctFilter(id, accounts) {
   if (id == null) return null;
   return (accounts || []).some(a => a && a.id === id && !a.hidden) ? id : null;
 }
+
+// The Spending list's empty-state sentence. `cat` is the category chip's
+// DISPLAY name (or null), `acct` whether an account chip is narrowing, `what`
+// the quoted query or "the filters", `loaded` how many search matches are on
+// hand, `hasMore` whether the server has more pages. The hasMore branch exists
+// so the app never claims a chip has nothing when it only looked at a
+// truncated page of matches — for EITHER chip: an account chip used to fall
+// through to "No transactions match" above a live Load more button.
+export function emptyListMessage({ searchActive, cat = null, acct = false, hasMore = false, loaded = 0, what = '' }) {
+  if (searchActive) {
+    if ((cat || acct) && hasMore) {
+      const subject = `${cat ? `${cat} ` : ''}transactions${acct ? ' for this account' : ''}`;
+      return `No ${subject} in the first ${loaded} matches for ${what} — try Load more.`;
+    }
+    if (cat) return `No ${cat} transactions match ${what}.`;
+    return `No transactions match ${what}.`;
+  }
+  if (cat && acct) return `No ${cat} transactions for this account this month.`;
+  if (cat) return `No ${cat} transactions this month.`;
+  if (acct) return 'No transactions for this account this month.';
+  return 'No transactions for this period.';
+}
+
+// The search header's count. With more pages on the server the number on hand
+// is a lower bound, so it says so ("12+ matches") instead of a flat "0 matches"
+// above a Load more button that could still turn some up.
+export function matchCountLabel(n, hasMore = false) {
+  return `${n}${hasMore ? '+' : ''} match${n === 1 && !hasMore ? '' : 'es'}`;
+}

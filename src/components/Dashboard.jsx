@@ -25,7 +25,7 @@ import { teachQueueGroups, nonSpendLabel, categorizedShare } from "../teachQueue
 import { displayBalance, isDebtAccount as isDebtType, balanceAsOf, BALANCE_STALE_DAYS } from "../accountBalance.js";
 import { unhideConfirmMessage } from "../unhideConfirm.js";
 import { NAV_ITEMS, REFLECT_TABS, navForTab, pageTitle } from "../nav.js";
-import { groupByDay, longDate, liveAcctFilter } from "../txList.js";
+import { groupByDay, longDate, liveAcctFilter, emptyListMessage, matchCountLabel } from "../txList.js";
 import { TX_TYPES, txTypeLabel, allowedUserTypes } from "../txType.js";
 import { breakdownSegments, incomeVsSpendingInsight, incomeSections } from "../reflect.js";
 import { createSheetHistory } from "../sheetHistory.js";
@@ -5765,7 +5765,7 @@ export default function Dashboard({ refreshTick = 0 }) {
               <div style={{display:"flex",alignItems:"center",gap:10}}>
                 <span style={{fontSize:12,color:"var(--muted)"}}>
                   {searchActive
-                    ?(searching?"searching…":`${shownSearch.length} match${shownSearch.length!==1?"es":""}`)
+                    ?(searching?"searching…":matchCountLabel(shownSearch.length,!!searchRes?.hasMore))
                     :`${shownTxs.length} transaction${shownTxs.length!==1?"s":""}`}
                 </span>
                 {/* The refine disclosure — search box, amount/date filters AND
@@ -5933,21 +5933,13 @@ export default function Dashboard({ refreshTick = 0 }) {
             )):listTxs.length===0?(
               <div style={{textAlign:"center",padding:"30px 0",color:"var(--muted)",fontSize:14}}>
                 {/* Always getName — a renamed category must not leak its raw
-                    registry label here. The hasMore case exists so the app never
-                    claims a category has nothing when it only looked at a
-                    truncated page of matches. */}
+                    registry label here. The sentence (incl. the hasMore "try
+                    Load more" case, for either chip) is emptyListMessage. */}
                 {(()=>{
-                  const cn=txCatFilter?getName(txCatFilter):null;
                   const q=searchQ.trim();
                   // Filter-only search has no text query to quote.
-                  const what=q.length>=2?`"${q}"`:"the filters";
-                  if(searchActive&&cn&&searchRes?.hasMore)return `No ${cn} transactions in the first ${searchTxs.length} matches for ${what} — try Load more.`;
-                  if(searchActive&&cn)return `No ${cn} transactions match ${what}.`;
-                  if(searchActive)return `No transactions match ${what}.`;
-                  if(cn&&acctFilter)return `No ${cn} transactions for this account this month.`;
-                  if(cn)return `No ${cn} transactions this month.`;
-                  if(acctFilter)return "No transactions for this account this month.";
-                  return "No transactions for this period.";
+                  return emptyListMessage({searchActive,cat:txCatFilter?getName(txCatFilter):null,acct:!!acctFilter,
+                    hasMore:!!searchRes?.hasMore,loaded:searchTxs.length,what:q.length>=2?`"${q}"`:"the filters"});
                 })()}
               </div>
             ):(()=>{
