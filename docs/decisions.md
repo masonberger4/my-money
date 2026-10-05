@@ -757,7 +757,12 @@ entry records them. What PR B DECIDED, as opposed to fixed:
   chat history can exceed the per-message character cap on the next turn.
 - **Sonnet 5 is priced at its standard list price**, and every price is a list
   price pinned in a test, re-verified whenever a model changes. Display-only;
-  the model lineup itself (F102) waits for Mason.
+  the model lineup itself (F102) waits for Mason. Source: Anthropic's pricing
+  page (platform.claude.com/docs/en/about-claude/pricing), read 2026-10-05. Its
+  Sonnet 5 footnote says the $2/$10 announced at launch as intro pricing
+  through 2026-08-31 is now the standard price, and the $3/$15 rise scheduled
+  for 2026-09-01 will not happen. So $3/$15 never took effect; $2/$10 is not
+  an expired intro price.
 - **The reconciliation panel names date edits instead of reporting them as
   Unexplained.** A `dateMoved` timing line; the month rows stay effective-date
   reads (Overview parity, the panel's rule 3) plus ONE bank-date read for rows
