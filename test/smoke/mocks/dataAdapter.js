@@ -498,7 +498,12 @@ export async function getTaxYearTransactions(year) {
   return { transactions: TAX_ROWS.filter(t => t.transaction_date.startsWith(String(year))).map(t => ({ ...t })) };
 }
 export async function getMileage() { return []; }
-export async function addMileage() {}
+// The real adapter's shape (taxIO.addMileage's `.select(...)` row): the Tax
+// tab reads row.on_date to list the drive or say which year it went to.
+let mileSeq = 0;
+export async function addMileage({ on_date, miles, purpose, entity_id } = {}) {
+  return { id: `mile-${++mileSeq}`, entity_id: entity_id || null, on_date, miles, purpose: purpose || null };
+}
 export async function deleteMileage() {}
 export async function getReceiptTxIds() { return null; }
 export async function getReceipts() { return []; }
