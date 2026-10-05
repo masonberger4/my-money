@@ -1921,6 +1921,14 @@ export default function Dashboard({ refreshTick = 0 }) {
   const [month,setMonth]=useState(now.getMonth()+1);
   const [tab,setTab]=useState("overview");
   const [loading,setLoading]=useState(true);
+  // A bank pull fetchData started is still running — counted, because the
+  // startup pull and a Refresh can overlap. The pull chip, its gate and the
+  // gear's Refresh ride loading||refreshing, so they last until the pull (and
+  // its follow-up reload) settles instead of stopping after the cache read in
+  // front of it; the page skeletons stay on `loading` alone — the screen is
+  // painted while the sync runs.
+  const [refreshing,setRefreshing]=useState(false);
+  const syncsInFlight=useRef(0);
   const [lastUpd,setLastUpd]=useState(null);
   const [error,setError]=useState(null);
   const [overview,setOverview]=useState(null);
@@ -2747,41 +2755,46 @@ export default function Dashboard({ refreshTick = 0 }) {
     // holds it (cache invalidation). sync:"foreground" is the hour-gated pull
     // on a foreground return (the fetchData effect): nobody asked for it, so
     // its failure only logs — no banner over numbers the user didn't refresh.
-    if(sync)lastSyncAt.current=Date.now();
-    const syncP=sync?runSync().catch(err=>{
-      console.error("sync failed",err);
-      if(sync!=="foreground")setError(SYNC_FAILED_MSG);
-      return null;
-    }):null;
-    // No setLoading(false) here: the reload that wins loadSeq clears it
-    // (inside reloadData) — this one may be superseded, and the newer one
-    // must not be left relying on a clear that never comes.
-    await reloadData(y,m);
-    if(!syncP)return;
-    const res=await syncP;
-    // A failed pull painted its error above; a throttled pull (server ran
-    // within the hour) wrote nothing — vacuously, so did an empty results
-    // array (no access URL). Only a real pull earns the follow-up reload —
-    // EXCEPT on the explicit Refresh button (sync:"refresh"): its contract is
-    // a genuinely fresh read (the completion hook just dropped the caches),
-    // and skipping the follow-up there made a throttled Refresh serve the
-    // warm memo read from before the invalidation — stale exactly when the
-    // user asked for fresh. The follow-up reloads whatever month is on
-    // screen NOW (reloadViewed, not this call's y/m): the user can navigate
-    // while the pull runs, and a stale-month reload would mint the newest
-    // loadSeq and win.
-    const allThrottled=!res||(res.results||[]).every(r=>r?.skipped==="throttled");
-    if(allThrottled&&sync!=="refresh")return;
-    const live=await reloadViewed();
-    // A failed pull reaches here only on an explicit Refresh, and that
-    // reload's first act cleared the banner the catch above painted — in the
-    // same tick, so it never showed and cached numbers read as fresh exactly
-    // when the user asked for fresh. Re-assert it, unless the reload was
-    // superseded or failed with its own (more urgent) load error.
-    if(!res&&live!==false)setError(e=>e??SYNC_FAILED_MSG);
-    // The pull may have written rows onto whatever account is open behind the
-    // month view; its list is the one thing reloadData does not cover.
-    setAcctTxEpoch(e=>e+1);
+    // Every pull holds `refreshing` until it settles (the finally below).
+    if(sync){lastSyncAt.current=Date.now();syncsInFlight.current++;setRefreshing(true);}
+    try{
+      const syncP=sync?runSync().catch(err=>{
+        console.error("sync failed",err);
+        if(sync!=="foreground")setError(SYNC_FAILED_MSG);
+        return null;
+      }):null;
+      // No setLoading(false) here: the reload that wins loadSeq clears it
+      // (inside reloadData) — this one may be superseded, and the newer one
+      // must not be left relying on a clear that never comes.
+      await reloadData(y,m);
+      if(!syncP)return;
+      const res=await syncP;
+      // A failed pull painted its error above; a throttled pull (server ran
+      // within the hour) wrote nothing — vacuously, so did an empty results
+      // array (no access URL). Only a real pull earns the follow-up reload —
+      // EXCEPT on the explicit Refresh button (sync:"refresh"): its contract is
+      // a genuinely fresh read (the completion hook just dropped the caches),
+      // and skipping the follow-up there made a throttled Refresh serve the
+      // warm memo read from before the invalidation — stale exactly when the
+      // user asked for fresh. The follow-up reloads whatever month is on
+      // screen NOW (reloadViewed, not this call's y/m): the user can navigate
+      // while the pull runs, and a stale-month reload would mint the newest
+      // loadSeq and win.
+      const allThrottled=!res||(res.results||[]).every(r=>r?.skipped==="throttled");
+      if(allThrottled&&sync!=="refresh")return;
+      const live=await reloadViewed();
+      // A failed pull reaches here only on an explicit Refresh, and that
+      // reload's first act cleared the banner the catch above painted — in the
+      // same tick, so it never showed and cached numbers read as fresh exactly
+      // when the user asked for fresh. Re-assert it, unless the reload was
+      // superseded or failed with its own (more urgent) load error.
+      if(!res&&live!==false)setError(e=>e??SYNC_FAILED_MSG);
+      // The pull may have written rows onto whatever account is open behind the
+      // month view; its list is the one thing reloadData does not cover.
+      setAcctTxEpoch(e=>e+1);
+    }finally{
+      if(sync&&--syncsInFlight.current===0)setRefreshing(false);
+    }
   },[reloadData,reloadViewed]);
 
   // The ONE refresh: the gear menu's Refresh row and the pull-to-refresh gesture
@@ -4607,8 +4620,9 @@ export default function Dashboard({ refreshTick = 0 }) {
     <div className="screen" style={{fontFamily:"var(--font-sans)",background:"var(--bg)",
       color:"var(--text)"}}>
       {/* Gated on anySheetOpen because sheets scroll internally, and on
-          loading so a refresh already in flight cannot be stacked. */}
-      <PullRefresh blocked={anySheetOpen||loading} loading={loading} onTrigger={refreshNow}/>
+          loading||refreshing so a refresh already in flight — its bank pull
+          included — cannot be stacked; the chip settles on the same flag. */}
+      <PullRefresh blocked={anySheetOpen||loading||refreshing} loading={loading||refreshing} onTrigger={refreshNow}/>
       {/* 96px bottom padding keeps the fixed bottom nav clear of the last row. */}
       <div style={{maxWidth:720,margin:"0 auto",padding:"24px 16px 96px"}}>
 
@@ -4661,7 +4675,7 @@ export default function Dashboard({ refreshTick = 0 }) {
         )}
         {gearOpen&&(
           <GearMenu tab={tab} themePref={themePref} themeResolved={themeResolved} onTheme={setThemePref}
-            loading={loading} lastUpd={lastUpd} onRefresh={refreshNow} onQuickAdd={()=>setQuickAdd(true)}
+            loading={loading||refreshing} lastUpd={lastUpd} onRefresh={refreshNow} onQuickAdd={()=>setQuickAdd(true)}
             onSignOut={confirmSignOut} onClose={()=>setGearOpen(false)}/>
         )}
 

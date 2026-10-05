@@ -168,7 +168,7 @@ test('a refreshTick re-run more than an hour after the last pull starts a quiet 
     'the effect must ask the pure hour gate with the last pull\'s start time');
   assert.ok(body.includes('"foreground"'), 'the hour-gated pull runs in the quiet "foreground" mode');
   const { body: fetch } = slice(...FETCH);
-  assert.match(fetch, /if\(sync\)lastSyncAt\.current=Date\.now\(\)/,
+  assert.match(fetch, /if\(sync\)\{?lastSyncAt\.current=Date\.now\(\)/,
     'every pull fetchData starts (startup, Refresh, foreground) restarts the hour');
 });
 
@@ -189,4 +189,26 @@ test('feed health is re-checked after any effect-started pull, and a healthy ans
     'gating the status check on syncFirst alone means a foreground pull never re-checks feed health');
   assert.match(body, /setFeedHealth\([^;]*:null\)/,
     'a re-check that finds the feed healthy must clear a banner an earlier check raised');
+});
+
+// --- F72: the refresh spinners last until the bank pull settles --------------
+// `loading` drops after the first (cache) read, while the pull a Refresh
+// started is still running; the pull chip and the gear's spinner settled on
+// it, and the pulled rows painted seconds later with no signal.
+
+test('fetchData holds `refreshing` for the whole pull, cleared in a finally once no pull is left', () => {
+  const { body } = slice(...FETCH);
+  assert.match(body, /if\(sync\)\{[^}]*syncsInFlight\.current\+\+;[^}]*setRefreshing\(true\);/,
+    'a pull raises refreshing (counted — the startup pull and a Refresh can overlap)');
+  assert.match(body, /finally\{\s*if\(sync&&--syncsInFlight\.current===0\)setRefreshing\(false\);\s*\}/,
+    'the clear must ride a finally (every early return included) and wait for the LAST overlapping pull');
+  assert.ok(body.indexOf('setRefreshing(true)') < body.indexOf('runSync('),
+    'refreshing is raised before the pull starts');
+});
+
+test('the pull chip, its gate and the gear\'s Refresh read loading||refreshing; page skeletons stay on loading', () => {
+  assert.match(code, /<PullRefresh blocked=\{anySheetOpen\|\|loading\|\|refreshing\} loading=\{loading\|\|refreshing\}/,
+    'PullRefresh settles its chip (and re-arms) only once the pull it started has finished');
+  assert.match(code, /<GearMenu[^>]*loading=\{loading\|\|refreshing\}/,
+    'the gear\'s Refresh row spins and stays disabled until the pull settles');
 });

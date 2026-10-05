@@ -69,12 +69,15 @@ test('cycleTheme is gone from both the header and src/theme.js', () => {
 });
 
 // --- Pull-to-refresh must be blocked while a sheet is open or already busy --
-test('<PullRefresh> is gated on anySheetOpen||loading', () => {
+// "Busy" includes the bank pull a refresh started (`refreshing`), not just the
+// cache read in front of it: gating on `loading` alone let the chip settle and
+// a second pull arm while SimpleFIN was still pulling (F72).
+test('<PullRefresh> is gated on anySheetOpen||loading||refreshing', () => {
   const dash = read(DASH);
   const line = dash.split('\n').find(l => l.includes('<PullRefresh'));
   assert.ok(line, 'the <PullRefresh render line moved — update this test\'s anchor string');
-  assert.ok(line.includes('blocked={anySheetOpen||loading}'),
-    'sheets scroll internally (the gesture would fight that scroll) and a refresh already in flight must not be stacked by a second pull');
+  assert.ok(line.includes('blocked={anySheetOpen||loading||refreshing}'),
+    'sheets scroll internally (the gesture would fight that scroll) and a refresh already in flight — its bank pull included — must not be stacked by a second pull');
 });
 
 // --- The gesture must be additive on top of native scrolling ----------------
