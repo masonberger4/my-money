@@ -25,7 +25,7 @@ import { teachQueueGroups, nonSpendLabel, categorizedShare } from "../teachQueue
 import { displayBalance, isDebtAccount as isDebtType, balanceAsOf, BALANCE_STALE_DAYS } from "../accountBalance.js";
 import { unhideConfirmMessage } from "../unhideConfirm.js";
 import { NAV_ITEMS, REFLECT_TABS, navForTab, pageTitle } from "../nav.js";
-import { groupByDay, longDate, liveAcctFilter, emptyListMessage, matchCountLabel } from "../txList.js";
+import { groupByDay, longDate, liveAcctFilter, emptyListMessage, matchCountLabel, resortByEffectiveDate } from "../txList.js";
 import { TX_TYPES, txTypeLabel, allowedUserTypes } from "../txType.js";
 import { breakdownSegments, incomeVsSpendingInsight, incomeSections } from "../reflect.js";
 import { createSheetHistory } from "../sheetHistory.js";
@@ -3610,6 +3610,12 @@ export default function Dashboard({ refreshTick = 0 }) {
   // keep asserting a save that didn't land.
   function patchAllTxLists(id,fields){
     const apply=t=>t.id===id?patchTxShape(t,fields):t;
+    // The lists are POSITIONAL (groupByDay keeps their order), so a date edit
+    // must re-sort them too, or the row stays put under its new day header.
+    // The account page and search results are never refetched after an edit,
+    // so for them this IS the fix; the month list is re-sorted as well so it
+    // reads right until reloadData replaces it. The rollback re-sorts again.
+    const order=fields&&"user_date" in fields?resortByEffectiveDate:list=>list;
     // Capture per list — the lists hold distinct row objects, and this runs
     // from an event handler, so the closed-over state is current.
     const before={
@@ -3618,15 +3624,15 @@ export default function Dashboard({ refreshTick = 0 }) {
       search:searchRes?.transactions.find(t=>t.id===id)||null,
       sel:selTx&&selTx.id===id?selTx:null,
     };
-    setTransactions(prev=>prev?{...prev,transactions:prev.transactions.map(apply)}:prev);
-    setAcctTxs(prev=>prev?prev.map(apply):prev);
-    setSearchRes(prev=>prev?{...prev,transactions:prev.transactions.map(apply)}:prev);
+    setTransactions(prev=>prev?{...prev,transactions:order(prev.transactions.map(apply))}:prev);
+    setAcctTxs(prev=>prev?order(prev.map(apply)):prev);
+    setSearchRes(prev=>prev?{...prev,transactions:order(prev.transactions.map(apply))}:prev);
     setSelTx(prev=>prev?apply(prev):prev);
     return()=>{
       const put=row=>t=>t.id===id?row:t;
-      if(before.month)setTransactions(prev=>prev?{...prev,transactions:prev.transactions.map(put(before.month))}:prev);
-      if(before.acct)setAcctTxs(prev=>prev?prev.map(put(before.acct)):prev);
-      if(before.search)setSearchRes(prev=>prev?{...prev,transactions:prev.transactions.map(put(before.search))}:prev);
+      if(before.month)setTransactions(prev=>prev?{...prev,transactions:order(prev.transactions.map(put(before.month)))}:prev);
+      if(before.acct)setAcctTxs(prev=>prev?order(prev.map(put(before.acct))):prev);
+      if(before.search)setSearchRes(prev=>prev?{...prev,transactions:order(prev.transactions.map(put(before.search)))}:prev);
       // Only if the sheet still shows this row — the user may have moved on.
       if(before.sel)setSelTx(prev=>prev&&prev.id===id?before.sel:prev);
     };

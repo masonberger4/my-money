@@ -5,7 +5,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { groupByDay, longDate, liveAcctFilter, emptyListMessage, matchCountLabel } from '../src/txList.js';
+import { groupByDay, longDate, liveAcctFilter, emptyListMessage, matchCountLabel, resortByEffectiveDate } from '../src/txList.js';
 
 test('groups consecutive same-day rows under one section, preserving order', () => {
   const rows = [
@@ -135,4 +135,60 @@ test('the Spending list renders emptyListMessage and matchCountLabel', () => {
   assert.match(dash, /return emptyListMessage\(\{searchActive,cat:txCatFilter\?getName\(txCatFilter\):null,acct:!!acctFilter,\s*hasMore:!!searchRes\?\.hasMore,loaded:searchTxs\.length,/);
   assert.match(dash, /matchCountLabel\(shownSearch\.length,!!searchRes\?\.hasMore\)/);
   assert.doesNotMatch(dash, /searchActive&&cn&&searchRes\?\.hasMore/, 'the category-only hasMore branch is back inline');
+});
+
+// --- resortByEffectiveDate: a date edit must move the row, not just its header -
+// patchAllTxLists maps the never-refetched account page and search results in
+// place, and groupByDay preserves order — so a row whose date moved used to
+// stay put under its new header ("October 3 | September 29 | October 1").
+test('resortByEffectiveDate moves an edited row into date order; groupByDay headers are monotone', () => {
+  // Row b was Oct 1 and is now dated Sep 28 (patchTxShape rewrote transaction_date).
+  const patched = [
+    { id: 'a', transaction_date: '2026-10-03' },
+    { id: 'b', transaction_date: '2026-09-28' },
+    { id: 'c', transaction_date: '2026-09-29' },
+  ];
+  assert.deepEqual(groupByDay(patched).map(s => s.date), ['2026-10-03', '2026-09-28', '2026-09-29'],
+    'the bug: order-preserving grouping of the patched list is out of order');
+  const sorted = resortByEffectiveDate(patched);
+  assert.deepEqual(sorted.map(r => r.id), ['a', 'c', 'b']);
+  assert.deepEqual(groupByDay(sorted).map(s => s.date), ['2026-10-03', '2026-09-29', '2026-09-28']);
+  // Moved FORWARD: an Oct 3 row sitting between Sep 29 and Oct 1 goes first.
+  const fwd = resortByEffectiveDate([
+    { id: 'x', transaction_date: '2026-10-01' },
+    { id: 'y', transaction_date: '2026-10-03' },
+    { id: 'z', transaction_date: '2026-09-29' },
+  ]);
+  assert.deepEqual(fwd.map(r => r.id), ['y', 'x', 'z']);
+});
+
+test('resortByEffectiveDate is stable: unmoved rows keep their exact order', () => {
+  // Same-day rows in a non-id order (the account page has no id tiebreak,
+  // the month list breaks ties by amount) must not be reshuffled.
+  const rows = [
+    { id: '1', transaction_date: '2026-10-02', amount: 5 },
+    { id: '9', transaction_date: '2026-10-02', amount: 80 },
+    { id: '3', transaction_date: '2026-10-02', amount: 12 },
+    { id: '2', transaction_date: '2026-10-01' },
+    { id: '7', date: '2026-09-30' },
+  ];
+  const out = resortByEffectiveDate(rows);
+  assert.deepEqual(out.map(r => r.id), ['1', '9', '3', '2', '7'], 'already sorted by date → identical order');
+  assert.notEqual(out, rows, 'returns a new array');
+  assert.deepEqual(rows.map(r => r.id), ['1', '9', '3', '2', '7'], 'input not mutated');
+  assert.deepEqual(resortByEffectiveDate(null), []);
+});
+
+test('patchAllTxLists re-sorts every list (and its rollback) on a user_date edit', () => {
+  const dash = readFileSync(new URL('../src/components/Dashboard.jsx', import.meta.url), 'utf8');
+  const start = dash.indexOf('function patchAllTxLists(');
+  assert.ok(start > 0, 'patchAllTxLists moved — update this test');
+  const body = dash.slice(start, dash.indexOf('\n  }\n', start));
+  assert.match(body, /const order=fields&&"user_date" in fields\?resortByEffectiveDate:list=>list;/);
+  assert.match(body, /setAcctTxs\(prev=>prev\?order\(prev\.map\(apply\)\):prev\)/,
+    'the account page is never refetched after an edit — it must be re-sorted');
+  assert.match(body, /setSearchRes\(prev=>prev\?\{\.\.\.prev,transactions:order\(prev\.transactions\.map\(apply\)\)\}:prev\)/,
+    'search results are never refetched after an edit — they must be re-sorted');
+  assert.match(body, /setAcctTxs\(prev=>prev\?order\(prev\.map\(put\(before\.acct\)\)\):prev\)/, 'the rollback must re-sort too');
+  assert.match(body, /transactions:order\(prev\.transactions\.map\(put\(before\.search\)\)\)/, 'the rollback must re-sort too');
 });

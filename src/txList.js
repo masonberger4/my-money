@@ -88,3 +88,20 @@ export function emptyListMessage({ searchActive, cat = null, acct = false, hasMo
 export function matchCountLabel(n, hasMore = false) {
   return `${n}${hasMore ? '+' : ''} match${n === 1 && !hasMore ? '' : 'es'}`;
 }
+
+// Re-sort shaped rows by their EFFECTIVE date, newest first, after an in-place
+// date edit (patchAllTxLists on `user_date`). groupByDay preserves the
+// caller's order by contract, and the account page and search results are
+// never refetched after an edit, so a row whose date moved stayed where it was
+// under its new header — "October 3 | September 29 | October 1". STABLE and
+// date-only on purpose: rows that didn't move keep their exact order (the
+// account page's query has no id tiebreak, so imposing one would reshuffle
+// untouched days), and the moved row lands in its new day by its old relative
+// position. Returns a new array; the input is not mutated.
+export function resortByEffectiveDate(rows) {
+  const key = t => String((t && (t.transaction_date || t.date)) || '');
+  return [...(rows || [])].sort((a, b) => {
+    const da = key(a), db = key(b);
+    return da === db ? 0 : da < db ? 1 : -1;
+  });
+}
