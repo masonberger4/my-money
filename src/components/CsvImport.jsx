@@ -147,7 +147,17 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
   // The target's existing ids/sources could NOT be read. Distinct from "the
   // account is empty" — see the effect that loads them.
   const [idsError, setIdsError] = useState(null);
-  const [idsEpoch, setIdsEpoch] = useState(0); // bumped by Retry
+  // Bumped by Retry, and once each import's writes have settled (see
+  // rereadExistingIds).
+  const [idsEpoch, setIdsEpoch] = useState(0);
+  // Re-read the target's ids and sources AFTER a write attempt settles. The
+  // effect below reads on a target change, and adoption changes the target
+  // BEFORE the write, so the snapshot was taken concurrently with (or ahead
+  // of) the rows it should hold. A modal that stays open afterwards — a retry
+  // after a failed write that committed earlier slices, or "Open alone" after
+  // a batch — then flagged duplicates and ran the one-format-per-account
+  // guard against stale data: a CSV picked after a part-written PDF passed it.
+  const rereadExistingIds = () => setIdsEpoch(n => n + 1);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [pdfAdvisory, setPdfAdvisory] = useState(null); // non-fatal guidance, not the terminal error slot
@@ -774,6 +784,9 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
       setError(e.message || "Import failed.");
     } finally {
       setBusy(false);
+      // Success or failure: importCsvTransactions commits slice by slice, so a
+      // throw can leave earlier slices written.
+      rereadExistingIds();
     }
   }
 
@@ -1048,12 +1061,19 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
     if (batchAbortRef.current) {
       // Unmounted mid-run: no UI left to show a summary, but rows already
       // landed — refresh the Dashboard so they appear. (An account created
-      // with nothing written is reported by the unmount effect.)
+      // with nothing written is reported by the unmount effect.) When the
+      // unmount effect DID report an adopted account, this second call is
+      // not redundant: the abort check only runs before the next file, so the
+      // file in flight at unmount can still write AFTER that first refresh,
+      // and only this one shows its rows.
       if (totals.written > 0) reportImported();
       return;
     }
     setBatchSummary({ ...totals, files: queue.length });
     setBatchRunning(false);
+    // "Open alone" hands a file to the single-file path, which must see what
+    // this run wrote.
+    rereadExistingIds();
     if (totals.written > 0) reportImported();
   }
 

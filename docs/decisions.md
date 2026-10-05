@@ -875,7 +875,12 @@ memory docs (the `src/csvImport.js`, `src/pdfImport.js`,
   file. After review, these decisions moved into pure helpers in
   `src/csvImport.js` and are tested as behaviour, not source text. Not added:
   a smoke-mock switch that makes the read reject. It would turn the CI render
-  gate into a multi-step modal flow for a low-severity path.
+  gate into a multi-step modal flow for a low-severity path. A second review
+  found the single-file read stale after a write: F42's adoption moves the
+  target before the write, so that read ran alongside it. It now re-runs
+  once `confirm()` settles (success or throw, since earlier slices may have
+  committed) and once a batch finishes, before "Open alone" can hand a file
+  over.
 - **One `useThemeToken` in theme.js** (F99). Two private copies drift on the
   next re-read change, and theme.js imports no component, so the single copy
   creates no cycle.

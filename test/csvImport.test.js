@@ -913,6 +913,22 @@ test('REGRESSION: an unreadable account blocks Import and batch start', () => {
   assert.match(bodyOf(src, 'async function confirm()', 'setBusy(true)'), /if \(idsError\) return;/);
 });
 
+// Adoption moves the target off "new" BEFORE the write, so the effect's read
+// runs alongside (or ahead of) the rows it should see, and nothing re-read
+// after. A modal left open — a retry after a write that committed earlier
+// slices and then threw, or "Open alone" after a batch — flagged duplicates
+// and ran the one-format guard on that stale snapshot: a CSV picked after a
+// part-written PDF passed it. Wiring only (the component can't mount in Node).
+test('REGRESSION: the target ids re-read once each import path has settled', () => {
+  const src = csvImportSrc();
+  assert.match(src, /const rereadExistingIds = \(\) => setIdsEpoch\(n => n \+ 1\);/);
+  const confirm = bodyOf(src, 'async function confirm()', '// --------');
+  assert.match(confirm, /\} finally \{[\s\S]*?rereadExistingIds\(\);[\s\S]*?\n {2}\}/,
+    'in confirm()\'s finally: a throw can leave earlier slices written');
+  const batchTail = bodyOf(src, 'setBatchSummary({ ...totals, files: queue.length });', 'const panelStyle');
+  assert.match(batchTail, /rereadExistingIds\(\);/, 'a finished batch re-reads before "Open alone" can hand a file over');
+});
+
 test('REGRESSION: every batch file guards its own refetch through batchFileIds', () => {
   const loop = bodyOf(csvImportSrc(), 'async function runBatch()', 'let builtRows;');
   assert.match(loop, /const freshIds = batchFileIds\(await getExistingTxIds\(accountId\), \{ kind, auditOnly, targetIsManual: targetManual \}\);/);
