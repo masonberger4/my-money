@@ -730,7 +730,7 @@ function EditName({name,onSave}) {
     onSave(next);
   };
   if(ed) return (
-    <input ref={ref} value={val} onChange={e=>setVal(e.target.value)}
+    <input ref={ref} value={val} onChange={e=>setVal(e.target.value)} data-mm-esc-local=""
       onBlur={commit}
       onKeyDown={e=>{if(e.key==="Enter"){commit();}if(e.key==="Escape"){e.stopPropagation();setEd(false);setVal(name);}}}
       style={{font:"inherit",fontSize:13,fontWeight:500,color:"var(--text)",background:"var(--bg)",
@@ -756,7 +756,7 @@ function BudgetEdit({limit,onSave}) {
   useEffect(()=>{if(ed)ref.current?.select();},[ed]);
   function commit(){setEd(false);const t=val.trim();onSave(t===""?null:t);}
   if(ed) return (
-    <input ref={ref} value={val} inputMode="decimal" placeholder="$/mo"
+    <input ref={ref} value={val} inputMode="decimal" placeholder="$/mo" data-mm-esc-local=""
       onChange={e=>setVal(numericish(e.target.value,{negative:false}))}
       onBlur={commit}
       onKeyDown={e=>{if(e.key==="Enter")commit();if(e.key==="Escape"){e.stopPropagation();setEd(false);setVal(limit!=null?String(limit):"");}}}
@@ -783,7 +783,7 @@ function AssignEdit({value,onSave}) {
   useEffect(()=>{if(ed)ref.current?.select();},[ed]);
   function commit(){setEd(false);const t=val.trim();onSave(t===""?null:t);}
   if(ed) return (
-    <input ref={ref} value={val} inputMode="decimal" placeholder="$"
+    <input ref={ref} value={val} inputMode="decimal" placeholder="$" data-mm-esc-local=""
       onChange={e=>setVal(numericish(e.target.value))}
       onBlur={commit}
       onKeyDown={e=>{if(e.key==="Enter")commit();if(e.key==="Escape"){e.stopPropagation();setEd(false);setVal(value?String(value):"");}}}
@@ -821,7 +821,7 @@ function IncomeEdit({value,isDefault,onSave}) {
   function commit(scope){setEd(false);const t=val.trim();onSave(t===""?null:t,scope);}
   if(ed) return (
     <span style={{display:"inline-flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
-      <input ref={ref} value={val} inputMode="decimal" placeholder="$"
+      <input ref={ref} value={val} inputMode="decimal" placeholder="$" data-mm-esc-local=""
         onChange={e=>setVal(numericish(e.target.value,{negative:false}))}
         onKeyDown={e=>{if(e.key==="Enter")commit("month");if(e.key==="Escape"){e.stopPropagation();setEd(false);setVal(value!=null?String(value):"");}}}
         style={{font:"inherit",fontSize:16,width:96,color:"var(--text)",background:"var(--card)",
@@ -3304,6 +3304,13 @@ export default function Dashboard({ refreshTick = 0 }) {
       // with [data-mm-topmost] (ReceiptSection.jsx); the marker in the DOM
       // means a topmost overlay owns this press.
       if(document.querySelector("[data-mm-topmost]"))return;
+      // An inline editor (EditName — the sheet's Payee rename) consumes
+      // Escape itself to CANCEL the edit; capture runs before its React
+      // onKeyDown, so without this yield the press closed the whole sheet
+      // instead. Its stopPropagation keeps the press from reaching any
+      // bubble-phase sheet closer; the NEXT press (focus gone) closes the
+      // sheet as before. Only marked editors yield — not every input.
+      if(e.target instanceof Element&&e.target.closest("[data-mm-esc-local]"))return;
       e.stopImmediatePropagation();
       if(addingCat)setAddingCat(false);
       else if(catPickerFor)setCatPickerFor(null);
