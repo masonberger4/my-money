@@ -12,7 +12,7 @@
 // then saved per account and re-applied to later statements — always through
 // the existing preview/confirm gate.
 
-import { parseDate as parseNumericDate, parseMoney } from './csvImport.js';
+import { directionMark, parseDate as parseNumericDate, parseMoney } from './csvImport.js';
 
 export const TEMPLATE_VERSION = 1;
 
@@ -869,14 +869,26 @@ function escapeRe(s) {
 // Resolve it here instead of loosening the shipped CSV rule: a negative in one
 // column is exactly a positive in the other, so swap it across. The signed math
 // (debit − credit) then comes out right and the CSV path is untouched.
+//
+// A CR- or DR-marked cell is read AS PRINTED, in either column — CR money in,
+// DR money out, the rule buildRows' single-amount path follows. parseMoney's CR
+// is relative (the opposite of the column's unmarked values), which is right
+// in the Debit column but backwards in the Credit one: a statement that
+// prints a redundant "100.00 CR" in its Credit column would net to a DEBIT
+// and import a deposit as money out, a wrong-signed row no re-import can
+// dedup away. So a marked credit cell keeps parseMoney's own orientation
+// (DR +, CR −) instead of being subtracted: CR in Credit stays a credit, DR
+// in Credit is a reversal (money out), CR in Debit is a reversal (money in).
 export function normalizeDebitCredit(debitRaw, creditRaw) {
   const d = String(debitRaw ?? '').trim();
   const c = String(creditRaw ?? '').trim();
   const dv = d ? parseMoney(d) : 0;
   const cv = c ? parseMoney(c) : 0;
   if (!Number.isFinite(dv) || !Number.isFinite(cv)) return { debit: d, credit: c };
-  // Net the pair, then place the magnitude in the column its sign implies.
-  const net = dv - cv; // positive = money out
+  // Net the pair (positive = money out), then place the magnitude in the
+  // column its sign implies. A debit cell, marked or not, is already oriented
+  // money-out-positive; an unmarked credit cell counts against it.
+  const net = dv + (directionMark(c) ? cv : -cv);
   if (net > 0) return { debit: net.toFixed(2), credit: '' };
   if (net < 0) return { debit: '', credit: (-net).toFixed(2) };
   return { debit: '', credit: '' };

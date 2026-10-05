@@ -177,9 +177,42 @@ test('REGRESSION: a dated "New Balance … CR" summary line outside the anchored
   assert.deepEqual(rows.map(r => r.amount), [45, -12]);
 });
 
-test('a CR in a Debit/Credit pair moves to the other column (normalizeDebitCredit)', () => {
-  assert.deepEqual(normalizeDebitCredit('45.00 CR', ''), { debit: '', credit: '45.00' });
-  assert.deepEqual(normalizeDebitCredit('', '45.00 DR'), { debit: '', credit: '45.00' });
+test('a CR or DR in a Debit/Credit pair is read as printed, in either column (normalizeDebitCredit)', () => {
+  // CR is money in and DR money out wherever the cell sits. A marker that
+  // matches its own column is redundant; one that contradicts it is a reversal.
+  assert.deepEqual(normalizeDebitCredit('', '100.00 CR'), { debit: '', credit: '100.00' }, 'CR in Credit stays a credit');
+  assert.deepEqual(normalizeDebitCredit('100.00 DR', ''), { debit: '100.00', credit: '' }, 'DR in Debit stays a debit');
+  assert.deepEqual(normalizeDebitCredit('45.00 CR', ''), { debit: '', credit: '45.00' }, 'CR in Debit is money in');
+  assert.deepEqual(normalizeDebitCredit('', '45.00 DR'), { debit: '45.00', credit: '' }, 'DR in Credit is money out');
+  assert.deepEqual(normalizeDebitCredit('100.00 DR', '30.00 CR'), { debit: '70.00', credit: '' }, 'both marked, netted as printed');
+  assert.deepEqual(normalizeDebitCredit('', '$1,250.00 cr'), { debit: '', credit: '1250.00' }, 'lower-case marker');
+});
+
+test('REGRESSION: a Credit column printing a redundant "100.00 CR" imports a deposit as money IN', () => {
+  // parseMoney's CR is relative (negative), and the old netting subtracted the
+  // credit cell, so -(-100) landed as a $100 DEBIT — a deposit imported as
+  // spending, wrong-signed for good (the dedup hash includes the amount).
+  const pg = page(1, [
+    ...mortgagePreamble(),
+    ...textLine(100, 'ACTIVITY SINCE LAST STATEMENT'),
+    ...mortgageHeader(120),
+    ...mortgageRow(140, 'Jun 15', 'PAYMENT RECEIVED THANK YOU', { payment: '100.00 CR' }),
+    ...mortgageRow(160, 'Jun 20', 'LATE FEE ASSESSMENT', { charge: '15.00 DR' }),
+    ...mortgageRow(180, 'Jun 22', 'PAYMENT REVERSAL', { payment: '40.00 DR' }),
+  ]);
+  const res = applyTemplate([pg], mortgageTemplate());
+  assert.deepEqual(res.skipped.map(s => s.text), [], 'nothing silently dropped');
+  assert.deepEqual(res.grid.map(r => [r[2], r[3]]), [
+    ['', '100.00'],
+    ['15.00', ''],
+    ['40.00', ''],
+  ]);
+  const { rows } = buildRows(res.grid, res.buildOpts);
+  assert.deepEqual(rows.map(r => [r.description, r.amount]), [
+    ['PAYMENT RECEIVED THANK YOU', -100],
+    ['LATE FEE ASSESSMENT', 15],
+    ['PAYMENT REVERSAL', 40],
+  ]);
 });
 
 test('parseDate: the two-digit-year pivot is at 70', () => {

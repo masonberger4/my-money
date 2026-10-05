@@ -375,17 +375,17 @@ export function detectHeader(rows) {
 // column's unmarked values": a statement that prints CR marks its credits
 // (refunds, payments) against unmarked charges, which is exactly the
 // out_positive reading the PDF default and a card CSV use, so the refund lands
-// as money in. That relative number is what the PDF section flip and
-// normalizeDebitCredit work with; buildRows' single-amount path instead reads
-// a CR/DR-marked cell AS IS, whatever amountSign says (see directionMark). A
-// marker COMBINED with parentheses or a leading sign is NaN — two directions
-// on one value is ambiguous, and guessing it wrong mints a wrong-signed row
-// that can never be deduped away.
+// as money in. That relative number is what the PDF section flip works with;
+// buildRows' single-amount path and the PDF pair's normalizeDebitCredit instead
+// read a CR/DR-marked cell AS PRINTED (see directionMark). A marker COMBINED
+// with parentheses or a leading sign is NaN — two directions on one value is
+// ambiguous, and guessing it wrong mints a wrong-signed row that can never be
+// deduped away.
 const TRAILING_MARK_RE = /^(.*\d.*?)\s*(CR|DR|-)$/i;
 
 // The explicit direction a money cell prints, if any: 'CR' | 'DR' | null. A
 // trailing minus is a SIGN (the same as a leading one), not a direction.
-function directionMark(raw) {
+export function directionMark(raw) {
   const m = String(raw ?? '').trim().match(TRAILING_MARK_RE);
   return m && m[2] !== '-' ? m[2].toUpperCase() : null;
 }

@@ -820,16 +820,22 @@ memory docs (the `src/csvImport.js`, `src/pdfImport.js`,
   statement period and no guess without one** (F41). CSV `parseDate` stays
   strict, because a CSV has no statement period to take a year from.
 - **Trailing CR, DR and minus are read** (F83). `parseMoney` keeps CR
-  relative (the opposite of the column's unmarked values), which
-  `normalizeDebitCredit` and the PDF section flip depend on. After review,
-  `buildRows`' single-amount path reads a CR/DR-marked CSV cell as printed,
-  whatever `amountSign` says: the CSV default is in_positive, so "100.00 CR"
-  had come in as money out. Rejected: auto-selecting out_positive for a
-  marked file. `amountSign` is sticky across the files of one modal, so an
-  automatic flip would silently carry into the next, unmarked file. Accepted
-  residuals: a dated credit-balance summary line inside a PDF's table region
-  ("Previous Balance … CR") now has a money shape and can import as a row, as
-  unsigned balance lines already could, and the totals line exposes it.
+  relative (the opposite of the column's unmarked values), which the PDF
+  section flip depends on. After review, `buildRows`' single-amount path
+  reads a CR/DR-marked CSV cell as printed, whatever `amountSign` says: the
+  CSV default is in_positive, so "100.00 CR" had come in as money out. A
+  second review found the same inversion in the PDF Debit/Credit pair:
+  `normalizeDebitCredit` subtracted the credit cell, so a redundant
+  "100.00 CR" printed in the Credit column netted to a $100 debit. It now
+  reads a marked cell as printed in either column too (CR in, DR out; a
+  marker contradicting its column is a reversal), which also flips the
+  first build's pin that a "45.00 DR" in Credit was a credit. Rejected:
+  auto-selecting out_positive for a marked file. `amountSign` is sticky
+  across the files of one modal, so an automatic flip would silently carry
+  into the next, unmarked file. Accepted residuals: a dated credit-balance
+  summary line inside a PDF's table region ("Previous Balance … CR") now has
+  a money shape and can import as a row, as unsigned balance lines already
+  could, and the totals line exposes it.
   Reporting skipped PDF lines stays the deferred near-miss feature. Under
   out_positive, the section flip can turn a CR-marked deposit inside a
   Deposits section into money out, though auto mode usually declines the
