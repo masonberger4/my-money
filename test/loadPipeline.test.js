@@ -119,3 +119,36 @@ test('fetchData re-asserts the sync-failure banner after the follow-up reload of
   assert.match(body.slice(follow), /if\([^)]*!res[^)]*\)setError\([^;]*SYNC_FAILED_MSG/,
     'after the follow-up reload (which cleared the error), a failed pull (res null) must set the banner again');
 });
+
+// --- F17: the Budget tab's typed income is MONTH-TAGGED ----------------------
+// Its siblings (actualInc, envelopes) carry their month; `income` did not, so
+// a transient getBudgetIncome failure after paging — or an envelope write
+// settling after a month tap, which supersedes the reload's envelope-state
+// commit — left the PREVIOUS month's figure feeding Ready to Assign.
+
+test('every setIncome commit carries the month it was read for', () => {
+  const calls = [...code.matchAll(/\bsetIncome\(/g)];
+  assert.ok(calls.length >= 2, 'fixture assumption: reloadData and doEnvelopeWrite both commit income');
+  for (const m of calls) {
+    const arg = code.slice(m.index, code.indexOf(';', m.index));
+    assert.match(arg, /^setIncome\(\{\.\.\.\w+,y(:\w+)?,m(:\w+)?\}\)/,
+      `setIncome must commit {...inc,y,m} — an untagged figure renders under whatever month is viewed: ${arg}`);
+  }
+});
+
+test('the income state is read only through the month-checked accessor', () => {
+  const def = /const incomeForMonth=income&&income\.y===year&&income\.m===month\?income:null;/;
+  assert.match(code, def, 'incomeForMonth must reject a figure tagged for another month');
+  const defLine = code.match(def)[0];
+  const stripped = code.replace(defLine, '');
+  assert.doesNotMatch(stripped, /(?<![.\w])income\??\.\w/,
+    'a raw income./income?. read bypasses the month tag — read incomeForMonth instead');
+});
+
+test('an envelope write that lands after a month tap re-reads the viewed month\'s income too', () => {
+  const { body } = slice('async function doEnvelopeWrite', 'const saveBudget=');
+  const elseBranch = body.slice(body.indexOf('}else{'));
+  assert.ok(elseBranch.includes('getEnvelopes('), 'fixture assumption: the month-moved branch re-reads envelopes');
+  assert.ok(elseBranch.includes('getBudgetIncome('),
+    'the month-moved branch bumps envSeq, which makes the in-flight reload skip setIncome — it must re-read income itself');
+});

@@ -1972,6 +1972,12 @@ export default function Dashboard({ refreshTick = 0 }) {
   const [byDate,setByDate]=useState({});
   // --- Envelope budgeting (Budget tab) ---
   const [envelopes,setEnvelopes]=useState(null);
+  // The TYPED income ({income,isDefault,monthlyDefault} from getBudgetIncome),
+  // MONTH-TAGGED ({...,y,m}) like actualInc below and for the same reason: a
+  // transient read failure keeps the previous state, and an envelope write
+  // settling after a month tap makes the reload skip it — untagged, the old
+  // month's figure fed Ready to Assign under the new header. Read ONLY
+  // through incomeForMonth.
   const [income,setIncome]=useState(null);
   // Measured income for the viewed month (the hybrid income rule). MONTH-TAGGED
   // ({y,m,amount,coverageStart}) — the movers month-tagging lesson: a transient
@@ -2695,7 +2701,7 @@ export default function Dashboard({ refreshTick = 0 }) {
         setBudgets(bu.budgets||{});
         setByDate(bu.byDate||{});
         if(en!==undefined)setEnvelopes(en);
-        if(inc!==undefined)setIncome(inc);
+        if(inc!==undefined)setIncome({...inc,y,m});
       }
       // Outside the eseq guard: envelope writes never move transactions, so a
       // write completing mid-reload can't have made this snapshot stale.
@@ -4370,8 +4376,12 @@ export default function Dashboard({ refreshTick = 0 }) {
   // measurement; the resolver falls back to manual when there's no usable
   // actual (uncovered history, failed read) rather than blanking RTA.
   const actualForMonth=actualInc&&actualInc.y===year&&actualInc.m===month?actualInc:null;
+  // The typed figure gets the same tag check: a mismatch reads as "not set"
+  // (the existing prompt) until the viewed month's read lands — never as the
+  // previous month's income under this month's header.
+  const incomeForMonth=income&&income.y===year&&income.m===month?income:null;
   const incomeResolved=resolveBudgetIncome({year,month,todayKey:paceToday,
-    manual:income?.income??null,actual:actualForMonth?.amount??null,
+    manual:incomeForMonth?.income??null,actual:actualForMonth?.amount??null,
     coverageStart:actualForMonth?.coverageStart??null});
   const rta=envelopes?readyToAssign(incomeResolved.amount,envelopes.totals):null;
   // --- Expected transactions, DISPLAY-ONLY derivations (the envelopePace
@@ -4436,19 +4446,25 @@ export default function Dashboard({ refreshTick = 0 }) {
         // Newer than any reload still in flight from before the write.
         envSeq.current++;
         if(env!==undefined)setEnvelopes(env);
-        if(inc!==undefined)setIncome(inc);
+        if(inc!==undefined)setIncome({...inc,y:year,m:month});
         if(bud!==undefined){setBudgets(bud.budgets||{});setByDate(bud.byDate||{});}
       }else{
         // The user moved months while the write settled. The write still went
         // to ITS month (the one the number was typed against) — but a reload
         // for the new month may have read budget_months before this write
         // committed, leaving the carry short on screen. Re-read the month now
-        // being viewed; envSeq drops anything older.
+        // being viewed; envSeq drops anything older. Income too: the envSeq
+        // bump makes that in-flight reload skip ITS income commit, which
+        // would otherwise leave the previous month's figure on screen.
         const [cy,cm]=monthRef.current.split("-").map(Number);
-        const fresh=await getEnvelopes({year:cy,month:cm}).catch(()=>undefined);
+        const [fresh,freshInc]=await Promise.all([
+          getEnvelopes({year:cy,month:cm}).catch(()=>undefined),
+          getBudgetIncome({year:cy,month:cm}).catch(()=>undefined),
+        ]);
         if(fresh!==undefined&&monthRef.current===`${cy}-${cm}`){
           envSeq.current++;
           setEnvelopes(fresh);
+          if(freshInc!==undefined)setIncome({...freshInc,y:cy,m:cm});
         }
       }
     }catch(err){
@@ -5245,7 +5261,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                       </span>
                     </span>
                   ):(
-                    <IncomeEdit value={income?.income} isDefault={!!income?.isDefault} onSave={saveIncome}/>
+                    <IncomeEdit value={incomeForMonth?.income} isDefault={!!incomeForMonth?.isDefault} onSave={saveIncome}/>
                   )}
                   <span style={{flex:1}}/>
                   <span style={{color:"var(--muted)"}}>Assigned <strong style={MONO}>{fmtAuto(envelopes.totals.assigned)}</strong></span>
