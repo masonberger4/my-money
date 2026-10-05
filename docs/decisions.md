@@ -740,8 +740,9 @@ entry records them. What PR B DECIDED, as opposed to fixed:
   the reported failure real. Production change: an account at a card-only
   issuer whose name says nothing now arrives typed credit instead of uncertain
   checking (still hidden until a human confirms it). Not added: a credit-union
-  "share" savings rule and an investment-on-institution rule (optional in the
-  plan); such accounts stay at the visible uncertain default.
+  "share" savings rule and an investment-on-institution rule (optional extras,
+  neither needed to fix F37); such accounts stay at the visible uncertain
+  default.
 - **A cross-origin redirect drops the Authorization header, and it stays
   dropped** (the Fetch standard's behaviour, restored by hand). Only
   Authorization: it is the standard's whole cross-origin list, and nothing here
@@ -764,7 +765,7 @@ entry records them. What PR B DECIDED, as opposed to fixed:
   becomes `deltaLedger − dateMoved.impact === moneyIn − moneyOut`. Rejected:
   bank-date month reads (the panel would stop washing exactly what Overview
   washes and audit different numbers than it reports); falling back to an
-  empty list when the extra read fails (the build plan's version — it would
+  empty list when the extra read fails (the first-draft design — it would
   render the very residual the read exists to remove).
 - **Every figure the reconciliation panel prints is rounded to the cent, and
   `unexplained` rounds the raw difference.** The two balance totals stay
