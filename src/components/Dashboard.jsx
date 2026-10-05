@@ -4476,16 +4476,19 @@ export default function Dashboard({ refreshTick = 0 }) {
     }catch(err){console.error("expect seed failed",err);}
     finally{setExpBusy(false);}
   }
+  // A failure SAYS so (it used to be console-only, so a dead tap looked like
+  // nothing happened) and re-reads: the adapter writes the next cycle before
+  // the status flip, so a half-committed write is real state to show.
   async function doDismissExpected(id,opts){
     setExpBusy(true);
     try{await dismissExpected(id,opts);setExpMatchId(null);setExpDismissId(null);invalidateExpected();}
-    catch(err){console.error("dismiss expected failed",err);}
+    catch(err){console.error("dismiss expected failed",err);invalidateExpected();window.alert(`Couldn't dismiss that bill: ${friendlyError(err)}`);}
     finally{setExpBusy(false);}
   }
   async function doMarkPaid(id,txId){
     setExpBusy(true);
     try{await matchExpectedManually(id,txId);setExpMatchId(null);invalidateExpected();}
-    catch(err){console.error("mark paid failed",err);}
+    catch(err){console.error("mark paid failed",err);invalidateExpected();window.alert(`Couldn't mark that bill paid: ${friendlyError(err)}`);}
     finally{setExpBusy(false);}
   }
   const saveIncome=(val,scope)=>runEnvelopeWrite("the income",()=>setBudgetIncome({year,month},val,{scope}));
