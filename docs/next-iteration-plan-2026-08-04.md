@@ -680,7 +680,13 @@ nothing from Mason.
 - F72 — the pull chip and the gear's Refresh stopped before the bank pull they
   started finished; `refreshing` spans the pull, capped at 60s per hold.
 - F12 — the expected-bill auto-match ran once per session; it re-runs after a
-  pull and on a foreground return, one pass per return (leans on PR B's F35).
+  pull and on a foreground return, one pass per return (F35 below ships with it).
+- F27 — weekly expected bills claimed one charge twice across a month
+  boundary.
+- F33 — a failed roll-forward permanently dropped a recurring bill (the match
+  and the next-cycle insert weren't atomic).
+- F35 — the auto-match updated by id alone, so a stale pass could bring back a
+  bill the other phone stopped. Moved into PR A from PR B because F12's extra passes lean on it.
 - F17 — the typed budget income wasn't month-tagged, so one failed read priced
   Ready to Assign with the previous month's figure.
 - F19 — "Does it add up?" and Data coverage fetched once per launch, so "try
@@ -772,12 +778,6 @@ nothing from Mason.
   PR B)*
 - F80 — multi-batch transaction writes that failed partway skipped cache
   invalidation. *(lands in PR B)*
-- F27 — weekly expected bills claimed one charge twice across a month
-  boundary. *(lands in PR B)*
-- F33 — a failed roll-forward permanently dropped a recurring bill (the match
-  and the next-cycle insert weren't atomic). *(lands in PR B)*
-- F35 — the auto-match updated by id alone, so a stale pass could bring back a
-  bill the other phone stopped; PR A's F12 leans on this. *(lands in PR B)*
 - F94 — `updateTransaction`'s comment described a trigger that was rejected.
   *(lands in PR B)*
 - F89 — the façade still exported whole-map/whole-list writers that contradict

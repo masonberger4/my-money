@@ -607,8 +607,10 @@ what PR A DECIDED, as opposed to fixed.
   Rejected: an in-flight gate on the expected effect (the recorded Gotcha —
   in-flight gating is what lets the stale response win). Accepted residual: a
   foreground pull that never settles runs no pass on that return. The extra
-  passes widen the stale-pass race that PR B's status-guarded match write
-  (F35) closes, so PR B should follow this one closely.
+  passes widen the stale-pass race that the status-guarded match write (F35)
+  closes, so F35 and its prerequisites (F27, F33) were MOVED INTO this PR
+  from PR B. Rejected: shipping the passes first and letting PR B follow —
+  main would have run the extra passes over an id-only write in between.
 - **The pipeline's decisions are pure and unit-tested** (`src/loadPipeline.js`);
   Dashboard keeps only wiring scans. Rejected: a React renderer in the test
   deps to test the loading rule behaviourally (zero test-framework deps).

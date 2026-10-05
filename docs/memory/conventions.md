@@ -684,10 +684,12 @@ category's own first assignment; the pure core is `src/envelopes.js`.
   follow-up reload and on a foreground return — ONE pass per return, after
   its pull settles when it pulls (`refreshTickPlan`/`pullFollowUp`,
   `src/loadPipeline.js`), so the bill a pull brought in matches without a
-  manual Refresh. More passes widen the stale-pass race (a pass that read a
-  row before the other phone skipped or stopped it flips it back to matched);
-  the status-guarded match write that closes it is audit PR B's F35, and until
-  that merges the write is keyed on id alone.
+  manual Refresh. More passes would widen the stale-pass race (a pass that
+  read a row before the other phone skipped or stopped it flips it back to
+  matched), so they shipped TOGETHER with the write that closes it:
+  `commitExpected` (`src/dataAdapter.js`) inserts the dup-gated next cycle
+  FIRST, then flips the row guarded on `status='pending'`, and withdraws its
+  own successor when that flip matches 0 rows (another device resolved it).
 
 **The HYBRID income rule (Mason, 2026-08-13 — opens the old "income wall"
 halfway; the pure hand-entered rule that stood here is superseded):** Ready to
