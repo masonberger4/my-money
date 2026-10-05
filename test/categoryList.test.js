@@ -6,7 +6,9 @@ import {
   isDuplicateCategoryName,
   isUserCategory,
   MECHANISM_CATEGORIES,
+  rankByList,
 } from '../src/categoryList.js';
+import { readFileSync } from 'node:fs';
 import { TRANSFER_CATEGORY, RETURN_CATEGORY, UNCATEGORIZED } from '../src/categoryMap.js';
 
 // This module exists to fix Mason's bug: Categories, Budget and Transactions
@@ -72,4 +74,47 @@ test('duplicate guard is case-insensitive and also blocks the mechanism names', 
   // An empty name isn't a duplicate — it's just not addable (the caller's
   // canAdd checks emptiness), and reporting "already exists" would be a lie.
   assert.equal(isDuplicateCategoryName('   ', ['Pets']), false);
+});
+
+// --- rankByList: the Plan tab's row order ----------------------------------
+
+test('REGRESSION: a Plan row keeps its place when it gets its first dollar', () => {
+  // The Plan list ranked rows by the WALK's order — rows with an assignment,
+  // setting or spending first, sorted by RAW label, then the empty top-up
+  // rows. Assigning to Coffee moved it from the tail to the top, so the next
+  // tap hit a different envelope; the alias (dining → Restaurants) sat out of
+  // display order, and Uncategorized landed mid-list.
+  const getName = (c) => (c === 'dining' ? 'Restaurants' : c);
+  const userCats = userCategoryList({ registry: ['Pets', 'dining', 'Coffee', 'Groceries', 'Auto'], getName });
+  assert.deepEqual(userCats, ['Auto', 'Coffee', 'Groceries', 'Pets', 'dining'], 'display-name order');
+  const envRowsFor = (walk) => [...walk, ...missingCategories(userCats, new Set(walk))];
+  const before = envRowsFor(['Groceries', UNCATEGORIZED, 'dining']);
+  const after = envRowsFor(['Coffee', 'Groceries', UNCATEGORIZED, 'dining']);
+  assert.notDeepEqual(before.indexOf('Coffee'), after.indexOf('Coffee'), 'walk order moves Coffee — the bug');
+  const want = ['Auto', 'Coffee', 'Groceries', 'Pets', 'dining', UNCATEGORIZED];
+  assert.deepEqual(rankByList(before, userCats), want);
+  assert.deepEqual(rankByList(after, userCats), want, 'assigning Coffee moves nothing');
+});
+
+test('rankByList: names off the list keep their incoming order after every listed one; nothing dropped', () => {
+  assert.deepEqual(
+    rankByList([TRANSFER_CATEGORY, 'B', UNCATEGORIZED, 'A'], ['A', 'B']),
+    ['A', 'B', TRANSFER_CATEGORY, UNCATEGORIZED],
+  );
+  assert.deepEqual(rankByList(['B', 'A'], ['A', 'A', 'B']), ['A', 'B'], 'a duplicate in the list ranks at its first spot');
+  assert.deepEqual(rankByList(['X', 'B'], ['A', 'A', 'B']), ['B', 'X'], 'unlisted always after listed');
+  assert.deepEqual(rankByList([], ['A']), []);
+  assert.deepEqual(rankByList(null, null), []);
+  assert.deepEqual(rankByList(['B', 'A'], null), ['B', 'A'], 'no list → incoming order');
+});
+
+test('the Plan tab ranks its envelopes by userCats, not by envRows\' walk order', () => {
+  const dash = readFileSync(new URL('../src/components/Dashboard.jsx', import.meta.url), 'utf8');
+  const start = dash.indexOf('const envRowByCat=');
+  const block = dash.slice(start, dash.indexOf('const envGroups=', start) + 200);
+  assert.ok(start > 0, 'found the Plan ordering block');
+  assert.match(block, /const envOrder=rankByList\(envRows\.map\(r=>r\.category\),userCats\);/);
+  assert.match(block, /const envPos=new Map\(envOrder\.map\(/);
+  assert.match(block, /groupCategories\(envOrder,/);
+  assert.doesNotMatch(block, /envRows\.map\(\(r,i\)/, 'positions no longer come from the walk order');
 });

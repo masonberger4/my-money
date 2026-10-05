@@ -61,6 +61,23 @@ export function missingCategories(list, presentNames) {
   return list.filter((n) => !present.has(n));
 }
 
+// `names` in the one list's order: each name at its position in `list`
+// (display-name order), and any name the list does not carry — the mechanism
+// rows (Uncategorized, transfers), which never enter it — after all of them in
+// their incoming order. Stable; never drops or duplicates a name. The Plan tab
+// orders its envelopes with this, so a row stays put when it gets its first
+// dollar or its first spending (the walk's own order, budgeted-first by raw
+// label, made it jump to the top and put the next tap on another envelope).
+export function rankByList(names = [], list = []) {
+  const rank = new Map();
+  (list || []).forEach((n, i) => { if (!rank.has(n)) rank.set(n, i); });
+  const tail = (list || []).length;
+  return (names || [])
+    .map((n, i) => ({ n, i, k: rank.has(n) ? rank.get(n) : tail + i }))
+    .sort((a, b) => a.k - b.k)
+    .map((x) => x.n);
+}
+
 // The "+ Add category" guard. Case-insensitive against the user's own names AND
 // against the mechanism internals — a user-made "Return" would collide with the
 // mechanism one, which stored rows may still carry.

@@ -17,7 +17,7 @@ import { detectRecurring } from "../recurring.js";
 import { unlinkInstitution, restoreImportedInstitution, askAssistant, getSimpleFinStatus } from "../apiClient.js";
 import { restorableIds } from "../unlinkRestore.js";
 import { UNCATEGORIZED, isBudgetableCategory } from "../categoryMap.js";
-import { userCategoryList, missingCategories, isDuplicateCategoryName } from "../categoryList.js";
+import { userCategoryList, missingCategories, isDuplicateCategoryName, rankByList } from "../categoryList.js";
 import { parentIndex, parentOf, hasChildren, eligibleParents, canSetParent,
   setRegistryParent, groupCategories, groupMembers, rollupFields,
   orderGroups, earliestMemberRank, barScale } from "../categoryTree.js";
@@ -4371,14 +4371,19 @@ export default function Dashboard({ refreshTick = 0 }) {
   }
 
   const envRowByCat=new Map(envRows.map(r=>[r.category,r]));
-  // Same ordering bug as the Categories tab, different list order: envRows is
-  // the envelope walk followed by the appended empty rows, so a heading parent
-  // that has no budget_months row of its own is an appended emptyEnvRow and its
-  // whole group renders after every real envelope. The Budget list isn't sorted
-  // by magnitude, so a group takes the position of its earliest-placed member
-  // instead — the group sits where its children already sat.
-  const envPos=new Map(envRows.map((r,i)=>[r.category,i]));
-  const envGroups=orderGroups(groupCategories(envRows.map(r=>r.category),catIndex,getName).map(node=>({
+  // The Plan list's ORDER is the one list's (userCats, display-name order),
+  // with the mechanism rows (Uncategorized, transfers — never in userCats)
+  // last — the same order every picker shows. envRows itself stays in walk
+  // order (the walk sorts by raw label, then the appended empty rows) for its
+  // other readers; ranking by it made a category jump from the empty tail to
+  // the top the moment it got its first dollar, setting or spending, so the
+  // next tap landed on a different envelope. The Budget list isn't sorted by
+  // magnitude, so a group takes the position of its earliest-placed member —
+  // the group sits where its children already sat, never dragged to the tail
+  // because a heading parent has no envelope row of its own.
+  const envOrder=rankByList(envRows.map(r=>r.category),userCats);
+  const envPos=new Map(envOrder.map((c,i)=>[c,i]));
+  const envGroups=orderGroups(groupCategories(envOrder,catIndex,getName).map(node=>({
     ...node,
     members:groupMembers(node),
     own:envRowByCat.get(node.name),
