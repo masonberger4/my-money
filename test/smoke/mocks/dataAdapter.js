@@ -687,4 +687,8 @@ export async function matchExpectedManually() {}
 // unreachable — the second mock/façade drift in this audit, after
 // getBiggestMovers.
 export async function getExistingTxIds() { return { ids: new Set(), sources: new Set() }; }
-export async function importCsvTransactions() { return { inserted: 0 }; }
+// A COUNT, like the real adapter (`return written`): the import modal renders
+// it as "Imported N transactions", and the old `{ inserted: 0 }` object threw
+// "Objects are not valid as a React child" into the modal's ErrorBoundary the
+// first time a walk actually pressed Import.
+export async function importCsvTransactions(_accountId, rows = []) { return rows.length; }
