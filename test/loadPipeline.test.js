@@ -84,3 +84,17 @@ test('reloadViewed reads monthRef and is the only reload besides fetchData\'s ow
     'fetchData calls reloadData once (its first load); the follow-up goes through reloadViewed()');
   assert.ok(fetch.body.includes('reloadViewed()'), 'the sync follow-up reloads through reloadViewed()');
 });
+
+// --- F11: "current month" is decided with a FRESH date ------------------------
+// reloadData is a []-dep useCallback, so a render-time `now` in its body is
+// the FIRST render's date forever. A PWA or laptop tab left open across a
+// month end then treated the new month as past (no overview: the balance
+// tile and "vs last month" read "—") and the old month as current (comparing
+// it against itself). Wave A #12's "take a fresh date inside the load".
+
+test('reloadData takes a fresh date, never the mount-time `now`', () => {
+  const { body } = slice(...RELOAD);
+  assert.ok(/new Date\(\)/.test(body), 'reloadData must construct its own Date for the current-month test');
+  assert.ok(!/\bnow\./.test(body),
+    'a `now.` read inside the []-dep reloadData is the mount-time date — stale after a month rollover');
+});

@@ -2622,7 +2622,12 @@ export default function Dashboard({ refreshTick = 0 }) {
 
   const reloadData=useCallback(async(y,m)=>{
     setError(null);
-    const cur=y===now.getFullYear()&&m===now.getMonth()+1;
+    // A FRESH date, never the render-time `now`: this callback is []-dep, so
+    // `now` here would be the mount's date forever — a tab left open across a
+    // month end would fetch no overview for the new month and compare the
+    // old one against itself (Wave A #12).
+    const d=new Date();
+    const cur=y===d.getFullYear()&&m===d.getMonth()+1;
     // Two month taps in quick succession leave two loads in flight, and nothing
     // guarantees they resolve in order. Without this, the slower one wins and
     // paints its month's envelopes under the other month's header — and the
