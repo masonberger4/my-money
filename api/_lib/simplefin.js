@@ -362,13 +362,31 @@ export async function decodeSetupToken(raw, { lookup } = {}) {
 // including hop 0: callers validated the initial URL when it was decoded or
 // split, but re-checking immediately before the request narrows the
 // resolve-then-fetch window that comment describes.
+//
+// Following by hand also loses a second thing fetch does on its own: the
+// Fetch standard DROPS the Authorization header when a redirect crosses
+// origins, and this loop used to re-send it on every hop — so a Bridge 302 to
+// a CDN or any other host handed that host the Basic credential that reads
+// every linked bank. Restored here: once a hop leaves the original origin the
+// header is stripped, and stays stripped for every later hop (as in fetch). A
+// same-origin move keeps it, so a Bridge path change still authenticates; a
+// cross-origin target then answers 403, which surfaces as auth_failed rather
+// than a silent leak.
 const MAX_REDIRECTS = 3;
+
+function withoutAuthorization(init) {
+  const headers = Object.fromEntries(
+    Object.entries(init?.headers || {}).filter(([k]) => k.toLowerCase() !== 'authorization')
+  );
+  return { ...init, headers };
+}
 
 async function fetchNoOpenRedirect(url, init, signal, lookup) {
   let current = url;
+  let hopInit = init;
   await assertPublicHost(current, lookup);
   for (let hop = 0; ; hop++) {
-    const res = await fetch(current, { ...init, redirect: 'manual', signal });
+    const res = await fetch(current, { ...hopInit, redirect: 'manual', signal });
     if (res.status < 300 || res.status > 399) return res;
 
     const location = res.headers.get('location');
@@ -394,6 +412,7 @@ async function fetchNoOpenRedirect(url, init, signal, lookup) {
         `SimpleFIN redirected the claim (HTTP ${res.status}). Generate a fresh setup token.`
       );
     }
+    if (new URL(next).origin !== new URL(current).origin) hopInit = withoutAuthorization(hopInit);
     current = next;
   }
 }
