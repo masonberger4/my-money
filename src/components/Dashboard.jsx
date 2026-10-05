@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from "react";
 import { getOverview, getSpending, getBiggestMovers, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, quickAddTargets, ACCOUNT_TYPES, ACCOUNT_SUBTYPES, setCategoryRule, applyCategoryRuleToHistory, listCategoryRules, countCategoryRuleMatches, deleteCategoryRule, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, getActualIncome, resolveBudgetIncome, invalidateEnvelopeSpending, isEnvelopeSchemaMissing, targetNeed, readyToAssign, envelopePace, updateEnvPace as persistEnvPace, updateRecIgnore, getStartupSettings, monthKey, getEntities, createEntity, updateEntity, getTaxYearTransactions, getMileage, addMileage, deleteMileage, getReceiptTxIds, getDebts, getBalanceSnapshots, getNetWorthSeries, addManualTransaction, createManualAccount, updateManualBalance, getDataCoverage, getFeedCoverageGaps, FEED_GAP_SCAN_CAP, getReconciliation, getRestoreRecord, signOut, autoFillMonth, setTargetOverride, effectiveTarget, getExpectedTransactions, addExpected, dismissExpected, matchExpectedManually, getSavedChats, saveChatToApp, deleteSavedChat, addRegistryEntry, updateRegistryParent, removeRegistryEntry, updateCategoryColor, updateCategoryAlias, setTaxMapEntry, setDeductionMapEntry } from "../dataAdapter.js";
 import { FLOW_LABELS } from "../reconciliation.js";
-import { clampSeries } from "../netWorth.js";
+import { clampSeries, debtTotalSeries, sparklinePoints } from "../netWorth.js";
 // Pure cores imported directly (never Supabase — the mock-harness alias rule
 // only covers dataAdapter/sync/db/apiClient; pure modules are safe).
 import { planAutoFill, envelopeBar, assignUnchanged, targetUnchanged, monthsUntil, pickedMonthKey } from "../envelopes.js";
@@ -6757,20 +6757,14 @@ export default function Dashboard({ refreshTick = 0 }) {
           const startMonth=`${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,"0")}`;
           const freeMonth=plan?debtFreeMonth(startMonth,plan):null;
           // Total-owed history: carry each account's last-seen snapshot forward
-          // so a day where only one bank reported doesn't read as a paydown.
+          // so a day where only one bank reported doesn't read as a paydown
+          // (debtTotalSeries — netWorthSeries' fold in the STORED sign).
           const series=(()=>{
             if(debtSnaps.length<2)return [];
-            const last={},pts=[];let cur=null;
-            for(const s of debtSnaps){
-              last[s.account_id]=Number(s.balance)||0;
-              const total=Object.values(last).reduce((a,b)=>a+b,0);
-              if(cur&&cur.date===s.captured_on)cur.total=total;
-              else pts.push(cur={date:s.captured_on,total});
-            }
             // The 365-day window is a DISPLAY window applied to the folded
             // points, so the carry across its boundary survives (clampSeries
             // keeps the point before the cutoff for exactly that reason).
-            const shown=clampSeries(pts,debtSince);
+            const shown=clampSeries(debtTotalSeries(debtSnaps,debts.map(d=>d.id)),debtSince);
             return shown.length>=2?shown:[];
           })();
           return (
@@ -7030,11 +7024,8 @@ export default function Dashboard({ refreshTick = 0 }) {
             <div className="card">
               <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em",marginBottom:10}}>Total owed over time</div>
               {(()=>{
-                const max=Math.max(...series.map(p=>p.total),1);
-                const min=Math.min(...series.map(p=>p.total));
-                const span=Math.max(max-min,max*.02,1);
                 const W=300,H=60;
-                const pts=series.map((p,i)=>`${(i/(series.length-1))*W},${H-4-((p.total-min)/span)*(H-8)}`).join(" ");
+                const pts=sparklinePoints(series.map(p=>p.total),W,H);
                 const line=markOn("#7F77DD",surf.card);
                 return (
                   <>
@@ -7066,11 +7057,8 @@ export default function Dashboard({ refreshTick = 0 }) {
                 assets − debts across unhidden accounts · history since {shortDate(nwSeries[0].date)}
               </div>
               {nwSeries.length>=2&&(()=>{
-                const max=Math.max(...nwSeries.map(p=>p.total));
-                const min=Math.min(...nwSeries.map(p=>p.total));
-                const span=Math.max(max-min,Math.abs(max)*.02,1);
                 const W=300,H=60;
-                const pts=nwSeries.map((p,i)=>`${(i/(nwSeries.length-1))*W},${H-4-((p.total-min)/span)*(H-8)}`).join(" ");
+                const pts=sparklinePoints(nwSeries.map(p=>p.total),W,H);
                 const line=markOn("#7F77DD",surf.card);
                 return (
                   <>
