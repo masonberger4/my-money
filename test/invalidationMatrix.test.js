@@ -264,3 +264,45 @@ test('only plain month navigation skips the drop: the effect invalidates on star
   assert.ok(!/invalidate:false/.test(code),
     'no caller hard-codes invalidate:false — the follow-up, reloadViewed and Refresh must keep the default');
 });
+
+// --- The Accounts tab's lazy panels are epoch-driven too (F19) ---------------
+// "Does it add up?" and Data coverage fetched once per LAUNCH: reconData was
+// fetched only while null (and getReconciliation's ok:false is non-null, so a
+// failure stuck), covErr blocked every retry, and nothing ever reset either —
+// yet the copy says "try Refresh" and tells the user to fix the listed pairs.
+// Now an invalidating reload bumps an epoch per panel; an open panel refetches
+// at once, a closed one on its next expand, and a failed read retries.
+
+test('an invalidating reload bumps both panel epochs', () => {
+  const code = stripComments(dashboard);
+  const start = code.indexOf('const reloadData=useCallback');
+  const body = code.slice(start, code.indexOf('const reloadViewed=useCallback', start));
+  const open = body.indexOf('if(invalidate){');
+  assert.ok(open > 0, 'fixture assumption: reloadData gates its cache drops on invalidate');
+  const block = body.slice(open, body.indexOf('}', open + 'if(invalidate){'.length));
+  for (const bump of ['setReconEpoch(e=>e+1)', 'setCovEpoch(e=>e+1)']) {
+    assert.ok(block.includes(bump), `reloadData must ${bump} with the other lazy caches — "try Refresh" has to refetch`);
+  }
+});
+
+test('each panel fetches from an effect keyed on [open, epoch], seq-guarded, and a failure can retry', () => {
+  const code = stripComments(dashboard);
+  for (const [open, epoch, seq, loaded, fetcher] of [
+    ['reconOpen', 'reconEpoch', 'reconSeq', 'reconLoaded', 'getReconciliation()'],
+    ['covOpen', 'covEpoch', 'covSeq', 'covLoaded', 'getDataCoverage()'],
+  ]) {
+    const deps = `},[${open},${epoch}]);`;
+    const end = code.indexOf(deps);
+    assert.ok(end > 0, `the ${fetcher} effect must re-run on ${open} and ${epoch}`);
+    const body = code.slice(code.lastIndexOf('useEffect(()=>{', end), end);
+    assert.ok(body.includes(fetcher), `fixture assumption: the [${open},${epoch}] effect fetches ${fetcher}`);
+    assert.match(body, new RegExp(`if\\(!${open}\\|\\|${loaded}\\.current===${epoch}\\)return;`),
+      'fetch only while open, once per epoch (a collapse/expand alone is not a refetch)');
+    assert.match(body, new RegExp(`const s=\\+\\+${seq}\\.current;`), 'each fetch mints a sequence');
+    assert.match(body, new RegExp(`s===${seq}\\.current|s!==${seq}\\.current`), 'and a stale response is dropped');
+    assert.match(body, new RegExp(`${loaded}\\.current=-1`),
+      'a failed read RETURNS the epoch (the expected-tx rule), so re-expanding retries');
+  }
+  assert.ok(!/covData===null&&!covErr/.test(code),
+    'gating the coverage fetch on !covErr is what made one transient error permanent until relaunch');
+});

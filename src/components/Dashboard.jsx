@@ -2076,25 +2076,48 @@ export default function Dashboard({ refreshTick = 0 }) {
   // --- Reconciliation panel (Mason, 2026-08-28: "does the spending and income
   // totals for each month match the total amount of money in the observable
   // accounts?"). Same shape as the coverage panel above: collapsed, fetched on
-  // first expand only (it reads a month of rows per month shown), and no error
-  // state because getReconciliation never throws — an ok:false renders one
-  // muted line. Staleness across later edits is accepted, exactly like covData.
+  // expand (it reads a month of rows per month shown), and no error state
+  // because getReconciliation never throws — an ok:false renders one muted
+  // line. BOTH panels are EPOCH-driven (the expEpoch shape): an invalidating
+  // reloadData bumps reconEpoch/covEpoch, an open panel refetches at once and
+  // a closed one on its next expand (a collapse/expand alone is not a
+  // refetch), and a failed read RETURNS its epoch so re-expanding retries.
+  // Fetched once per launch, the panel's own "try Refresh" did nothing, a
+  // coverage error blocked every retry, and a pair the user fixed as told
+  // stayed listed.
   const [reconOpen,setReconOpen]=useState(false);
-  const [reconData,setReconData]=useState(null);   // null = not fetched
-  const openRecon=async()=>{
-    const next=!reconOpen; setReconOpen(next);
-    if(next&&reconData===null) setReconData(await getReconciliation());
-  };
+  const [reconData,setReconData]=useState(null);   // null = not fetched / refetching
+  const [reconEpoch,setReconEpoch]=useState(0);
+  const reconSeq=useRef(0);
+  const reconLoaded=useRef(-1);   // the epoch reconData was fetched for
+  const openRecon=()=>setReconOpen(o=>!o);
+  useEffect(()=>{
+    if(!reconOpen||reconLoaded.current===reconEpoch)return;
+    reconLoaded.current=reconEpoch;
+    const s=++reconSeq.current;
+    setReconData(null);
+    getReconciliation().catch(()=>({ok:false})).then(d=>{
+      if(s!==reconSeq.current)return;
+      setReconData(d);
+      if(!d?.ok)reconLoaded.current=-1;
+    });
+  },[reconOpen,reconEpoch]);
   const [covOpen,setCovOpen]=useState(false);
   const [covData,setCovData]=useState(null);   // null = not fetched; object keyed by account_id
   const [covErr,setCovErr]=useState(null);
-  const openCoverage=async()=>{
-    const next=!covOpen; setCovOpen(next);
-    if(next&&covData===null&&!covErr){
-      try{ setCovData(await getDataCoverage()); }
-      catch(e){ setCovErr(e?.message||"failed to load"); }
-    }
-  };
+  const [covEpoch,setCovEpoch]=useState(0);
+  const covSeq=useRef(0);
+  const covLoaded=useRef(-1);
+  const openCoverage=()=>setCovOpen(o=>!o);
+  useEffect(()=>{
+    if(!covOpen||covLoaded.current===covEpoch)return;
+    covLoaded.current=covEpoch;
+    const s=++covSeq.current;
+    setCovData(null);setCovErr(null);
+    getDataCoverage()
+      .then(d=>{if(s===covSeq.current)setCovData(d);})
+      .catch(e=>{if(s===covSeq.current){setCovErr(e?.message||"failed to load");covLoaded.current=-1;}});
+  },[covOpen,covEpoch]);
   // --- Feed-reach shortfall (Accounts tab, read-only) ---
   // Which fed accounts have history SimpleFIN could never fetch. Not a
   // troubleshooting toy like the coverage panel above and not an error: it is
@@ -2731,6 +2754,7 @@ export default function Dashboard({ refreshTick = 0 }) {
         invalidateTrends(); // Trends (cash flow + movers) refetches on next tab visit
         setRecurring(null); setRecEpoch(e=>e+1);
         setDebtData(null);  setDebtEpoch(e=>e+1);
+        setReconEpoch(e=>e+1); setCovEpoch(e=>e+1); // the Accounts-tab panels
       }
       setLastUpd(new Date());
     }catch(err){
