@@ -2589,7 +2589,9 @@ export default function Dashboard({ refreshTick = 0 }) {
     const prev=taxMaps;
     const w=taxMapsWrites.current;
     w.pending++;w.gen++;
-    setTaxMaps(mutate(prev));
+    // Functional: a second edit in the same render must patch over the
+    // first's optimistic entry, not over this render's closure value.
+    setTaxMaps(cur=>mutate(cur));
     try{setTaxMaps(await write());}
     catch(err){
       console.error("saving tax maps failed",err);
