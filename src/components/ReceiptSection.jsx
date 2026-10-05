@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { getReceipts, addReceipt, deleteReceipt, getReceiptUrl } from "../dataAdapter.js";
 import { compressReceipt } from "../receiptImage.js";
+import { friendlyError } from "../netRetry.js";
 
 // Receipt photos inside the transaction detail sheet. Self-contained: owns its
 // list + signed URLs (minted fresh per mount — never stored anywhere), talks
@@ -84,7 +85,11 @@ export default function ReceiptSection({ txId, onChanged }) {
       onChanged?.();
     } catch (e) {
       console.error("receipt add failed", e);
-      setErr(e?.message || "Couldn't save the receipt");
+      // friendlyError is the app's ONE error-to-text mapping: the upload is a
+      // POST (never retried), so a dead iOS socket surfaced storage-js's raw
+      // "Load failed". compressReceipt's own sentences pass through unchanged.
+      const text = friendlyError(e);
+      setErr(typeof text === "string" && text ? text[0].toUpperCase() + text.slice(1) : "Couldn't save the receipt");
     } finally {
       setBusy(false);
     }

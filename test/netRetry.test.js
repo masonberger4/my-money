@@ -136,3 +136,30 @@ test('friendlyError: network failures get the sentence, everything else keeps it
   assert.equal(friendlyError('plain string'), 'plain string');
   assert.equal(friendlyError(undefined), undefined);
 });
+
+// --- Failure copy goes through friendlyError and never reads as "empty" -------
+// Source pins (comments stripped) for three surfaces that bypassed the rule:
+// the load banner blamed a local cache that no longer exists, a failed
+// cash-flow read rendered as "Not enough measured income yet." (and left the
+// income sheet on a skeleton forever), and a receipt upload showed
+// storage-js's raw "Load failed".
+test('the load banner, the cash-flow failure and the receipt error use honest copy', async () => {
+  const { readFileSync } = await import('node:fs');
+  const code = p => readFileSync(new URL(`../${p}`, import.meta.url), 'utf8')
+    .replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+  const dash = code('src/components/Dashboard.jsx');
+  assert.doesNotMatch(dash, /local cache/i, 'there is no local cache — the banner must say what failed');
+  assert.match(dash, /setError\(`Couldn't load your data — \$\{friendlyError\(err\)\}`\)/);
+
+  assert.match(dash, /\.catch\(err=>\{if\(seq===trendsSeq\.current\)\{console\.error\(err\);setTrendsErr\(true\);\}\}\)/,
+    'the trends catch must flag the failure, or Reflect reads a dropped connection as "no income"');
+  assert.match(dash, /if\(needCf\)setTrendsErr\(false\);/, 'a fresh cash-flow fetch clears the flag');
+  assert.match(dash, /trendsLoading\?"Measuring…":trendsErr\?"Couldn't load this right now — try Refresh\.":"Not enough measured income yet\."/);
+  assert.match(dash, /<IncomeSheet [^\n]*busy=\{trendsLoading\|\|\(!cashFlow&&!trendsErr\)\} failed=\{trendsErr&&!cashFlow\}/,
+    'a failed read must stop the income sheet\'s skeleton and show the error line');
+
+  const receipt = code('src/components/ReceiptSection.jsx');
+  assert.doesNotMatch(receipt, /setErr\(e\?\.message/, 'a raw err.message reaches the screen');
+  assert.match(receipt, /import \{ friendlyError \} from "\.\.\/netRetry\.js";/);
+  assert.match(receipt, /const text = friendlyError\(e\);/);
+});

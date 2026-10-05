@@ -1552,12 +1552,14 @@ function CategoryPickerSheet({cats,catIndex,current,envRowByCat,hasAmounts,getNa
 // momentarily holds an empty report while the refetch runs. Rendering "No
 // income measured yet" in that window would read as "your edit just deleted
 // all your income". Empty-and-loading is a skeleton; empty-and-settled is the
-// real answer.
-function IncomeSheet({report,when,busy,surf,acctById,acctLabel,acctColor,onPick,onClose}) {
+// real answer; empty because the read FAILED (`failed`) is an error line —
+// never the empty answer, and never a skeleton that spins forever.
+function IncomeSheet({report,when,busy,failed,surf,acctById,acctLabel,acctColor,onPick,onClose}) {
   useEscClose(onClose);
   // Money in — green, contrast-corrected for the card it sits on.
   const green=inkOn(OK_MONEY,surf.card);
   const pending=busy&&report.sections.length===0;
+  const broken=!pending&&!!failed&&report.sections.length===0;
   return (
     <div className="overlay" onClick={onClose}>
       <div className="modal" role="dialog" aria-modal="true" onClick={e=>e.stopPropagation()}
@@ -1570,7 +1572,7 @@ function IncomeSheet({report,when,busy,surf,acctById,acctLabel,acctColor,onPick,
               hold flow content — the same validity rule that stopped the card
               outside from being one big button. */}
           <div style={{fontSize:16,fontWeight:600,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",color:green,flexShrink:0}}>
-            {pending?<Sk w={90} h={16}/>:fmtAuto(report.total)}
+            {pending?<Sk w={90} h={16}/>:broken?null:fmtAuto(report.total)}
           </div>
         </div>
         <div style={{fontSize:12,color:"var(--muted)",marginBottom:10}}>
@@ -1580,7 +1582,7 @@ function IncomeSheet({report,when,busy,surf,acctById,acctLabel,acctColor,onPick,
               the reader to divide by six. Suppressed for a ONE-month sheet
               (opened from a Trends bar), where the rate and the total are the
               same figure and printing both twice reads as a mistake. */}
-          {pending?"Recalculating…":<>{when} · {report.count} transaction{report.count!==1?"s":""}
+          {pending?"Recalculating…":broken?"Couldn't load this right now — try Refresh.":<>{when} · {report.count} transaction{report.count!==1?"s":""}
             {report.sections.length>1&&<> · {fmt(report.average)}/mo</>}</>}
         </div>
         <div style={{fontSize:10,color:"var(--muted)",lineHeight:1.5,marginBottom:14}}>
@@ -1590,7 +1592,7 @@ function IncomeSheet({report,when,busy,surf,acctById,acctLabel,acctColor,onPick,
           you say otherwise, and income you sent back subtracts.
         </div>
 
-        {pending?<Sk h={90}/>:report.sections.length===0?(
+        {pending?<Sk h={90}/>:broken?null:report.sections.length===0?(
           <div style={{textAlign:"center",padding:"24px 0",color:"var(--muted)",fontSize:13}}>
             No income measured yet.
           </div>
@@ -2012,6 +2014,10 @@ export default function Dashboard({ refreshTick = 0 }) {
   const [movers,setMovers]=useState(null);
   const [trendsEpoch,setTrendsEpoch]=useState(0);
   const [trendsLoading,setTrendsLoading]=useState(false);
+  // The cash-flow read FAILED (not "no income yet"): Reflect and IncomeSheet
+  // show an error line instead of the empty answer or an endless skeleton.
+  // Cleared when a cash-flow fetch starts; set only by that fetch's catch.
+  const [trendsErr,setTrendsErr]=useState(false);
   const trendsSeq=useRef(0);
   // The ONLY way to drop the Trends cache: clears both halves, bumps the seq
   // HERE (not just via the effect — when another tab is active the effect
@@ -2019,7 +2025,7 @@ export default function Dashboard({ refreshTick = 0 }) {
   // otherwise still pass the seq check and cache a pre-invalidation
   // snapshot), and bumps the epoch so the effect re-runs even when the
   // values were already null.
-  const invalidateTrends=useCallback(()=>{trendsSeq.current++;setCashFlow(null);setMovers(null);setTrendsEpoch(e=>e+1);},[]);
+  const invalidateTrends=useCallback(()=>{trendsSeq.current++;setCashFlow(null);setMovers(null);setTrendsErr(false);setTrendsEpoch(e=>e+1);},[]);
   const [accounts,setAccounts]=useState([]);
   const [budgets,setBudgets]=useState({});
   // By-date sinking funds, kept OUT of `budgets`: their amount is a
@@ -2811,7 +2817,9 @@ export default function Dashboard({ refreshTick = 0 }) {
       if(seq!==loadSeq.current)return false;
       setLoading(false);
       console.error(err);
-      setError("Couldn't load data from local cache.");
+      // There is no local cache any more (Dexie is gone) — say what failed,
+      // through the app's one error-to-text mapping (netRetry.js).
+      setError(`Couldn't load your data — ${friendlyError(err)}`);
     }
     return true;
   },[]);
@@ -2962,6 +2970,7 @@ export default function Dashboard({ refreshTick = 0 }) {
     if(!needCf&&!needMv)return;
     const seq=++trendsSeq.current;
     setTrendsLoading(true);
+    if(needCf)setTrendsErr(false);
     Promise.all([
       needCf?getCashFlow({num_periods:6}):Promise.resolve(null),
       needMv?getBiggestMovers({year,month}).catch(()=>undefined):Promise.resolve(undefined),
@@ -2971,7 +2980,8 @@ export default function Dashboard({ refreshTick = 0 }) {
         if(cf)setCashFlow(cf);
         if(mv!==undefined)setMovers({y:year,m:month,list:mv.movers||[],toDate:mv.toDate??null});
       })
-      .catch(err=>{if(seq===trendsSeq.current)console.error(err);})
+      // Only getCashFlow can reject (movers already degrade to undefined).
+      .catch(err=>{if(seq===trendsSeq.current){console.error(err);setTrendsErr(true);}})
       .finally(()=>{if(seq===trendsSeq.current)setTrendsLoading(false);});
   },[tab,year,month,cashFlow,movers,trendsEpoch]);
 
@@ -5036,7 +5046,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                 <div style={{fontSize:20,fontWeight:600,lineHeight:1.35,margin:"4px 0 12px"}}>{insight.sentence}</div>
               ):(
                 <div style={{fontSize:12,color:"var(--muted)",margin:"4px 0 12px"}}>
-                  {trendsLoading?"Measuring…":"Not enough measured income yet."}
+                  {trendsLoading?"Measuring…":trendsErr?"Couldn't load this right now — try Refresh.":"Not enough measured income yet."}
                 </div>
               )}
               {/* The two averages the sentence is a verdict on, and the legend
@@ -7923,7 +7933,7 @@ export default function Dashboard({ refreshTick = 0 }) {
           // sections are newest-first, so the range reads oldest → newest.
           :`${ss[ss.length-1].label} – ${ss[0].label}`;
         return (
-          <IncomeSheet report={report} when={when} busy={trendsLoading||!cashFlow} surf={surf}
+          <IncomeSheet report={report} when={when} busy={trendsLoading||(!cashFlow&&!trendsErr)} failed={trendsErr&&!cashFlow} surf={surf}
             acctById={acctById} acctLabel={acctLabel} acctColor={acctColor}
             onPick={t=>openTx(t)} onClose={()=>setIncomeDrill(null)}/>
         );
