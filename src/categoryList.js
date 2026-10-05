@@ -61,12 +61,54 @@ export function missingCategories(list, presentNames) {
   return list.filter((n) => !present.has(n));
 }
 
-// The "+ Add category" guard. Case-insensitive against the user's own names AND
-// against the mechanism internals — a user-made "Return" would collide with the
-// mechanism one, which stored rows may still carry.
-export function isDuplicateCategoryName(name, existing = []) {
-  const n = String(name || '').trim().toLowerCase();
+// `names` in the one list's order: each name at its position in `list`
+// (display-name order), and any name the list does not carry — the mechanism
+// rows (Uncategorized, transfers), which never enter it — after all of them in
+// their incoming order. Stable; never drops or duplicates a name. The Plan tab
+// orders its envelopes with this, so a row stays put when it gets its first
+// dollar or its first spending (the walk's own order, budgeted-first by raw
+// label, made it jump to the top and put the next tap on another envelope).
+export function rankByList(names = [], list = []) {
+  const rank = new Map();
+  (list || []).forEach((n, i) => { if (!rank.has(n)) rank.set(n, i); });
+  const tail = (list || []).length;
+  return (names || [])
+    .map((n, i) => ({ n, i, k: rank.has(n) ? rank.get(n) : tail + i }))
+    .sort((a, b) => a.k - b.k)
+    .map((x) => x.n);
+}
+
+// The "+ Add category" AND rename guard. Case-insensitive against the user's
+// own names AND against the mechanism internals — a user-made "Return" would
+// collide with the mechanism one, which stored rows may still carry.
+//
+// opts (all optional; the two-argument form is unchanged):
+//   aliases — `dash:names` ({raw: display}). A live category's DISPLAY name is
+//             taken too: a new "Dining" beside Food-renamed-"Dining" renders
+//             two identical rows with spending, budgets and envelopes split
+//             across two raw keys. Only aliases of LIVE names (existing ∪
+//             inUse) count — a retired category's leftover alias shows nowhere.
+//   inUse   — names real data still carries (userCategoryList's inUse). A CASE
+//             VARIANT of one collides; the EXACT name does not, because adding
+//             it re-registers that same raw key (the retire-and-re-add path).
+//   self    — the raw name being RENAMED: its own raw name and alias don't
+//             count against it.
+export function isDuplicateCategoryName(name, existing = [], { aliases = {}, inUse = [], self = null } = {}) {
+  const raw = String(name || '').trim();
+  const n = raw.toLowerCase();
   if (!n) return false;
+  const norm = (v) => String(v ?? '').trim();
+  const me = self == null ? null : norm(self);
   if (MECHANISM_CATEGORIES.some((m) => m.toLowerCase() === n)) return true;
-  return existing.some((e) => String(e || '').trim().toLowerCase() === n);
+  const names = (existing || []).map(norm).filter((e) => e && e !== me);
+  if (names.some((e) => e.toLowerCase() === n)) return true;
+  const used = (inUse || []).map(norm).filter((u) => u && u !== me);
+  if (used.some((u) => u !== raw && u.toLowerCase() === n)) return true;
+  const live = new Set([...names, ...used]);
+  for (const [k, v] of Object.entries(aliases && typeof aliases === 'object' ? aliases : {})) {
+    const key = norm(k);
+    if (key === me || !live.has(key)) continue;
+    if (norm(v) && norm(v).toLowerCase() === n) return true;
+  }
+  return false;
 }

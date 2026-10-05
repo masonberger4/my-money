@@ -390,8 +390,8 @@ export async function pullOneAccessUrl(supabase, householdId, accessRow, { force
     const type = existing ? existing.type : guessed.type;
     const subtype = existing ? existing.subtype : guessed.subtype;
     if (guessed?.uncertain) {
-      // Worth a log line: a card guessed as checking turns every purchase on it
-      // into household spending the moment the account is unhidden.
+      // Worth a log line: a card guessed as checking counts its refunds as
+      // income and its balance as an asset the moment the account is unhidden.
       console.warn(
         '[sync:simplefin] account type is a GUESS for "%s" (%s) -> %s/%s — confirm it in the Accounts tab',
         acct.name,

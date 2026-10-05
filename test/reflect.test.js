@@ -5,6 +5,7 @@
 // must read the chart's own numbers rather than re-adding the rows.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { breakdownSegments, incomeVsSpendingInsight, incomeSections } from '../src/reflect.js';
 
 const g = (label, amount) => ({ label, amount, transaction_count: 1, percent_of_total: 0 });
@@ -154,4 +155,23 @@ test('empty/garbage input degrades to an empty report, never throws', () => {
   assert.deepEqual(legacy.sections[0].rows, []);
   // A period with no income key at all reads as $0 rather than NaN.
   assert.equal(incomeSections([{ label: 'Jul' }]).total, 0);
+});
+
+test('the Home donut, its legend and Reflect\'s breakdown are ONE arrangement', () => {
+  // The ring drew the top 7 positive groups renormalised among themselves
+  // while the legend listed cats.slice(0,6) — negatives included — so a 7th
+  // wedge went unnamed, every share was overstated, and a refunded category
+  // could sit in the legend with no wedge. All three now read one
+  // breakdownSegments(cats,{max:6}) result.
+  const dash = readFileSync(new URL('../src/components/Dashboard.jsx', import.meta.url), 'utf8');
+  assert.match(dash, /const homeBd=breakdownSegments\(cats,\{max:6\}\);/);
+  assert.equal((dash.match(/breakdownSegments\(/g) || []).length, 1, 'computed once, not per surface');
+  assert.match(dash, /const donutData=homeBd\.segments\.map\(/, 'the ring draws the segments');
+  const homeStart = dash.indexOf('{/* OVERVIEW */}');
+  const home = dash.slice(homeStart, dash.indexOf('Recent transactions', homeStart));
+  assert.ok(homeStart > 0 && home.includes('<Donut'), 'found the Home card');
+  assert.match(home, /homeBd\.segments\.map\(/, 'the legend lists the same segments');
+  assert.doesNotMatch(home, /cats\.slice\(0,6\)/, 'no second arrangement on Home');
+  assert.doesNotMatch(dash, /cats\.filter\(c=>c\.amount>0\)\.slice\(0,7\)/, 'the renormalised top-7 is gone');
+  assert.match(dash, /const bd=homeBd;/, 'Reflect reuses it');
 });

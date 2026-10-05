@@ -4,6 +4,8 @@
 import { toTxShape, spendingGroups, biggestMovers } from '../../../src/spending.js';
 import { markInternalTransfers, cashIncome } from '../../../src/cashFlow.js';
 import { setRegistryParent } from '../../../src/categoryTree.js';
+import { setEmapEntryIn, setDmapEntryIn } from '../../../src/taxReport.js';
+import { summarizeDebts } from '../../../src/debtPayoff.js';
 // The aliased settings store — the registry updaters below read-merge-write
 // the same rows Dashboard's mount reads hit, so the adopt-merged-value path
 // renders honestly.
@@ -349,9 +351,22 @@ export const updateCategoryColor = (cat, color) =>
   mergeSettingRow('dash:colors', {}, cur => ({ ...cur, [cat]: color }));
 export const updateCategoryAlias = (cat, alias) =>
   mergeSettingRow('dash:names', {}, cur => ({ ...cur, [cat]: alias }));
+// tax:maps — same contract (setEmapEntryIn/setDmapEntryIn tolerate a
+// corrupt or empty row on their own).
+export const setTaxMapEntry = (entityId, cat, value) =>
+  mergeSettingRow('tax:maps', {}, cur => setEmapEntryIn(cur, entityId, cat, value));
+export const setDeductionMapEntry = (cat, bucket) =>
+  mergeSettingRow('tax:maps', {}, cur => setDmapEntryIn(cur, cat, bucket));
 export const FEED_GAP_SCAN_CAP = 25;
 export function isManualAccount(a) { return !!a?.is_manual; }
 export function isSimpleFinAccount(a) { return String(a?.plaid_account_id || '').startsWith('sfin:'); }
+// Same shape as the real quickAddTargets (pure, but dataAdapter.js imports
+// Supabase, so the mock keeps its own copy over the mock predicates above).
+export function quickAddTargets(accounts) {
+  const ok = (accounts || []).filter(
+    a => isManualAccount(a) && !isSimpleFinAccount(a) && a.type !== 'loan' && !a.hidden);
+  return [...ok.filter(a => a.type === 'depository'), ...ok.filter(a => a.type !== 'depository')];
+}
 export async function setCategoryRule() {}
 // Returns a COUNT — the real adapter returns matches.length (a number the
 // learn-confirm renders as "updates N past transactions"). The first version
@@ -485,7 +500,12 @@ export async function getTaxYearTransactions(year) {
   return { transactions: TAX_ROWS.filter(t => t.transaction_date.startsWith(String(year))).map(t => ({ ...t })) };
 }
 export async function getMileage() { return []; }
-export async function addMileage() {}
+// The real adapter's shape (taxIO.addMileage's `.select(...)` row): the Tax
+// tab reads row.on_date to list the drive or say which year it went to.
+let mileSeq = 0;
+export async function addMileage({ on_date, miles, purpose, entity_id } = {}) {
+  return { id: `mile-${++mileSeq}`, entity_id: entity_id || null, on_date, miles, purpose: purpose || null };
+}
 export async function deleteMileage() {}
 export async function getReceiptTxIds() { return null; }
 export async function getReceipts() { return []; }
@@ -507,13 +527,7 @@ export async function getDebts() {
     apr: 24.99, minimum_payment: a.id === 'a3' ? 80 : 40, credit_limit: a.id === 'a3' ? 15000 : 5000,
     statement_balance: null, next_payment_due_date: '2026-08-20', interest_rate: null, original_balance: null,
   })).concat([{ ...MANUAL_DEBT }]);
-  for (const d of debts) d.debtRate = d.apr ?? d.interest_rate ?? null;
-  return {
-    debts,
-    totalDebt: debts.reduce((s, a) => s + (Number(a.current_balance) || 0), 0),
-    totalMinimums: debts.reduce((s, a) => s + (Number(a.minimum_payment) || 0), 0),
-    hasDebtColumns: true,
-  };
+  return { ...summarizeDebts(debts), hasDebtColumns: true };
 }
 export async function getBalanceSnapshots(accountIds = []) {
   const days = ['2026-07-28', '2026-07-30', '2026-08-01', '2026-08-02', '2026-08-03'];

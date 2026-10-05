@@ -14,6 +14,8 @@ import { unlinkSettingsKey, parseRestoreIds } from './unlinkRestore.js';
 import { aggregateCoverage, feedCoverageGaps, FEED_REACH_DAYS } from './coverage.js';
 import { netWorthSeries, clampSeries } from './netWorth.js';
 import { buildReconciliation, reconciliationScope } from './reconciliation.js';
+import { localIsoDate, localTodayIso } from './format.js';
+import { summarizeDebts } from './debtPayoff.js';
 import {
   pad2,
   monthBounds,
@@ -65,6 +67,8 @@ export {
   removeRegistryEntry,
   updateCategoryColor,
   updateCategoryAlias,
+  setTaxMapEntry,
+  setDeductionMapEntry,
 } from './adapters/settingsIO.js';
 export {
   getEntities,
@@ -401,7 +405,7 @@ export async function getBiggestMovers({ year, month }) {
   // fall simply because the prior month had 31 days behind it. A past month is
   // already complete and keeps the full-month comparison (toDate null), so its
   // output is byte-identical to before.
-  const today = localTodayISO();
+  const today = localTodayIso();
   const isCurrent = today.slice(0, 7) === `${year}-${String(month).padStart(2, '0')}`;
   const toDate = isCurrent ? Number(today.slice(8, 10)) : null;
   return { movers: biggestMovers(currRows, prevRows, { toDate }), toDate };
@@ -546,16 +550,13 @@ export async function getDebts() {
       next_payment_due_date: a.next_payment_due_date ?? null,
       interest_rate: a.interest_rate ?? null,
       original_balance: a.original_balance ?? null,
-      // One normalized rate for payoff math — stored as PERCENT; divide by 100
-      // for monthly amortization (src/debtPayoff.js does).
-      debtRate: a.apr ?? a.interest_rate ?? null,
     }));
-  const totalDebt = debts.reduce((s, a) => s + (Number(a.current_balance) || 0), 0);
-  const totalMinimums = debts.reduce((s, a) => s + (Number(a.minimum_payment) || 0), 0);
+  // debtRate (one normalized PERCENT rate) + the two totals come from the
+  // shared summarizeDebts, the same derivation the Debt view's edits use.
   // hasDebtColumns tells the Debt view whether the liability columns exist yet
   // (false pre-migration → it hides the APR/min editors instead of offering
   // edits that can't be written).
-  return { debts, totalDebt, totalMinimums, hasDebtColumns: accountsHaveDebtColumns };
+  return { ...summarizeDebts(debts), hasDebtColumns: accountsHaveDebtColumns };
 }
 
 // Balance history for the debt-over-time chart. Returns an ARRAY of
@@ -891,8 +892,9 @@ export async function applyCategoryRuleToHistory(descriptor, category, { dryRun 
   } finally {
     // A real apply rewrites other rows' mapped_category — a write, so it is an
     // invalidation moment (spend sums shift when categories move between
-    // spending and the transfer bucket's veto). From a finally: the batches
-    // before a mid-loop failure are already committed.
+    // spending and the transfer bucket's veto). In a FINALLY: the rewrite runs
+    // in batches, and a batch that throws after earlier ones already wrote
+    // must not leave the envelope cache serving the pre-write sums.
     if (!dryRun) invalidateEnvelopeSpending();
   }
 }
@@ -1304,6 +1306,23 @@ export function isManualAccount(a) {
   );
 }
 
+// The accounts QuickAddSheet may write a hand-typed row to: manual, not
+// SimpleFIN-fed (a manual: id would collide with the feed's id space), not a
+// loan (a loan's rows never count as spending, so a cash purchase parked there
+// would vanish from every total), and not HIDDEN — hidden accounts are
+// excluded at the query level, so the row would show optimistically and then
+// vanish on the reload, reading as "it didn't save". Depository first: the
+// sheet defaults to the first target, quick-add exists for cash, and
+// getAccounts' type-ascending order would otherwise put a card ahead of the
+// cash account. Stable within each group (getAccounts' name order). Empty when
+// nothing qualifies, which is the sheet's create-an-"Imported"-account path.
+export function quickAddTargets(accounts) {
+  const ok = (accounts || []).filter(
+    a => isManualAccount(a) && !isSimpleFinAccount(a) && a.type !== 'loan' && !a.hidden,
+  );
+  return [...ok.filter(a => a.type === 'depository'), ...ok.filter(a => a.type !== 'depository')];
+}
+
 // Find (or create) the single household-wide "Imported" institution that owns
 // every manual account. status='disabled' keeps api/sync.js from ever
 // processing it (it filters .neq('status','disabled')), so no bogus
@@ -1354,8 +1373,8 @@ export async function getRestoreRecord(institutionId) {
 }
 
 // Create one manual account. kind is 'checking' | 'savings' | 'credit' | 'loan'.
-// checking/savings are depository (and drive the Trends checking-vs-savings
-// split); 'credit' is a credit-card account, for a card whose statements are
+// checking/savings are depository (the subtype is only a label — no total
+// reads it); 'credit' is a credit-card account, for a card whose statements are
 // only available as CSV/PDF — its purchases count as spending by category and
 // its negatives are refunds, which net against spending and are never income —
 // like a SimpleFIN-fed card. 'loan' is a hand-tracked debt (a private loan, a
@@ -1937,7 +1956,7 @@ export async function getReconciliation({ maxMonths = 12 } = {}) {
       }))
     );
 
-    const today = `${now.getFullYear()}-${pad2(curM)}-${pad2(now.getDate())}`;
+    const today = localIsoDate(now);
     const built = buildReconciliation({ monthsRows, snapshots, accounts: visible, today });
     return { ok: true, ...built, scopeCount: scope.length };
   } catch {
@@ -1988,11 +2007,6 @@ function addDaysISO(iso, days) {
   const [y, m, d] = String(iso).split('-').map(Number);
   const dt = new Date(Date.UTC(y, m - 1, d + days));
   return `${dt.getUTCFullYear()}-${pad2(dt.getUTCMonth() + 1)}-${pad2(dt.getUTCDate())}`;
-}
-
-function localTodayISO() {
-  const now = new Date();
-  return `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}`;
 }
 
 // The pending rows of `fields`' series, for the roll-forward dup gate: keyed
@@ -2108,7 +2122,7 @@ export async function getExpectedTransactions(
   { client = supabase, fetchTxs = getTransactionsBetween } = {}
 ) {
   if (!hasExpectedTx) return null;
-  const day = today || localTodayISO();
+  const day = today || localTodayIso();
   const { start: monthStart, end: monthEnd } = monthBounds(
     Number(day.slice(0, 4)),
     Number(day.slice(5, 7))

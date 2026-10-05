@@ -130,7 +130,7 @@ export function setRegistryParent(registry = [], name, parent) {
 // Display order: the CALLER'S order is preserved for top-level rows, and each
 // parent's children sit directly beneath it. Order-preserving rather than
 // sorted on purpose — the Categories tab hands its rows biggest-spend-first and
-// the Budget tab hands them walk order, and "categories with no parent render
+// the Plan tab hands them the one list's order (rankByList), and "categories with no parent render
 // exactly as they do today" is the promise nesting must not break. Children are
 // ordered among themselves by DISPLAY name (they are a new list, so there is no
 // prior order to preserve, and a renamed child sits where its label says).
@@ -165,7 +165,8 @@ export function groupCategories(list = [], index, getName) {
 // drags every child down with it — while the number it RENDERS is the rollup.
 // A row must sort by the number it shows, so the caller ranks each group by
 // whatever its own list is ordered on (the rollup on the Categories tab, the
-// earliest member's walk position on the Budget tab).
+// earliest member's position in the one category list on the Plan tab —
+// rankByList over userCats, never the walk's budgeted-first order).
 //
 // Stable ascending by `keyOf`, so equal keys keep the grouping order and a
 // caller that wants biggest-first just returns a negated value. Non-finite keys
@@ -181,9 +182,20 @@ export function orderGroups(groups = [], keyOf) {
     .map((x) => x.g);
 }
 
+// The denominator every top-level Categories bar divides by: the largest value
+// actually RENDERED at top level (a rollup can exceed every single leaf),
+// floored at a positive 1. A refund-only month has every value <= 0, and the
+// old fallback to the first category's own (negative) amount made −50/−50 a
+// FULL bar beside a negative total — defeating the Math.max(0, …) every bar
+// width carries. With nothing positive, every spend-driven bar is empty.
+export function barScale(values = []) {
+  const max = Math.max(0, ...(values || []).map(Number).filter(Number.isFinite));
+  return max > 0 ? max : 1;
+}
+
 // Rank a group by the EARLIEST position any of its members holds in the
-// caller's original list — the Budget tab's rule, where the list is the
-// envelope walk's order rather than a magnitude. A group with no member in the
+// caller's original list — the Plan tab's rule, where the list is the one
+// category list's display order (rankByList) rather than a magnitude. A group with no member in the
 // list (impossible today, but cheap to survive) sorts last.
 export function earliestMemberRank(node, positionOf) {
   const pos = typeof positionOf === 'function' ? positionOf : () => undefined;

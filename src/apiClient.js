@@ -4,6 +4,7 @@
 // to is worse than no name at all.
 import { getAccessToken } from './supabaseClient.js';
 import { makeRetryingFetch } from './netRetry.js';
+import { localTodayIso } from './format.js';
 
 // Same wire-death retry the Supabase client gets (src/netRetry.js): a GET or
 // the one DELETE here is re-sent if it never got a response; the POST routes
@@ -126,11 +127,6 @@ export function askAssistant(messages, opts = {}) {
     // The phone's OWN calendar day. The server validates it and falls back to
     // UTC — without it, the assistant spent the last hours of every month
     // answering about the next one while every screen said otherwise.
-    today: localDayIso(),
+    today: localTodayIso(),
   });
-}
-
-function localDayIso() {
-  const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }

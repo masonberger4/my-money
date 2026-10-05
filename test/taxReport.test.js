@@ -13,6 +13,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import {
   SCHEDULE_E_LINES,
   RENTS_KEY,
@@ -23,6 +24,12 @@ import {
   DEDUCTION_BUCKETS,
   DEFAULT_SCHEDULE_E_MAP,
   DEFAULT_DEDUCTION_MAP,
+  parseTaxMaps,
+  setEmapEntryIn,
+  setDmapEntryIn,
+  savedOutsideYear,
+  ratesForYear,
+  mileageFootnote,
   MILEAGE_RATES,
   mileageRate,
   mileageDeduction,
@@ -355,4 +362,83 @@ test('scheduleECsv escapes and carries the sign-convention column name', () => {
   assert.ok(csv.includes('amount_positive_is_outflow'));
   assert.ok(csv.includes('"Doors, ""Custom"" Co"'), 'RFC-4180 quoting for commas and quotes');
   assert.ok(csv.includes('Not tax advice'));
+});
+
+// --- tax:maps parse + single-entry merges (2026-10 audit) --------------------
+// The pure halves of the settingsIO read-merge-write chain: a corrupt row
+// reads as "no mappings" (a FAILED read rejects upstream, never reaching
+// here), and an edit touches exactly one key without merging defaults.
+
+test('parseTaxMaps is tolerant: missing, corrupt and wrong-shaped rows read as empty maps', () => {
+  const empty = { emap: {}, dmap: {} };
+  assert.deepEqual(parseTaxMaps(null), empty);
+  assert.deepEqual(parseTaxMaps(''), empty);
+  assert.deepEqual(parseTaxMaps('{'), empty);
+  assert.deepEqual(parseTaxMaps('[]'), empty);
+  assert.deepEqual(parseTaxMaps('5'), empty);
+  assert.deepEqual(parseTaxMaps('{"emap":5,"dmap":[1]}'), empty);
+  assert.deepEqual(
+    parseTaxMaps('{"emap":{"P":{"Repairs":14}},"dmap":{"Gifts":"charitable"}}'),
+    { emap: { P: { Repairs: 14 } }, dmap: { Gifts: 'charitable' } },
+  );
+  assert.deepEqual(parseTaxMaps('{"emap":{},"dmap":{},"v":2}').v, 2, 'unknown keys survive');
+  assert.deepEqual(parseTaxMaps({ emap: { P: {} } }), { emap: { P: {} }, dmap: {} }, 'accepts a parsed object');
+});
+
+test('setEmapEntryIn sets or DELETES one key for one entity and never merges the defaults', () => {
+  const maps = { emap: { P: { Repairs: 14 }, Q: { Taxes: 16 } }, dmap: { Gifts: 'charitable' } };
+  const added = setEmapEntryIn(maps, 'P', 'Insurance', 9);
+  assert.deepEqual(added, { emap: { P: { Repairs: 14, Insurance: 9 }, Q: { Taxes: 16 } }, dmap: { Gifts: 'charitable' } });
+  assert.deepEqual(maps.emap.P, { Repairs: 14 }, 'the input is not mutated');
+  const removed = setEmapEntryIn(added, 'P', 'Repairs', null);
+  assert.equal('Repairs' in removed.emap.P, false, 'null deletes the key ("Not mapped")');
+  assert.deepEqual(setEmapEntryIn(null, 'N', 'Rent', RENTS_KEY), { emap: { N: { Rent: RENTS_KEY } }, dmap: {} },
+    'a first edit starts from the (empty) defaults');
+});
+
+test('setDmapEntryIn sets or DELETES one bucket key and leaves emap alone', () => {
+  const maps = { emap: { P: { Repairs: 14 } }, dmap: { Gifts: 'charitable' } };
+  assert.deepEqual(setDmapEntryIn(maps, 'Doctor', 'medical').dmap, { Gifts: 'charitable', Doctor: 'medical' });
+  const removed = setDmapEntryIn(maps, 'Gifts', null);
+  assert.deepEqual(removed.dmap, {});
+  assert.deepEqual(removed.emap, { P: { Repairs: 14 } });
+});
+
+test('savedOutsideYear names the year a drive landed in only when it is not the viewed year', () => {
+  assert.equal(savedOutsideYear('2026-02-10', 2025), 2026, 'a today-dated drive logged on last year\'s view');
+  assert.equal(savedOutsideYear('2026-01-01', 2025), 2026, 'Jan 1 is the next year — string slice, no TZ drift');
+  assert.equal(savedOutsideYear('2025-12-31', 2025), null);
+  assert.equal(savedOutsideYear('2025-06-01', '2025'), null, 'a string year compares the same');
+  assert.equal(savedOutsideYear('', 2025), null);
+  assert.equal(savedOutsideYear(undefined, 2025), null);
+});
+
+// 2026-10 audit: the Mileage card's footnote was hand-typed as the 2026 split
+// on EVERY year's view, so the 2025 worksheet priced drives at 70¢ under a
+// note quoting 72.5¢/76¢. It is now built from MILEAGE_RATES.
+test('ratesForYear returns the entries in effect during the year, carrying forward like mileageRate', () => {
+  assert.deepEqual(ratesForYear(2025), [{ from: '2025-01-01', rate: 0.70 }]);
+  assert.deepEqual(ratesForYear(2026), [
+    { from: '2026-01-01', rate: 0.725 },
+    { from: '2026-07-01', rate: 0.76 },
+  ]);
+  assert.deepEqual(ratesForYear(2023), [], 'before the table = nothing on file');
+  assert.deepEqual(ratesForYear(2027), [{ from: '2026-07-01', rate: 0.76 }],
+    'past the table = the last rate carried forward, which is what mileageRate prices at');
+  assert.equal(ratesForYear(2027)[0].rate, mileageRate('2027-03-01'));
+  assert.deepEqual(ratesForYear('abc'), []);
+});
+
+test('mileageFootnote names the viewed year\'s own rates', () => {
+  assert.equal(mileageFootnote(2025), '2025: 70¢/mi');
+  assert.equal(mileageFootnote(2024), '2024: 67¢/mi');
+  assert.equal(mileageFootnote(2026), '2026: 72.5¢/mi Jan–Jun, 76¢/mi from Jul 1');
+  assert.equal(mileageFootnote(2027), '2027: 76¢/mi (the latest rate on file)');
+  assert.equal(mileageFootnote(2023), 'no IRS rate on file for 2023 — drives are valued at $0');
+});
+
+test('the Mileage card renders the footnote from the data, not a hand-typed year', () => {
+  const src = readFileSync(new URL('../src/components/Dashboard.jsx', import.meta.url), 'utf8');
+  assert.match(src, /\{mileageFootnote\(taxYear\)\}/);
+  assert.doesNotMatch(src, /2026: 72\.5¢\/mi Jan–Jun/, 'no hand-typed rate text');
 });

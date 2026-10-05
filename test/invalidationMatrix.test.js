@@ -18,6 +18,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { refreshTickPlan } from '../src/loadPipeline.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const adapter = readFileSync(join(root, 'src', 'dataAdapter.js'), 'utf8');
@@ -187,6 +188,233 @@ test('App.jsx still bumps refreshTick on visibility return (the signal this wiri
   const app = stripComments(readFileSync(join(root, 'src', 'App.jsx'), 'utf8'));
   assert.ok(app.includes('visibilitychange'), 'the foreground-return listener exists');
   assert.ok(/setRefreshTick\(t\s*=>\s*t\s*\+\s*1\)/.test(app), 'and it bumps the tick Dashboard consumes');
+});
+
+// --- Lists outside reloadData's reach on a pull / foreground return ----------
+// Two lazily-loaded surfaces are epoch-driven and reloadData never touches
+// them: the open account page's 500-row list (acctTxEpoch — not
+// month-scoped, so a month tap must not refetch it) and the expected-bill
+// auto-match pass (expEpoch — getExpectedTransactions runs the match). Both
+// must move when rows may have arrived: after a real pull's follow-up reload
+// and on a foreground return (the other phone's writes / its server sync).
+// Before, the account page showed the new balance over stale rows (Wave C
+// #20's foreground half), and the match pass ran once per session, racing
+// the startup pull, so a bill that posted overnight stayed "due" all day.
+
+function fetchEffectTickBranch() {
+  const code = stripComments(dashboard);
+  const start = code.indexOf('const syncFirst=!didInitialSync.current');
+  assert.notEqual(start, -1, 'fixture assumption: the fetchData effect gates on didInitialSync');
+  const body = code.slice(start, code.indexOf('},[year,month,ready,refreshTick,fetchData]', start));
+  return body.slice(body.indexOf('refreshTick!==lastRefreshTick.current'));
+}
+
+test('a foreground return (refreshTick) refetches the open account list and re-runs the expected-bill match', () => {
+  const guarded = fetchEffectTickBranch();
+  const fetchAt = guarded.indexOf('fetchData(');
+  const tickBranch = guarded.slice(guarded.indexOf('if(tick){'));
+  const acct = tickBranch.indexOf('setAcctTxEpoch(');
+  assert.ok(acct !== -1 && acct < tickBranch.indexOf('fetchData('),
+    'the refreshTick branch must call setAcctTxEpoch(…) before fetchData — reloadData never refreshes that surface');
+  // The auto-match pass: at once when this return does not pull, otherwise
+  // after the pull settles (fetchData) — refreshTickPlan's bumpExpectedNow,
+  // behavior-tested in test/loadPipeline.test.js. Never both.
+  const exp = guarded.indexOf('if(bumpExpectedNow)setExpEpoch(');
+  assert.ok(exp !== -1 && exp < fetchAt,
+    'the effect must bump the expected epoch (gated on the plan) before fetchData');
+});
+
+test('a real pull\'s follow-up reload refetches the open account list and re-runs the expected-bill match', () => {
+  const code = stripComments(dashboard);
+  const start = code.indexOf('const fetchData=useCallback');
+  const end = code.indexOf('const refreshNow=useCallback', start);
+  assert.ok(start !== -1 && end > start, 'fixture assumption: fetchData precedes refreshNow');
+  const body = code.slice(start, end);
+  const followUp = body.indexOf('await reloadViewed()');
+  assert.ok(followUp > 0, 'fixture assumption: the follow-up reload goes through reloadViewed');
+  const after = body.slice(followUp);
+  assert.ok(after.includes('setAcctTxEpoch('), 'the pull may have written rows onto the open account');
+  assert.ok(after.includes('setExpEpoch('),
+    'the auto-match pass must re-run against the pulled rows — the startup pass raced the pull');
+});
+
+// --- The lazy TAB caches survive plain month navigation (F92) ----------------
+// Extends the 2026-08-04 ruling from the adapter memo to the Dashboard's lazy
+// tab caches: Recurring (a ~40-month read anchored on TODAY), Debt (accounts +
+// snapshots), Tax (its own taxYear) and Trends' cash flow (anchored on the
+// CURRENT month) depend on no viewed month, yet every month tap dropped all
+// four and re-ran the app's heaviest reads on the next visit. reloadData now
+// takes {invalidate}: plain navigation passes false; startup, the foreground
+// return, Refresh, a pull's follow-up and every post-write reload keep the
+// default (true). Movers are month-tagged and refetch on their own.
+
+const LAZY_DROPS = ['invalidateTax()', 'invalidateTrends()', 'setRecEpoch(', 'setDebtEpoch('];
+
+test('reloadData drops the lazy tab caches only inside an if(invalidate) block', () => {
+  const code = stripComments(dashboard);
+  const start = code.indexOf('const reloadData=useCallback');
+  const end = code.indexOf('const reloadViewed=useCallback', start);
+  assert.ok(start !== -1 && end > start, 'fixture assumption: reloadData precedes reloadViewed');
+  const body = code.slice(start, end);
+  assert.match(body, /^const reloadData=useCallback\(async\(y,m,\{invalidate=true\}=\{\}\)=>/,
+    'invalidate defaults to TRUE — every caller that says nothing (post-write reloads) keeps invalidating');
+  const open = body.indexOf('if(invalidate){');
+  assert.ok(open > 0, 'reloadData must gate the lazy-cache drops on invalidate');
+  const close = body.indexOf('}', open + 'if(invalidate){'.length);
+  const block = body.slice(open, close);
+  const outside = body.slice(0, open) + body.slice(close);
+  for (const drop of LAZY_DROPS) {
+    assert.ok(block.includes(drop), `${drop} must sit inside if(invalidate){…}`);
+    assert.ok(!outside.includes(drop), `${drop} must not ALSO run unconditionally`);
+  }
+});
+
+test('only plain month navigation skips the drop: the effect invalidates on startup and on a refreshTick bump', () => {
+  const code = stripComments(dashboard);
+  const start = code.indexOf('const syncFirst=!didInitialSync.current');
+  const body = code.slice(start, code.indexOf('},[year,month,ready,refreshTick,fetchData]', start));
+  assert.match(body, /const tick=refreshTick!==lastRefreshTick\.current;/,
+    'fixture assumption: the tick comparison is computed once');
+  assert.match(body, /const \{sync,invalidate,bumpExpectedNow\}=refreshTickPlan\(\{syncFirst,tick,/,
+    'the effect takes `invalidate` from refreshTickPlan, fed syncFirst and the tick');
+  assert.match(body, /fetchData\(year,month,\{sync,invalidate\}\)/, 'and hands it to fetchData');
+  assert.deepEqual(
+    [[true, false], [false, true], [true, true], [false, false]].map(([syncFirst, tick]) =>
+      refreshTickPlan({ syncFirst, tick, due: true }).invalidate),
+    [true, true, true, false],
+    'the effect must invalidate exactly when it is NOT plain navigation (startup or a foreground return)');
+  const fstart = code.indexOf('const fetchData=useCallback');
+  const fbody = code.slice(fstart, code.indexOf('const refreshNow=useCallback', fstart));
+  assert.match(fbody, /^const fetchData=useCallback\(async\(y,m,\{sync=false,invalidate=true\}=\{\}\)=>/,
+    'fetchData defaults to invalidating (Refresh says nothing and must drop the caches)');
+  assert.ok(fbody.includes('reloadData(y,m,{invalidate})'), 'fetchData threads invalidate into its first load');
+  assert.ok(!/invalidate:false/.test(code),
+    'no caller hard-codes invalidate:false — the follow-up, reloadViewed and Refresh must keep the default');
+});
+
+// --- The Accounts tab's lazy panels are epoch-driven too (F19) ---------------
+// "Does it add up?" and Data coverage fetched once per LAUNCH: reconData was
+// fetched only while null (and getReconciliation's ok:false is non-null, so a
+// failure stuck), covErr blocked every retry, and nothing ever reset either —
+// yet the copy says "try Refresh" and tells the user to fix the listed pairs.
+// Now an invalidating reload bumps an epoch per panel; a panel on screen
+// refetches at once, any other on its next showing, and a failed read retries.
+
+test('an invalidating reload bumps both panel epochs', () => {
+  const code = stripComments(dashboard);
+  const start = code.indexOf('const reloadData=useCallback');
+  const body = code.slice(start, code.indexOf('const reloadViewed=useCallback', start));
+  const open = body.indexOf('if(invalidate){');
+  assert.ok(open > 0, 'fixture assumption: reloadData gates its cache drops on invalidate');
+  const block = body.slice(open, body.indexOf('}', open + 'if(invalidate){'.length));
+  for (const bump of ['setReconEpoch(e=>e+1)', 'setCovEpoch(e=>e+1)']) {
+    assert.ok(block.includes(bump), `reloadData must ${bump} with the other lazy caches — "try Refresh" has to refetch`);
+  }
+});
+
+test('each panel fetches from an effect keyed on [shown, epoch], seq-guarded, and a failure can retry', () => {
+  const code = stripComments(dashboard);
+  for (const [open, epoch, seq, loaded, fetcher] of [
+    ['reconShown', 'reconEpoch', 'reconSeq', 'reconLoaded', 'getReconciliation()'],
+    ['covShown', 'covEpoch', 'covSeq', 'covLoaded', 'getDataCoverage()'],
+  ]) {
+    const deps = `},[${open},${epoch}]);`;
+    const end = code.indexOf(deps);
+    assert.ok(end > 0, `the ${fetcher} effect must re-run on ${open} and ${epoch}`);
+    const body = code.slice(code.lastIndexOf('useEffect(()=>{', end), end);
+    assert.ok(body.includes(fetcher), `fixture assumption: the [${open},${epoch}] effect fetches ${fetcher}`);
+    assert.match(body, new RegExp(`if\\(!${open}\\|\\|${loaded}\\.current===${epoch}\\)return;`),
+      'fetch only while open, once per epoch (a collapse/expand alone is not a refetch)');
+    assert.match(body, new RegExp(`const s=\\+\\+${seq}\\.current[,;]`), 'each fetch mints a sequence');
+    assert.match(body, new RegExp(`s===${seq}\\.current|s!==${seq}\\.current`), 'and a stale response is dropped');
+    assert.match(body, new RegExp(`${loaded}\\.current=-1`),
+      'a failed read RETURNS the epoch (the expected-tx rule), so re-expanding retries');
+  }
+  assert.ok(!/covData===null&&!covErr/.test(code),
+    'gating the coverage fetch on !covErr is what made one transient error permanent until relaunch');
+});
+
+// Reviewer repair (F19): gated on `open` alone, every post-write reload re-ran
+// the 12-month reconciliation and the whole-table coverage scan in the
+// background while the user fixed the listed pairs on the Spending tab (the
+// panels' open state outlives a tab switch), and each
+// refetch set the data to null — an edit made with a panel on screen
+// collapsed it to skeletons. Now a panel fetches only while it is ON SCREEN,
+// and a refetch keeps a good answer up, dimmed, until the new one lands.
+test('the panels fetch only while on screen, with the render\'s own visibility test', () => {
+  const code = stripComments(dashboard);
+  const shown = code.match(/const acctListShown=([^;]+);/);
+  assert.ok(shown, 'fixture assumption: one acctListShown names when the account list (and both panels) render');
+  assert.equal(shown[1], 'tab==="accounts"&&!(selAcctId&&accounts.some(a=>a.id===selAcctId))',
+    'the same test as the render\'s tab==="accounts"&&!selAcct, spelled from selAcct\'s inputs');
+  assert.ok(code.includes('const selAcct=useMemo(()=>(selAcctId?accounts.find(a=>a.id===selAcctId)||null:null)'),
+    'fixture assumption: selAcct is still derived from selAcctId + accounts — re-check acctListShown if it moves');
+  assert.ok(code.includes('const reconShown=reconOpen&&acctListShown;'));
+  assert.ok(code.includes('const covShown=covOpen&&acctListShown;'));
+  assert.ok(code.split('{tab==="accounts"&&!selAcct&&(').length - 1 >= 2,
+    'fixture assumption: both panels render under tab==="accounts"&&!selAcct');
+});
+
+test('a panel refetch keeps a good answer on screen, dimmed, and clears only a failure', () => {
+  const code = stripComments(dashboard);
+  for (const [epoch, data, setFor, stale] of [
+    ['reconEpoch', 'reconData', 'setReconFor', 'reconStale'],
+    ['covEpoch', 'covData', 'setCovFor', 'covStale'],
+  ]) {
+    const deps = epoch === 'reconEpoch' ? '},[reconShown,reconEpoch]);' : '},[covShown,covEpoch]);';
+    const end = code.indexOf(deps);
+    const body = code.slice(code.lastIndexOf('useEffect(()=>{', end), end);
+    const set = `set${data[0].toUpperCase()}${data.slice(1)}`;
+    assert.ok(!body.includes(`${set}(null)`), `a refetch must not blank ${data} — it is what collapsed an open panel on every edit`);
+    assert.match(body, new RegExp(`const s=\\+\\+\\w+\\.current,ep=${epoch};`), 'the fetch remembers the epoch it answers');
+    assert.ok(body.includes(`${setFor}(ep)`), `${data} lands with the epoch it answers`);
+    const forVar = setFor.slice(3, 4).toLowerCase() + setFor.slice(4);
+    assert.ok(code.includes(`const ${stale}=${data}!==null&&${forVar}!==${epoch};`),
+      `${stale}: an answer from an older epoch is stale`);
+    assert.match(code, new RegExp(`opacity:${stale}[^}]*\\.55`), `a stale ${data} renders dimmed, never as current`);
+  }
+  const recon = code.slice(code.lastIndexOf('useEffect(()=>{', code.indexOf('},[reconShown,reconEpoch]);')),
+    code.indexOf('},[reconShown,reconEpoch]);'));
+  assert.ok(recon.includes('setReconData(d=>d?.ok?d:null);'),
+    'a failed reconciliation answer is cleared on retry (skeleton); a good one stays up');
+});
+
+// --- 2026-10 audit: teaching on a flaky connection ---------------------------
+// learnMerchant ran setCategoryRule, the history rewrite, the reloads and
+// invalidateRules in ONE try whose catch alerted "Couldn't save that rule" —
+// so a rewrite that failed AFTER the rule committed told the user the rule
+// wasn't saved (the next sync used it anyway) and left the taught-rules list
+// stale. And applyCategoryRuleToHistory invalidated the envelope cache only
+// after the whole batched rewrite returned, so a batch that threw after
+// earlier ones wrote skipped it.
+test('applyCategoryRuleToHistory invalidates in a finally, so a mid-rewrite throw still drops the caches', () => {
+  const body = stripComments(exportedFunction(adapter, 'applyCategoryRuleToHistory'));
+  const fin = body.indexOf('} finally {');
+  assert.ok(fin > body.indexOf('applyRuleToHistory('), 'the rewrite sits inside the try');
+  assert.ok(body.indexOf('if (!dryRun) invalidateEnvelopeSpending();', fin) > fin,
+    'the invalidation runs in the finally');
+});
+
+test('learnMerchant: only a failed RULE write says "Couldn\'t save that rule"; after it, the rules list always refreshes', () => {
+  const code = stripComments(dashboard);
+  const start = code.indexOf('async function learnMerchant(){');
+  const body = code.slice(start, code.indexOf('function patchAllTxLists', start));
+  const ruleWrite = body.indexOf('await setCategoryRule(');
+  const ruleCatch = body.indexOf('}catch(err){', ruleWrite);
+  const saveAlert = body.indexOf("Couldn't save that rule");
+  const ruleEnd = body.indexOf('return;', ruleCatch);
+  assert.ok(ruleWrite > 0 && ruleCatch > ruleWrite && saveAlert > ruleCatch && ruleEnd > saveAlert,
+    'the "Couldn\'t save" alert belongs to the rule write\'s own catch, which returns');
+  const apply = body.indexOf('await applyCategoryRuleToHistory(');
+  assert.ok(apply > ruleEnd, 'the history rewrite runs in its own try, after the rule is saved');
+  const fin = body.indexOf('}finally{', apply);
+  assert.ok(fin > apply, 'the post-save block ends in a finally');
+  const tail = body.slice(fin);
+  assert.ok(tail.indexOf('invalidateRules();') > 0, 'invalidateRules runs whatever the rewrite did');
+  assert.ok(tail.indexOf('await reloadViewed();') > 0 && tail.indexOf('refetchOpenLists(sid)') > 0,
+    'and the viewed month + open lists reload (a partial rewrite still moved rows)');
+  assert.equal(body.split("Couldn't save that rule").length - 1, 1, 'no second "Couldn\'t save" for a saved rule');
+  assert.match(body.slice(apply, fin), /past transactions couldn't be updated/);
 });
 
 // --- Expected-bill writes: a failure re-reads AND says so ---------------------
