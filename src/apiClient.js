@@ -118,7 +118,8 @@ export function restoreSimpleFinInstitution(institutionId) {
 
 // messages: [{role: 'user'|'assistant', content: string}, ...]
 // opts: { model, effort } — validated server-side against the allowlist.
-// Returns { reply, stop_reason, usage }.
+// Returns { reply, stop_reason, usage }, plus truncated: true when the answer
+// hit max_tokens (the cut-off note is already in `reply`).
 export function askAssistant(messages, opts = {}) {
   return postJson('/api/assistant', {
     messages,

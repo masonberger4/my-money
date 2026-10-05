@@ -1,8 +1,10 @@
 // Assistant model options + a rough per-question cost estimate. Shared by the
 // Ask-tab settings UI (client) and api/assistant.js (server, which validates
 // the chosen model/effort against this list). Prices are USD per million
-// tokens at list price (Sonnet 5 has lower intro pricing through 2026-08-31,
-// so its real cost runs a bit under these estimates).
+// tokens at Anthropic's list price, verified 2026-10-05 and pinned in
+// test/assistantModels.test.js — re-verify them whenever a model changes.
+// (Sonnet 5 was priced here at $3/$15, with $2/$10 described as temporary
+// intro pricing; $2/$10 is its standard price, so its estimate ran 1.5× high.)
 //
 // Capability notes: Haiku 4.5 predates adaptive thinking and the effort
 // parameter, so it runs with neither (sending them would 400). Sonnet 5 and
@@ -14,7 +16,7 @@ export const ASSISTANT_MODELS = {
   },
   'claude-sonnet-5': {
     label: 'Sonnet 5', blurb: 'Balanced',
-    thinking: true, effort: true, maxTokens: 4096, inPerM: 3, outPerM: 15,
+    thinking: true, effort: true, maxTokens: 4096, inPerM: 2, outPerM: 10,
   },
   'claude-opus-4-8': {
     label: 'Opus 4.8', blurb: 'Most capable',

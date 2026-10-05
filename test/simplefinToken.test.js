@@ -14,6 +14,7 @@ import {
   decodeSetupToken,
   splitAccessUrl,
   claimAccessUrl,
+  fetchAccountSet,
   isPrivateIp,
   SimpleFinError,
 } from '../api/_lib/simplefin.js';
@@ -389,5 +390,60 @@ test('a claim body that is not a credentialed https URL is refused', () =>
       await assert.rejects(() => claimAccessUrl('https://bridge.example.com/claim/b', { lookup: publicDns }), code('claim_failed'));
       await assert.rejects(() => claimAccessUrl('https://bridge.example.com/claim/c', { lookup: publicDns }), code('invalid_token'));
       assert.equal(calls.length, 3);
+    }
+  ));
+
+// --- fetchAccountSet: the credential never follows a cross-origin redirect ---
+// The Fetch standard strips Authorization when a redirect leaves the origin;
+// the hand-rolled redirect loop (needed for the per-hop SSRF check) has to do
+// the same by hand, or a Bridge 302 to any other host is handed the Basic
+// credential that reads every linked bank.
+
+const authOf = init =>
+  Object.entries(init?.headers || {}).find(([k]) => k.toLowerCase() === 'authorization')?.[1];
+const EMPTY_SET = JSON.stringify({ errors: [], accounts: [] });
+
+test('a cross-origin redirect drops the Authorization header — and it stays dropped on later hops', () =>
+  withFetchStub(
+    [
+      { status: 307, headers: { location: 'https://cdn.other-host.example/simplefin/accounts' } },
+      // Back to the original origin: fetch does not re-attach a stripped
+      // credential either, so neither does this loop.
+      { status: 302, headers: { location: 'https://bridge.example.com/simplefin/accounts' } },
+      { status: 200, body: EMPTY_SET },
+    ],
+    async calls => {
+      await fetchAccountSet(ACCESS_URL, { lookup: publicDns });
+      assert.equal(calls.length, 3);
+      assert.equal(authOf(calls[0].init), `Basic ${Buffer.from('u:p').toString('base64')}`, 'hop 0 authenticates');
+      assert.equal(authOf(calls[1].init), undefined, 'the other host never sees the credential');
+      assert.equal(authOf(calls[2].init), undefined, 'once stripped, stripped for good');
+      assert.equal(calls[1].init.headers.Accept, 'application/json', 'only the credential is dropped');
+    }
+  ));
+
+test('a same-origin redirect keeps the Authorization header (a Bridge path move still authenticates)', () =>
+  withFetchStub(
+    [
+      { status: 307, headers: { location: 'https://bridge.example.com/v2/simplefin/accounts' } },
+      { status: 200, body: EMPTY_SET },
+    ],
+    async calls => {
+      await fetchAccountSet(ACCESS_URL, { lookup: publicDns });
+      assert.equal(calls.length, 2);
+      assert.equal(authOf(calls[1].init), authOf(calls[0].init));
+      assert.ok(authOf(calls[1].init));
+    }
+  ));
+
+test('a different PORT is a different origin — the credential is dropped there too', () =>
+  withFetchStub(
+    [
+      { status: 307, headers: { location: 'https://bridge.example.com:8443/simplefin/accounts' } },
+      { status: 200, body: EMPTY_SET },
+    ],
+    async calls => {
+      await fetchAccountSet(ACCESS_URL, { lookup: publicDns });
+      assert.equal(authOf(calls[1].init), undefined);
     }
   ));
