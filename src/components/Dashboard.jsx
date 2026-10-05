@@ -8,7 +8,7 @@ import { planAutoFill, envelopeBar, assignUnchanged, targetUnchanged, monthsUnti
 import { buildSearchFilters, searchIsActive, sanitizeDateInput, dateCommit, EDIT_YEAR_FLOOR } from "../searchFilters.js";
 import { expectedByCategory, expectedStatus, isMissedExpected, seedFromRecurring, projectFutureCycles, homeBillsWindow } from "../expectedTx.js";
 import { payoffWhatIf, debtFreeMonth, isMortgage, amortizationSchedule, addMonths, MAX_MONTHS, payoffProgress, utilization } from "../debtPayoff.js";
-import { SCHEDULE_E_LINES, RENTS_KEY, DEFAULT_SCHEDULE_E_MAP, scheduleEReport, entityMonthly, entityLedger, personalDeductionReport, DEDUCTION_BUCKETS, DEFAULT_DEDUCTION_MAP, mileageDeduction, scheduleECsv, parseTaxMaps, setEmapEntryIn, setDmapEntryIn, savedOutsideYear } from "../taxReport.js";
+import { SCHEDULE_E_LINES, RENTS_KEY, DEFAULT_SCHEDULE_E_MAP, scheduleEReport, entityMonthly, entityLedger, personalDeductionReport, DEDUCTION_BUCKETS, DEFAULT_DEDUCTION_MAP, mileageDeduction, scheduleECsv, parseTaxMaps, setEmapEntryIn, setDmapEntryIn, savedOutsideYear, mileageFootnote } from "../taxReport.js";
 import { merchantKey, matchLearnedRule, isKeyPrefix } from "../txClassify.js";
 import { trimChatMsgs, buildSavedChat } from "../savedChats.js";
 import { patchTxShape } from "../spending.js";
@@ -7891,8 +7891,8 @@ export default function Dashboard({ refreshTick = 0 }) {
                   </div>
                 ))}
                 <div style={{fontSize:10,color:"var(--muted)",lineHeight:1.5,marginTop:8}}>
-                  Valued at the IRS standard rate for the drive's date (2026: 72.5¢/mi Jan–Jun, 76¢/mi from
-                  Jul 1). Hand-entered — log rental and other deductible drives only.
+                  Valued at the IRS standard rate for the drive's date ({mileageFootnote(taxYear)}).
+                  Hand-entered — log rental and other deductible drives only.
                 </div>
               </div>
             )}

@@ -345,6 +345,52 @@ export function mileageRate(isoDate) {
   return found ? found.rate : null;
 }
 
+// The MILEAGE_RATES entries in effect during one calendar year, ascending:
+// the entry in force on Jan 1 (which may be carried forward from an earlier
+// year, exactly as mileageRate prices it) plus every entry starting inside
+// the year. [] when the table doesn't reach the year at all.
+export function ratesForYear(year) {
+  const y = String(year);
+  if (!/^\d{4}$/.test(y)) return [];
+  const jan1 = `${y}-01-01`;
+  let first = null;
+  for (const r of MILEAGE_RATES) {
+    if (r.from <= jan1 && (!first || r.from > first.from)) first = r;
+  }
+  const later = MILEAGE_RATES
+    .filter((r) => r.from > jan1 && r.from.slice(0, 4) === y)
+    .sort((a, b) => (a.from < b.from ? -1 : a.from > b.from ? 1 : 0));
+  return (first ? [first, ...later] : later).map((r) => ({ from: r.from, rate: r.rate }));
+}
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const centsPerMile = (rate) => `${+(rate * 100).toFixed(1)}¢/mi`;
+const monthDay = (iso) => `${MONTHS[Number(iso.slice(5, 7)) - 1]} ${Number(iso.slice(8, 10))}`;
+
+// The Mileage card's rate footnote for the tax year on screen, built from
+// MILEAGE_RATES so it can't name another year's rates (it was hand-typed as
+// the 2026 split on every year's view): "2025: 70¢/mi",
+// "2026: 72.5¢/mi Jan–Jun, 76¢/mi from Jul 1". Month labels come from the
+// ISO strings, never Date.
+export function mileageFootnote(year) {
+  const rates = ratesForYear(year);
+  if (!rates.length) return `no IRS rate on file for ${year} — drives are valued at $0`;
+  const jan1 = `${year}-01-01`;
+  const parts = rates.map((r, i) => {
+    if (r.from > jan1) return `${centsPerMile(r.rate)} from ${monthDay(r.from)}`;
+    const next = rates[i + 1];
+    if (!next) return centsPerMile(r.rate);
+    // In force from Jan 1 until the next change: "Jan–Jun" when that change
+    // lands on a month's 1st, else "before Jul 15".
+    if (next.from.slice(8, 10) !== '01') return `${centsPerMile(r.rate)} before ${monthDay(next.from)}`;
+    const last = Number(next.from.slice(5, 7)) - 2; // index of the month before
+    return `${centsPerMile(r.rate)} ${last <= 0 ? 'in Jan' : `Jan–${MONTHS[last]}`}`;
+  });
+  const newest = MILEAGE_RATES.reduce((m, r) => (r.from > m ? r.from : m), '');
+  const carried = String(year) > newest.slice(0, 4) ? ' (the latest rate on file)' : '';
+  return `${year}: ${parts.join(', ')}${carried}`;
+}
+
 // The year a saved drive (or any dated row) landed in when that is NOT the
 // tax year on screen, else null — the Mileage list shows only the viewed
 // year, so a drive dated outside it has to be announced or it silently

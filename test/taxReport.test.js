@@ -13,6 +13,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import {
   SCHEDULE_E_LINES,
   RENTS_KEY,
@@ -27,6 +28,8 @@ import {
   setEmapEntryIn,
   setDmapEntryIn,
   savedOutsideYear,
+  ratesForYear,
+  mileageFootnote,
   MILEAGE_RATES,
   mileageRate,
   mileageDeduction,
@@ -408,4 +411,34 @@ test('savedOutsideYear names the year a drive landed in only when it is not the 
   assert.equal(savedOutsideYear('2025-06-01', '2025'), null, 'a string year compares the same');
   assert.equal(savedOutsideYear('', 2025), null);
   assert.equal(savedOutsideYear(undefined, 2025), null);
+});
+
+// 2026-10 audit: the Mileage card's footnote was hand-typed as the 2026 split
+// on EVERY year's view, so the 2025 worksheet priced drives at 70¢ under a
+// note quoting 72.5¢/76¢. It is now built from MILEAGE_RATES.
+test('ratesForYear returns the entries in effect during the year, carrying forward like mileageRate', () => {
+  assert.deepEqual(ratesForYear(2025), [{ from: '2025-01-01', rate: 0.70 }]);
+  assert.deepEqual(ratesForYear(2026), [
+    { from: '2026-01-01', rate: 0.725 },
+    { from: '2026-07-01', rate: 0.76 },
+  ]);
+  assert.deepEqual(ratesForYear(2023), [], 'before the table = nothing on file');
+  assert.deepEqual(ratesForYear(2027), [{ from: '2026-07-01', rate: 0.76 }],
+    'past the table = the last rate carried forward, which is what mileageRate prices at');
+  assert.equal(ratesForYear(2027)[0].rate, mileageRate('2027-03-01'));
+  assert.deepEqual(ratesForYear('abc'), []);
+});
+
+test('mileageFootnote names the viewed year\'s own rates', () => {
+  assert.equal(mileageFootnote(2025), '2025: 70¢/mi');
+  assert.equal(mileageFootnote(2024), '2024: 67¢/mi');
+  assert.equal(mileageFootnote(2026), '2026: 72.5¢/mi Jan–Jun, 76¢/mi from Jul 1');
+  assert.equal(mileageFootnote(2027), '2027: 76¢/mi (the latest rate on file)');
+  assert.equal(mileageFootnote(2023), 'no IRS rate on file for 2023 — drives are valued at $0');
+});
+
+test('the Mileage card renders the footnote from the data, not a hand-typed year', () => {
+  const src = readFileSync(new URL('../src/components/Dashboard.jsx', import.meta.url), 'utf8');
+  assert.match(src, /\{mileageFootnote\(taxYear\)\}/);
+  assert.doesNotMatch(src, /2026: 72\.5¢\/mi Jan–Jun/, 'no hand-typed rate text');
 });
