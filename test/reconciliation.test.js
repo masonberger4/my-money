@@ -31,7 +31,7 @@ import {
   RECON_SCOPE_TYPES,
   NEAR_MISS_MIN_AMOUNT,
 } from '../src/reconciliation.js';
-import { withEffectiveDate } from '../src/dataAdapter.js';
+import { withEffectiveDate, getReconciliation } from '../src/dataAdapter.js';
 import { standardLedger, randomLedger, makeTx, makeAccounts, lcg } from './helpers/ledger.js';
 
 const near = (a, b, eps = 1e-6) => Math.abs(a - b) < eps;
@@ -520,8 +520,164 @@ test('getReconciliation feeds the builder a BANK-date read of rows re-dated out 
   assert.ok(body.includes(".eq('accounts.hidden', false)"), 'hidden accounts excluded at the query level');
   assert.ok(body.includes('withEffectiveDate('), 'same row shape as the month reads');
   assert.ok(/buildReconciliation\(\{[^}]*\bmovedOut\b[^}]*\}\)/.test(body), 'handed to the builder');
-  // The month rows themselves stay effective-date reads (rule 3 parity).
-  assert.ok(body.includes('getMonthTransactions(year, month)'));
+  // The month rows themselves stay effective-date reads (rule 3 parity): the
+  // injectable month read defaults to getMonthTransactions, and it is the one
+  // the month loop calls.
+  assert.ok(body.includes('fetchMonth = getMonthTransactions'));
+  assert.ok(body.includes('fetchMonth(year, month)'));
+});
+
+// getReconciliation itself, driven through a recording fake of the two
+// supabase-js chains it runs (the accounts read and the re-dated bank-date
+// read); the month reads and the snapshot read are injected as functions.
+function reconClient({ accounts, redated, redatedError = null }, calls) {
+  return {
+    from(table) {
+      const q = { table, columns: null, filters: [] };
+      const b = {
+        select(cols) {
+          q.columns = cols;
+          return b;
+        },
+        eq(c, v) {
+          q.filters.push(['eq', c, v]);
+          return b;
+        },
+        not(c, op, v) {
+          q.filters.push(['not', c, op, v]);
+          return b;
+        },
+        gte(c, v) {
+          q.filters.push(['gte', c, v]);
+          return b;
+        },
+        lte(c, v) {
+          q.filters.push(['lte', c, v]);
+          return b;
+        },
+        order() {
+          return b;
+        },
+        range() {
+          return b;
+        },
+        then(resolve, reject) {
+          calls.push(q);
+          const out =
+            table === 'accounts' ? { data: accounts, error: null }
+            : redatedError ? { data: null, error: redatedError }
+            : { data: redated, error: null };
+          return Promise.resolve(out).then(resolve, reject);
+        },
+      };
+      return b;
+    },
+  };
+}
+
+// A raw row of the re-dated read, before withEffectiveDate: `date` is the
+// bank's, `effective_date` the generated coalesce(user_date, date).
+const rawRedated = (id, account_id, bankDate, effectiveDate, amount) => ({
+  id,
+  account_id,
+  date: bankDate,
+  amount,
+  user_date: effectiveDate,
+  effective_date: effectiveDate,
+  accounts: { hidden: false },
+});
+
+function reconHarness({ redatedError = null } = {}) {
+  const A = makeAccounts();
+  const calls = [];
+  const monthCalls = [];
+  const snapshotCalls = [];
+  // Today Oct 15 and the history starts Aug 31, so the span is Aug..Oct:
+  // spanStart 2026-08-01, spanEnd 2026-10-31.
+  const redated = [
+    // Counted OUTSIDE the span (before it, after it): the only rows the
+    // builder needs from this read.
+    rawRedated('out-before', A.checking.id, '2026-09-10', '2026-07-20', 40),
+    rawRedated('out-after', A.checking.id, '2026-10-02', '2026-11-03', 15),
+    // Counted INSIDE the span, on both edges: a month read carries these,
+    // so the client-side filter must drop them.
+    rawRedated('in-start', A.checking.id, '2026-08-05', '2026-08-01', 25),
+    rawRedated('in-end', A.checking.id, '2026-09-20', '2026-10-31', 30),
+  ];
+  const client = reconClient({ accounts: [A.checking], redated, redatedError }, calls);
+  const deps = {
+    client,
+    // Every month read comes back empty, so the dateMoved lines below list
+    // EXACTLY the rows the re-dated read let through to the builder.
+    fetchMonth: async (year, month) => {
+      monthCalls.push([year, month]);
+      return [];
+    },
+    fetchSnapshots: async (ids, since) => {
+      snapshotCalls.push([ids, since]);
+      // The bank moved -40 in September and -15 by Oct 10 — the two rows
+      // posted in the span and counted outside it.
+      return [
+        snap(A.checking.id, '2026-08-31', 1000),
+        snap(A.checking.id, '2026-09-30', 960),
+        snap(A.checking.id, '2026-10-10', 945),
+      ];
+    },
+  };
+  const run = () => getReconciliation({ now: new Date(2026, 9, 15, 12) }, deps);
+  return { A, calls, monthCalls, snapshotCalls, run };
+}
+
+test('getReconciliation hands the builder only the re-dated rows counted OUTSIDE the span', async () => {
+  const h = reconHarness();
+  const out = await h.run();
+  assert.equal(out.ok, true);
+  assert.deepEqual(h.monthCalls, [[2026, 8], [2026, 9], [2026, 10]]);
+  assert.deepEqual(h.snapshotCalls, [[[h.A.checking.id], null]]);
+
+  // The read: re-dated rows only, ranged on the BANK date over the span,
+  // hidden accounts excluded at the query level.
+  const reads = h.calls.filter(q => q.table === 'transactions');
+  assert.equal(reads.length, 1);
+  const [read] = reads;
+  for (const col of ['date', 'amount', 'account_id', 'user_date', 'effective_date']) {
+    assert.ok(read.columns.split(/,\s*/).includes(col), `selects ${col}`);
+  }
+  for (const f of [
+    ['eq', 'accounts.hidden', false],
+    ['not', 'user_date', 'is', null],
+    ['gte', 'date', '2026-08-01'],
+    ['lte', 'date', '2026-10-31'],
+  ]) {
+    assert.ok(read.filters.some(g => JSON.stringify(g) === JSON.stringify(f)), `filter ${JSON.stringify(f)}`);
+  }
+  assert.ok(!read.filters.some(g => g[1] === 'effective_date'), 'never ranged on the effective date');
+
+  const byMonth = Object.fromEntries(out.months.map(m => [m.month, m]));
+  assert.deepEqual(Object.keys(byMonth).sort(), ['2026-08', '2026-09', '2026-10']);
+  // Only the two outside-span rows reached the builder, each in its bank month.
+  assert.equal(bucketOf(byMonth['2026-08'], 'dateMoved'), undefined, 'the Aug 1 edge row is inside the span');
+  assert.deepEqual(
+    [bucketOf(byMonth['2026-09'], 'dateMoved').impact, bucketOf(byMonth['2026-09'], 'dateMoved').count],
+    [-40, 1],
+    'September carries the row moved to July, never the one moved to Oct 31'
+  );
+  assert.deepEqual(
+    [bucketOf(byMonth['2026-10'], 'dateMoved').impact, bucketOf(byMonth['2026-10'], 'dateMoved').count],
+    [-15, 1]
+  );
+  // ...and those are what the balances did, so both months reconcile.
+  assert.equal(byMonth['2026-09'].unexplained, 0);
+  assert.equal(byMonth['2026-10'].unexplained, 0);
+});
+
+test('a failed re-dated read fails the panel (ok:false), never a fake residual', async () => {
+  const h = reconHarness({ redatedError: { code: '57014', message: 'canceling statement due to statement timeout' } });
+  const out = await h.run();
+  assert.ok(h.calls.some(q => q.table === 'transactions'), 'the failure came from the re-dated read');
+  assert.equal(out.ok, false);
+  assert.deepEqual(out.months, []);
+  assert.deepEqual(out.nearMiss, { pairs: [], total: 0 });
 });
 
 test('rows with no date edit, an in-month edit, or out of scope never produce a dateMoved line', () => {
