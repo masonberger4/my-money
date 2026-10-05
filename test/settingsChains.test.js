@@ -11,6 +11,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { makeSettingsChains } from '../src/adapters/settingsIO.js';
 import { makeEnvPaceChain } from '../src/adapters/envelopeIO.js';
 
@@ -273,4 +275,36 @@ test('concurrent updateEnvPace calls serialize rather than clobbering', async ()
   ]);
   assert.deepEqual(JSON.parse(store.get('env:pace')), { A: true, B: true, C: true });
   assert.ok(reads >= 3, 'each update re-read rather than reusing one snapshot');
+});
+
+// --- No whole-map / whole-list writer is handed out ---------------------------
+// setRecIgnore / setEnvPace persisted a map or list REBUILT FROM LOCAL STATE —
+// the stale-phone overwrite updateRecIgnore / updateEnvPace were built to end.
+// Nothing called them, and Dashboard names its useState setters the same, so
+// an aliased import was one autocomplete away from re-opening the wipe. The
+// chains keep them internal; the façade exports only the single-key writers.
+
+test('makeSettingsChains hands out no whole-list rec:ignore reader or writer', () => {
+  const chains = makeSettingsChains(makeSettingsTable().db);
+  assert.equal('setRecIgnore' in chains, false);
+  assert.equal('getRecIgnore' in chains, false);
+  assert.equal(typeof chains.updateRecIgnore, 'function');
+});
+
+test('source scan: no adapter or the façade exports setEnvPace / setRecIgnore (or their whole-map getters)', () => {
+  const read = rel => readFileSync(fileURLToPath(new URL(`../${rel}`, import.meta.url)), 'utf8')
+    .replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+  const names = ['setEnvPace', 'getEnvPace', 'setRecIgnore', 'getRecIgnore'];
+  for (const rel of ['src/dataAdapter.js', 'src/adapters/envelopeIO.js', 'src/adapters/settingsIO.js']) {
+    const src = read(rel);
+    for (const n of names) {
+      assert.doesNotMatch(src, new RegExp(`export\\s+(async\\s+)?function\\s+${n}\\b`), `${rel} exports ${n}`);
+    }
+    // Re-export lists and destructured exports: `export { … name, … }` / `export const { … name, … }`.
+    for (const m of src.matchAll(/export\s+(?:const\s+)?\{([^}]*)\}/g)) {
+      for (const n of names) {
+        assert.doesNotMatch(m[1], new RegExp(`\\b${n}\\b`), `${rel} exports ${n}`);
+      }
+    }
+  }
 });

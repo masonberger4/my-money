@@ -46,8 +46,6 @@ export {
   isEnvelopeSchemaMissing,
   getBudgetIncome,
   setBudgetIncome,
-  getEnvPace,
-  setEnvPace,
   updateEnvPace,
   setAssigned,
   setTargetOverride,
@@ -58,8 +56,6 @@ export {
   fundTargets,
 } from './adapters/envelopeIO.js';
 export {
-  getRecIgnore,
-  setRecIgnore,
   updateRecIgnore,
   getSavedChats,
   saveChatToApp,

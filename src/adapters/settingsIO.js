@@ -130,9 +130,12 @@ export function makeSettingsChains(db) {
 
   const trimmedName = c => (c?.name || '').trim();
 
+  // getRecIgnore/setRecIgnore stay INTERNAL to the chain: a whole-list writer
+  // handed out would let a caller persist a list rebuilt from stale local
+  // state over the other phone's edits — exactly what updateRecIgnore's
+  // read-merge-write exists to prevent. Startup reads go through
+  // getStartupSettings (parseIgnoreList on the batched row).
   return {
-    getRecIgnore,
-    setRecIgnore,
     updateRecIgnore,
     getSavedChats,
     // Both return the merged stored list so the caller can adopt entries the
@@ -158,8 +161,6 @@ export function makeSettingsChains(db) {
 const bound = makeSettingsChains({ getSetting, setSetting });
 
 export const {
-  getRecIgnore,
-  setRecIgnore,
   updateRecIgnore,
   getSavedChats,
   saveChatToApp,
