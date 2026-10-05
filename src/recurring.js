@@ -199,6 +199,14 @@ const medianOf = rows => median(rows.map(t => t.amount).sort((a, b) => a - b));
 // the OLD price while old-price charges are still the majority of the slice
 // (a fresh hike flags "was $10.00 now $13.00"), the new one once it dominates
 // — the same moment the plain path's slice median would flip over.
+//
+// A KNOWN TRADE, deliberate and pinned: ONE new charge can't tell a hike from
+// a one-off spike on a variable bill (a $95 power bill after months near $50).
+// Both read as a step for that one cycle — the spike as the /mo amount, with
+// priceCreep set — because waiting for a second charge would bring back the
+// false "overdue at the old price" in every real hike month. The next ordinary
+// bill puts the plain reading back (the newest charge is kept again, so no
+// step is tried), so a spike costs one cycle.
 function priceStep(windowed) {
   const n = windowed.length;
   let lo = Infinity;

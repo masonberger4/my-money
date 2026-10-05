@@ -545,6 +545,33 @@ test('a >20% price CUT stays detected at the new price, without a creep flag', (
   assert.notEqual(r.dueStatus, 'overdue');
 });
 
+test('KNOWN TRADE: a one-off spike on a variable bill reads as a step for ONE cycle, then the plain reading returns', () => {
+  // One new charge >20% off a steady series is ambiguous: a sub's hike (the
+  // tests above, which must not read "overdue" at the old price) looks exactly
+  // like a utility's one-off spike. The detector takes the hike reading, and
+  // the next ordinary bill restores the plain one — pinned so a change to
+  // either side of the trade is deliberate.
+  const amounts = [48.2, 52.75, 50.1, 53.0, 49.4, 51.6, 50.5];
+  const steady = amounts.map((a, i) => tx(addDays('2026-02-14', 30 * i), a, 'CITY POWER'));
+  const spike = tx(addDays('2026-02-14', 30 * 7), 95, 'CITY POWER');
+  const [s] = detectRecurring([...steady, spike], addDays(spike.transaction_date, 2));
+  assert.equal(s.key, 'CITY POWER');
+  assert.equal(s.lastDate, spike.transaction_date);
+  assert.equal(s.lastAmount, 95);
+  assert.equal(s.monthlyAmount, 95, 'the spike month reports the spike as the current amount');
+  assert.equal(s.medianAmount, 51.05, 'against the steady bills in the slice');
+  assert.equal(s.priceCreep, true);
+  assert.notEqual(s.dueStatus, 'overdue', 'the bill was paid: never a false overdue');
+  const ordinary = tx(addDays('2026-02-14', 30 * 8), 50.9, 'CITY POWER');
+  const [b] = detectRecurring([...steady, spike, ordinary], addDays(ordinary.transaction_date, 2));
+  assert.equal(b.key, 'CITY POWER');
+  assert.equal(b.monthlyAmount, 50.7, 'one cycle later the plain median is back');
+  assert.equal(b.lastAmount, 50.9);
+  assert.equal(b.medianAmount, 50.9);
+  assert.equal(b.priceCreep, false);
+  assert.equal(b.count, 6, 'the spike is dropped by the ordinary gate again');
+});
+
 test('a price step must be a clean step: an interleaved second amount is never read as a hike', () => {
   // A new $10.99 subscription starting alongside a $2.99 one at the same
   // merchant is NOT a $2.99 → $10.99 hike once both amounts keep arriving:
