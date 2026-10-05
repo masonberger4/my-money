@@ -1,16 +1,23 @@
 // The Dashboard's load/refresh pipeline: reloadData / reloadViewed / fetchData
 // and the fetchData effect (App.jsx's foreground-return refreshTick lands
-// there). Dashboard is a component nothing in Node can mount, and these
-// failures are SILENT on every surface — a spinner that never comes down, an
-// old month's totals under the new month's header — so this is a SOURCE-SCAN
-// pin in the test/invalidationMatrix.test.js mold: comments stripped (the
-// reasoning next to the code names the very calls these scans look for), and
-// every slice anchored on a declaration string that fails loudly if it moves.
+// there). Two halves:
+//  - BEHAVIOR: the pipeline's decisions live in src/loadPipeline.js (pure) —
+//    which effect run pulls and drops the lazy caches (refreshTickPlan) and
+//    what a settled pull earns (pullFollowUp) — and are unit-tested here as
+//    decision tables.
+//  - WIRING: Dashboard is a component nothing in Node can mount, and these
+//    failures are SILENT on every surface — a spinner that never comes down,
+//    an old month's totals under the new month's header — so the rest is a
+//    SOURCE-SCAN pin in the test/invalidationMatrix.test.js mold: comments
+//    stripped (the reasoning next to the code names the very calls these
+//    scans look for), and every slice anchored on a declaration string that
+//    fails loudly if it moves.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { refreshTickPlan, pullFollowUp } from '../src/loadPipeline.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const dashboard = readFileSync(join(root, 'src', 'components', 'Dashboard.jsx'), 'utf8');
@@ -116,8 +123,20 @@ test('fetchData re-asserts the sync-failure banner after the follow-up reload of
   const follow = body.indexOf('await reloadViewed()');
   assert.ok(follow > 0, 'fixture assumption: the follow-up reload goes through reloadViewed');
   assert.ok(body.slice(0, follow).includes('SYNC_FAILED_MSG'), 'the runSync catch paints the banner');
-  assert.match(body.slice(follow), /if\([^)]*!res[^)]*\)setError\([^;]*SYNC_FAILED_MSG/,
-    'after the follow-up reload (which cleared the error), a failed pull (res null) must set the banner again');
+  assert.match(body.slice(0, follow), /const next=pullFollowUp\(sync,res\);\s*if\(next\.reload\)\{/,
+    'the follow-up reload runs exactly when pullFollowUp says so');
+  assert.match(body.slice(follow), /if\(next\.reassertError&&live!==false\)setError\([^;]*SYNC_FAILED_MSG/,
+    'after the follow-up reload (which cleared the error), a failed Refresh must set the banner again');
+});
+
+test('pullFollowUp: a failed explicit Refresh still reloads, then re-asserts the banner', () => {
+  assert.deepEqual(pullFollowUp('refresh', null), { reload: true, reassertError: true, bumpExpected: true });
+  // A Refresh that pulled (or was merely throttled) has no failure to show.
+  for (const res of [{ results: [{ institution: 'a' }] }, { results: [{ skipped: 'throttled' }] }, { results: [] }]) {
+    const next = pullFollowUp('refresh', res);
+    assert.equal(next.reload, true, 'the explicit Refresh always earns its fresh read');
+    assert.equal(next.reassertError, false, `no banner for ${JSON.stringify(res)}`);
+  }
 });
 
 // --- F17: the Budget tab's typed income is MONTH-TAGGED ----------------------
@@ -162,11 +181,24 @@ test('an envelope write that lands after a month tap re-reads the viewed month\'
 
 const EFFECT = ['const syncFirst=!didInitialSync.current', '},[year,month,ready,refreshTick,fetchData]'];
 
-test('a refreshTick re-run more than an hour after the last pull starts a quiet "foreground" sync', () => {
+test('refreshTickPlan: only a foreground return over an hour after the last pull starts the quiet "foreground" sync', () => {
+  // Startup always pulls (true — the loud mode: its failure paints the banner).
+  assert.equal(refreshTickPlan({ syncFirst: true, tick: false, due: false }).sync, true);
+  assert.equal(refreshTickPlan({ syncFirst: true, tick: true, due: true }).sync, true);
+  // A foreground return: the hour gate decides, and the pull is QUIET.
+  assert.equal(refreshTickPlan({ syncFirst: false, tick: true, due: true }).sync, 'foreground');
+  assert.equal(refreshTickPlan({ syncFirst: false, tick: true, due: false }).sync, false);
+  // Plain month navigation never pulls, however long ago the last pull was.
+  assert.equal(refreshTickPlan({ syncFirst: false, tick: false, due: true }).sync, false);
+});
+
+test('the effect asks refreshTickPlan with the hour gate and runs fetchData on its plan', () => {
   const { body } = slice(...EFFECT);
-  assert.match(body, /foregroundSyncDue\(lastSyncAt\.current,Date\.now\(\)\)/,
-    'the effect must ask the pure hour gate with the last pull\'s start time');
-  assert.ok(body.includes('"foreground"'), 'the hour-gated pull runs in the quiet "foreground" mode');
+  assert.match(body,
+    /const \{sync,invalidate,bumpExpectedNow\}=refreshTickPlan\(\{syncFirst,tick,\s*due:foregroundSyncDue\(lastSyncAt\.current,Date\.now\(\)\)\}\);/,
+    'the effect must ask the pure plan, with the hour gate fed the last pull\'s start time');
+  assert.ok(body.indexOf('refreshTickPlan(') < body.indexOf('fetchData('), 'the plan is made before fetchData runs');
+  assert.match(body, /fetchData\(year,month,\{sync,invalidate\}\)/, 'fetchData runs the planned sync mode and cache drop');
   const { body: fetch } = slice(...FETCH);
   assert.match(fetch, /if\(sync\)\{?lastSyncAt\.current=Date\.now\(\)/,
     'every pull fetchData starts (startup, Refresh, foreground) restarts the hour');
@@ -176,10 +208,75 @@ test('a failed foreground pull never paints the sync-failure banner', () => {
   const { body } = slice(...FETCH);
   assert.match(body, /if\(sync!=="foreground"\)setError\(SYNC_FAILED_MSG\)/,
     'the runSync catch must skip the banner for the quiet foreground pull');
-  // The F13 re-assert is reachable only on sync:"refresh" — a failed pull
-  // (res null) is allThrottled, which returns for every other mode.
-  assert.match(body, /if\(allThrottled&&sync!=="refresh"\)return;/,
-    'the throttled/failed early return stays for every mode but Refresh');
+  // ...and nothing after it puts the banner back: a failed (null) pull earns
+  // the follow-up and its re-assert on the explicit Refresh only.
+  for (const sync of [true, 'foreground']) {
+    const next = pullFollowUp(sync, null);
+    assert.equal(next.reload, false, `a failed ${sync} pull wrote nothing — no follow-up reload`);
+    assert.equal(next.reassertError, false, `a failed ${sync} pull re-asserts nothing`);
+  }
+});
+
+// --- pullFollowUp: what a settled pull earns ---------------------------------
+// res shapes runSync resolves with (src/sync.js pullWasClean lists them), plus
+// null for a rejected pull (fetchData's catch maps it).
+const REAL = { results: [{ institution: 'a' }] };
+const MIXED = { results: [{ skipped: 'throttled' }, { institution: 'b' }] };
+const THROTTLED = { results: [{ skipped: 'throttled' }] };
+const NO_URL = { results: [] };
+
+test('pullFollowUp: only a real pull earns the follow-up reload — except the explicit Refresh', () => {
+  for (const sync of [true, 'foreground']) {
+    assert.equal(pullFollowUp(sync, REAL).reload, true, `${sync}: a real pull wrote rows`);
+    assert.equal(pullFollowUp(sync, MIXED).reload, true, `${sync}: one real bank in a throttled set still wrote rows`);
+    for (const res of [THROTTLED, NO_URL, null]) {
+      assert.equal(pullFollowUp(sync, res).reload, false, `${sync}: ${JSON.stringify(res)} wrote nothing`);
+    }
+  }
+  for (const res of [REAL, MIXED, THROTTLED, NO_URL, null]) {
+    assert.equal(pullFollowUp('refresh', res).reload, true, `refresh: ${JSON.stringify(res)} still reloads`);
+  }
+});
+
+test('pullFollowUp: the auto-match re-runs after every follow-up, and after ANY settle of a foreground pull', () => {
+  for (const res of [REAL, MIXED]) {
+    for (const sync of [true, 'refresh', 'foreground']) {
+      assert.equal(pullFollowUp(sync, res).bumpExpected, true, `${sync}: the pulled rows may match a bill`);
+    }
+  }
+  for (const res of [THROTTLED, NO_URL, null]) {
+    // The foreground return deferred its pass to this settle — it must run.
+    assert.equal(pullFollowUp('foreground', res).bumpExpected, true, `foreground: ${JSON.stringify(res)}`);
+    // The startup pass already ran at mount, against the same rows.
+    assert.equal(pullFollowUp(true, res).bumpExpected, false, `startup: ${JSON.stringify(res)}`);
+  }
+});
+
+test('one foreground return runs exactly ONE auto-match pass, whatever its pull does', () => {
+  // The F12 overlap: the refreshTick branch bumped the epoch AND the pull's
+  // follow-up bumped it again — a pre-pull pass plus a post-pull one, each
+  // writing matches and roll-forwards, possibly overlapping.
+  for (const due of [false, true]) {
+    const plan = refreshTickPlan({ syncFirst: false, tick: true, due });
+    const settles = plan.sync ? [REAL, MIXED, THROTTLED, NO_URL, null] : [undefined];
+    for (const res of settles) {
+      const passes = (plan.bumpExpectedNow ? 1 : 0) + (plan.sync ? (pullFollowUp(plan.sync, res).bumpExpected ? 1 : 0) : 0);
+      assert.equal(passes, 1, `due=${due} res=${JSON.stringify(res)}: ${passes} passes`);
+    }
+  }
+  // Plain month navigation runs none (the epoch is already consumed).
+  assert.equal(refreshTickPlan({ syncFirst: false, tick: false, due: true }).bumpExpectedNow, false);
+});
+
+test('the effect bumps the auto-match epoch only on the plan\'s say-so, and fetchData only on pullFollowUp\'s', () => {
+  const { body } = slice(...EFFECT);
+  const bumps = body.match(/[^;{}]*setExpEpoch\(/g) || [];
+  assert.deepEqual(bumps.map(b => b.trim()), ['if(bumpExpectedNow)setExpEpoch('],
+    'one bump in the effect, gated on refreshTickPlan — an ungated one is the second, pre-pull pass');
+  const { body: fetch } = slice(...FETCH);
+  const fbumps = fetch.match(/[^;{}]*setExpEpoch\(/g) || [];
+  assert.deepEqual(fbumps.map(b => b.trim()), ['if(next.bumpExpected)setExpEpoch('],
+    'one bump in fetchData, gated on pullFollowUp — it must also fire on a throttled/failed foreground settle');
 });
 
 test('feed health is re-checked after any effect-started pull, and a healthy answer clears the banner', () => {

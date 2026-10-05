@@ -18,6 +18,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { refreshTickPlan } from '../src/loadPipeline.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const adapter = readFileSync(join(root, 'src', 'dataAdapter.js'), 'utf8');
@@ -196,11 +197,16 @@ function fetchEffectTickBranch() {
 test('a foreground return (refreshTick) refetches the open account list and re-runs the expected-bill match', () => {
   const guarded = fetchEffectTickBranch();
   const fetchAt = guarded.indexOf('fetchData(');
-  for (const bump of ['setAcctTxEpoch(', 'setExpEpoch(']) {
-    const at = guarded.indexOf(bump);
-    assert.ok(at !== -1 && at < fetchAt,
-      `the refreshTick branch must call ${bump}…) before fetchData — reloadData never refreshes that surface`);
-  }
+  const tickBranch = guarded.slice(guarded.indexOf('if(tick){'));
+  const acct = tickBranch.indexOf('setAcctTxEpoch(');
+  assert.ok(acct !== -1 && acct < tickBranch.indexOf('fetchData('),
+    'the refreshTick branch must call setAcctTxEpoch(…) before fetchData — reloadData never refreshes that surface');
+  // The auto-match pass: at once when this return does not pull, otherwise
+  // after the pull settles (fetchData) — refreshTickPlan's bumpExpectedNow,
+  // behavior-tested in test/loadPipeline.test.js. Never both.
+  const exp = guarded.indexOf('if(bumpExpectedNow)setExpEpoch(');
+  assert.ok(exp !== -1 && exp < fetchAt,
+    'the effect must bump the expected epoch (gated on the plan) before fetchData');
 });
 
 test('a real pull\'s follow-up reload refetches the open account list and re-runs the expected-bill match', () => {
@@ -254,7 +260,13 @@ test('only plain month navigation skips the drop: the effect invalidates on star
   const body = code.slice(start, code.indexOf('},[year,month,ready,refreshTick,fetchData]', start));
   assert.match(body, /const tick=refreshTick!==lastRefreshTick\.current;/,
     'fixture assumption: the tick comparison is computed once');
-  assert.match(body, /fetchData\(year,month,\{sync,invalidate:syncFirst\|\|tick\}\)/,
+  assert.match(body, /const \{sync,invalidate,bumpExpectedNow\}=refreshTickPlan\(\{syncFirst,tick,/,
+    'the effect takes `invalidate` from refreshTickPlan, fed syncFirst and the tick');
+  assert.match(body, /fetchData\(year,month,\{sync,invalidate\}\)/, 'and hands it to fetchData');
+  assert.deepEqual(
+    [[true, false], [false, true], [true, true], [false, false]].map(([syncFirst, tick]) =>
+      refreshTickPlan({ syncFirst, tick, due: true }).invalidate),
+    [true, true, true, false],
     'the effect must invalidate exactly when it is NOT plain navigation (startup or a foreground return)');
   const fstart = code.indexOf('const fetchData=useCallback');
   const fbody = code.slice(fstart, code.indexOf('const refreshNow=useCallback', fstart));

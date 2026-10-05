@@ -30,6 +30,7 @@ import { TX_TYPES, txTypeLabel, allowedUserTypes } from "../txType.js";
 import { breakdownSegments, incomeVsSpendingInsight, incomeSections } from "../reflect.js";
 import { createSheetHistory } from "../sheetHistory.js";
 import { runSync, foregroundSyncDue } from "../sync.js";
+import { refreshTickPlan, pullFollowUp } from "../loadPipeline.js";
 // Lazy: both are modals rendered only on user action, and CsvImport reaches the
 // whole statement-import stack — no reason for either in the initial bundle.
 // A failed chunk load throws during render; App's ErrorBoundary is the net.
@@ -2806,32 +2807,27 @@ export default function Dashboard({ refreshTick = 0 }) {
       await reloadData(y,m,{invalidate});
       if(!syncP)return;
       const res=await syncP;
-      // A failed pull painted its error above; a throttled pull (server ran
-      // within the hour) wrote nothing — vacuously, so did an empty results
-      // array (no access URL). Only a real pull earns the follow-up reload —
-      // EXCEPT on the explicit Refresh button (sync:"refresh"): its contract is
-      // a genuinely fresh read (the completion hook just dropped the caches),
-      // and skipping the follow-up there made a throttled Refresh serve the
-      // warm memo read from before the invalidation — stale exactly when the
-      // user asked for fresh. The follow-up reloads whatever month is on
-      // screen NOW (reloadViewed, not this call's y/m): the user can navigate
-      // while the pull runs, and a stale-month reload would mint the newest
-      // loadSeq and win.
-      const allThrottled=!res||(res.results||[]).every(r=>r?.skipped==="throttled");
-      if(allThrottled&&sync!=="refresh")return;
-      const live=await reloadViewed();
-      // A failed pull reaches here only on an explicit Refresh, and that
-      // reload's first act cleared the banner the catch above painted — in the
-      // same tick, so it never showed and cached numbers read as fresh exactly
-      // when the user asked for fresh. Re-assert it, unless the reload was
-      // superseded or failed with its own (more urgent) load error.
-      if(!res&&live!==false)setError(e=>e??SYNC_FAILED_MSG);
-      // The pull may have written rows onto whatever account is open behind the
-      // month view, and bills it brought in can match expectations — the two
-      // epoch-driven surfaces reloadData does not cover. The setter, not
+      // pullFollowUp (src/loadPipeline.js) decides — and documents — which
+      // settles earn the follow-up reload (a real pull, or ANY explicit
+      // Refresh), the banner re-assert and the auto-match re-run. The
+      // follow-up reloads whatever month is on screen NOW (reloadViewed, not
+      // this call's y/m): the user can navigate while the pull runs, and a
+      // stale-month reload would mint the newest loadSeq and win.
+      const next=pullFollowUp(sync,res);
+      if(next.reload){
+        const live=await reloadViewed();
+        // A failed Refresh's banner was cleared by that reload's first act,
+        // in the same tick it was painted — re-assert it, unless the reload
+        // was superseded or failed with its own (more urgent) load error.
+        if(next.reassertError&&live!==false)setError(e=>e??SYNC_FAILED_MSG);
+        // The pull may have written rows onto whatever account is open behind
+        // the month view — an epoch surface reloadData does not cover.
+        setAcctTxEpoch(e=>e+1);
+      }
+      // Bills the pull brought in can match expectations (and a foreground
+      // return deferred its pass to this settle). The setter, not
       // invalidateExpected: that callback is declared below (TDZ).
-      setAcctTxEpoch(e=>e+1);
-      setExpEpoch(e=>e+1);
+      if(next.bumpExpected)setExpEpoch(e=>e+1);
     }finally{
       if(sync&&--syncsInFlight.current===0)setRefreshing(false);
     }
@@ -2863,21 +2859,25 @@ export default function Dashboard({ refreshTick = 0 }) {
     // screen disagree until a manual Refresh. Ref-compared so a re-run caused
     // by year/month/ready (plain month navigation) still reuses the caches.
     const tick=refreshTick!==lastRefreshTick.current;
+    // refreshTickPlan (src/loadPipeline.js): a foreground return more than an
+    // hour after this device last pulled also PULLS — quietly ("foreground":
+    // a failure logs, never a banner), or the day's charges wait for a manual
+    // Refresh; the server throttle still decides whether SimpleFIN is asked.
+    // Plain month navigation is the one re-run that keeps the lazy tab caches.
+    const {sync,invalidate,bumpExpectedNow}=refreshTickPlan({syncFirst,tick,
+      due:foregroundSyncDue(lastSyncAt.current,Date.now())});
     if(tick){
       lastRefreshTick.current=refreshTick;
       invalidateEnvelopeSpending();
-      // The same rows reach the two epoch surfaces reloadData can't: the open
-      // account page's list and the expected-bill auto-match pass.
+      // The same rows reach the open account page's list, an epoch surface
+      // reloadData can't.
       setAcctTxEpoch(e=>e+1);
-      setExpEpoch(e=>e+1);
     }
-    // A foreground return more than an hour after this device last pulled
-    // also PULLS — quietly ("foreground": a failure logs, never a banner),
-    // or the day's charges wait for a manual Refresh. The server throttle
-    // still decides whether SimpleFIN is actually asked.
-    const sync=syncFirst||(tick&&foregroundSyncDue(lastSyncAt.current,Date.now())?"foreground":false);
-    // Plain month navigation is the one re-run that keeps the lazy tab caches.
-    fetchData(year,month,{sync,invalidate:syncFirst||tick}).then(()=>{
+    // And the expected-bill auto-match pass — now, or (when this return
+    // pulls) once that pull settles: fetchData bumps it then, so one return
+    // runs ONE pass, against the pulled rows.
+    if(bumpExpectedNow)setExpEpoch(e=>e+1);
+    fetchData(year,month,{sync,invalidate}).then(()=>{
       if(!sync)return;
       // The sync response can't answer "is the feed stale?" — a clean pull
       // carries no last_pulled_at — so ask /api/simplefin-status in the same
@@ -2956,10 +2956,11 @@ export default function Dashboard({ refreshTick = 0 }) {
   // (persisting matches + roll-forwards) — so it fetches once per epoch,
   // tracked in a ref. The epoch moves when a match may have become possible:
   // invalidateExpected after a write commits, a real pull's follow-up reload,
-  // and a foreground return (fetchData and its effect) — once per session
-  // raced the startup pull and left an overnight bill "due" all day. Never a
-  // null sentinel (the setState(null) gotcha, and here null already means
-  // "migration not installed").
+  // and a foreground return — ONE pass per return, after its pull settles
+  // when it pulls (refreshTickPlan/pullFollowUp), never a pre-pull pass plus
+  // a post-pull one. Once per session raced the startup pull and left an
+  // overnight bill "due" all day. Never a null sentinel (the setState(null)
+  // gotcha, and here null already means "migration not installed").
   useEffect(()=>{
     if(!ready)return;
     if(tab!=="budget"&&tab!=="recurring"&&tab!=="overview")return;
