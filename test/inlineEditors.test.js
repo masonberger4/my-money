@@ -84,3 +84,21 @@ test('AssignEdit and BudgetEdit skip onSave when the value is unchanged', () => 
     assert.ok(guard < commit.indexOf('onSave('), `${name}'s unchanged guard must run before onSave`);
   }
 });
+
+// --- TargetSheet previews with the funder's own month arithmetic -------------
+// The preview used to re-derive targetNeed's months-left inline, and the two
+// already disagreed on an impossible month typed into the Safari/Firefox text
+// fallback. It must call monthsUntil, validate through pickedMonthKey, and say
+// what is missing when only the month is.
+test('TargetSheet uses monthsUntil and pickedMonthKey, not inline month math', () => {
+  const body = fnBody('TargetSheet');
+  assert.match(body, /const left=monthsUntil\(ymKey,year,month\)/,
+    'the by-date preview must count months with targetNeed\'s own monthsUntil');
+  assert.doesNotMatch(body, /\(ty-year\)\*12/, 'the inline months-left arithmetic is back');
+  assert.match(body, /const ymKey=pickedMonthKey\(ym\)/, 'the by-date month must be validated by pickedMonthKey');
+  assert.doesNotMatch(body, /\/\^\\d\{4\}-\\d\{2\}\$\/\.test\(ym\)/,
+    'a bare YYYY-MM regex lets 2027-13 through');
+  assert.match(body, /date:kind==="by_date"\?`\$\{ymKey\}-01`/, 'the save must store the validated key');
+  assert.match(body, /<input type="month"[^\n]*placeholder="YYYY-MM"/,
+    'the month input needs a format hint where it degrades to a text box');
+});

@@ -4,7 +4,7 @@ import { FLOW_LABELS } from "../reconciliation.js";
 import { clampSeries } from "../netWorth.js";
 // Pure cores imported directly (never Supabase — the mock-harness alias rule
 // only covers dataAdapter/sync/db/apiClient; pure modules are safe).
-import { planAutoFill, envelopeBar, assignUnchanged, targetUnchanged } from "../envelopes.js";
+import { planAutoFill, envelopeBar, assignUnchanged, targetUnchanged, monthsUntil, pickedMonthKey } from "../envelopes.js";
 import { buildSearchFilters, searchIsActive } from "../searchFilters.js";
 import { expectedByCategory, expectedStatus, isMissedExpected, seedFromRecurring, projectFutureCycles } from "../expectedTx.js";
 import { payoffWhatIf, debtFreeMonth, isMortgage, amortizationSchedule, addMonths, MAX_MONTHS, payoffProgress, utilization } from "../debtPayoff.js";
@@ -895,11 +895,14 @@ function TargetSheet({name,row,busy,year,month,onSave,onClose}) {
   const [ym,setYm]=useState(row?.targetDate?String(row.targetDate).slice(0,7):"");
   const mName=new Date(year,month-1,1).toLocaleString("default",{month:"long"});
   const n=Number(amount);
+  // null unless `ym` is a real 'YYYY-MM' (the month input is a bare text box
+  // on desktop Safari/Firefox — see pickedMonthKey).
+  const ymKey=pickedMonthKey(ym);
   // Month scope allows 0 — "ask nothing this month" is a real override,
   // distinct from clearing it.
   const valid=scope==="month"
     ?amount.trim()!==""&&Number.isFinite(n)&&n>=0
-    :Number.isFinite(n)&&n>0&&(kind==="monthly"||/^\d{4}-\d{2}$/.test(ym));
+    :Number.isFinite(n)&&n>0&&(kind==="monthly"||!!ymKey);
   const pickScope=s=>{
     if(s===scope)return;
     setScope(s);
@@ -908,8 +911,8 @@ function TargetSheet({name,row,busy,year,month,onSave,onClose}) {
       ?(row?.targetOverride!=null?String(row.targetOverride):row?.target!=null?String(row.target):"")
       :(row?.target!=null?String(row.target):""));
   };
-  // Mirrors targetNeed()'s by-date arithmetic so the sheet can't promise a
-  // number the funder won't produce.
+  // Uses targetNeed()'s own monthsUntil so the sheet can't promise a number
+  // the funder won't produce.
   const preview=(()=>{
     if(!valid) return null;
     if(scope==="month"){
@@ -919,11 +922,10 @@ function TargetSheet({name,row,busy,year,month,onSave,onClose}) {
     if(kind==="monthly") return `Tops this category up to ${fmtAuto(n)} every month.`;
     // Months left count from the month BEING VIEWED, exactly as targetNeed
     // will — when budgeting ahead, "today" would overstate the runway.
-    const [ty,tm]=ym.split("-").map(Number);
-    const left=Math.max(1,(ty-year)*12+(tm-month)+1);
+    const left=monthsUntil(ymKey,year,month);
     const have=row?.rolledOver||0;
     const per=Math.max(0,(n-have)/left);
-    return `${fmtAuto(n)} by ${monthYear(`${ym}-01`)} — about ${fmtAuto(per)} a month for ${left} month${left===1?"":"s"}${have>0?`, on top of the ${fmtAuto(have)} already in it`:""}.`;
+    return `${fmtAuto(n)} by ${monthYear(`${ymKey}-01`)} — about ${fmtAuto(per)} a month for ${left} month${left===1?"":"s"}${have>0?`, on top of the ${fmtAuto(have)} already in it`:""}.`;
   })();
   return (
     <div className="overlay" onClick={onClose}>
@@ -961,13 +963,15 @@ function TargetSheet({name,row,busy,year,month,onSave,onClose}) {
 
         {scope==="all"&&kind==="by_date"&&(<>
           <div style={{fontSize:12,color:"var(--muted)",marginBottom:6}}>Needed by</div>
-          <input type="month" value={ym} onChange={e=>setYm(e.target.value)}
+          <input type="month" value={ym} onChange={e=>setYm(e.target.value)} placeholder="YYYY-MM"
             style={{width:"100%",padding:"9px 12px",borderRadius:8,border:"1px solid var(--border)",background:"var(--input-bg)",
               color:"var(--text)",fontSize:14,fontFamily:"inherit",outline:"none",marginBottom:14}}/>
         </>)}
 
         <div style={{fontSize:11,color:"var(--muted)",background:"var(--input-bg)",borderRadius:8,padding:"8px 12px",marginBottom:16,minHeight:16}}>
-          {preview||"Set an amount to see how this will be funded."}
+          {preview||(scope==="all"&&kind==="by_date"&&Number.isFinite(n)&&n>0
+            ?"Pick the month it's needed by (YYYY-MM)."
+            :"Set an amount to see how this will be funded.")}
         </div>
 
         <div style={{display:"flex",gap:8}}>
@@ -983,7 +987,7 @@ function TargetSheet({name,row,busy,year,month,onSave,onClose}) {
           <button disabled={!valid||busy}
             onClick={()=>onSave(scope==="month"
               ?{scope:"month",amount}
-              :{scope:"all",amount,kind,date:kind==="by_date"?`${ym}-01`:null})}
+              :{scope:"all",amount,kind,date:kind==="by_date"?`${ymKey}-01`:null})}
             style={{flex:1,padding:"8px 0",borderRadius:8,border:"none",background:"var(--accent)",color:"var(--accent-text)",
               fontFamily:"inherit",fontSize:14,fontWeight:500,cursor:valid&&!busy?"pointer":"default",opacity:valid&&!busy?1:.5}}>
             Save

@@ -29,6 +29,7 @@ import {
   resolveBudgetIncome,
   assignUnchanged,
   targetUnchanged,
+  pickedMonthKey,
 } from '../src/envelopes.js';
 
 const a = (category, month, assigned) => ({ category, month, assigned });
@@ -894,4 +895,23 @@ test('targetUnchanged: mirrors setBudget (a positive figure, anything else clear
   assert.equal(targetUnchanged('0', 400), false, '0 clears a target, so it is a change');
   assert.equal(targetUnchanged('500', 400), false);
   assert.equal(targetUnchanged('25', null), false);
+});
+
+// --- TargetSheet's "Needed by" month ------------------------------------------
+// <input type="month"> is a bare text box on desktop Safari/Firefox, so the
+// sheet validates whatever was typed. '2027-13' used to pass the old regex and
+// reach the save, where monthsUntil clamped it to one month while the sheet's
+// own arithmetic promised another number.
+test('pickedMonthKey: only an exact YYYY-MM naming a real month', () => {
+  assert.equal(pickedMonthKey('2027-06'), '2027-06');
+  assert.equal(pickedMonthKey(' 2027-06 '), '2027-06');
+  assert.equal(pickedMonthKey('2027-12'), '2027-12');
+  assert.equal(pickedMonthKey('2027-01'), '2027-01');
+  for (const bad of ['', null, undefined, '2027-6', '2027-13', '2027-00', '2027-06-01', '06/2027', 'June 2027', '27-06']) {
+    assert.equal(pickedMonthKey(bad), null, `${JSON.stringify(bad)} is not a month key`);
+  }
+});
+
+test('monthsUntil clamps an impossible month to one (why the sheet validates first)', () => {
+  assert.equal(monthsUntil('2027-13', 2026, 7), 1);
 });

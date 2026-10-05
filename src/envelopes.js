@@ -36,6 +36,16 @@ export function normalizeMonthKey(value) {
   return /^\d{4}-(0[1-9]|1[0-2])$/.test(s) ? s : null;
 }
 
+// TargetSheet's "Needed by" value as a month key, or null. <input type="month">
+// degrades to a bare text box on desktop Safari and Firefox, so the value can
+// be anything typed: only an exact 'YYYY-MM' naming a real month counts —
+// '2027-6', '2027-13' and a full date do not, because `${key}-01` is what gets
+// stored and monthsUntil would quietly clamp a bad month to 1.
+export function pickedMonthKey(value) {
+  const s = String(value ?? '').trim();
+  return /^\d{4}-\d{2}$/.test(s) ? normalizeMonthKey(s) : null;
+}
+
 export function shiftMonthKey(key, delta) {
   const [y, m] = key.split('-').map(Number);
   const total = y * 12 + (m - 1) + delta;
