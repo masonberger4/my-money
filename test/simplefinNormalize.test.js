@@ -11,6 +11,7 @@ import {
   parseMoney,
   epochToIsoDate,
   normalizeAccount,
+  normalizeAccountSet,
 } from '../api/_lib/simplefin.js';
 
 const secs = (y, m, d) => Math.floor(Date.UTC(y, m - 1, d, 12) / 1000);
@@ -58,10 +59,16 @@ test('a card-only issuer in the org name resolves credit when the name says noth
   assert.deepEqual([r3.type, r3.subtype], ['depository', 'savings']);
 });
 
-test('REGRESSION: the institution name never feeds the name rules — "Savings and Loan" / "Credit Union" / "Savings Bank" are not account types', () => {
-  // The loan and savings rules run first and the card rule matches a bare
-  // "credit", so an org name in the haystack would override even an explicit
-  // "Checking" in the account name.
+test('GUARD: the institution name never feeds the name rules — "Savings and Loan" / "Credit Union" / "Savings Bank" are not account types', () => {
+  // NOT a regression test for the shipped change: these cases also pass on
+  // the pre-fix code, whose haystack read `org.name` — a field the normalized
+  // org never carries, so production's haystack was already the account name
+  // alone. What this pins is the fix's PLANNED MISTAKE: reviving the dead
+  // org signal by putting `org.label` (or any org field) back into the shared
+  // haystack. The loan and savings rules run first and the card rule matches
+  // a bare "credit", so an org name there would override even an explicit
+  // "Checking" in the account name. The test that goes red without the fix
+  // is the pipeline one below.
   const cases = [
     ['Everyday Checking', 'First Federal Savings and Loan', ['depository', 'checking']],
     ['Visa Signature', 'Peoples Savings Bank', ['credit', 'credit card']],
@@ -79,6 +86,50 @@ test('REGRESSION: the institution name never feeds the name rules — "Savings a
   const sl = inferAccountType('Acct 0042', orgOf('Home Savings & Loan'), 900);
   assert.notEqual(sl.type, 'loan', 'an account at a Savings & Loan is not a loan');
   assert.equal(sl.uncertain, true);
+});
+
+test('REGRESSION: through the real sync pipeline (normalizeAccountSet → inferAccountType, both wire versions) the issuer signal is live and the institution name stays out of the name rules', () => {
+  // api/sync.js calls inferAccountType(acct.name, acct.org, acct.balance) on
+  // what normalizeAccountSet hands back — so this walks that exact path, v1
+  // (org per account) and v2 (top-level connections joined by conn_id). The
+  // pre-fix code read `org.name`, which neither path produces, so the
+  // card-only-issuer rule never fired: a zero-balance store card came out
+  // uncertain CHECKING (every purchase on it household spending once
+  // unhidden), and one owing money was a card only by the uncertain
+  // negative-balance fallback.
+  const v1 = normalizeAccountSet({
+    errors: [],
+    accounts: [
+      { id: 'v1-store', name: 'MyStore Account', currency: 'USD', balance: '-120.00', org: { name: 'Synchrony Bank', domain: 'synchrony.com' } },
+      { id: 'v1-chk', name: 'Everyday Checking', currency: 'USD', balance: '900.00', org: { name: 'First Federal Savings and Loan' } },
+      { id: 'v1-share', name: 'Membership Share', currency: 'USD', balance: '250.00', org: { name: 'Lakeside Federal Credit Union' } },
+    ],
+  });
+  const v2 = normalizeAccountSet({
+    errlist: [],
+    connections: [
+      { conn_id: 'c-sync', org_name: 'Synchrony Bank', name: 'Synchrony - J' },
+      { conn_id: 'c-psb', org_name: 'Peoples Savings Bank', name: 'Peoples - J' },
+    ],
+    accounts: [
+      { id: 'v2-store', conn_id: 'c-sync', name: 'Retail Rewards', currency: 'USD', balance: '0.00' },
+      { id: 'v2-visa', conn_id: 'c-psb', name: 'Visa Signature', currency: 'USD', balance: '-40.00' },
+    ],
+  });
+  const typed = Object.fromEntries(
+    [...v1.accounts, ...v2.accounts].map(a => [a.externalId, inferAccountType(a.name, a.org, a.balance)])
+  );
+  // The issuer fallback reaches production — and, as before, without the
+  // uncertain flag (a card-only issuer's account IS a card).
+  for (const id of ['v1-store', 'v2-store']) {
+    assert.deepEqual([typed[id].type, typed[id].subtype], ['credit', 'credit card'], id);
+    assert.ok(!typed[id].uncertain, `${id}: the issuer verdict is not a guess`);
+  }
+  // …while the institution's own name never types the account.
+  assert.deepEqual([typed['v1-chk'].type, typed['v1-chk'].subtype], ['depository', 'checking']);
+  assert.notEqual(typed['v1-share'].type, 'credit', 'a CU share account is not a card');
+  assert.equal(typed['v1-share'].uncertain, true);
+  assert.deepEqual([typed['v2-visa'].type, typed['v2-visa'].subtype], ['credit', 'credit card']);
 });
 
 test('negative-balance fallback: an unrecognisable account with a negative balance is a card, flagged uncertain', () => {
