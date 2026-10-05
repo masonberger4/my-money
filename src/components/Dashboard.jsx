@@ -2035,9 +2035,10 @@ export default function Dashboard({ refreshTick = 0 }) {
   // every rename/colour/hide replaced the object and re-ran the effect below,
   // refetching all 500 rows and flashing skeletons under the user's hands.
   const [selAcctId,setSelAcctId]=useState(null);
-  // Bumped only when NEW ROWS may have arrived — a completed sync, or the
-  // explicit Refresh. The account page's list is not month-scoped, so a plain
-  // month tap must not refetch its 500 rows; but a pull that just wrote
+  // Bumped only when NEW ROWS may have arrived — a completed sync, the
+  // explicit Refresh, or a foreground return (refreshTick — how the other
+  // phone's writes arrive). The account page's list is not month-scoped, so a
+  // plain month tap must not refetch its 500 rows; but a pull that just wrote
   // transactions must reach it, or the open page keeps showing yesterday while
   // the tile behind it moves on.
   const [acctTxEpoch,setAcctTxEpoch]=useState(0);
@@ -2790,8 +2791,11 @@ export default function Dashboard({ refreshTick = 0 }) {
       // superseded or failed with its own (more urgent) load error.
       if(!res&&live!==false)setError(e=>e??SYNC_FAILED_MSG);
       // The pull may have written rows onto whatever account is open behind the
-      // month view; its list is the one thing reloadData does not cover.
+      // month view, and bills it brought in can match expectations — the two
+      // epoch-driven surfaces reloadData does not cover. The setter, not
+      // invalidateExpected: that callback is declared below (TDZ).
       setAcctTxEpoch(e=>e+1);
+      setExpEpoch(e=>e+1);
     }finally{
       if(sync&&--syncsInFlight.current===0)setRefreshing(false);
     }
@@ -2826,6 +2830,10 @@ export default function Dashboard({ refreshTick = 0 }) {
     if(tick){
       lastRefreshTick.current=refreshTick;
       invalidateEnvelopeSpending();
+      // The same rows reach the two epoch surfaces reloadData can't: the open
+      // account page's list and the expected-bill auto-match pass.
+      setAcctTxEpoch(e=>e+1);
+      setExpEpoch(e=>e+1);
     }
     // A foreground return more than an hour after this device last pulled
     // also PULLS — quietly ("foreground": a failure logs, never a banner),
@@ -2907,9 +2915,12 @@ export default function Dashboard({ refreshTick = 0 }) {
   // Expected transactions load lazily on the tabs that render them.
   // getExpectedTransactions is NOT a pure read — it runs the auto-match pass
   // (persisting matches + roll-forwards) — so it fetches once per epoch,
-  // tracked in a ref; invalidateExpected bumps the epoch after a write
-  // commits (never a null sentinel — the setState(null) gotcha, and here
-  // null already means "migration not installed").
+  // tracked in a ref. The epoch moves when a match may have become possible:
+  // invalidateExpected after a write commits, a real pull's follow-up reload,
+  // and a foreground return (fetchData and its effect) — once per session
+  // raced the startup pull and left an overnight bill "due" all day. Never a
+  // null sentinel (the setState(null) gotcha, and here null already means
+  // "migration not installed").
   useEffect(()=>{
     if(!ready)return;
     if(tab!=="budget"&&tab!=="recurring"&&tab!=="overview")return;

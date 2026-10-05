@@ -173,3 +173,46 @@ test('App.jsx still bumps refreshTick on visibility return (the signal this wiri
   assert.ok(app.includes('visibilitychange'), 'the foreground-return listener exists');
   assert.ok(/setRefreshTick\(t\s*=>\s*t\s*\+\s*1\)/.test(app), 'and it bumps the tick Dashboard consumes');
 });
+
+// --- Lists outside reloadData's reach on a pull / foreground return ----------
+// Two lazily-loaded surfaces are epoch-driven and reloadData never touches
+// them: the open account page's 500-row list (acctTxEpoch — not
+// month-scoped, so a month tap must not refetch it) and the expected-bill
+// auto-match pass (expEpoch — getExpectedTransactions runs the match). Both
+// must move when rows may have arrived: after a real pull's follow-up reload
+// and on a foreground return (the other phone's writes / its server sync).
+// Before, the account page showed the new balance over stale rows (Wave C
+// #20's foreground half), and the match pass ran once per session, racing
+// the startup pull, so a bill that posted overnight stayed "due" all day.
+
+function fetchEffectTickBranch() {
+  const code = stripComments(dashboard);
+  const start = code.indexOf('const syncFirst=!didInitialSync.current');
+  assert.notEqual(start, -1, 'fixture assumption: the fetchData effect gates on didInitialSync');
+  const body = code.slice(start, code.indexOf('},[year,month,ready,refreshTick,fetchData]', start));
+  return body.slice(body.indexOf('refreshTick!==lastRefreshTick.current'));
+}
+
+test('a foreground return (refreshTick) refetches the open account list and re-runs the expected-bill match', () => {
+  const guarded = fetchEffectTickBranch();
+  const fetchAt = guarded.indexOf('fetchData(');
+  for (const bump of ['setAcctTxEpoch(', 'setExpEpoch(']) {
+    const at = guarded.indexOf(bump);
+    assert.ok(at !== -1 && at < fetchAt,
+      `the refreshTick branch must call ${bump}…) before fetchData — reloadData never refreshes that surface`);
+  }
+});
+
+test('a real pull\'s follow-up reload refetches the open account list and re-runs the expected-bill match', () => {
+  const code = stripComments(dashboard);
+  const start = code.indexOf('const fetchData=useCallback');
+  const end = code.indexOf('const refreshNow=useCallback', start);
+  assert.ok(start !== -1 && end > start, 'fixture assumption: fetchData precedes refreshNow');
+  const body = code.slice(start, end);
+  const followUp = body.indexOf('await reloadViewed()');
+  assert.ok(followUp > 0, 'fixture assumption: the follow-up reload goes through reloadViewed');
+  const after = body.slice(followUp);
+  assert.ok(after.includes('setAcctTxEpoch('), 'the pull may have written rows onto the open account');
+  assert.ok(after.includes('setExpEpoch('),
+    'the auto-match pass must re-run against the pulled rows — the startup pass raced the pull');
+});
