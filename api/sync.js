@@ -17,6 +17,7 @@ import {
   INCLUDE_PENDING,
 } from './_lib/simplefin.js';
 import { classifyDescription } from '../src/txClassify.js';
+import { isRangeExhaustedError } from '../src/ruleHistory.js';
 
 // depository + credit fund the spending/cash-flow views; loan lets linked
 // debts (mortgage, student/personal loans) sync their balances for the debt
@@ -87,19 +88,42 @@ export function isMissingTableError(error, table) {
 // is a SEPARATE test from a missing TABLE (conflating them would read a column
 // problem as "no rules at all" and silently revert every taught merchant on
 // the next pull).
-async function loadCategoryRules(supabase, householdId) {
-  const read = cols =>
-    supabase.from('category_rules').select(cols).eq('household_id', householdId);
-  let { data, error } = await read('merchant_key, category, amount');
-  if (error && isMissingColumnError(error, 'amount')) {
-    ({ data, error } = await read('merchant_key, category'));
-  }
-  if (error) {
-    if (isMissingTableError(error, 'category_rules')) return {};
-    throw error;
+//
+// PAGED and TOTALLY ORDERED, mirroring the client's readRuleRows
+// (src/dataAdapter.js — api/ can't import it): PostgREST clamps any single read
+// at max-rows (1000), so past that an unpaged read dropped an ARBITRARY subset
+// of rules and those merchants imported Uncategorized; merchant_key then
+// amount nulls first is a total order (the two partial unique indexes), so a
+// page boundary can't drop or repeat one. The amount order goes with the
+// amount column pre-migration; 416/PGRST103 on an exact multiple is
+// end-of-data. Exported for test/categoryRules.test.js only.
+export async function loadCategoryRules(supabase, householdId) {
+  const page = 1000;
+  let withAmount = true;
+  const rows = [];
+  for (let from = 0; ; from += page) {
+    let q = supabase
+      .from('category_rules')
+      .select(withAmount ? 'merchant_key, category, amount' : 'merchant_key, category')
+      .eq('household_id', householdId)
+      .order('merchant_key', { ascending: true });
+    if (withAmount) q = q.order('amount', { ascending: true, nullsFirst: true });
+    const { data, error } = await q.range(from, from + page - 1);
+    if (error) {
+      if (isRangeExhaustedError(error)) break;
+      if (withAmount && isMissingColumnError(error, 'amount')) {
+        withAmount = false;
+        from -= page; // redo this page with the narrower select
+        continue;
+      }
+      if (isMissingTableError(error, 'category_rules')) return {};
+      throw error;
+    }
+    rows.push(...(data || []));
+    if (!data || data.length < page) break;
   }
   const rules = {};
-  for (const r of data || []) {
+  for (const r of rows) {
     const amt = r.amount == null || r.amount === '' ? null : Number(r.amount);
     (rules[r.merchant_key] ||= []).push({
       amount: Number.isFinite(amt) ? amt : null,
@@ -476,6 +500,26 @@ export async function pullOneAccessUrl(supabase, householdId, accessRow, { force
     }
   }
 
+  // A first-sight account's history is fetched by the backfill below, which is
+  // keyed on the accounts INSERTED by this call — so once they exist, nothing
+  // would ever trigger it again. Anything that throws between this insert and
+  // the watermark write at the end (the tx upsert, the bookkeeping, a killed
+  // invocation) used to leave last_pulled_at at its old value, and the next
+  // pull capped the newcomer at the 30-day overlap: days ~30 to ~88 of the new
+  // bank's history lost for good. So the watermark is cleared BEFORE the
+  // insert: a pull that dies after it leaves NULL, and the next pull is a
+  // full-window one for every account (idempotent upserts — just a bigger
+  // response). A clean finish re-advances it through watermarkUpdate as
+  // before; a pull carrying a REAL error now leaves it NULL rather than at
+  // the old value, the same full-window retry.
+  if (toInsert.length && lastPulled) {
+    const { error } = await supabase
+      .from('simplefin_access')
+      .update({ last_pulled_at: null })
+      .eq('id', accessRow.id);
+    if (error) throw error;
+  }
+
   if (toInsert.length) {
     const { error } = await supabase
       .from('accounts')
@@ -634,6 +678,13 @@ export async function pullOneAccessUrl(supabase, householdId, accessRow, { force
     Boolean
   );
   if (instIds.length) {
+    // CONDITIONAL on not being disabled. instIds was resolved at the top of
+    // the pull; a Remove-bank that lands since then (the other phone, or the
+    // auto-sync on load still running) sets status='disabled' as its
+    // tombstone, and an unguarded status:'active' here would silently undo
+    // it — Restore vanishes, and after a permanent delete the next pull
+    // re-creates the accounts. One atomic UPDATE … WHERE status <> 'disabled'
+    // closes that window; status is NOT NULL, so no row escapes the guard.
     const { error } = await supabase
       .from('institutions')
       .update({
@@ -641,7 +692,8 @@ export async function pullOneAccessUrl(supabase, householdId, accessRow, { force
         status: 'active',
         last_error: null,
       })
-      .in('id', instIds);
+      .in('id', instIds)
+      .neq('status', 'disabled');
     if (error) throw error;
   }
 
@@ -670,6 +722,9 @@ export async function pullOneAccessUrl(supabase, householdId, accessRow, { force
   // re-requests full history for every account — the only way to give the new
   // account the history it missed, since it will no longer look "new".
   // last_attempt_at still holds the throttle, so this can't turn into a loop.
+  // (When this pull inserted accounts, the watermark is ALREADY null — it was
+  // cleared before the insert, so a throw anywhere after it can't strand the
+  // newcomer's history either. This write is what re-advances it.)
   //
   // The decision itself is pure — watermarkUpdate in api/_lib/simplefin.js,
   // pinned by test/syncDecisions.test.js, because its failure mode (the

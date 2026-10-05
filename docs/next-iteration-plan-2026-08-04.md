@@ -768,46 +768,38 @@ nothing from Mason.
 - F75 — the duplicate-category guard ignored display names, and rename had
   no guard at all.
 
-**PR B — data layer, server and pure cores (lands in the next audit PR).**
+**PR B — data layer, server and pure cores — SHIPPED 2026-10-05 (audit PR B).**
 - F34 — `setCategoryRule` deleted the old rule before inserting the new one,
-  so a failed insert left the merchant with no rule. *(lands in PR B)*
+  so a failed insert left the merchant with no rule.
 - F78 — paged reads without a total ORDER BY could skip or repeat rows at page
-  boundaries. *(lands in PR B)*
+  boundaries.
 - F79 — `category_rules` was read unpaged on both sides of the wire, and the
-  assistant and mileage limits exceeded PostgREST's 1,000-row cap. *(lands in
-  PR B)*
+  assistant and mileage limits exceeded PostgREST's 1,000-row cap.
 - F80 — multi-batch transaction writes that failed partway skipped cache
-  invalidation. *(lands in PR B)*
+  invalidation.
 - F94 — `updateTransaction`'s comment described a trigger that was rejected.
-  *(lands in PR B)*
 - F89 — the façade still exported whole-map/whole-list writers that contradict
-  the never-write-the-whole-map rule. *(lands in PR B)*
+  the never-write-the-whole-map rule.
 - F25 — apiClient's GET wasn't re-sent on wire death, contrary to its comment.
-  *(lands in PR B)*
 - F77 — apiClient lost the HTTP status and body on a non-JSON error response.
-  *(lands in PR B)*
 - F36 — a pull that failed after inserting a new bank's accounts lost that
-  bank's older history for good. *(lands in PR B)*
+  bank's older history for good.
 - F38 — sync bookkeeping wrote status 'active' over a bank removed mid-pull,
-  undoing the Remove-bank tombstone. *(lands in PR B)*
+  undoing the Remove-bank tombstone.
 - F37 — `inferAccountType` read an org field the server never passes, and
   reading it naively would have typed "Savings and Loan" accounts as loans.
-  *(lands in PR B)*
 - F82 — the manual redirect loop re-sent the bank-feed Authorization header to
-  a different origin. *(lands in PR B)*
+  a different origin.
 - F39 — the assistant's thinking could spend the whole 4096-token budget and
   the cut-off was ignored; it is now surfaced (raising the budget is in the
-  ruling list below). *(lands in PR B)*
+  ruling list below).
 - F50 — the Ask-tab cost estimate still priced Sonnet 5 at the old rate.
-  *(lands in PR B)*
 - F60 — reconciliation printed "Unexplained −$0" on a month that balanced.
-  *(lands in PR B)*
 - F24 — every re-dated transaction showed as a fake "Unexplained" residual in
-  two months. *(lands in PR B)*
+  two months.
 - F26 — a subscription price rise over 20% read as overdue at the old price,
-  then vanished for months. *(lands in PR B)*
+  then vanished for months.
 - F29 — two subscriptions billed under one merchant name were both missed.
-  *(lands in PR B)*
 
 **PR C — statement import and the PWA shell (lands in the audit PR after B).**
 - F06 — PDF auto-detect read Amount plus Balance columns as a Debit/Credit
@@ -1166,17 +1158,24 @@ taught-rules list stale (`Dashboard.jsx:3037-3059`) — **SHIPPED 2026-10-05
 the old rule before inserting the new one, so a failed insert leaves the
 merchant with NO rule (`src/dataAdapter.js:660-694` — an update-first rewrite
 also changes the recorded delete-then-insert rule in
-docs/memory/conventions.md, same PR); two paged reads have no ORDER BY, so a
+docs/memory/conventions.md, same PR) — **SHIPPED 2026-10-05 (audit PR B)**,
+update-first with the Convention corrected; two paged reads have no ORDER BY, so a
 re-import can show stored rows as new (`src/dataAdapter.js:1416-1443,1479-1492`,
-plus a `pagedGuards` extension); `category_rules` is read unpaged on both sides
+plus a `pagedGuards` extension) — **SHIPPED 2026-10-05 (audit PR B)**, with
+`listCategoryRules` given a total order too; `category_rules` is read unpaged on both sides
 of the wire and the assistant's and mileage caps exceed PostgREST's default, so
 past ~1,000 taught rules the classifier silently stops seeing some of them
-(`src/dataAdapter.js:521-524,624-652,717-755`, `api/sync.js:90-110`); the
+(`src/dataAdapter.js:521-524,624-652,717-755`, `api/sync.js:90-110`) —
+**SHIPPED 2026-10-05 (audit PR B)**; the
 expected-bill auto-match updates by id alone, so a stale pass can resurrect a
 bill the other phone just stopped or mint a twin
-(`src/dataAdapter.js:2030-2047,2108-2123`); and a crash after `api/sync.js`
+(`src/dataAdapter.js:2030-2047,2108-2123`) — **SHIPPED 2026-10-05 (audit PR
+A)**, moved there from PR B because PR A's extra auto-match passes lean on it;
+and a crash after `api/sync.js`
 inserts a first-sight bank's accounts strands that bank's history, because the
-watermark is neither advanced nor reset (`api/sync.js:479-487,571-630`).
+watermark is neither advanced nor reset (`api/sync.js:479-487,571-630`) —
+**SHIPPED 2026-10-05 (audit PR B)**: the watermark is now cleared before the
+insert.
 
 **Phone-shell resilience.** A stale chunk after a deploy turns Import or Manage
 Bank Connections into the full-screen error card (`src/main.jsx:20-24`,
@@ -1226,7 +1225,9 @@ pairing; receipt glyphs and a With-receipt filter; per-account CSV column memory
 quick-add merchant memory; PDF near-miss reporting and per-file batch totals;
 correcting a taught rule from the taught-rules screen; the trim-the-key preview
 naming the merchants a shorter key would swallow; subscription price-hike
-detection (a large hike currently makes the sub vanish for months); naming the
+detection (a large hike currently makes the sub vanish for months) — **SHIPPED
+2026-10-05 (audit PR B)**, as a price step that keeps the sub's key and
+reports the new price (the `src/recurring.js` key row); naming the
 broken bank on its tile; and category colour dots in place of the retired
 taxonomy's emoji on Home rows.
 

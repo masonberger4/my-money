@@ -187,16 +187,6 @@ export function parseEnvPace(value) {
   }
 }
 
-export async function getEnvPace() {
-  return parseEnvPace(await getSetting(ENV_PACE_KEY));
-}
-
-export async function setEnvPace(map) {
-  const clean = {};
-  for (const [k, v] of Object.entries(map || {})) if (v) clean[k] = true;
-  await setSetting(ENV_PACE_KEY, JSON.stringify(clean));
-}
-
 // ONE KEY at a time, read-merge-write — the same discipline `rec:ignore` got,
 // and for the same reason. `env:pace` is HOUSEHOLD data both phones read, and
 // the toggle used to persist the whole map rebuilt from local state: a phone

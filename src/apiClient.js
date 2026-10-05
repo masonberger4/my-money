@@ -8,8 +8,11 @@ import { localTodayIso } from './format.js';
 
 // Same wire-death retry the Supabase client gets (src/netRetry.js): a GET or
 // the one DELETE here is re-sent if it never got a response; the POST routes
-// (sync, unlink, claim, assistant) are never re-sent.
-const retryingFetch = makeRetryingFetch();
+// (sync, unlink, claim, assistant) are never re-sent. GET is opted IN here
+// (the default set leaves reads to postgrest-js's own retry, which this
+// plain fetch doesn't have — without it the status read on a resumed PWA
+// failed once and the feed-health banner silently never appeared).
+const retryingFetch = makeRetryingFetch({ methods: ['GET', 'PUT', 'PATCH', 'DELETE'] });
 
 async function request(method, url, body) {
   const token = await getAccessToken();
@@ -22,15 +25,25 @@ async function request(method, url, body) {
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
   if (!res.ok) {
+    // Read the body ONCE: a body counts as consumed even when res.json()
+    // fails to parse it, so the old json-then-text fallback threw "Body is
+    // unusable" on any non-JSON error page (a Vercel 504, a proxy) before
+    // err.status was set — the alert showed that raw TypeError and the
+    // "(HTTP 504)" hint was lost. Every api/ route answers JSON, so non-JSON
+    // only ever comes from the platform: `detail` is then undefined, never the
+    // raw text (describeError would show a whole HTML page), and the first
+    // 500 chars ride on err.body for the console.
+    const text = await res.text().catch(() => '');
     let detail;
     try {
-      detail = await res.json();
+      detail = text ? JSON.parse(text) : undefined;
     } catch {
-      detail = await res.text();
+      detail = undefined;
     }
     const err = new Error(`${method} ${url} → ${res.status}`);
     err.status = res.status;
     err.detail = detail;
+    err.body = text.slice(0, 500);
     throw err;
   }
   return res.json();
@@ -105,7 +118,8 @@ export function restoreSimpleFinInstitution(institutionId) {
 
 // messages: [{role: 'user'|'assistant', content: string}, ...]
 // opts: { model, effort } — validated server-side against the allowlist.
-// Returns { reply, stop_reason, usage }.
+// Returns { reply, stop_reason, usage }, plus truncated: true when the answer
+// hit max_tokens (the cut-off note is already in `reply`).
 export function askAssistant(messages, opts = {}) {
   return postJson('/api/assistant', {
     messages,

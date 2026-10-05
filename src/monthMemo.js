@@ -15,7 +15,7 @@
 //    retired with applyAccountRules, 2026-08-17; the
 //    nested `accounts` join object is read-only everywhere) — so a shallow
 //    per-row copy is exactly deep enough. Sharing the same row objects would
-//    let getCashFlow's transfer marks leak into the purchase-based model.
+//    let getCashFlow's transfer marks leak into the spending model.
 //
 // 2. It stores the PROMISE, not the resolved rows: reloadData fires its calls
 //    in parallel, so a value-cache would still double-fetch — the second

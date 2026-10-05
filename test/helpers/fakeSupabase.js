@@ -5,12 +5,13 @@
 // PostgREST's actual error shapes), and record every write for assertions.
 //
 // Chains api/sync.js uses on the pullOneAccessUrl path (grep-verified
-// 2026-08-01 — .is/.lt/.delete/.single/.maybeSingle are NOT among them):
+// 2026-08-01, .neq added 2026-10-05 — .is/.lt/.delete/.single/.maybeSingle
+// are NOT among them):
 //   from(t).select(cols).eq(col, v).not(col, 'is', null)       institutions read
 //   from(t).select(cols).eq(col, v).like(col, pattern)         accounts reads
 //   from(t).insert(rows).select(cols)                          institutions create
 //   from(t).update(patch).eq(col, v)[.or(arms)][.select(cols)] throttle stamp / account patch / watermark
-//   from(t).update(patch).in(col, vals)                        institution bookkeeping
+//   from(t).update(patch).in(col, vals).neq(col, v)            institution bookkeeping
 //   from(t).upsert(rows, { onConflict[, ignoreDuplicates] })   accounts / transactions / balance_snapshots
 //
 // Anything else throws, loudly — a chain this fake doesn't know is a chain the
@@ -81,6 +82,10 @@ function rowMatches(row, filter) {
       return row[filter.col] === filter.value;
     case 'in':
       return filter.values.includes(row[filter.col]);
+    case 'neq':
+      // SQL `<>`: NULL is neither equal nor unequal, so PostgREST's neq never
+      // matches a NULL cell.
+      return row[filter.col] != null && row[filter.col] !== filter.value;
     case 'like':
       return filter.re.test(String(row[filter.col] ?? ''));
     case 'not-is-null':
@@ -158,6 +163,10 @@ export function makeFakeSupabase(seed = {}, opts = {}) {
     }
     in(col, values) {
       this.filters.push({ kind: 'in', col, values: [...values] });
+      return this;
+    }
+    neq(col, value) {
+      this.filters.push({ kind: 'neq', col, value });
       return this;
     }
     like(col, pattern) {

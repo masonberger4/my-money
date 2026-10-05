@@ -123,6 +123,48 @@ async function fetchBudgetInputs(supabase, householdId, visibleIds, year, month)
   return { year, month, assignments, settings, spendTxs };
 }
 
+// The context window's row cap, newest first. REACHED BY PAGING: PostgREST
+// clamps any single read at max-rows (1000), so the old 1500-row limit quietly
+// returned 1000 — and since the read is newest-first, the rows it lost were
+// the oldest days of the 90-day window, under-counting those months' totals.
+export const CONTEXT_TX_CAP = 1500;
+
+// The window's transactions: visible accounts only, newest first, at most
+// `cap` rows, in pages of at most 1000 (the last one sized to land exactly on
+// the cap). Exported for test/spendingContext.test.js, which drives it with a
+// fake client — buildSpendingContext's only other I/O is the accounts read.
+export async function fetchContextTxs(supabase, householdId, visibleIds, sinceStr, { cap = CONTEXT_TX_CAP } = {}) {
+  const txs = [];
+  if (!visibleIds.length) return txs;
+  const page = 1000;
+  for (let from = 0; from < cap; from += page) {
+    const to = Math.min(from + page, cap) - 1;
+    const { data, error } = await supabase
+      .from('transactions')
+      // user_type rides for the same reason as the envelope read above — the
+      // shared model reads it; same deliberate no-degrade stance.
+      .select('account_id, date:effective_date, amount, merchant_name, description, mapped_category, user_category, user_description, excluded, user_type')
+      .eq('household_id', householdId)
+      .in('account_id', visibleIds)
+      .gte('effective_date', sinceStr)
+      .order('effective_date', { ascending: false })
+      // id as the tiebreak: `date` alone leaves same-day rows in whatever order
+      // Postgres happens to return, which both reorders the transaction list and
+      // (at the 1500 cap) can change WHICH rows arrive — the two ways the text
+      // could differ for one DB state — and lets a page boundary drop or
+      // repeat a row. Same ordering discipline as fetchBudgetInputs' paged read.
+      .order('id', { ascending: false })
+      .range(from, to);
+    if (error) {
+      if (isRangeExhaustedError(error)) break; // 416 = end-of-data (exact page multiple)
+      throw error;
+    }
+    txs.push(...(data || []));
+    if (!data || data.length < to - from + 1) break;
+  }
+  return txs;
+}
+
 // Builds a compact plain-text snapshot of the household's finances for the
 // assistant's context window. Kept deterministic (stable ordering, fixed
 // formatting) so repeat requests produce byte-identical text — that's what
@@ -171,27 +213,7 @@ export async function buildSpendingContext(householdId, { today = null } = {}) {
   // excluded): the assistant must describe the household's data as the
   // household has curated it, not as the feed delivered it.
   const visibleIds = accounts.filter(a => !a.hidden).map(a => a.id);
-  let txs = [];
-  if (visibleIds.length) {
-    const { data, error: txErr } = await supabase
-      .from('transactions')
-      // user_type rides for the same reason as the envelope read above — the
-      // shared model reads it; same deliberate no-degrade stance.
-      .select('account_id, date:effective_date, amount, merchant_name, description, mapped_category, user_category, user_description, excluded, user_type')
-      .eq('household_id', householdId)
-      .in('account_id', visibleIds)
-      .gte('effective_date', sinceStr)
-      .order('effective_date', { ascending: false })
-      // id as the tiebreak: `date` alone leaves same-day rows in whatever order
-      // Postgres happens to return, which both reorders the transaction list and
-      // (at the 1500 cap) can change WHICH rows arrive — the two ways the text
-      // could differ for one DB state. Same ordering discipline as
-      // fetchBudgetInputs' paged read.
-      .order('id', { ascending: false })
-      .limit(1500);
-    if (txErr) throw txErr;
-    txs = data || [];
-  }
+  const txs = await fetchContextTxs(supabase, householdId, visibleIds, sinceStr);
 
   // The envelope month comes off the SAME day as `since` — same clock
   // discipline: it shapes the queries and the section's month label, never a

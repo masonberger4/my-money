@@ -679,3 +679,118 @@ what PR A DECIDED, as opposed to fixed.
   a drive saved outside that year says where it went. The date still defaults
   to today: defaulting into the viewed year is unruled.
 
+## 2026-10-05 — Audit PR B: data layer, server and pure-core fixes
+
+The second of the three PRs from the 2026-10-05 review (the item list: the
+plan doc's "Improvement backlog (2026-10-05 audit)"; the rules: the memory
+docs). F27, F33 and F35 were planned for this PR and moved into PR A — that
+entry records them. What PR B DECIDED, as opposed to fixed:
+
+- **A taught rule is written update-first, never delete-first.** Update the
+  exact (merchant_key, amount) slot, insert only when no row came back, and on
+  a 23505 (both phones taught the slot at once) re-run the update once — last
+  writer wins, as before. Rejected: keeping delete-then-insert (a lost insert
+  POST left the merchant with no rule); re-sending the POST (the never-retry-
+  POST rule is global); an upsert (ON CONFLICT cannot infer the two partial
+  unique indexes); a one-transaction database function (a migration, for a gap
+  the update-first order already closes).
+- **Every read that can pass 1000 rows pages, and every paged read is totally
+  ordered.** The classifier and the Taught-rules screen share one rule read;
+  api/sync.js mirrors it. The Taught-rules page grew from 500 to 1000 rows as
+  a side effect of sharing. Rejected: loading the rules after sync's throttle
+  decision — a load inside the pull runs after the throttle stamp, so a
+  transient rules-read failure would burn the throttle window, all to save one
+  query on a throttled call.
+- **Multi-batch transaction writes invalidate from a `finally`**, like the
+  sync hook: clearing is cheap and an upsert whose answer was lost may have
+  landed. The error still reaches the caller unchanged.
+- **No whole-map reader or writer for `env:pace` or `rec:ignore` is exported**
+  from an adapter or the façade; the chains keep theirs internal. Nothing
+  called them, and Dashboard's useState setters share the names, so one
+  aliased import would re-open the stale-phone wipe.
+- **apiClient opts its GET into the wire-death retry.** The 2026-09-08 read
+  exclusion is the DEFAULT method set, sized for supabase-js, which re-sends
+  reads itself; apiClient's plain fetch has no such budget. POST is still
+  never re-sent. Rejected: widening the default (it would stack a second
+  budget on supabase-js reads, the offline-wait multiplication 2026-09-08
+  rejected).
+- **An api/ error body is read once.** `detail` is the parsed JSON or
+  undefined — never the raw text, which would put a whole HTML error page in
+  an alert — and the first 500 characters ride on `err.body`.
+- **The sync watermark is cleared before a first-sight bank's accounts are
+  inserted.** Accepted behaviour shift: a pull that adds a bank AND carries a
+  real feed error now leaves the watermark NULL (the next pull asks for the
+  full window; upserts are idempotent) rather than at the old value. Rejected:
+  resetting it in a catch (a killed invocation runs no catch). Not gated on
+  the attempt-column degrade: pre-migration the throttle reads the watermark,
+  but it never held after a failed pull anyway.
+- **Sync's institution bookkeeping is conditional on not being disabled** —
+  one atomic UPDATE, so a Remove-bank that lands mid-pull keeps its tombstone.
+  Rejected: dropping `status: 'active'` from the patch — a legacy 'error'
+  status would then never clear on a good pull, and a removed bank would still
+  be stamped as freshly pulled. Out of scope, recorded: accounts re-created by
+  an upsert that landed between a mid-pull PERMANENT delete and the disable
+  stay under the tombstoned institution, which the next pull skips.
+- **An account's type comes from its NAME; the institution is a fallback
+  signal only**, for card-only issuers when the name says nothing. The finding
+  as reported (accounts at a Savings and Loan typed as loans, at a credit union
+  as cards) did NOT occur in production: the old code read an org field the
+  normalized org lacks, so the real bug was a dead issuer rule — and the
+  obvious fix, reading the org's label in the shared haystack, would have made
+  the reported failure real. Production change: an account at a card-only
+  issuer whose name says nothing now arrives typed credit instead of uncertain
+  checking (still hidden until a human confirms it). Not added: a credit-union
+  "share" savings rule and an investment-on-institution rule (optional extras,
+  neither needed to fix F37); such accounts stay at the visible uncertain
+  default.
+- **A cross-origin redirect drops the Authorization header, and it stays
+  dropped** (the Fetch standard's behaviour, restored by hand). Only
+  Authorization: it is the standard's whole cross-origin list, and nothing here
+  sends a cookie or proxy credential.
+- **A `max_tokens` stop is surfaced in the reply, never shown as complete.**
+  OPEN for Mason: raising `maxTokens` for the thinking models (for example 8000
+  at high effort and 16000 at xhigh/max, plus the matching cost-estimate
+  update). An Opus answer at max effort would go from roughly 16¢ to 46¢ per
+  question at 16k, under the spend-cap ruling, and the non-streaming request
+  runs longer with no `maxDuration` set in vercel.json; past ~21k the SDK
+  forces streaming. Accepted, pre-existing: a long cut-off answer kept in the
+  chat history can exceed the per-message character cap on the next turn.
+- **Sonnet 5 is priced at its standard list price**, and every price is a list
+  price pinned in a test, re-verified whenever a model changes. Display-only;
+  the model lineup itself (F102) waits for Mason. Source: Anthropic's pricing
+  page (platform.claude.com/docs/en/about-claude/pricing), read 2026-10-05. Its
+  Sonnet 5 footnote says the $2/$10 announced at launch as intro pricing
+  through 2026-08-31 is now the standard price, and the $3/$15 rise scheduled
+  for 2026-09-01 will not happen. So $3/$15 never took effect; $2/$10 is not
+  an expired intro price.
+- **The reconciliation panel names date edits instead of reporting them as
+  Unexplained.** A `dateMoved` timing line; the month rows stay effective-date
+  reads (Overview parity, the panel's rule 3) plus ONE bank-date read for rows
+  counted outside the span; a failed read fails the panel. The gross pin
+  becomes `deltaLedger − dateMoved.impact === moneyIn − moneyOut`. Rejected:
+  bank-date month reads (the panel would stop washing exactly what Overview
+  washes and audit different numbers than it reports); falling back to an
+  empty list when the extra read fails (the first-draft design — it would
+  render the very residual the read exists to remove).
+- **Every figure the reconciliation panel prints is rounded to the cent, and
+  `unexplained` rounds the raw difference.** The two balance totals stay
+  unrounded: the panel shows only their dates.
+- **A >20% subscription price change reads as a price step.** The item keeps
+  its key and reports the new price; the old price stays the creep baseline
+  until new-price charges outnumber old ones (the moment the plain path's
+  median would flip), and a settled step whose old-price tail is down to one
+  or two charges is accepted too. Deliberate trade: one new charge can't tell
+  a hike from a one-off spike on a variable bill, so a spike reads as a step
+  for one cycle. Rejected: requiring a second new-price charge (it brings back
+  the false overdue-at-the-old-price in every real hike month). Not built,
+  because it adds a threshold and is preference-shaped: allowing a one-charge
+  step only when the old price is fixed to within a percent or two.
+- **A merchant that fails as a whole is split into amount clusters.** The
+  oldest cluster keeps the plain key so ignore entries and seeded bills stay
+  attached; extras get ` #n` in first-charge order. Rejected: keying extras by
+  amount (a price step would re-key them). Known limits: the numbering can
+  shift when the incumbent ages out, and a >20% hike on ONE of several
+  subscriptions under one merchant string is read as a new cluster, so the
+  hiked one can land on a ` #n` key — exact key stability needs persisted
+  identity, i.e. a migration.
+

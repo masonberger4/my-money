@@ -258,8 +258,9 @@ export async function getRecurringCandidates() { return { transactions: REC.map(
 
 // Household recurring ignore list ('rec:ignore' settings row in prod).
 let recIgnoreList = [normalizeMerchant('PLANET FITNESS'), normalizeMerchant('HULU')];
-export async function getRecIgnore() { return [...recIgnoreList]; }
-export async function setRecIgnore(keys) { recIgnoreList = [...keys]; }
+// Local, NOT exported: the real façade hands out no whole-list reader/writer
+// (only updateRecIgnore); getStartupSettings below reads through this.
+async function getRecIgnore() { return [...recIgnoreList]; }
 export async function updateRecIgnore(key, ignored) {
   recIgnoreList = recIgnoreList.filter(k => k !== key);
   if (ignored) recIgnoreList.push(key);
@@ -445,8 +446,9 @@ export async function setBudgetIncome() {}
 export async function getActualIncome() { return { amount: 5400, coverageStart: '2026-01-09' }; }
 export function invalidateEnvelopeSpending() {}
 export function isEnvelopeSchemaMissing() { return false; }
-export async function getEnvPace() { return false; }
-export async function setEnvPace() {}
+// Local, NOT exported (the façade's whole-map pair is gone — only
+// updateEnvPace writes); getStartupSettings below reads through it.
+async function getEnvPace() { return false; }
 // A STUB, not a mirror: it returns {} whatever it is given, where the real one
 // returns the merged map. The walk never toggles pace, so nothing exercises it
 // — but if a future step does, Dashboard's `.then(merged=>setEnvPace(merged))`
