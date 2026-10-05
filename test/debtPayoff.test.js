@@ -315,3 +315,15 @@ test('utilization: null without a limit, 0 in credit, ratio in between, clamped 
   assert.equal(utilization(500, 2000), 0.25);
   assert.equal(utilization(3000, 2000), 1, 'over the limit still fills the bar exactly once');
 });
+
+// --- 2026-10 audit: the payoff projection names debts the household's way ----
+// simulatePayoff's perDebt carries only the raw bank `name`, and the
+// projection rendered it directly — two cards nicknamed "Mason Visa"/"Wife
+// Visa" but both named "Visa Signature" by the bank read identically, while
+// the rows above them already used acctLabel (nickname || name ··mask).
+test('the payoff projection lines resolve each debt\'s label through acctLabel by id', () => {
+  const dash = readFileSync(join(root, 'src/components/Dashboard.jsx'), 'utf8');
+  assert.match(dash, /const incById=new Map\(included\.map\(d=>\[d\.id,d\]\)\);/);
+  assert.match(dash, /\{acctLabel\(incById\.get\(d\.id\)\)\|\|d\.name\|\|"\?"\} clears /);
+  assert.doesNotMatch(dash, /\{d\.name\|\|"\?"\} clears /, 'the raw bank name is only a fallback');
+});

@@ -6749,6 +6749,10 @@ export default function Dashboard({ refreshTick = 0 }) {
           const extra=Math.max(0,Number(debtExtra)||0);
           const missingMin=included.filter(d=>!(Number(d.minimum_payment)>0));
           const plan=included.length?payoffWhatIf(included,{strategy:debtStrategy,extraMonthly:extra}):null;
+          // perDebt carries only the raw bank name (the pure core stays
+          // label-agnostic) — the projection lines resolve the household label
+          // by id, or two cards both named "Visa Signature" read identically.
+          const incById=new Map(included.map(d=>[d.id,d]));
           const debtSince=addLocalDays(-365);
           const startMonth=`${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,"0")}`;
           const freeMonth=plan?debtFreeMonth(startMonth,plan):null;
@@ -7010,7 +7014,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                       explains why avalanche beats snowball. */}
                   <div style={{fontSize:11,color:"var(--muted)",lineHeight:1.7}}>
                     {plan.perDebt.filter(d=>d.months!=null).map(d=>(
-                      <div key={d.id}>{d.name||"?"} clears {monthYear(addMonths(startMonth,d.months))} · {fmtAuto(d.interest)} interest</div>
+                      <div key={d.id}>{acctLabel(incById.get(d.id))||d.name||"?"} clears {monthYear(addMonths(startMonth,d.months))} · {fmtAuto(d.interest)} interest</div>
                     ))}
                   </div>
                 </>
