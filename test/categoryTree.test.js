@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import {
   parentIndex, parentOf, hasChildren, eligibleParents, canSetParent,
   setRegistryParent, groupCategories, groupMembers, rollupFields,
-  orderGroups, earliestMemberRank,
+  orderGroups, earliestMemberRank, barScale,
 } from '../src/categoryTree.js';
+import { readFileSync } from 'node:fs';
 import { UNCATEGORIZED, TRANSFER_CATEGORY, RETURN_CATEGORY } from '../src/categoryMap.js';
 
 const reg = (...entries) => entries.map((e, i) => ({ id: String(i), color: '#7F77DD', ...e }));
@@ -220,4 +221,26 @@ test('REGRESSION: on the Budget tab a group takes its earliest member position',
 
 test('earliestMemberRank returns Infinity when no member is in the list', () => {
   assert.equal(earliestMemberRank({ name: 'X', children: ['Y'] }, () => undefined), Infinity);
+});
+
+test('REGRESSION: barScale floors at a positive 1, so a refund-only month draws EMPTY bars', () => {
+  // Every top-level amount <= 0 (a lone $50 refund): Math.max(..., 0) is 0,
+  // and the old fallback was the first category's own amount, −50 — truthy —
+  // so the bar read max(0, −50/−50 * 100) = a FULL bar beside "−$50".
+  assert.equal(barScale([-50]), 1);
+  assert.equal(barScale([-10, -50]), 1);
+  assert.equal(Math.max(0, (-50 / barScale([-50])) * 100), 0, 'the width the row draws');
+  assert.equal(barScale([]), 1);
+  assert.equal(barScale(null), 1);
+  assert.equal(barScale([0, 0]), 1);
+  // Unchanged when anything is positive: the largest top-level value.
+  assert.equal(barScale([120, -30, 80]), 120);
+  assert.equal(barScale([0.5]), 0.5, 'a real sub-dollar max is kept, not floored to 1');
+  assert.equal(barScale([NaN, 40]), 40, 'garbage is ignored, not propagated');
+});
+
+test('the Categories tab scales its bars with barScale, and maxCat is gone', () => {
+  const dash = readFileSync(new URL('../src/components/Dashboard.jsx', import.meta.url), 'utf8');
+  assert.match(dash, /const maxCatBar=barScale\(/);
+  assert.doesNotMatch(dash, /\bmaxCat\s*=/, 'the negative-capable fallback is deleted');
 });

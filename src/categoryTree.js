@@ -181,6 +181,17 @@ export function orderGroups(groups = [], keyOf) {
     .map((x) => x.g);
 }
 
+// The denominator every top-level Categories bar divides by: the largest value
+// actually RENDERED at top level (a rollup can exceed every single leaf),
+// floored at a positive 1. A refund-only month has every value <= 0, and the
+// old fallback to the first category's own (negative) amount made −50/−50 a
+// FULL bar beside a negative total — defeating the Math.max(0, …) every bar
+// width carries. With nothing positive, every spend-driven bar is empty.
+export function barScale(values = []) {
+  const max = Math.max(0, ...(values || []).map(Number).filter(Number.isFinite));
+  return max > 0 ? max : 1;
+}
+
 // Rank a group by the EARLIEST position any of its members holds in the
 // caller's original list — the Budget tab's rule, where the list is the
 // envelope walk's order rather than a magnitude. A group with no member in the

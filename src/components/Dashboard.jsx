@@ -20,7 +20,7 @@ import { UNCATEGORIZED, isBudgetableCategory } from "../categoryMap.js";
 import { userCategoryList, missingCategories, isDuplicateCategoryName } from "../categoryList.js";
 import { parentIndex, parentOf, hasChildren, eligibleParents, canSetParent,
   setRegistryParent, groupCategories, groupMembers, rollupFields,
-  orderGroups, earliestMemberRank } from "../categoryTree.js";
+  orderGroups, earliestMemberRank, barScale } from "../categoryTree.js";
 import { teachQueueGroups, nonSpendLabel, categorizedShare } from "../teachQueue.js";
 import { displayBalance, isDebtAccount as isDebtType, balanceAsOf, BALANCE_STALE_DAYS } from "../accountBalance.js";
 import { unhideConfirmMessage } from "../unhideConfirm.js";
@@ -3882,7 +3882,6 @@ export default function Dashboard({ refreshTick = 0 }) {
   const shownSearch=txCatFilter?acctSearchView.filter(t=>t.category===txCatFilter):acctSearchView;
   const listTxs=searchActive?shownSearch:shownTxs;
   const cfPs=cashFlow?.periods||[];
-  const maxCat=cats[0]?.amount||1;
   const maxSpend=Math.max(...cfPs.map(p=>p.spending?.amount||0),1);
   // The Income-vs-spending card scales BOTH rows against the larger of the
   // two, not against maxSpend. Scaled to spending alone, any month whose
@@ -4137,7 +4136,9 @@ export default function Dashboard({ refreshTick = 0 }) {
   // Bars are relative to the largest thing ACTUALLY RENDERED at top level, not
   // to the largest single leaf: a rollup can exceed every leaf, which pegged
   // the biggest group's bar at 100% (or past it) and made the column unreadable.
-  const maxCatBar=Math.max(...catGroups.map(g=>g.children.length?g.roll.amount:(g.own?.amount||0)),0)||maxCat;
+  // Floored at a positive 1 (barScale): a refund-only month must draw empty
+  // bars, never −50/−50 = a full one.
+  const maxCatBar=barScale(catGroups.map(g=>g.children.length?g.roll.amount:(g.own?.amount||0)));
   // ONE row renderer for the Categories tab, used at both levels — a
   // subcategory row is byte-identical to the row it was before it got a parent,
   // just indented. Two renderers would be two chances to drift.
