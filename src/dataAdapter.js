@@ -1911,8 +1911,38 @@ export async function getReconciliation({ maxMonths = 12 } = {}) {
       }))
     );
 
+    // Re-dated rows POSTED inside the span but COUNTED outside it (user_date):
+    // no month read above returns them, yet their balance move is in a
+    // fetched month, and without them each one reads as Unexplained there.
+    // A BANK-date read on purpose (`date`, never txDateCol) — the one thing
+    // it asks is "what did the bank move in these months". Rows moved INTO
+    // the span need nothing extra: the month reads carry their bank_date.
+    // Pre-migration there is no user_date and nothing can have moved. No
+    // inner catch: a failed read must fail the panel (ok:false) like every
+    // other read here, never render the fake residual it exists to remove.
+    let movedOut = [];
+    if (transactionsHaveUserDate) {
+      const spanStart = monthBounds(months[0].year, months[0].month).start;
+      const spanEnd = monthBounds(curY, curM).end;
+      const redated = await pagedRows((from, to) =>
+        supabase
+          .from('transactions')
+          .select('id, account_id, date, amount, user_date, effective_date, accounts!inner(hidden)')
+          .eq('accounts.hidden', false)
+          .not('user_date', 'is', null)
+          .gte('date', spanStart)
+          .lte('date', spanEnd)
+          .order('date', { ascending: false })
+          .order('id', { ascending: false })
+          .range(from, to)
+      );
+      movedOut = withEffectiveDate(
+        redated.filter(r => r.effective_date && (r.effective_date < spanStart || r.effective_date > spanEnd))
+      );
+    }
+
     const today = `${now.getFullYear()}-${pad2(curM)}-${pad2(now.getDate())}`;
-    const built = buildReconciliation({ monthsRows, snapshots, accounts: visible, today });
+    const built = buildReconciliation({ monthsRows, snapshots, accounts: visible, today, movedOut });
     return { ok: true, ...built, scopeCount: scope.length };
   } catch {
     return empty;
