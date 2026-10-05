@@ -212,3 +212,50 @@ test('the pull chip, its gate and the gear\'s Refresh read loading||refreshing; 
   assert.match(code, /<GearMenu[^>]*loading=\{loading\|\|refreshing\}/,
     'the gear\'s Refresh row spins and stays disabled until the pull settles');
 });
+
+// --- F54: async writers outside their effects keep the effects' guards -------
+// refetchOpenLists (after teaching a merchant rule) wrote searchRes and
+// acctTxs with no sequence/id check, after several round trips: open account
+// B meanwhile and A's rows landed under B's header; type a new query and the
+// old query's page clobbered it. The Debt load set its snapshot and net-worth
+// series OUTSIDE its debtSeq check, so a superseded load could overwrite a
+// newer one's chart data.
+
+test('refetchOpenLists writes search results only for the query it was asked about', () => {
+  const { body } = slice('const refetchOpenLists=useCallback', 'async function learnMerchant');
+  assert.match(body, /^const refetchOpenLists=useCallback\(async\(sid=searchSeq\.current\)=>/,
+    'refetchOpenLists takes the searchSeq its caller captured (default: now)');
+  assert.match(body, /if\(searchSeq\.current===sid\)setSearchRes\(/,
+    'a query typed since (which bumps searchSeq) must win over this refetch');
+  assert.ok(!/\bthen\(setSearchRes\)/.test(body), 'no unguarded .then(setSearchRes)');
+  const { body: learn } = slice('async function learnMerchant', 'function patchAllTxLists');
+  const cap = learn.indexOf('const sid=searchSeq.current');
+  assert.ok(cap > 0 && cap < learn.indexOf('await '),
+    'learnMerchant captures searchSeq BEFORE its first await — the query its closure holds is the one at that moment');
+  assert.ok(learn.includes('refetchOpenLists(sid)'), 'and hands it to refetchOpenLists');
+});
+
+test('refetchOpenLists refetches the account open NOW and writes only if it is still open', () => {
+  const { body } = slice('const refetchOpenLists=useCallback', 'async function learnMerchant');
+  assert.match(body, /const aid=selAcctIdRef\.current;/,
+    'read the committed open account at refetch time, never the closure\'s selAcct');
+  assert.ok(!/\bselAcct\b/.test(body), 'no selAcct snapshot read inside refetchOpenLists');
+  assert.match(body, /if\(selAcctIdRef\.current===aid\)\{?setAcctTxs\(/,
+    'an account page switched while the fetch ran must not receive the old account\'s rows');
+  assert.match(code, /selAcctIdRef\.current=selAcctId;/, 'the ref mirrors the committed selAcctId');
+});
+
+test('the Debt load commits snapshots, the net-worth series and the debts together under debtSeq', () => {
+  const { body } = slice('if(tab!=="debt"||debtData)return;', '},[tab,debtData,debtEpoch]);');
+  const guard = 'if(seq===debtSeq.current){';
+  const open = body.indexOf(guard);
+  assert.ok(open > 0, 'the success path commits inside one debtSeq-guarded block');
+  const block = body.slice(open, body.indexOf('}', open + guard.length));
+  const outside = body.slice(0, open) + body.slice(open + block.length);
+  for (const set of ['setDebtSnaps(', 'setNwSeries(', 'setDebtData(d)']) {
+    assert.ok(block.includes(set), `${set} must be inside the debtSeq-guarded commit`);
+  }
+  for (const set of ['setDebtSnaps(', 'setNwSeries(']) {
+    assert.ok(!outside.includes(set), `${set} outside the guard lets a superseded load overwrite a newer one`);
+  }
+});

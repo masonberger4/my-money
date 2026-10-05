@@ -2035,6 +2035,9 @@ export default function Dashboard({ refreshTick = 0 }) {
   // every rename/colour/hide replaced the object and re-ran the effect below,
   // refetching all 500 rows and flashing skeletons under the user's hands.
   const [selAcctId,setSelAcctId]=useState(null);
+  // The COMMITTED selAcctId, for async writers that resume after awaits
+  // (refetchOpenLists) — mirrored in the account-list effect below.
+  const selAcctIdRef=useRef(null);
   // Bumped only when NEW ROWS may have arrived — a completed sync, the
   // explicit Refresh, or a foreground return (refreshTick — how the other
   // phone's writes arrive). The account page's list is not month-scoped, so a
@@ -2991,6 +2994,10 @@ export default function Dashboard({ refreshTick = 0 }) {
     setDebtLoading(true);
     getDebts()
       .then(async d=>{
+        // Read into locals and commit all three under ONE debtSeq check: set
+        // outside it, a load superseded mid-flight (addManualDebt's epoch
+        // bump) could overwrite the newer load's snapshots or series.
+        let snaps=[],series=[];
         try{
           // FULL history, clamped after the fold — never a windowed FETCH.
           // Snapshots are written on balance CHANGE only, so an account that
@@ -3000,13 +3007,13 @@ export default function Dashboard({ refreshTick = 0 }) {
           // above still counts it, and the line reads as a paydown that never
           // happened. getNetWorthSeries already documents and avoids exactly
           // this; the Debt tab was the copy that didn't.
-          setDebtSnaps(await getBalanceSnapshots(d.debts.map(a=>a.id),null));
-        }catch(err){console.error("balance snapshots load failed",err);setDebtSnaps([]);}
+          snaps=await getBalanceSnapshots(d.debts.map(a=>a.id),null);
+        }catch(err){console.error("balance snapshots load failed",err);}
         try{
           const since=new Date(Date.now()-365*86400000).toISOString().slice(0,10);
-          setNwSeries(await getNetWorthSeries(since));
-        }catch(err){console.error("net worth load failed",err);setNwSeries([]);}
-        if(seq===debtSeq.current)setDebtData(d);
+          series=await getNetWorthSeries(since);
+        }catch(err){console.error("net worth load failed",err);}
+        if(seq===debtSeq.current){setDebtSnaps(snaps);setNwSeries(series);setDebtData(d);}
       })
       .catch(err=>{console.error("debt load failed",err);if(seq===debtSeq.current)setDebtData({debts:[],totalDebt:0,totalMinimums:0,hasDebtColumns:false});})
       .finally(()=>{if(seq===debtSeq.current)setDebtLoading(false);});
@@ -3187,6 +3194,7 @@ export default function Dashboard({ refreshTick = 0 }) {
   // Keyed on the ID, never the object: an edit to the account's NAME or COLOUR
   // is not a reason to refetch its transactions.
   useEffect(()=>{
+    selAcctIdRef.current=selAcctId;
     if(!selAcctId){setAcctTxs(null);setAcctHasMore(false);return;}
     let cancelled=false;
     setAcctLoading(true);
@@ -3470,27 +3478,37 @@ export default function Dashboard({ refreshTick = 0 }) {
   // A rule rewrites OTHER transactions, so there is no id to patch and the
   // optimistic path can't help: the lists reloadData doesn't cover have to be
   // refetched or the relabelled rows keep their old category on screen — the
-  // "it didn't apply to the others" symptom.
-  const refetchOpenLists=useCallback(async()=>{
+  // "it didn't apply to the others" symptom. Both writes keep the guards their
+  // own effects have, because this runs after several round trips: `sid` is
+  // the searchSeq the CALLER captured before its awaits (a query typed since
+  // bumps it, and this closure's query is the old one), and the account leg
+  // refetches whichever account is open NOW and writes only if it still is —
+  // otherwise A's rows could land under B's header.
+  const refetchOpenLists=useCallback(async(sid=searchSeq.current)=>{
     const q=searchQ.trim();
     const filters=buildSearchFilters(searchFilters);
+    const aid=selAcctIdRef.current;
     await Promise.all([
       searchIsActive(q,filters)
         // First page of the current filtered query — an appended load-more
         // tail is dropped here, but hasMore comes back true so it's one tap
         // away, and the refetched page is at least consistent.
-        ? searchTransactions(q,{filters}).then(setSearchRes).catch(err=>console.error("search refresh failed",err))
+        ? searchTransactions(q,{filters})
+            .then(res=>{if(searchSeq.current===sid)setSearchRes(res);})
+            .catch(err=>console.error("search refresh failed",err))
         : Promise.resolve(),
-      selAcct
-        ? getAccountTransactions(selAcct.id)
-            .then(res=>{setAcctTxs(res.transactions);setAcctHasMore(res.hasMore);})
+      aid
+        ? getAccountTransactions(aid)
+            .then(res=>{if(selAcctIdRef.current===aid){setAcctTxs(res.transactions);setAcctHasMore(res.hasMore);}})
             .catch(err=>console.error("account list refresh failed",err))
         : Promise.resolve(),
     ]);
-  },[searchQ,searchFilters,selAcctId]);
+  },[searchQ,searchFilters]);
 
   async function learnMerchant(){
     if(!learnPrompt)return;
+    // Before the awaits: this closure's search query is the one current NOW.
+    const sid=searchSeq.current;
     setLearning(true);
     try{
       const amt=learnPrompt.scope==="amount"?learnPrompt.amount:null;
@@ -3506,7 +3524,7 @@ export default function Dashboard({ refreshTick = 0 }) {
         ? `Remembered — ${subject} is ${getName(learnPrompt.category)}, and ${n} past transaction${n!==1?"s":""} updated.`
         : `Remembered — ${subject} is ${getName(learnPrompt.category)}. No past transactions needed changing; future ones will use it.`);
       await reloadViewed();
-      await refetchOpenLists();
+      await refetchOpenLists(sid);
       // The taught-rules list has a new row — refresh it too, or the screen
       // opened right after teaching is missing the rule just created.
       invalidateRules();
