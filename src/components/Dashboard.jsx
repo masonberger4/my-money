@@ -8482,7 +8482,7 @@ export default function Dashboard({ refreshTick = 0 }) {
         const manualAccounts=quickAddTargets(accounts);
         // Uncategorized is never an offerable pick (same rule as the detail sheet).
         return (
-          <QuickAddSheet accounts={accounts} manualAccounts={manualAccounts} allCats={userCats}
+          <QuickAddSheet manualAccounts={manualAccounts} allCats={userCats}
             getName={getName} getColor={getColor} acctLabel={acctLabel} acctColor={acctColor}
             busy={quickAddBusy} surf={surf} onSave={addManualTx} onClose={()=>setQuickAdd(false)}/>
         );
@@ -8490,7 +8490,7 @@ export default function Dashboard({ refreshTick = 0 }) {
 
       {/* Funding target (rule 2) */}
       {targetEdit&&(
-        <TargetSheet name={getName(targetEdit)} row={envMap[targetEdit]||{target:budgets[targetEdit]??null}} busy={envBusy} surf={surf} year={year} month={month}
+        <TargetSheet name={getName(targetEdit)} row={envMap[targetEdit]||{target:budgets[targetEdit]??null}} busy={envBusy} year={year} month={month}
           onClose={()=>setTargetEdit(null)}
           onSave={v=>{const c=targetEdit;setTargetEdit(null);saveTarget(c,v);}}/>
       )}
