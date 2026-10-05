@@ -305,6 +305,90 @@ test('suggestRoles: two money columns use header wording only to break the debit
   assert.deepEqual(suggestRoles(sampleRows, null), ['date', 'description', 'debit', 'credit']);
 });
 
+// --- 2026-10 import audit (F06): a running Balance is never a money role ----
+// The positional debit/credit fallback used to fire on ANY two money columns
+// the header didn't name as a pair — so a checking statement's
+// `Date Description Amount Balance` imported every row as Amount − Balance,
+// all money in, under "Layout detected automatically". The batch path saves
+// that auto layout as the account's template without a preview, and the
+// wrong-signed rows can never be deduped away (the hash includes the amount).
+const BALANCE_ROWS = [
+  ['07/02/2026', 'STARBUCKS STORE 123', '-5.45', '1,994.55'],
+  ['07/15/2026', 'ACME PAYROLL DIRECT DEP', '1,500.00', '3,494.55'],
+  ['07/20/2026', 'CITY WATER BILL', '-60.00', '3,434.55'],
+];
+
+test('suggestRoles: an Amount + Balance pair is ONE amount column, the balance ignored', () => {
+  assert.deepEqual(
+    suggestRoles(BALANCE_ROWS, ['Date', 'Description', 'Amount', 'Balance']),
+    ['date', 'description', 'amount', 'ignore']
+  );
+});
+
+test('suggestRoles: Balance LEFT of Amount reads the same', () => {
+  const rows = BALANCE_ROWS.map(([d, desc, amt, bal]) => [d, desc, bal, amt]);
+  assert.deepEqual(
+    suggestRoles(rows, ['Date', 'Description', 'Balance', 'Amount']),
+    ['date', 'description', 'ignore', 'amount']
+  );
+});
+
+test('suggestRoles: "Transaction Amount" claims the amount role (not description) beside a Balance', () => {
+  assert.deepEqual(
+    suggestRoles(BALANCE_ROWS, ['Date', 'Description', 'Transaction Amount', 'Running Balance']),
+    ['date', 'description', 'amount', 'ignore']
+  );
+});
+
+test('suggestRoles: Withdrawals/Deposits/Balance keeps the named pair and ignores the balance', () => {
+  const rows = [
+    ['07/02/2026', 'STARBUCKS STORE 123', '5.45', '', '1,994.55'],
+    ['07/15/2026', 'ACME PAYROLL DIRECT DEP', '', '1,500.00', '3,494.55'],
+    ['07/20/2026', 'CITY WATER BILL', '60.00', '', '3,434.55'],
+  ];
+  assert.deepEqual(
+    suggestRoles(rows, ['Date', 'Description', 'Withdrawals', 'Deposits', 'Balance']),
+    ['date', 'description', 'debit', 'credit', 'ignore']
+  );
+});
+
+test('suggestRoles: a Balance never becomes the credit column when Deposits is empty in the sample', () => {
+  // The verifier's second trigger: an all-blank Deposits column is not a
+  // money column, so Withdrawals + Balance used to pair up as debit/credit.
+  const rows = [
+    ['07/02/2026', 'STARBUCKS STORE 123', '5.45', '', '1,994.55'],
+    ['07/20/2026', 'CITY WATER BILL', '60.00', '', '1,934.55'],
+  ];
+  const roles = suggestRoles(rows, ['Date', 'Description', 'Withdrawals', 'Deposits', 'Balance']);
+  assert.equal(roles[4], 'ignore', 'the running balance must never carry a money role');
+  assert.ok(!roles.includes('credit'), `no column may be read as credit here: ${roles}`);
+});
+
+test('autoDetectTemplate on a checking layout with a running Balance: signed amount, balance never read', () => {
+  const pg = page(1, [
+    ...textLine(60, [['Statement Period: Jul 1, 2026 - Jul 31, 2026', 40]]),
+    run('Date', 40, 200), run('Description', 120, 200), run('Amount', 430, 200), run('Balance', 520, 200),
+    ...BALANCE_ROWS.flatMap(([d, desc, amt, bal], i) => [
+      run(d, 40, 220 + i * 16), run(desc, 120, 220 + i * 16), run(amt, 435, 220 + i * 16), run(bal, 520, 220 + i * 16),
+    ]),
+  ]);
+  const t = autoDetectTemplate([pg]);
+  assert.ok(t);
+  assert.deepEqual(t.roles, ['date', 'description', 'amount', 'ignore']);
+  assert.equal(t.amountMode, 'signed');
+  const applied = applyTemplate([pg], t);
+  assert.deepEqual(applied.grid.map(r => r[4]), ['-5.45', '1,500.00', '-60.00'], 'the Amount column, never the balance');
+  // This statement prints money OUT as negative, which is the in_positive
+  // reading — the sign the user picks in the editor for it.
+  const { rows } = buildRows(applied.grid, { ...applied.buildOpts, amountSign: 'in_positive' });
+  assert.deepEqual(rows.map(r => [r.description, r.amount]), [
+    ['STARBUCKS STORE 123', 5.45],
+    ['ACME PAYROLL DIRECT DEP', -1500],
+    ['CITY WATER BILL', 60],
+  ]);
+  assert.deepEqual(rowTotals(rows), { out: 65.45, in: 1500 });
+});
+
 // ---------------------------------------------------------------------------
 // autoDetectTemplate
 // ---------------------------------------------------------------------------

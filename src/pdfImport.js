@@ -332,9 +332,16 @@ export function lineCellStarts(line, boundaries, pageWidth) {
 // has to confirm rather than build one from scratch.
 // ---------------------------------------------------------------------------
 
-const HEADER_WORDS = [
-  [/\btrans(action)?\s*date\b|\bpost(ing|ed)?\s*date\b|\bdate\b/i, 'date'],
-  [/\bdescription\b|\bmerchant\b|\bpayee\b|\bdetails?\b|\btransaction\b/i, 'description'],
+// How a MONEY column's header reads. Only money columns consult the header
+// (dates and the description are chosen by content), and the description
+// words are deliberately absent: the old shared list carried \btransaction\b
+// for description, so "Transaction Amount" resolved to description and never
+// claimed the amount role. A running balance comes first and always wins: it
+// is a money-shaped column that is never a transaction amount, and letting it
+// into the debit/credit pairing is how `Date Description Amount Balance`
+// imported every row as (Amount − Balance), all money in.
+const MONEY_HEADER_WORDS = [
+  [/\bbalance\b/i, 'balance'],
   [/\bdebit\b|\bcharges?\b|\bwithdrawals?\b/i, 'debit'],
   [/\bcredit\b|\bpayments?\b|\bdeposits?\b/i, 'credit'],
   [/\bamount\b/i, 'amount'],
@@ -420,32 +427,41 @@ export function suggestRoles(sampleRows, headerCells) {
     stats.push({ c, dates, money, text, nonEmpty, avgLen: nonEmpty ? totalLen / nonEmpty : 0 });
   }
   const roles = new Array(nCols).fill('ignore');
-  const headerRole = c => {
-    const h = (headerCells && headerCells[c]) || '';
-    for (const [re, role] of HEADER_WORDS) if (re.test(h)) return role;
-    return null;
-  };
 
   // Dates: columns where most non-empty cells parse as dates. First = 'date'.
   const dateCols = stats.filter(s => s.nonEmpty && s.dates / s.nonEmpty >= 0.6).map(s => s.c);
   dateCols.forEach((c, i) => { roles[c] = i === 0 ? 'date' : 'date2'; });
 
-  // Money columns.
-  const moneyCols = stats.filter(s => s.nonEmpty && s.money / s.nonEmpty >= 0.6 && roles[s.c] === 'ignore').map(s => s.c);
-  if (moneyCols.length >= 2) {
-    // Two money columns → debit/credit pair; use the header wording when it
-    // disambiguates, else assume left = debit (out), right = credit (in).
-    const named = moneyCols.map(c => headerRole(c));
-    const debitIdx = named.indexOf('debit');
-    const creditIdx = named.indexOf('credit');
-    if (debitIdx >= 0 && creditIdx >= 0) {
-      roles[moneyCols[debitIdx]] = 'debit';
-      roles[moneyCols[creditIdx]] = 'credit';
-    } else {
-      roles[moneyCols[0]] = 'debit';
-      roles[moneyCols[1]] = 'credit';
-    }
-    for (let i = 2; i < moneyCols.length; i++) roles[moneyCols[i]] = 'ignore';
+  // Money columns. A header that says "balance" drops its column out of the
+  // money roles entirely (it stays 'ignore'), whatever else was seen — with
+  // Withdrawals/Deposits/Balance and a Deposits column blank in the sample,
+  // the balance used to be paired in as the credit column.
+  const moneyHeader = c => {
+    const h = (headerCells && headerCells[c]) || '';
+    for (const [re, role] of MONEY_HEADER_WORDS) if (re.test(h)) return role;
+    return null;
+  };
+  const moneyCols = stats
+    .filter(s => s.nonEmpty && s.money / s.nonEmpty >= 0.6 && roles[s.c] === 'ignore')
+    .map(s => s.c)
+    .filter(c => moneyHeader(c) !== 'balance');
+  const named = moneyCols.map(moneyHeader);
+  const debitIdx = named.indexOf('debit');
+  const creditIdx = named.indexOf('credit');
+  const amountIdxs = named.flatMap((n, i) => (n === 'amount' ? [i] : []));
+  if (moneyCols.length >= 2 && debitIdx >= 0 && creditIdx >= 0) {
+    // The header names the pair: Payments → credit, Charges → debit, wherever
+    // they sit.
+    roles[moneyCols[debitIdx]] = 'debit';
+    roles[moneyCols[creditIdx]] = 'credit';
+  } else if (moneyCols.length >= 2 && amountIdxs.length === 1) {
+    // One column the header calls "Amount" IS the signed amount; the others
+    // (a fee, a reference total) are not a debit/credit pair.
+    roles[moneyCols[amountIdxs[0]]] = 'amount';
+  } else if (moneyCols.length >= 2) {
+    // Two UNNAMED money columns → assume left = debit (out), right = credit (in).
+    roles[moneyCols[0]] = 'debit';
+    roles[moneyCols[1]] = 'credit';
   } else if (moneyCols.length === 1) {
     roles[moneyCols[0]] = 'amount';
   }
