@@ -8308,8 +8308,9 @@ export default function Dashboard({ refreshTick = 0 }) {
                   // transaction can't have NO date, unlike placed-in-service.
                   if(c.action==="clear"||c.action==="revert"){ev.target.value=selTx.transaction_date||"";return;}
                   if(c.action==="noop")return;
+                  const v=c.value;
                   // Picking the bank's own date again is a reset, not an override.
-                  saveTx({user_date:c.value===selTx.bank_date?null:c.value});}}
+                  saveTx({user_date:v===selTx.bank_date?null:v});}}
                 style={{padding:"6px 8px",borderRadius:8,border:"1px solid var(--border)",background:"var(--input-bg)",
                   color:"var(--text)",fontSize:13,fontWeight:500,fontFamily:"inherit",outline:"none"}}/>
             </div>
