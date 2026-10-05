@@ -2644,7 +2644,7 @@ export default function Dashboard({ refreshTick = 0 }) {
   function nextMonth(){if(!canNext)return;if(month===12){setYear(y=>y+1);setMonth(1);}else setMonth(m=>m+1);}
   function goCurrentMonth(){setYear(now.getFullYear());setMonth(now.getMonth()+1);}
 
-  const reloadData=useCallback(async(y,m)=>{
+  const reloadData=useCallback(async(y,m,{invalidate=true}={})=>{
     setError(null);
     // A FRESH date, never the render-time `now`: this callback is []-dep, so
     // `now` here would be the mount's date forever — a tab left open across a
@@ -2705,8 +2705,6 @@ export default function Dashboard({ refreshTick = 0 }) {
       // pattern): folding it into [] would blank the entity chips and every
       // property worksheet until the next successful reload.
       if(ents!==undefined)setEntities(ents.entities||[]);
-      invalidateTax(); // recompute lazily on next Tax-tab visit
-      invalidateTrends(); // Trends (cash flow + movers) refetches on next tab visit
       // A completed envelope write may have painted fresher rows while this
       // reload was in flight — don't overwrite them (or the freshly saved
       // budgets/targets) with a pre-write snapshot.
@@ -2719,11 +2717,21 @@ export default function Dashboard({ refreshTick = 0 }) {
       // Outside the eseq guard: envelope writes never move transactions, so a
       // write completing mid-reload can't have made this snapshot stale.
       if(ai!==undefined)setActualInc({y,m,amount:ai.amount,coverageStart:ai.coverageStart});
-      // Clear AND bump: the clear is what makes the next visit refetch, the
-      // bump is what supersedes a load already in flight (a null set over a
-      // null is a no-op React bails on — the recorded gotcha).
-      setRecurring(null); setRecEpoch(e=>e+1);
-      setDebtData(null);  setDebtEpoch(e=>e+1);
+      // The lazy TAB caches depend on no viewed month (Recurring anchors on
+      // today, Debt reads accounts + snapshots, Tax has its own taxYear,
+      // cash flow anchors on the current month), so plain month navigation
+      // (invalidate:false) keeps them — extending the 2026-08-04 month-nav
+      // caching ruling. Every other reload drops them: startup, a foreground
+      // return, Refresh, a pull's follow-up and each post-write reload.
+      // Recurring/Debt clear AND bump: the clear is what makes the next visit
+      // refetch, the bump is what supersedes a load already in flight (a null
+      // set over a null is a no-op React bails on — the recorded gotcha).
+      if(invalidate){
+        invalidateTax(); // recompute lazily on next Tax-tab visit
+        invalidateTrends(); // Trends (cash flow + movers) refetches on next tab visit
+        setRecurring(null); setRecEpoch(e=>e+1);
+        setDebtData(null);  setDebtEpoch(e=>e+1);
+      }
       setLastUpd(new Date());
     }catch(err){
       if(seq!==loadSeq.current)return false;
@@ -2745,7 +2753,7 @@ export default function Dashboard({ refreshTick = 0 }) {
     return reloadData(cy,cm);
   },[reloadData]);
 
-  const fetchData=useCallback(async(y,m,{sync=false}={})=>{
+  const fetchData=useCallback(async(y,m,{sync=false,invalidate=true}={})=>{
     setLoading(true);
     // First paint never waits for the feed: painting DB state immediately is
     // already what happens on every sync failure and every other-device sync,
@@ -2766,8 +2774,9 @@ export default function Dashboard({ refreshTick = 0 }) {
       }):null;
       // No setLoading(false) here: the reload that wins loadSeq clears it
       // (inside reloadData) — this one may be superseded, and the newer one
-      // must not be left relying on a clear that never comes.
-      await reloadData(y,m);
+      // must not be left relying on a clear that never comes. `invalidate` is
+      // false only for plain month navigation (the effect below).
+      await reloadData(y,m,{invalidate});
       if(!syncP)return;
       const res=await syncP;
       // A failed pull painted its error above; a throttled pull (server ran
@@ -2840,7 +2849,8 @@ export default function Dashboard({ refreshTick = 0 }) {
     // or the day's charges wait for a manual Refresh. The server throttle
     // still decides whether SimpleFIN is actually asked.
     const sync=syncFirst||(tick&&foregroundSyncDue(lastSyncAt.current,Date.now())?"foreground":false);
-    fetchData(year,month,{sync}).then(()=>{
+    // Plain month navigation is the one re-run that keeps the lazy tab caches.
+    fetchData(year,month,{sync,invalidate:syncFirst||tick}).then(()=>{
       if(!sync)return;
       // The sync response can't answer "is the feed stale?" — a clean pull
       // carries no last_pulled_at — so ask /api/simplefin-status in the same
@@ -2857,11 +2867,12 @@ export default function Dashboard({ refreshTick = 0 }) {
 
   // Trends is lazy like recurring/debt/tax: the 6-month cash-flow window and
   // the movers month-pair fetch only while the tab is open, cached until
-  // invalidateTrends() bumps the epoch (write/sync/import/reload — never a
-  // bare null sentinel; the epoch mints a fresh sequence so an in-flight
-  // response can't paint a pre-invalidation snapshot). cashFlow anchors on
-  // the CURRENT month (getCashFlow ignores the viewed month) so it survives
-  // month navigation; movers are month-tagged and refetch when the viewed
+  // invalidateTrends() bumps the epoch (write/sync/import/an invalidating
+  // reload — never a bare null sentinel; the epoch mints a fresh sequence so
+  // an in-flight response can't paint a pre-invalidation snapshot). cashFlow
+  // anchors on the CURRENT month (getCashFlow ignores the viewed month) so it
+  // survives month navigation (reloadData's invalidate:false keeps it);
+  // movers are month-tagged and refetch when the viewed
   // pair changes. A movers-only failure keeps the skeleton (mlist null) and
   // retries on the next state change/tab visit; a cash-flow failure leaves
   // cashFlow null, retried on the next tab visit.
@@ -2891,7 +2902,8 @@ export default function Dashboard({ refreshTick = 0 }) {
 
   // Recurring detection is lazy: fetched + computed the first time the tab
   // opens (a ~40-month query — CANDIDATE_WINDOW_MONTHS, sized for annual),
-  // cached until the next data reload.
+  // cached until the next INVALIDATING reload (a write, a pull, Refresh, a
+  // foreground return) — plain month navigation keeps it.
   useEffect(()=>{
     // The in-flight flag (recLoading) is NOT in this guard: gating on it
     // suppresses exactly the superseding load a sequence guard exists for,

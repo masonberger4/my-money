@@ -216,3 +216,51 @@ test('a real pull\'s follow-up reload refetches the open account list and re-run
   assert.ok(after.includes('setExpEpoch('),
     'the auto-match pass must re-run against the pulled rows — the startup pass raced the pull');
 });
+
+// --- The lazy TAB caches survive plain month navigation (F92) ----------------
+// Extends the 2026-08-04 ruling from the adapter memo to the Dashboard's lazy
+// tab caches: Recurring (a ~40-month read anchored on TODAY), Debt (accounts +
+// snapshots), Tax (its own taxYear) and Trends' cash flow (anchored on the
+// CURRENT month) depend on no viewed month, yet every month tap dropped all
+// four and re-ran the app's heaviest reads on the next visit. reloadData now
+// takes {invalidate}: plain navigation passes false; startup, the foreground
+// return, Refresh, a pull's follow-up and every post-write reload keep the
+// default (true). Movers are month-tagged and refetch on their own.
+
+const LAZY_DROPS = ['invalidateTax()', 'invalidateTrends()', 'setRecEpoch(', 'setDebtEpoch('];
+
+test('reloadData drops the lazy tab caches only inside an if(invalidate) block', () => {
+  const code = stripComments(dashboard);
+  const start = code.indexOf('const reloadData=useCallback');
+  const end = code.indexOf('const reloadViewed=useCallback', start);
+  assert.ok(start !== -1 && end > start, 'fixture assumption: reloadData precedes reloadViewed');
+  const body = code.slice(start, end);
+  assert.match(body, /^const reloadData=useCallback\(async\(y,m,\{invalidate=true\}=\{\}\)=>/,
+    'invalidate defaults to TRUE — every caller that says nothing (post-write reloads) keeps invalidating');
+  const open = body.indexOf('if(invalidate){');
+  assert.ok(open > 0, 'reloadData must gate the lazy-cache drops on invalidate');
+  const close = body.indexOf('}', open + 'if(invalidate){'.length);
+  const block = body.slice(open, close);
+  const outside = body.slice(0, open) + body.slice(close);
+  for (const drop of LAZY_DROPS) {
+    assert.ok(block.includes(drop), `${drop} must sit inside if(invalidate){…}`);
+    assert.ok(!outside.includes(drop), `${drop} must not ALSO run unconditionally`);
+  }
+});
+
+test('only plain month navigation skips the drop: the effect invalidates on startup and on a refreshTick bump', () => {
+  const code = stripComments(dashboard);
+  const start = code.indexOf('const syncFirst=!didInitialSync.current');
+  const body = code.slice(start, code.indexOf('},[year,month,ready,refreshTick,fetchData]', start));
+  assert.match(body, /const tick=refreshTick!==lastRefreshTick\.current;/,
+    'fixture assumption: the tick comparison is computed once');
+  assert.match(body, /fetchData\(year,month,\{sync,invalidate:syncFirst\|\|tick\}\)/,
+    'the effect must invalidate exactly when it is NOT plain navigation (startup or a foreground return)');
+  const fstart = code.indexOf('const fetchData=useCallback');
+  const fbody = code.slice(fstart, code.indexOf('const refreshNow=useCallback', fstart));
+  assert.match(fbody, /^const fetchData=useCallback\(async\(y,m,\{sync=false,invalidate=true\}=\{\}\)=>/,
+    'fetchData defaults to invalidating (Refresh says nothing and must drop the caches)');
+  assert.ok(fbody.includes('reloadData(y,m,{invalidate})'), 'fetchData threads invalidate into its first load');
+  assert.ok(!/invalidate:false/.test(code),
+    'no caller hard-codes invalidate:false — the follow-up, reloadViewed and Refresh must keep the default');
+});
