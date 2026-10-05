@@ -30,6 +30,7 @@ import { TX_TYPES, txTypeLabel, allowedUserTypes } from "../txType.js";
 import { breakdownSegments, incomeVsSpendingInsight, incomeSections } from "../reflect.js";
 import { periodYM, localTodayIso, localIsoDate, addLocalDays, ordinalSuffix, monthLabel, shortDate, localShortDate, fmt, fmtX, fmtAuto, signed, monthYear, numericish } from "../format.js";
 import { createSheetHistory } from "../sheetHistory.js";
+import { donutSlices, donutGeometry } from "../donut.js";
 import { runSync, foregroundSyncDue } from "../sync.js";
 import { refreshTickPlan, pullFollowUp, createSyncHold } from "../loadPipeline.js";
 // Lazy: both are modals rendered only on user action, and CsvImport reaches the
@@ -572,18 +573,13 @@ function GearMenu({tab,themePref,themeResolved,onTheme,loading,lastUpd,onRefresh
   );
 }
 
+// Geometry lives in src/donut.js (testable without a DOM). A lone category
+// comes back as a 'ring', not an arc: SVG drops an arc whose endpoints
+// coincide, so a single 0-360° slice used to render as an empty ring.
 function Donut({data,size=130}) {
-  const total = data.reduce((s,d)=>s+d.value,0);
-  if (!total) return <div style={{width:size,height:size,borderRadius:"50%",background:"var(--border)"}} />;
-  let off=0;
-  const cx=size/2,cy=size/2,r=size*.38,ir=size*.24;
-  const slices = data.map(d=>{const p=d.value/total,s=off;off+=p*360;return{...d,s,e:off};});
-  function arc(s,e,or,ir){
-    const sa=(s-90)*Math.PI/180,ea=(e-90)*Math.PI/180,lg=e-s>180?1:0;
-    const x1=cx+or*Math.cos(sa),y1=cy+or*Math.sin(sa),x2=cx+or*Math.cos(ea),y2=cy+or*Math.sin(ea);
-    const x3=cx+ir*Math.cos(ea),y3=cy+ir*Math.sin(ea),x4=cx+ir*Math.cos(sa),y4=cy+ir*Math.sin(sa);
-    return `M${x1},${y1} A${or},${or} 0 ${lg},1 ${x2},${y2} L${x3},${y3} A${ir},${ir} 0 ${lg},0 ${x4},${y4} Z`;
-  }
+  const slices=donutSlices(data,size);
+  if (!slices.length) return <div style={{width:size,height:size,borderRadius:"50%",background:"var(--border)"}} />;
+  const {cx,cy,ir}=donutGeometry(size);
   return (
     <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
       {/* No opacity here: the slice colour is already contrast-corrected against
@@ -592,8 +588,11 @@ function Donut({data,size=130}) {
           The card-coloured stroke separates ADJACENT slices, which contrast
           correction cannot: the palette legitimately maps several categories to
           one colour (Groceries / Dining out / Pets are all #1D9E75), so
-          neighbours can be a literal 1:1 and would otherwise read as one wedge. */}
-      {slices.map((s,i)=><path key={i} d={arc(s.s,s.e,r,ir)} fill={s.color} stroke="var(--card)" strokeWidth="1.5"/>)}
+          neighbours can be a literal 1:1 and would otherwise read as one wedge.
+          A lone ring has no neighbour, so it carries no separator. */}
+      {slices.map((s,i)=>s.kind==="ring"
+        ?<circle key={i} cx={s.cx} cy={s.cy} r={s.r} fill="none" stroke={s.color} strokeWidth={s.width}/>
+        :<path key={i} d={s.d} fill={s.color} stroke="var(--card)" strokeWidth="1.5"/>)}
       <circle cx={cx} cy={cy} r={ir-2} fill="var(--card)"/>
     </svg>
   );
