@@ -40,8 +40,17 @@ function darkMql() {
   }
 }
 
+// A choice made THIS session that storage refused to keep (null when the
+// last write landed). It wins over the stored value: with storage blocked a
+// read says 'system' — or, in old Safari private mode, the read "works" and
+// answers nothing while only the write throws — and initTheme's OS listener
+// re-reads the preference, so an explicit Dark flipped to light at sunset
+// while the gear menu still showed Dark.
+let sessionPref = null;
+
 /** Stored preference: 'system' | 'light' | 'dark' (never throws). */
 function getThemePref() {
+  if (sessionPref) return sessionPref;
   try {
     const v = localStorage.getItem(THEME_STORAGE_KEY);
     return THEME_PREFS.includes(v) ? v : 'system';
@@ -56,9 +65,11 @@ function setThemePref(pref) {
   try {
     if (next === 'system') localStorage.removeItem(THEME_STORAGE_KEY);
     else localStorage.setItem(THEME_STORAGE_KEY, next);
+    sessionPref = null; // storage holds it now
   } catch {
     // Private mode / storage disabled: the choice still applies for this
-    // session, it just won't survive a reload.
+    // session (held in memory, above), it just won't survive a reload.
+    sessionPref = next;
   }
   return applyTheme(next);
 }
