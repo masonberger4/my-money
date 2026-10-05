@@ -1896,8 +1896,12 @@ export async function getFeedCoverageGaps(accounts) {
 // residual would send someone hunting a duplicate that does not exist.
 // Degrades cleanly pre-migration too: getBalanceSnapshots returns [] when the
 // table is not installed, which surfaces as months with no balance coverage
-// rather than an error.
-export async function getReconciliation({ maxMonths = 12 } = {}) {
+// rather than an error. `now` and the reads are injectable for tests (the
+// getExpectedTransactions pattern); the app calls it bare.
+export async function getReconciliation(
+  { maxMonths = 12, now = new Date() } = {},
+  { client = supabase, fetchMonth = getMonthTransactions, fetchSnapshots = getBalanceSnapshots } = {}
+) {
   // Same KEYS as the success path, so the panel never has to guard a field's
   // existence — only `ok`. The month objects carry `flows` (the gross view) and
   // the top level carries `nearMiss`; both ride the spread below, so the only
@@ -1909,7 +1913,7 @@ export async function getReconciliation({ maxMonths = 12 } = {}) {
     nearMiss: { pairs: [], total: 0 },
   };
   try {
-    const { data, error } = await supabase.from('accounts').select('id, type, hidden');
+    const { data, error } = await client.from('accounts').select('id, type, hidden');
     if (error) throw error;
     // Hidden accounts are out on BOTH sides — their rows are already dropped at
     // the query level, so excluding their balances here is what keeps the two
@@ -1921,9 +1925,8 @@ export async function getReconciliation({ maxMonths = 12 } = {}) {
     // window: snapshots are written on balance CHANGE only, so an account that
     // has not moved inside a window has no rows in it — and here that absence
     // would read as "unknown" and null out every month's balance comparison.
-    const snapshots = await getBalanceSnapshots(scope.map(a => a.id), null);
+    const snapshots = await fetchSnapshots(scope.map(a => a.id), null);
 
-    const now = new Date();
     const curY = now.getFullYear();
     const curM = now.getMonth() + 1;
     // Start at the month the balance history begins, so every month that CAN
@@ -1952,12 +1955,42 @@ export async function getReconciliation({ maxMonths = 12 } = {}) {
       months.map(async ({ year, month }) => ({
         month: `${year}-${pad2(month)}`,
         label: monthLabel(year, month),
-        rows: await getMonthTransactions(year, month),
+        rows: await fetchMonth(year, month),
       }))
     );
 
+    // Re-dated rows POSTED inside the span but COUNTED outside it (user_date):
+    // no month read above returns them, yet their balance move is in a
+    // fetched month, and without them each one reads as Unexplained there.
+    // A BANK-date read on purpose (`date`, never txDateCol) — the one thing
+    // it asks is "what did the bank move in these months". Rows moved INTO
+    // the span need nothing extra: the month reads carry their bank_date.
+    // Pre-migration there is no user_date and nothing can have moved. No
+    // inner catch: a failed read must fail the panel (ok:false) like every
+    // other read here, never render the fake residual it exists to remove.
+    let movedOut = [];
+    if (transactionsHaveUserDate) {
+      const spanStart = monthBounds(months[0].year, months[0].month).start;
+      const spanEnd = monthBounds(curY, curM).end;
+      const redated = await pagedRows((from, to) =>
+        client
+          .from('transactions')
+          .select('id, account_id, date, amount, user_date, effective_date, accounts!inner(hidden)')
+          .eq('accounts.hidden', false)
+          .not('user_date', 'is', null)
+          .gte('date', spanStart)
+          .lte('date', spanEnd)
+          .order('date', { ascending: false })
+          .order('id', { ascending: false })
+          .range(from, to)
+      );
+      movedOut = withEffectiveDate(
+        redated.filter(r => r.effective_date && (r.effective_date < spanStart || r.effective_date > spanEnd))
+      );
+    }
+
     const today = localIsoDate(now);
-    const built = buildReconciliation({ monthsRows, snapshots, accounts: visible, today });
+    const built = buildReconciliation({ monthsRows, snapshots, accounts: visible, today, movedOut });
     return { ok: true, ...built, scopeCount: scope.length };
   } catch {
     return empty;

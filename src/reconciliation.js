@@ -32,9 +32,24 @@
 //                either), and card credits held back by isCardPaymentReceived
 //   excluded     rows excluded by hand
 //   outOfScope   counted rows on accounts outside the balance view
+//   dateMoved    rows the household RE-DATED across the balance window's edge
+//                (user_date). The month rows are effective-date reads (rule 3:
+//                the panel washes exactly what Overview washes), but balances
+//                move on the bank's date, so a re-dated row's amount sits in
+//                one month's ledger and its balance move in another's. This
+//                line moves it back: +amount where the row is counted but was
+//                not posted, -amount where it was posted but is not counted.
+//                It is a TIMING correction, not a class — it is in neither the
+//                headline nor the gross flows, and it is what keeps every date
+//                edit from showing as ± its amount of Unexplained twice.
 //   other        anything else, rendered only when nonzero (unknowns stay
 //                visible — a silently dropped row is the failure this module
 //                exists to catch)
+//
+// With dateMoved, deltaLedger reads as "what the transactions say the
+// balances did, by BANK date" — the same footing as the snapshots it is
+// compared against — and the identity above holds with dateMoved among the
+// impacts.
 //
 // WHAT IS LEFT is `unexplained = deltaObserved - deltaLedger`: interest
 // accrual, fees the feed reports only as a balance change, pending-vs-posted
@@ -66,13 +81,14 @@ import { displayBalance } from './accountBalance.js';
 // The cash boundary. Loans are deliberately absent — see the scope note above.
 export const RECON_SCOPE_TYPES = ['depository', 'credit'];
 
-export const BUCKET_ORDER = ['transfer', 'cardPayment', 'excluded', 'outOfScope', 'other'];
+export const BUCKET_ORDER = ['transfer', 'cardPayment', 'excluded', 'outOfScope', 'dateMoved', 'other'];
 
 export const BUCKET_LABELS = {
   transfer: 'Transfers between linked accounts',
   cardPayment: 'Card payments',
   excluded: 'Excluded by hand',
   outOfScope: 'Counted rows on other accounts',
+  dateMoved: 'Moved by a date edit',
   other: 'Other uncounted rows',
 };
 
@@ -193,7 +209,10 @@ export function classifyUncounted(t) {
 //
 // Sign note, easy to get backwards: positive `amount` is money OUT, and
 // `deltaLedger = -Σ amount`, so `deltaLedger === moneyIn.total - moneyOut.total`
-// — NOT the reverse. Property-pinned.
+// — NOT the reverse. Property-pinned. The one term the flows leave out is the
+// dateMoved timing correction (a re-dated row is classified in the month it
+// is COUNTED in), so the exact pin is
+// `deltaLedger - dateMoved.impact === moneyIn.total - moneyOut.total`.
 //
 // NAME CLASH, deliberate and worth knowing before grepping: `moneyOut`/`moneyIn`
 // appear on TWO different objects in this file. On a BUCKET (the `add()` tally)
@@ -235,6 +254,8 @@ const finite = v => {
   const n = Number(v);
   return Number.isFinite(n) ? n : 0;
 };
+
+const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
 
 // ---------------------------------------------------------------------------
 // POSSIBLE MISSED TRANSFERS — the one over-count no balance check can ever see.
@@ -445,10 +466,16 @@ function buildFlows(gross, outOfScope) {
 //   absence would read as unknown and null out every month).
 // accounts: the non-hidden account list; the builder scopes itself.
 // today: 'YYYY-MM-DD' local — decides which month is still in progress.
+// movedOut (optional): re-dated rows whose EFFECTIVE date falls outside every
+//   fetched month but whose bank `date` may fall inside one — no month read
+//   returns them, yet their balance move is in a fetched month. Same shape as
+//   the month rows (withEffectiveDate: `date` effective, `bank_date` bank).
+//   Only their amount, account and two dates are read; they are never
+//   classified, since they are counted in a month outside the panel.
 //
 // Returns { months: [...newest first], coverage: { earliestSnapshot,
 // latestSnapshot } }. Degrades to an empty shape on garbage; never throws.
-export function buildReconciliation({ monthsRows, snapshots, accounts, today } = {}) {
+export function buildReconciliation({ monthsRows, snapshots, accounts, today, movedOut } = {}) {
   const empty = {
     months: [],
     coverage: { earliestSnapshot: null, latestSnapshot: null },
@@ -467,6 +494,29 @@ export function buildReconciliation({ monthsRows, snapshots, accounts, today } =
   if (!Array.isArray(monthsRows) || monthsRows.length === 0) return { ...empty, coverage };
 
   const currentMonth = typeof today === 'string' ? today.slice(0, 7) : null;
+
+  // Every in-scope row whose bank date differs from the date it is counted
+  // on, across ALL fetched months (unsliced) plus the movedOut read — the
+  // pool each month's window draws its moved-OUT rows from. A row without
+  // `bank_date` (a pre-migration read) never qualifies, so ledgers with no
+  // date edits are byte-identical to before.
+  const isRedated = t =>
+    !!t &&
+    scopeIds.has(t.account_id) &&
+    typeof t.date === 'string' &&
+    typeof t.bank_date === 'string' &&
+    ISO_DAY.test(t.bank_date) &&
+    t.bank_date !== t.date &&
+    finite(t.amount) !== 0;
+  const fetched = monthsRows.flatMap(e => (Array.isArray(e?.rows) ? e.rows.filter(Boolean) : []));
+  const seenIds = new Set(fetched.map(t => t.id).filter(id => id != null));
+  const redatedPool = fetched.filter(isRedated);
+  for (const t of Array.isArray(movedOut) ? movedOut : []) {
+    // Never twice: a movedOut row a month read also returned is already here.
+    if (!isRedated(t) || (t.id != null && seenIds.has(t.id))) continue;
+    if (t.id != null) seenIds.add(t.id);
+    redatedPool.push(t);
+  }
 
   const months = monthsRows
     .map(entry => {
@@ -567,25 +617,60 @@ export function buildReconciliation({ monthsRows, snapshots, accounts, today } =
       }
       const flows = buildFlows(gross, outOfScope);
 
+      // DATE EDITS, after the flows on purpose: the gross view classifies the
+      // rows counted in THIS month, while this corrects deltaLedger onto the
+      // bank's dates for the balance comparison. The window is the one the
+      // balances span — the month, or through asOfDate for the month in
+      // progress — so a posting after the newest reading is never corrected
+      // for, and a row re-dated past the cutoff within the month is.
+      const inWindow = d => d >= edges.start && d <= asOfDate;
+      const counted = new Set(rows);
+      for (const t of rows) {
+        // Counted here, posted outside the window: its -amount above never
+        // moved these balances.
+        if (!isRedated(t) || inWindow(t.bank_date)) continue;
+        const amount = finite(t.amount);
+        add('dateMoved', amount, amount);
+        deltaLedger += amount;
+      }
+      for (const t of redatedPool) {
+        // Posted inside the window, counted elsewhere (another month, or past
+        // the cutoff of this one): the balances moved and no row here says so.
+        if (counted.has(t) || !inWindow(t.bank_date)) continue;
+        const amount = finite(t.amount);
+        add('dateMoved', amount, -amount);
+        deltaLedger -= amount;
+      }
+
       const start = usable ? balancesAsOf(snaps, scope, edges.prevEnd) : null;
       const end = usable ? balancesAsOf(snaps, scope, asOfDate) : null;
       const deltaObserved =
         start && end && start.total !== null && end.total !== null ? end.total - start.total : null;
 
+      // Every figure the panel prints goes out through r2, like the gross
+      // view's: 10.10 + 20.20 + 30.30 is 60.599999999999994 in floating point,
+      // and a month that balances to the cent otherwise left a -7e-15 residual
+      // that signed() printed as "−$0" on the one line the panel says to watch.
+      // `unexplained` rounds the RAW difference, never a difference of two
+      // rounded figures. Inputs are cent amounts, so the identity still holds
+      // between the rounded figures to float precision.
       return {
         month: entry.month,
         label: entry.label ?? entry.month,
         partial,
-        income,
-        spending,
-        net,
+        income: r2(income),
+        spending: r2(spending),
+        net: r2(net),
         flows,
-        deltaLedger,
-        buckets: BUCKET_ORDER.filter(k => tally.has(k)).map(k => tally.get(k)),
+        deltaLedger: r2(deltaLedger),
+        buckets: BUCKET_ORDER.filter(k => tally.has(k)).map(k => {
+          const b = tally.get(k);
+          return { ...b, impact: r2(b.impact), moneyOut: r2(b.moneyOut), moneyIn: r2(b.moneyIn) };
+        }),
         balanceStart: start,
         balanceEnd: end,
-        deltaObserved,
-        unexplained: deltaObserved === null ? null : deltaObserved - deltaLedger,
+        deltaObserved: deltaObserved === null ? null : r2(deltaObserved),
+        unexplained: deltaObserved === null ? null : r2(deltaObserved - deltaLedger),
       };
     })
     .filter(Boolean)
