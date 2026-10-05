@@ -39,7 +39,11 @@
   nobody in the smoke walk (the searchOpen lesson), so the walk has to OPEN the
   section (`[data-mm-plan-group]`). No stored
   value ⇒ no `data-theme` ⇒ follow the OS. Every storage access is try/caught
-  (Safari private mode throws on access). `src/theme.js` owns it; index.html
+  (Safari private mode throws on access; older private mode READS fine and
+  throws only on the write), and a choice whose write is refused is held in
+  memory for the session, so an OS appearance change can't undo it (the
+  `src/theme.js` row — a blocked store must never silently mean "system").
+  `src/theme.js` owns it; index.html
   carries a deliberate 3-line duplicate of read+apply that must stay in sync.
 - **Theme tokens live ONLY in `src/ui.css`.** Never redeclare a token value in a
   component and never set one as an inline style — an inline custom property on
@@ -47,6 +51,15 @@
   Use tokens, not literals, for anything themed. Two exceptions that must stay
   hardcoded and be changed in lockstep with `--bg`: index.html's `theme-color`
   metas and its pre-paint `html/body` background (parsed before CSS loads).
+- **A fixed-width form control sets its width in em, not px** (2026-10-05):
+  the old px divided by its inline font size (56px at `fontSize:12` is
+  4.67em), or `max(<px>, <em>)` when part of the control doesn't scale (a date
+  input's picker icon). On a phone the `src/ui.css` coarse-pointer rule lifts
+  every text-entry control to 16px, and a px width then clips its own value
+  (the Debt tab's 56px APR field cut "24.99" off); em keeps desktop unchanged
+  and widens with the text. A flex:1 input beside a button also needs
+  `minWidth:0`, or its intrinsic width at 16px pushes the button out of the
+  row (the Ask tab's Send did).
 - `ACCOUNT_COLORS` / `DEFAULT_COLORS` (Dashboard.jsx) are **data, not theme** —
   user-overridable colors persisted in `settings`. Never tokenize them and
   **never change their stored hex values**. Same for the `#1D9E75`/`#D85A30`
@@ -56,7 +69,9 @@
   3:1 (marks) against the surface it actually sits on — which also covers the
   arbitrary colors the Swatch picker can produce, as a second fixed palette
   could not. Pass the surface read from the token at runtime (`readToken`), and
-  re-read it on theme change or chips keep the old theme's contrast. Two things
+  re-read it on theme change or chips keep the old theme's contrast
+  (`useThemeToken` in theme.js is the component hook that does both — don't
+  write a local copy). Two things
   deliberately NOT corrected: the Swatch fill (it's the color picker — it must
   show the stored value truthfully) and the Donut's slice separation (the
   palette maps several categories to one hex, so adjacent slices can be a

@@ -794,3 +794,127 @@ entry records them. What PR B DECIDED, as opposed to fixed:
   hiked one can land on a ` #n` key — exact key stability needs persisted
   identity, i.e. a migration.
 
+## 2026-10-05 — Audit PR C: statement import and PWA shell fixes
+
+The last of the three PRs from the 2026-10-05 review: the statement-import
+group and the PWA-shell group, plus a lockfile-only `npm audit fix` (F103) and
+a follow-up that keeps sw.js's shell cache write inside the navigation's
+waitUntil. PR A (#145) and PR B (#146) had already merged. The item list is
+the plan doc's "Improvement backlog (2026-10-05 audit)"; the rules are in the
+memory docs (the `src/csvImport.js`, `src/pdfImport.js`,
+`src/components/CsvImport.jsx`, `src/theme.js`, `src/lazyWithReload.js`,
+`src/components/ErrorBoundary.jsx`, `public/sw.js`, `src/ui.css` and
+`vercel.json` key rows). What PR C DECIDED, as opposed to fixed:
+
+- **A PDF's running Balance never takes a money role, and Amount beside
+  Balance is one signed amount** (F06). Money columns are named by their
+  header; a named Debit+Credit pair wins, a lone "Amount" is the signed
+  amount, and the left = debit / right = credit guess applies only to
+  unnamed columns. Templates already saved per account are not migrated (a
+  bad saved layout is re-adjusted by hand), and rows already imported under
+  one must be deleted by hand, since the hash includes the amount. Not built:
+  inferring an auto-detected single column's sign from balance deltas. It
+  still defaults to out_positive; a statement printing withdrawals negative
+  needs the editor's sign select, and the totals line shows when it does.
+- **Year-less MM/DD dates parse in PDFs only, with the year from the
+  statement period and no guess without one** (F41). CSV `parseDate` stays
+  strict, because a CSV has no statement period to take a year from.
+- **Trailing CR, DR and minus are read** (F83). `parseMoney` keeps CR
+  relative (the opposite of the column's unmarked values), which
+  `normalizeDebitCredit` and the PDF section flip depend on. After review,
+  `buildRows`' single-amount path reads a CR/DR-marked CSV cell as printed,
+  whatever `amountSign` says: the CSV default is in_positive, so "100.00 CR"
+  had come in as money out. Rejected: auto-selecting out_positive for a
+  marked file. `amountSign` is sticky across the files of one modal, so an
+  automatic flip would silently carry into the next, unmarked file. Accepted
+  residuals: a dated credit-balance summary line inside a PDF's table region
+  ("Previous Balance … CR") now has a money shape and can import as a row, as
+  unsigned balance lines already could, and the totals line exposes it.
+  Reporting skipped PDF lines stays the deferred near-miss feature. Under
+  out_positive, the section flip can turn a CR-marked deposit inside a
+  Deposits section into money out, though auto mode usually declines the
+  flip. CR cells were dropped before this, so no existing id moves.
+- **CSV description synonyms run Description, Payee, Name, Details, Memo,
+  then a generic Transaction column** (F44; Memo was second). Accepted with a
+  dedup caveat: the hash includes the description, so a file with NO
+  Description column whose description now comes from a different column
+  double-inserts if it was already imported under the old order. Delete the
+  old import first. The household's backfill files carry a Description column,
+  so their ids don't move. Accepted because the old order took blank or
+  boilerplate memos: a blank-memo file skipped every row, and a bank's
+  boilerplate memo became every row's description. Not built: a
+  mostly-blank-column fallback. The reorder covered both reproductions.
+- **An Amount column beside one stray debit- or credit-worded column is not
+  a pair** (F40). If at least 80% of its sampled cells are Debit/Credit
+  markers, it becomes a per-row indicator. Otherwise it is dropped. A row
+  with no readable marker is skipped, not signed through `amountSign`,
+  because the toggle is hidden for this shape. The pair path needs both
+  columns. "Payments" counts as a credit header only as the whole header.
+  A detected file that builds no rows offers "Map columns by hand", which is
+  never persisted (per-account column memory stays the deferred Group 6
+  feature). Accepted residuals: a credit column worded "Payment Amount" no
+  longer auto-detects and goes to the manual mapper, and a "Dr/Cr" header
+  claims no role, so it reads as one signed Amount with the toggle shown.
+- **The import modal adopts the account it creates** (F42). Rejected: name
+  dedup inside `createManualAccount`. A name match can't tell this modal's
+  own retry from a different account that happens to share the name.
+  Adoption fixes the twin where it starts. Changed from the plan: an
+  adopted account whose rows didn't land is reported to the parent on CLOSE,
+  not at the failure. In the first-run EmptyState that refresh replaces the
+  modal with the Dashboard, which drops the adopted target, and a fresh modal
+  defaults to "new", so the twin comes back.
+- **Reading an account's existing transactions fails closed** (F43), in the
+  single-file path and on every batch file's refetch. The one-format check
+  re-runs on each of those reads, and a batch read with no sources fails the
+  file. After review, these decisions moved into pure helpers in
+  `src/csvImport.js` and are tested as behaviour, not source text. Not added:
+  a smoke-mock switch that makes the read reject. It would turn the CI render
+  gate into a multi-step modal flow for a low-severity path.
+- **One `useThemeToken` in theme.js** (F99). Two private copies drift on the
+  next re-read change, and theme.js imports no component, so the single copy
+  creates no cycle.
+- **A theme choice storage refuses is held for the session** (F76). Changed
+  from the plan, which held it only when the READ failed: old Safari private
+  mode reads fine and throws only on the write, so the hold keys on the
+  failed write.
+- **A stale lazy chunk reloads the app once** (F45). A sessionStorage flag is
+  the guard. With the flag already set, or with storage unreadable, the
+  error is rethrown. Rejected: retrying without a bound, which loops a
+  reload while offline. A second failure lands in `LazyModal`, a boundary
+  scoped to the modal. Rejected: leaving it to App's boundary, which blanked
+  the whole Dashboard and the nav. `LazyModal` stays in ErrorBoundary.jsx
+  because, as its own module, it moved vendor-react's hash with app code
+  (the shared-chunk Gotcha). The Vercel rewrite excludes assets/ so a
+  missing chunk 404s, and sw.js refuses to cache HTML for an /assets path as
+  a backstop. The card's copy ("Couldn't open this … Your data is fine —
+  reloading usually fixes it.") was written in the build and is Mason's to
+  re-word.
+- **sw.js v8 keeps fingerprinted assets across a version bump** (F48). The
+  asset cache is unversioned, precache paths are served from the shell
+  cache, and activate migrates a legacy assets-v* cache. Rejected: versioned
+  asset caches, which wiped every chunk on each bump. Skipped: warming the
+  shell's /assets URLs at install, to keep the change small.
+- **A navigation gives the network 3s when a cached shell exists** (F85) —
+  an engineering default. Trade: on a slow network the previous deploy's
+  shell is served more often. The reload-once, the kept assets and the
+  background shell update cover that. With no cached shell it waits.
+- **The prune spares every /assets URL the fresh shell references**, and it
+  runs only after an ok navigation (F86). Cache hits never refresh insertion
+  order, so the keep-set is what protects the byte-stable vendor chunks.
+- **The shell's `cache.put` rides in waitUntil too** (the review follow-up).
+  The lockstep pin now accepts the ternary that keeps the put's promise,
+  and it still requires the `fresh.ok` guard.
+- **Form controls are 16px on a coarse pointer through one `!important`
+  media rule** (F49), and fixed-width fields moved to em so desktop is
+  unchanged. Rejected: `maximum-scale=1`/`user-scalable=no`, which disables
+  pinch-zoom (accessibility). Rejected too: per-site inline 16px edits,
+  because there are dozens of sites and new ones would drift.
+- **F103 shipped as a one-off lockfile-only `npm audit fix`.** No `--force`,
+  package.json unchanged, dev-tree only (the dev server's express stack and
+  eslint's brace-expansion), and nothing in the browser bundle. The
+  2026-09-08 rejection was about a recurring `npm audit` CI gate, not about
+  applying an in-range fix once.
+- **Left for later, by design** (reasons in the plan doc's lists): F84's
+  extra CSV date shapes, F87's error-mapping half, and the rulings on F46's
+  update signal and F47's cold-start screen.
+

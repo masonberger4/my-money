@@ -656,9 +656,10 @@ nothing from Mason.
 > run `wf_45ee6a52-0dd`. The build ships as THREE PRs — **A**: Dashboard
 > state, refresh and screens; **B**: the data layer, the server and the pure
 > cores; **C**: statement import and the PWA shell — and every fix commit
-> names its ids (F01–F105, the audit's own numbering) in a `Findings:` trailer
-> or, on PR A's first ten commits, as the body's leading `Fnn:` lines; a
-> review-repair trailer may carry a tag such as `F72-HANG` instead.
+> names its ids (F01–F105, the audit's own numbering) in a `Findings:` (or
+> `Finding:`) trailer or, on PR A's first ten commits, as the body's leading
+> `Fnn:` lines; a review-repair trailer may carry a tag such as `F72-HANG`
+> instead.
 > Each line below is the failure that was fixed; the rule it produced lives
 > in the memory docs, the reasoning in the 2026-10-05 decision-journal entry.
 
@@ -801,37 +802,42 @@ nothing from Mason.
   then vanished for months.
 - F29 — two subscriptions billed under one merchant name were both missed.
 
-**PR C — statement import and the PWA shell (lands in the audit PR after B).**
+**PR C — statement import and the PWA shell — SHIPPED 2026-10-05 (audit PR C).**
 - F06 — PDF auto-detect read Amount plus Balance columns as a Debit/Credit
-  pair. *(lands in PR C)*
+  pair.
 - F41 — year-less MM/DD PDF dates (most US card statements) never parsed.
-  *(lands in PR C)*
 - F83 — credits printed with a CR suffix or a trailing minus were dropped from
-  PDFs and rejected in CSVs. *(lands in PR C)*
+  PDFs and rejected in CSVs.
 - F44 — CSV description mapping preferred Memo over Payee and Name.
-  *(lands in PR C)*
 - F40 — Amount plus one stray debit- or credit-worded column imported zero
-  rows with no way to remap. *(lands in PR C)*
+  rows with no way to remap.
 - F42 — an account created for import target "new" was never adopted, so a
-  retry created a same-named twin. *(lands in PR C)*
+  retry created a same-named twin.
 - F43 — a failed existing-ids lookup read as an empty account, disarming the
-  mixed-format guard. *(lands in PR C)*
+  mixed-format guard.
 - F99 — the `useSurface` hook was duplicated in CsvImport and
-  PdfTemplateEditor. *(lands in PR C)*
+  PdfTemplateEditor.
 - F76 — with storage blocked, an explicit Light/Dark choice was undone by the
-  next OS appearance change. *(lands in PR C)*
+  next OS appearance change.
 - F45 — a stale lazy chunk after a deploy replaced the Dashboard with
   "Something broke", and sw.js cached index.html under the dead .js URL.
-  *(lands in PR C)*
 - F48 — a `CACHE_VERSION` bump wiped every fingerprinted asset and cacheFirst
   never read the precache, so the first offline launch after a bump couldn't
-  boot. *(lands in PR C)*
+  boot.
 - F85 — an offline or lie-fi launch waited on the OS fetch timeout before
-  serving the cached shell. *(lands in PR C)*
+  serving the cached shell.
 - F86 — the /assets prune evicted the live shell's stable vendor and runtime
-  chunks. *(lands in PR C)*
+  chunks.
 - F49 — about forty form controls under 16px made iOS Safari zoom on focus.
-  *(lands in PR C)*
+- F103 — `npm audit` reported four dev-tree advisories (one high); a
+  lockfile-only `npm audit fix` cleared them. A one-off refresh, not the
+  `npm audit` CI step rejected 2026-09-08 (listed under "Buildable, not built"
+  until PR C took it).
+
+Where PR C's build diverged from the plan (the adopted account reported on
+close, the theme choice held on a failed write, `LazyModal` kept inside
+ErrorBoundary.jsx, a CR/DR-marked cell read as printed), the "Audit PR C"
+decision-journal entry says what shipped instead and why.
 
 ### Needs a Mason ruling before code
 
@@ -913,9 +919,6 @@ or copy the household sees, a recorded rule, or a migration — so it waits.
   Its third shape, M/D/YYYY with a time, stays rejected by the shipped
   2026-09-04 Wave B #16 scope (pinned in `test/csvImport.test.js`) unless
   Mason relaxes it.
-- **F103 — `npm audit fix`** clears four dev-tree advisories with a
-  lockfile-only change; nothing reaches production. A one-off refresh, not the
-  `npm audit` CI step rejected 2026-09-08.
 - The no-ruling halves named above: F30's half B, F87's error mapping and
   F81's worst-row status.
 
@@ -990,6 +993,9 @@ descriptions are invented illustrations, never household numbers (public repo).
 >   inside the harness, which is why the overlap path had never been rendered).
 >   `test/smokeMocks.test.js` asserts every needed export EXISTS but nothing
 >   about the SHAPE it returns; closing that gap is unbuilt work, recorded here.
+>   (A third drift surfaced in the 2026-10-05 audit PR C: the mock's
+>   `importCsvTransactions` returned an object where the adapter returns a
+>   count, and the first walk that pressed Import crashed the modal.)
 > - **The render gate earned its keep again.** The Wave C sheet re-resolve
 >   assumed `transactions` was an array; it is a result object that starts null.
 >   `npm test` and `vite build` both passed on that TypeError. Only the browser
@@ -1179,11 +1185,13 @@ insert.
 
 **Phone-shell resilience.** A stale chunk after a deploy turns Import or Manage
 Bank Connections into the full-screen error card (`src/main.jsx:20-24`,
-`Dashboard.jsx:31-35,7811-7836`); a resident PWA runs yesterday's bundle with no
-update signal (`public/sw.js:29-47`); an offline launch waits on the OS fetch
-timeout before serving the cached shell (`public/sw.js:92-105` — keep the
-`fresh.ok` line verbatim, the lockstep test matches it, and bump
-`CACHE_VERSION`); a foreground return after hours away never re-pulls the feed
+`Dashboard.jsx:31-35,7811-7836`) — **SHIPPED 2026-10-05 (audit PR C)**: one
+automatic reload, then a card scoped to the modal; a resident PWA runs
+yesterday's bundle with no update signal (`public/sw.js:29-47`); an offline
+launch waits on the OS fetch timeout before serving the cached shell
+(`public/sw.js:92-105` — keep the `fresh.ok` line verbatim, the lockstep test
+matches it, and bump `CACHE_VERSION`) — **SHIPPED 2026-10-05 (audit PR C)**,
+a 3s network budget in sw.js v8; a foreground return after hours away never re-pulls the feed
 or re-checks feed health (`Dashboard.jsx:1984,2452-2479`, **VERIFIED**, and the
 hour-gated case must not paint the sync-failure banner) — **SHIPPED 2026-10-05
 (audit PR A)**, quiet as required; the load-failure banner
@@ -1194,8 +1202,10 @@ cash-flow read renders as "not enough measured income" rather than an error
 nothing about why (`src/App.jsx:104-113`, `src/components/Login.jsx:14-21`);
 sub-16px inputs trigger Safari's focus zoom on roughly fourteen inputs (one
 `@media (pointer: coarse)` rule in `src/ui.css`, then re-screenshot the filter,
-add-debt and mileage rows, which will reflow); and every pre-Dashboard screen
-overflows by the safe-area insets.
+add-debt and mileage rows, which will reflow) —
+**SHIPPED 2026-10-05 (audit PR C)** as described, and the walk found about
+forty such controls; and every pre-Dashboard screen overflows by the
+safe-area insets.
 
 **Teaching and Plan ergonomics.** "Show all" when the Review filter empties the
 list; a Recent row in the category picker; the taught-rules screen's copy still
