@@ -668,24 +668,48 @@ function Donut({data,size=130}) {
 }
 
 // Commits when the picker CLOSES, not on every step of it. A native colour
-// input fires `change` continuously while the user drags, and each one was a
-// database write plus (before the account page derived its account) a refetch
-// of that account's whole transaction list — a burst of UPDATEs and a flashing
-// list for one colour choice. The live value is previewed locally so the
-// swatch still tracks the drag; `onChange` fires once, on blur/close, and only
-// if the colour actually changed. Accepted, not overlooked: there is no
-// flush-on-unmount, so a pick abandoned by the component disappearing mid-drag
-// is dropped. Native colour pickers are modal on both targets here (iOS Safari
-// and desktop), so nothing can unmount underneath one — machinery for that
-// would be guarding a path the platform does not offer.
+// input fires `input` continuously while the user drags (React's onChange
+// follows `input`), and each one used to be a database write plus (before the
+// account page derived its account) a refetch of that account's whole
+// transaction list — a burst of UPDATEs and a flashing list for one colour
+// choice. The live value is previewed locally so the swatch still tracks the
+// drag; `onChange` fires once, when the picker closes, and only if the colour
+// actually changed. "Closes" is the NATIVE `change` event, bound directly on
+// the input: React exposes no listener for it on a colour input, and the
+// blur-only commit this replaced never fired on the laptop — the picker opens
+// through a programmatic click() on a pointer-events:none input, which is
+// never focused, so it never blurs (the swatch showed the new colour, nothing
+// was written, and a reload brought the old one back). Blur stays as a
+// fallback for a platform whose picker does take focus; whichever of the two
+// arrives first commits and the second finds nothing pending. Accepted, not
+// overlooked: there is no flush-on-unmount, so a pick abandoned by the
+// component disappearing mid-drag is dropped. Native colour pickers are modal
+// on both targets here (iOS Safari and desktop), so nothing can unmount
+// underneath one — machinery for that would be guarding a path the platform
+// does not offer.
 function Swatch({color,onChange}) {
   const ref=useRef();
   const [live,setLive]=useState(null);
   const shown=live??color;
-  const commit=()=>{
+  // The native listener is bound once, so it reads props and the pending
+  // pick through refs — never a stale closure.
+  const latest=useRef(null); latest.current={color,onChange};
+  const pick=useRef(null);
+  const commit=v=>{
+    pick.current=null;
     setLive(null);
-    if(live&&live!==color)onChange(live);
+    if(v&&v!==latest.current.color)latest.current.onChange(v);
   };
+  useEffect(()=>{
+    const el=ref.current;
+    if(!el)return;
+    // `pick` is set by every `input` before the close; el.value covers a
+    // browser that fires `change` alone. After a blur commit, the parent's
+    // optimistic colour already equals el.value, so this can't write twice.
+    const h=()=>commit(pick.current??el.value);
+    el.addEventListener("change",h);
+    return ()=>el.removeEventListener("change",h);
+  },[]);
   // The fill is the STORED colour, shown truthfully — this is the colour picker,
   // so it must never be contrast-adjusted. The outline is --muted (>=3:1 on the
   // card in both themes) rather than the --border hairline, which disappears
@@ -696,7 +720,8 @@ function Swatch({color,onChange}) {
         outline:"1.5px solid var(--muted)",transition:"transform .1s",position:"relative"}}
       onMouseEnter={e=>e.currentTarget.style.transform="scale(1.3)"}
       onMouseLeave={e=>e.currentTarget.style.transform="scale(1)"}>
-      <input ref={ref} type="color" value={shown} onChange={e=>setLive(e.target.value)} onBlur={commit}
+      <input ref={ref} type="color" value={shown} onChange={e=>{pick.current=e.target.value;setLive(e.target.value);}}
+        onBlur={()=>commit(pick.current)}
         style={{position:"absolute",opacity:0,width:1,height:1,pointerEvents:"none"}}/>
     </div>
   );

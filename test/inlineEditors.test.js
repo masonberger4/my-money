@@ -48,3 +48,26 @@ test('the tx-sheet Escape capture yields to [data-mm-esc-local] inline editors',
       `${name}'s input consumes Escape itself, so it must carry data-mm-esc-local=""`);
   }
 });
+
+// --- Swatch commits when the picker closes — on the NATIVE change event ------
+// The picker opens via a programmatic click() on a pointer-events:none input,
+// which is never focused and so never blurs: a blur-only commit previewed the
+// new colour and wrote nothing (the laptop's every Swatch site). React's
+// onChange on a colour input follows `input` (each drag step), so the close
+// has to be heard with a native `change` listener.
+test('Swatch commits on a native change listener, bound and unbound', () => {
+  const body = fnBody('Swatch');
+  assert.match(body, /addEventListener\("change",/,
+    'Swatch must listen for the native change event (the picker closing) — blur never fires on the laptop');
+  assert.match(body, /removeEventListener\("change",/,
+    'the native change listener must be removed on unmount');
+  // The listener is bound once, so it must read the props through a ref.
+  assert.match(body, /latest\.current=\{color,onChange\}/,
+    'the once-bound listener must read color/onChange through a ref, never a stale closure');
+  assert.match(body, /v!==latest\.current\.color\)latest\.current\.onChange\(v\)/,
+    'commit must write only a colour that differs from the stored one');
+  // React's onChange only previews; it must never write per drag step.
+  const onChangeAttr = body.slice(body.indexOf('type="color"'));
+  assert.doesNotMatch(onChangeAttr.slice(0, onChangeAttr.indexOf('onBlur')), /onChange\(/,
+    'the per-step React onChange must only preview, never call the parent onChange');
+});
