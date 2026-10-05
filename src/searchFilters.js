@@ -2,7 +2,8 @@
 // Transactions-tab search filters (amount range + date range) and building the
 // PostgREST clause for absolute-value amount matching. Pushed SERVER-side so
 // the 200-cap + load-more paginate the FILTERED set, not a client slice of an
-// unfiltered 200. Covered by test/searchFilters.test.js.
+// unfiltered 200. Also home to dateCommit, the blur-commit guard every date
+// EDIT input shares. Covered by test/searchFilters.test.js.
 
 // Amounts match by ABSOLUTE VALUE — the app stores positive = money out,
 // negative = money in (CLAUDE.md sign convention), but a user typing 80 means
@@ -18,13 +19,36 @@ export function parseAmount(str) {
 // Only a COMPLETE, sane date passes — <input type="date"> emits values like
 // "0202-06-15" while a year is being typed (the CLAUDE.md date-input gotcha),
 // so anything outside the floor/ceiling is treated as "no filter yet" rather
-// than a real bound that silently empties the results.
+// than a real bound that silently empties the results. The full-shape regex
+// is also what rejects a 5- or 6-digit year ("20261-09-15"): Chrome's year
+// segment keeps accepting digits, and a 4-character prefix compare passed it.
 export const DATE_YEAR_FLOOR = 1990;
-export function sanitizeDateInput(str) {
+export function sanitizeDateInput(str, floor = DATE_YEAR_FLOOR) {
   if (typeof str !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(str)) return null;
   const y = Number(str.slice(0, 4));
-  if (y < DATE_YEAR_FLOOR || y > 2100) return null;
+  if (y < floor || y > 2100) return null;
   return str;
+}
+
+// Record EDITS (a transaction's date, placed-in-service, a debt's due date, a
+// logged drive) keep the 1900 floor their old hand-rolled guards had: an old
+// building's placed-in-service date can predate the search floor.
+export const EDIT_YEAR_FLOOR = 1900;
+
+// What a date input's BLUR should do with what the field now holds, against
+// the stored value (null/'' = none): an EMPTY field clears ('clear', or
+// 'noop' when nothing is stored), an invalid value — a partial year, a 5-digit
+// year — REVERTS the field without writing, a valid different date saves.
+// Never write garbage and never turn garbage into a clear (that deleted the
+// stored date). A field that can't be empty (a transaction's date) maps
+// 'clear' to a revert itself.
+export function dateCommit(raw, stored, floor = EDIT_YEAR_FLOOR) {
+  const cur = stored || null;
+  if (!raw) return cur ? { action: 'clear', value: null } : { action: 'noop', value: null };
+  const v = sanitizeDateInput(raw, floor);
+  if (!v) return { action: 'revert', value: cur };
+  if (v === cur) return { action: 'noop', value: v };
+  return { action: 'save', value: v };
 }
 
 // Raw input strings -> normalized filter object, or null when nothing is

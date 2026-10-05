@@ -5,10 +5,10 @@ import { clampSeries } from "../netWorth.js";
 // Pure cores imported directly (never Supabase — the mock-harness alias rule
 // only covers dataAdapter/sync/db/apiClient; pure modules are safe).
 import { planAutoFill, envelopeBar, assignUnchanged, targetUnchanged, monthsUntil, pickedMonthKey } from "../envelopes.js";
-import { buildSearchFilters, searchIsActive } from "../searchFilters.js";
+import { buildSearchFilters, searchIsActive, sanitizeDateInput, dateCommit, EDIT_YEAR_FLOOR } from "../searchFilters.js";
 import { expectedByCategory, expectedStatus, isMissedExpected, seedFromRecurring, projectFutureCycles, homeBillsWindow } from "../expectedTx.js";
 import { payoffWhatIf, debtFreeMonth, isMortgage, amortizationSchedule, addMonths, MAX_MONTHS, payoffProgress, utilization } from "../debtPayoff.js";
-import { SCHEDULE_E_LINES, RENTS_KEY, DEFAULT_SCHEDULE_E_MAP, scheduleEReport, entityMonthly, entityLedger, personalDeductionReport, DEDUCTION_BUCKETS, DEFAULT_DEDUCTION_MAP, mileageDeduction, scheduleECsv, parseTaxMaps, setEmapEntryIn, setDmapEntryIn } from "../taxReport.js";
+import { SCHEDULE_E_LINES, RENTS_KEY, DEFAULT_SCHEDULE_E_MAP, scheduleEReport, entityMonthly, entityLedger, personalDeductionReport, DEDUCTION_BUCKETS, DEFAULT_DEDUCTION_MAP, mileageDeduction, scheduleECsv, parseTaxMaps, setEmapEntryIn, setDmapEntryIn, savedOutsideYear } from "../taxReport.js";
 import { merchantKey, matchLearnedRule, isKeyPrefix } from "../txClassify.js";
 import { trimChatMsgs, buildSavedChat } from "../savedChats.js";
 import { patchTxShape } from "../spending.js";
@@ -2204,6 +2204,10 @@ export default function Dashboard({ refreshTick = 0 }) {
   const [addingEntity,setAddingEntity]=useState(false);
   const [newEntityName,setNewEntityName]=useState("");
   const [mileForm,setMileForm]=useState(null);  // {on_date,miles,purpose,entity_id}
+  // The year a just-saved drive landed in when that is NOT the year on screen
+  // (the form defaults to today while the viewed year may be last year's) —
+  // the list only shows the viewed year, so without this the drive vanished.
+  const [mileNote,setMileNote]=useState(null);
   const [customColors,setCustomColors]=useState({});
   const [customNames,setCustomNames]=useState({});
   const [customCats,setCustomCats]=useState([]);
@@ -2637,11 +2641,17 @@ export default function Dashboard({ refreshTick = 0 }) {
   async function handleAddMileage(){
     if(!mileForm)return;
     const miles=Number(mileForm.miles);
-    if(!mileForm.on_date||!Number.isFinite(miles)||miles<=0)return;
+    // The input commits per keystroke, so a mid-typed year ("0002-…", or a
+    // 5-digit "20261-…" on desktop) must not be savable.
+    const onDate=sanitizeDateInput(mileForm.on_date,EDIT_YEAR_FLOOR);
+    if(!onDate||!Number.isFinite(miles)||miles<=0)return;
     try{
-      const row=await addMileage({on_date:mileForm.on_date,miles,purpose:mileForm.purpose,entity_id:mileForm.entity_id||null});
-      // Only list it if it belongs to the year on screen.
-      if(row.on_date.slice(0,4)===String(taxYear))setMileage(prev=>[row,...prev].sort((a,b)=>a.on_date<b.on_date?1:-1));
+      const row=await addMileage({on_date:onDate,miles,purpose:mileForm.purpose,entity_id:mileForm.entity_id||null});
+      // Only list it if it belongs to the year on screen; otherwise SAY where
+      // it went (savedOutsideYear) instead of letting it silently vanish.
+      const elsewhere=savedOutsideYear(row.on_date,taxYear);
+      if(elsewhere==null)setMileage(prev=>[row,...prev].sort((a,b)=>a.on_date<b.on_date?1:-1));
+      setMileNote(elsewhere);
       setMileForm(null);
     }catch(err){
       console.error("adding mileage failed",err);
@@ -6899,12 +6909,13 @@ export default function Dashboard({ refreshTick = 0 }) {
                           )}
                           {/* Commit on BLUR only — a date input emits COMPLETE
                               garbage values while the year is typed (see the
-                              placed_in_service comment). */}
+                              placed_in_service comment). dateCommit: empty
+                              clears, garbage reverts, a valid date saves. */}
                           <label style={{display:"inline-flex",alignItems:"center",gap:4,fontSize:12,color:"var(--muted)"}}>due
                             <input type="date" key={a.id+":due:"+(a.next_payment_due_date||"")} defaultValue={a.next_payment_due_date||""}
-                              onBlur={ev=>{const raw=ev.target.value||null;const v=raw&&raw.slice(0,4)>="1900"?raw:null;
-                                ev.target.value=v||"";
-                                if(v!==(a.next_payment_due_date||null))saveDebt(a.id,{next_payment_due_date:v});}}
+                              onBlur={ev=>{const c=dateCommit(ev.target.value,a.next_payment_due_date);
+                                if(c.action==="revert"){ev.target.value=c.value||"";return;}
+                                if(c.action!=="noop")saveDebt(a.id,{next_payment_due_date:c.value});}}
                               style={{padding:"5px 7px",borderRadius:8,border:"1px solid var(--border)",background:"var(--bg)",
                                 color:"var(--text)",fontSize:12,fontFamily:"inherit",outline:"none"}}/>
                           </label>
@@ -7812,7 +7823,7 @@ export default function Dashboard({ refreshTick = 0 }) {
               <div className="card">
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
                   <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em"}}>Mileage</div>
-                  {!mileForm&&<button className="ibtn" style={{fontSize:11}} onClick={()=>setMileForm({on_date:localToday,miles:"",purpose:"",entity_id:activeEnts[0]?.id||""})}>＋ Log a drive</button>}
+                  {!mileForm&&<button className="ibtn" style={{fontSize:11}} onClick={()=>{setMileNote(null);setMileForm({on_date:localToday,miles:"",purpose:"",entity_id:activeEnts[0]?.id||""});}}>＋ Log a drive</button>}
                 </div>
                 <div style={{fontSize:13,color:"var(--text)",marginBottom:4}}>
                   <strong style={{fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums"}}>{mileSum.miles.toLocaleString("en-US")}</strong> mi in {taxYear} ·
@@ -7826,6 +7837,15 @@ export default function Dashboard({ refreshTick = 0 }) {
                 {mileSum.unratedMiles>0&&(
                   <div style={{fontSize:10,color:amber,marginBottom:4}}>
                     {mileSum.unratedMiles} mi predate the app's rate table and are valued at $0 — give your preparer the dates.
+                  </div>
+                )}
+                {mileNote!=null&&mileNote!==taxYear&&!mileForm&&(
+                  <div style={{fontSize:11,color:"var(--muted)",marginTop:4}}>
+                    Saved to {mileNote}
+                    {mileNote<=now.getFullYear()&&<>{" — "}
+                      <button onClick={()=>{const y=mileNote;setMileNote(null);setTaxYear(y);invalidateTax();}}
+                        style={{background:"none",border:"none",padding:0,fontSize:11,color:"var(--accent)",cursor:"pointer",fontFamily:"inherit"}}>switch to {mileNote}</button>
+                      {" "}to see it</>}.
                   </div>
                 )}
                 {mileForm&&(
@@ -7849,11 +7869,12 @@ export default function Dashboard({ refreshTick = 0 }) {
                     )}
                     <div style={{display:"flex",gap:8}}>
                       <button className="ibtn" style={{flex:1,justifyContent:"center"}} onClick={()=>setMileForm(null)}>Cancel</button>
-                      <button onClick={handleAddMileage} disabled={!mileForm.on_date||!(Number(mileForm.miles)>0)}
+                      {(()=>{const ok=!!sanitizeDateInput(mileForm.on_date,EDIT_YEAR_FLOOR)&&Number(mileForm.miles)>0;return(
+                      <button onClick={handleAddMileage} disabled={!ok}
                         style={{flex:1,padding:"7px 0",borderRadius:8,border:"none",background:"var(--accent)",color:"var(--accent-text)",fontFamily:"inherit",fontSize:12,fontWeight:600,
-                          cursor:mileForm.on_date&&Number(mileForm.miles)>0?"pointer":"default",opacity:mileForm.on_date&&Number(mileForm.miles)>0?1:.5}}>
+                          cursor:ok?"pointer":"default",opacity:ok?1:.5}}>
                         Save drive
-                      </button>
+                      </button>);})()}
                     </div>
                   </div>
                 )}
@@ -8278,13 +8299,13 @@ export default function Dashboard({ refreshTick = 0 }) {
               </div>
               <input type="date" key={selTx.id+":"+selTx.transaction_date} defaultValue={selTx.transaction_date||""}
                 aria-label="Transaction date"
-                onBlur={ev=>{const raw=ev.target.value||null;const v=raw&&raw.slice(0,4)>="1900"?raw:null;
+                onBlur={ev=>{const c=dateCommit(ev.target.value,selTx.transaction_date);
                   // An empty/abandoned value keeps the current date — a
                   // transaction can't have NO date, unlike placed-in-service.
-                  if(!v){ev.target.value=selTx.transaction_date||"";return;}
-                  if(v===selTx.transaction_date)return;
+                  if(c.action==="clear"||c.action==="revert"){ev.target.value=selTx.transaction_date||"";return;}
+                  if(c.action==="noop")return;
                   // Picking the bank's own date again is a reset, not an override.
-                  saveTx({user_date:v===selTx.bank_date?null:v});}}
+                  saveTx({user_date:c.value===selTx.bank_date?null:c.value});}}
                 style={{padding:"6px 8px",borderRadius:8,border:"1px solid var(--border)",background:"var(--input-bg)",
                   color:"var(--text)",fontSize:13,fontWeight:500,fontFamily:"inherit",outline:"none"}}/>
             </div>
@@ -8381,12 +8402,14 @@ export default function Dashboard({ refreshTick = 0 }) {
                               ("0002-…", "0020-…", …), so an onChange commit
                               persists garbage intermediate years — and the
                               optimistic patch then makes blur a no-op on the
-                              garbage (review-caught). The year floor rejects
-                              an abandoned partial year the same way. */}
+                              garbage (review-caught). dateCommit REVERTS an
+                              abandoned partial or 5-digit year (it used to
+                              save null, deleting the stored date); only an
+                              emptied field clears. */}
                           <input type="date" key={selTx.id} defaultValue={selTx.placed_in_service||""}
-                            onBlur={ev=>{const raw=ev.target.value||null;const v=raw&&raw.slice(0,4)>="1900"?raw:null;
-                              ev.target.value=v||"";
-                              if(v!==(selTx.placed_in_service||null))saveTx({placed_in_service:v});}}
+                            onBlur={ev=>{const c=dateCommit(ev.target.value,selTx.placed_in_service);
+                              if(c.action==="revert"){ev.target.value=c.value||"";return;}
+                              if(c.action!=="noop")saveTx({placed_in_service:c.value});}}
                             style={{width:"100%",marginTop:3,padding:"6px 8px",borderRadius:8,border:"1px solid var(--border)",
                               background:"var(--bg)",color:"var(--text)",fontSize:12,fontFamily:"inherit",outline:"none"}}/>
                         </label>

@@ -26,6 +26,7 @@ import {
   parseTaxMaps,
   setEmapEntryIn,
   setDmapEntryIn,
+  savedOutsideYear,
   MILEAGE_RATES,
   mileageRate,
   mileageDeduction,
@@ -398,4 +399,13 @@ test('setDmapEntryIn sets or DELETES one bucket key and leaves emap alone', () =
   const removed = setDmapEntryIn(maps, 'Gifts', null);
   assert.deepEqual(removed.dmap, {});
   assert.deepEqual(removed.emap, { P: { Repairs: 14 } });
+});
+
+test('savedOutsideYear names the year a drive landed in only when it is not the viewed year', () => {
+  assert.equal(savedOutsideYear('2026-02-10', 2025), 2026, 'a today-dated drive logged on last year\'s view');
+  assert.equal(savedOutsideYear('2026-01-01', 2025), 2026, 'Jan 1 is the next year — string slice, no TZ drift');
+  assert.equal(savedOutsideYear('2025-12-31', 2025), null);
+  assert.equal(savedOutsideYear('2025-06-01', '2025'), null, 'a string year compares the same');
+  assert.equal(savedOutsideYear('', 2025), null);
+  assert.equal(savedOutsideYear(undefined, 2025), null);
 });

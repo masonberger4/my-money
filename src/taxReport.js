@@ -345,6 +345,16 @@ export function mileageRate(isoDate) {
   return found ? found.rate : null;
 }
 
+// The year a saved drive (or any dated row) landed in when that is NOT the
+// tax year on screen, else null — the Mileage list shows only the viewed
+// year, so a drive dated outside it has to be announced or it silently
+// vanishes. String slice, never Date (the mileageRate rule above).
+export function savedOutsideYear(isoDate, year) {
+  if (typeof isoDate !== 'string' || !/^\d{4}-/.test(isoDate)) return null;
+  const y = Number(isoDate.slice(0, 4));
+  return y === Number(year) ? null : y;
+}
+
 // logRows: [{ on_date, miles }]. Returns totals plus a per-rate breakdown
 // (a year that straddles a rate change needs both lines on the log the
 // preparer sees). Rows older than the rate table are counted in `unratedMiles`
