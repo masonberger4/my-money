@@ -386,3 +386,27 @@ test('isIncome over a real pairing: the washed leg drops out, the paycheck stays
   assert.deepEqual(rows.filter(isIncome), [paycheck]);
   assert.equal(cashIncome(rows), 2200);
 });
+
+// --- No screen may claim the subtype moves a total ----------------------------
+// The unified model above counts savings outflows exactly like checking ones;
+// the subtype is a label. Three screens still told the household the opposite
+// (Mason's deferred 2026-09-08 copy item) — marking an account Savings excluded
+// nothing. Pinned so the retired rule can't come back in UI copy.
+test('UI copy never says Checking/Savings decides what counts as spending', async () => {
+  const { readFileSync } = await import('node:fs');
+  // Code and copy only: a comment recording the OLD wording is history, not UI.
+  const read = p => readFileSync(new URL(`../${p}`, import.meta.url), 'utf8')
+    .replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+  const retired = [
+    /savings<\/em>\s*never does/i,
+    /savings outflows never count/i,
+    /checking\/savings split drives/i,
+    /counts as spending in Trends;\s*money out of/i,
+  ];
+  for (const file of ['src/components/Dashboard.jsx', 'src/components/CsvImport.jsx', 'src/components/SimpleFinConnect.jsx']) {
+    const src = read(file);
+    for (const re of retired) assert.doesNotMatch(src, re, `${file} repeats the retired subtype rule (${re})`);
+  }
+  // The account page says what the type choice does change.
+  assert.match(read('src/components/Dashboard.jsx'), /Checking vs Savings is only a label/);
+});

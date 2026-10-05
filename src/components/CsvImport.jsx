@@ -1075,7 +1075,7 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
           <div style={{ fontSize: 11, color: "var(--muted)" }}>
             {newSubtype === "credit"
               ? "Card purchases count as spending by category; refunds and payments never count as income."
-              : "Savings outflows never count as spending in Trends; pick Checking for a day-to-day account."}
+              : "Checking vs Savings is only a label — both count the same way in every total."}
           </div>
           {/* Gated on FED accounts, not on `plaid`. `plaid` is
               "neither manual nor SimpleFIN", which went

@@ -1361,8 +1361,8 @@ export async function getRestoreRecord(institutionId) {
 }
 
 // Create one manual account. kind is 'checking' | 'savings' | 'credit' | 'loan'.
-// checking/savings are depository (and drive the Trends checking-vs-savings
-// split); 'credit' is a credit-card account, for a card whose statements are
+// checking/savings are depository (the subtype is only a label — no total
+// reads it); 'credit' is a credit-card account, for a card whose statements are
 // only available as CSV/PDF — its purchases count as spending by category and
 // its negatives are refunds, which net against spending and are never income —
 // like a SimpleFIN-fed card. 'loan' is a hand-tracked debt (a private loan, a

@@ -6639,8 +6639,9 @@ export default function Dashboard({ refreshTick = 0 }) {
                 <div style={{fontSize:10,color:"var(--muted)",marginTop:8,lineHeight:1.5}}>
                   {retyping
                     ?"Re-syncing so the balance is read the right way round for the new type…"
-                    :<>SimpleFIN doesn't send an account type — this was guessed from the name. Money out of
-                      <em> checking</em> counts as spending in Trends; money out of <em>savings</em> never does.</>}
+                    :<>SimpleFIN doesn't send an account type — this was guessed from the name. Bank, Credit card
+                      or Loan changes the numbers (how refunds and card payments count, and whether the balance is
+                      an asset or a debt); Checking vs Savings is only a label.</>}
                 </div>
               </div>
             )}
