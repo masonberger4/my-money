@@ -572,20 +572,30 @@ export function buildReconciliation({ monthsRows, snapshots, accounts, today } =
       const deltaObserved =
         start && end && start.total !== null && end.total !== null ? end.total - start.total : null;
 
+      // Every figure the panel prints goes out through r2, like the gross
+      // view's: 10.10 + 20.20 + 30.30 is 60.599999999999994 in floating point,
+      // and a month that balances to the cent otherwise left a -7e-15 residual
+      // that signed() printed as "−$0" on the one line the panel says to watch.
+      // `unexplained` rounds the RAW difference, never a difference of two
+      // rounded figures. Inputs are cent amounts, so the identity still holds
+      // between the rounded figures to float precision.
       return {
         month: entry.month,
         label: entry.label ?? entry.month,
         partial,
-        income,
-        spending,
-        net,
+        income: r2(income),
+        spending: r2(spending),
+        net: r2(net),
         flows,
-        deltaLedger,
-        buckets: BUCKET_ORDER.filter(k => tally.has(k)).map(k => tally.get(k)),
+        deltaLedger: r2(deltaLedger),
+        buckets: BUCKET_ORDER.filter(k => tally.has(k)).map(k => {
+          const b = tally.get(k);
+          return { ...b, impact: r2(b.impact), moneyOut: r2(b.moneyOut), moneyIn: r2(b.moneyIn) };
+        }),
         balanceStart: start,
         balanceEnd: end,
-        deltaObserved,
-        unexplained: deltaObserved === null ? null : deltaObserved - deltaLedger,
+        deltaObserved: deltaObserved === null ? null : r2(deltaObserved),
+        unexplained: deltaObserved === null ? null : r2(deltaObserved - deltaLedger),
       };
     })
     .filter(Boolean)

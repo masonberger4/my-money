@@ -175,6 +175,50 @@ test('money that moved with no row behind it lands in Unexplained, exactly', () 
   assert.ok(near(months[0].unexplained, -12.34), `got ${months[0].unexplained}`);
 });
 
+test('a month that balances to the cent renders 0, never a float-noise "−$0" (F60)', () => {
+  // 10.10 + 20.20 + 30.30 is 60.599999999999994 in floating point, so the raw
+  // residual against a -60.60 balance move was -7e-15 — which the panel's
+  // signed() printed as "−$0" on the one line it tells the household to watch.
+  // Two excluded rows (0.10 + 0.20) give a bucket whose raw sum is
+  // -0.30000000000000004, the same class of noise on a bucket line.
+  const A = makeAccounts();
+  const rows = [
+    makeTx(A.checking, 'a', '2026-07-03', 10.1, 'SAFEWAY 1467 EVERETT WA'),
+    makeTx(A.checking, 'b', '2026-07-04', 20.2, 'SAFEWAY 1467 EVERETT WA'),
+    makeTx(A.checking, 'c', '2026-07-05', 30.3, 'SAFEWAY 1467 EVERETT WA'),
+    makeTx(A.checking, 'd', '2026-07-06', 0.1, 'MYSTERY VENDOR LLC', { excluded: true }),
+    makeTx(A.checking, 'e', '2026-07-07', 0.2, 'MYSTERY VENDOR LLC', { excluded: true }),
+  ];
+  markInternalTransfers(rows);
+  const { months } = buildReconciliation({
+    monthsRows: [{ month: '2026-07', rows }],
+    snapshots: [snap(A.checking.id, '2026-06-30', 100), snap(A.checking.id, '2026-07-31', 39.1)],
+    accounts: [A.checking],
+    today: '2026-08-28',
+  });
+  const m = months[0];
+  assert.equal(m.unexplained, 0);
+  assert.ok(!Object.is(m.unexplained, -0), 'a −0 renders as "−$0"');
+  assert.equal(m.spending, 60.6);
+  assert.equal(m.net, -60.6);
+  assert.equal(m.deltaLedger, -60.9);
+  assert.equal(m.deltaObserved, -60.9);
+  const by = Object.fromEntries(m.buckets.map(b => [b.key, b]));
+  assert.equal(by.excluded.impact, -0.3, 'bucket lines are cent-exact too');
+  assert.equal(by.excluded.moneyOut, 0.3);
+  assert.equal(by.excluded.moneyIn, 0);
+  // A month whose income and spending cancel nets to +0, not −0.
+  const flat = buildReconciliation({
+    monthsRows: [{ month: '2026-07', rows: [] }],
+    snapshots: [snap(A.checking.id, '2026-06-30', 100), snap(A.checking.id, '2026-07-31', 100)],
+    accounts: [A.checking],
+    today: '2026-08-28',
+  }).months[0];
+  for (const k of ['net', 'income', 'spending', 'deltaLedger', 'deltaObserved', 'unexplained']) {
+    assert.ok(Object.is(flat[k], 0), `${k} is ${flat[k]}`);
+  }
+});
+
 test('no balance history for a month reports null rather than guessing zero', () => {
   const { led, rows } = julyFixture();
   const { months, coverage } = buildReconciliation({
