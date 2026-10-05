@@ -25,7 +25,7 @@ import { teachQueueGroups, nonSpendLabel, categorizedShare } from "../teachQueue
 import { displayBalance, isDebtAccount as isDebtType, balanceAsOf, BALANCE_STALE_DAYS } from "../accountBalance.js";
 import { unhideConfirmMessage } from "../unhideConfirm.js";
 import { NAV_ITEMS, REFLECT_TABS, navForTab, pageTitle } from "../nav.js";
-import { groupByDay, longDate } from "../txList.js";
+import { groupByDay, longDate, liveAcctFilter } from "../txList.js";
 import { TX_TYPES, txTypeLabel, allowedUserTypes } from "../txType.js";
 import { breakdownSegments, incomeVsSpendingInsight, incomeSections } from "../reflect.js";
 import { createSheetHistory } from "../sheetHistory.js";
@@ -3904,15 +3904,19 @@ export default function Dashboard({ refreshTick = 0 }) {
   // still never DISCARDS a chip filter — that would lose the selection rather
   // than hide it.
   const refineOpen=searchOpen;
-  const refineDirty=!!txAcctFilter||!!txCatFilter;
+  // The account filter only while it names a VISIBLE account — see
+  // liveAcctFilter (txList.js). Everything below reads this, never the raw
+  // state, so a filter stranded on a hidden account reads as unset.
+  const acctFilter=liveAcctFilter(txAcctFilter,accounts);
+  const refineDirty=!!acctFilter||!!txCatFilter;
   const searchTxs=searchRes?.transactions||[];
   // Account first, category second, so the category chips can be derived from
   // the account-filtered rows WITHOUT being narrowed by the category filter —
   // otherwise picking a category leaves exactly one chip on screen and no way
   // back. Accounts narrow the offered categories; categories never narrow the
   // offered accounts.
-  const acctTxsView=txAcctFilter?txs.filter(t=>t.account_id===txAcctFilter):txs;
-  const acctSearchView=txAcctFilter?searchTxs.filter(t=>t.account_id===txAcctFilter):searchTxs;
+  const acctTxsView=acctFilter?txs.filter(t=>t.account_id===acctFilter):txs;
+  const acctSearchView=acctFilter?searchTxs.filter(t=>t.account_id===acctFilter):searchTxs;
   const shownTxs=txCatFilter?acctTxsView.filter(t=>t.category===txCatFilter):acctTxsView;
   const shownSearch=txCatFilter?acctSearchView.filter(t=>t.category===txCatFilter):acctSearchView;
   const listTxs=searchActive?shownSearch:shownTxs;
@@ -5866,7 +5870,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                     tokens (it used to ask for `var(--muted)22`, which is not a
                     colour, so its active tint never painted at all). */}
                 {[{id:null,label:"All accounts",color:null},...accounts.filter(a=>!a.hidden).map(a=>({id:a.id,label:acctLabel(a),color:acctColor(a)}))].map(c=>{
-                  const active=txAcctFilter===c.id;
+                  const active=acctFilter===c.id;
                   const cs=c.color?chipOn(c.color,surf.card):null;
                   return (
                     <button key={c.id||"all"} onClick={()=>setTxAcctFilter(c.id)}
@@ -5940,9 +5944,9 @@ export default function Dashboard({ refreshTick = 0 }) {
                   if(searchActive&&cn&&searchRes?.hasMore)return `No ${cn} transactions in the first ${searchTxs.length} matches for ${what} — try Load more.`;
                   if(searchActive&&cn)return `No ${cn} transactions match ${what}.`;
                   if(searchActive)return `No transactions match ${what}.`;
-                  if(cn&&txAcctFilter)return `No ${cn} transactions for this account this month.`;
+                  if(cn&&acctFilter)return `No ${cn} transactions for this account this month.`;
                   if(cn)return `No ${cn} transactions this month.`;
-                  if(txAcctFilter)return "No transactions for this account this month.";
+                  if(acctFilter)return "No transactions for this account this month.";
                   return "No transactions for this period.";
                 })()}
               </div>

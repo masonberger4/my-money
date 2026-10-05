@@ -46,3 +46,16 @@ export function longDate(iso) {
   if (!month || !day) return s;
   return `${month} ${day}, ${m[1]}`;
 }
+
+// The Spending list's account-chip filter AS IT APPLIES NOW: the id when it
+// names a visible account, else null. Hidden accounts are excluded at the
+// query level, so a filter left pointing at one (hidden here, or by the other
+// phone and arriving through a reload) narrowed the list to rows that can't
+// exist — "No transactions for this account" every month — while the chip row,
+// which lists visible accounts only, lost the chip that could clear it (and
+// unmounts entirely with one visible account left). Derived at render, not
+// cleared in an effect: no transient state, and it covers the other phone.
+export function liveAcctFilter(id, accounts) {
+  if (id == null) return null;
+  return (accounts || []).some(a => a && a.id === id && !a.hidden) ? id : null;
+}
