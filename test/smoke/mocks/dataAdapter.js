@@ -550,7 +550,12 @@ export async function getNetWorthSeries() {
 }
 export async function updateManualBalance() {}
 export async function addManualTransaction() {}
-export async function createManualAccount() { return { id: 'am1' }; }
+// A manual-shaped row, like the real insert returns: the import modal ADOPTS
+// the account it creates and classifies it locally until the parent reloads,
+// so a bare { id } would read as an unknown (compare-only) account.
+export async function createManualAccount({ name = 'Imported', subtype = 'checking' } = {}) {
+  return { id: 'am1', name, subtype, nickname: null, plaid_account_id: 'manual:am1', is_manual: true, type: 'depository', hidden: false };
+}
 export async function getFeedCoverageStart() { return null; }
 export async function getDataCoverage() { return { accounts: [], months: [] }; }
 // The removed-imported marker. Null = nothing removed, which is the harness's
@@ -698,4 +703,8 @@ export async function matchExpectedManually() {}
 // unreachable — the second mock/façade drift in this audit, after
 // getBiggestMovers.
 export async function getExistingTxIds() { return { ids: new Set(), sources: new Set() }; }
-export async function importCsvTransactions() { return { inserted: 0 }; }
+// A COUNT, like the real adapter (`return written`): the import modal renders
+// it as "Imported N transactions", and the old `{ inserted: 0 }` object threw
+// "Objects are not valid as a React child" into the modal's ErrorBoundary the
+// first time a walk actually pressed Import.
+export async function importCsvTransactions(_accountId, rows = []) { return rows.length; }

@@ -12,7 +12,7 @@
 // then saved per account and re-applied to later statements — always through
 // the existing preview/confirm gate.
 
-import { parseDate as parseNumericDate, parseMoney } from './csvImport.js';
+import { directionMark, parseDate as parseNumericDate, parseMoney } from './csvImport.js';
 
 export const TEMPLATE_VERSION = 1;
 
@@ -32,22 +32,45 @@ const MONTHS = {
 // deliberately strict: a false positive invents a transaction.
 // ---------------------------------------------------------------------------
 
-// "May 23" | "May 23, 2026" | "5/23/2026" | "2026-05-23" | "23 May"
+// "May 23" | "May 23, 2026" | "5/23/2026" | "2026-05-23" | "23 May" | "05/23"
 const MONTH_NAME_RE = new RegExp(`^(${Object.keys(MONTHS).join('|')})\\.?\\s+(\\d{1,2})(?:\\s*,?\\s*(\\d{4}))?$`, 'i');
 const DAY_MONTH_RE = new RegExp(`^(\\d{1,2})\\s+(${Object.keys(MONTHS).join('|')})\\.?(?:\\s*,?\\s*(\\d{4}))?$`, 'i');
+// Year-less numeric month/day — how most US card statements print the
+// transaction date ("07/18"). Strict on purpose: a WHOLE cell, slash only, both
+// parts 1-2 digits, month first (M/D, never a D/M guess). The year comes from
+// the statement period like the month-name forms; with no period it stays
+// unparsed rather than guessed. The CSV parser does NOT accept this shape — a
+// CSV has no statement period to infer a year from.
+const MD_RE = /^(\d{1,2})\/(\d{1,2})$/;
+function matchMonthDay(v) {
+  const m = v.match(MD_RE);
+  if (!m) return null;
+  const month = Number(m[1]);
+  const day = Number(m[2]);
+  return month >= 1 && month <= 12 && day >= 1 && day <= 31 ? { month, day } : null;
+}
 
 export function looksLikeDate(s) {
   const v = String(s ?? '').trim();
   if (!v) return false;
-  if (MONTH_NAME_RE.test(v) || DAY_MONTH_RE.test(v)) return true;
+  if (MONTH_NAME_RE.test(v) || DAY_MONTH_RE.test(v) || matchMonthDay(v)) return true;
   return parseNumericDate(v) !== null;
 }
 
 // A money cell: optional sign/parens, optional $, digits with optional
-// thousands separators and cents. Requires a digit. "- $69.31" and "$1,234.56"
-// and "(45.00)" all qualify; a bare "2026" does not (no separator/decimal and
-// four digits is far more likely a year — statements always show cents).
-const MONEY_RE = /^[-+−–—(]?\s*\$?\s*\d{1,3}(?:,\d{3})*(?:\.\d{2})?\s*\)?$|^[-+−–—(]?\s*\$?\s*\d+\.\d{2}\s*\)?$/;
+// thousands separators and cents, and an optional TRAILING direction marker —
+// "CR", "DR" or a trailing minus, as card statements print refunds ("23.10 CR")
+// and some banks print debits ("500.00-"); parseMoney owns what each means.
+// Requires a digit. "- $69.31", "$1,234.56", "(45.00)" and "23.10 CR" all
+// qualify; a bare "2026" does not (no separator/decimal and four digits is far
+// more likely a year — statements always show cents), and neither does
+// "2026-" or "7 CR".
+const MONEY_MARK = '(?:\\s*(?:CR|DR|-))?';
+const MONEY_RE = new RegExp(
+  `^[-+−–—(]?\\s*\\$?\\s*\\d{1,3}(?:,\\d{3})*(?:\\.\\d{2})?\\s*\\)?${MONEY_MARK}$` +
+  `|^[-+−–—(]?\\s*\\$?\\s*\\d+\\.\\d{2}\\s*\\)?${MONEY_MARK}$`,
+  'i'
+);
 
 export function looksLikeMoney(s) {
   // Normalize FIRST: some statement generators print a Unicode minus (U+2212)
@@ -59,8 +82,9 @@ export function looksLikeMoney(s) {
   if (!/\d/.test(v)) return false;
   if (!MONEY_RE.test(v)) return false;
   // Reject a bare integer with no cents and no currency marker (e.g. a year or
-  // a count) unless it carries $ / , / sign — statements print cents.
-  if (/^\d+$/.test(v)) return false;
+  // a count) unless it carries $ / , / sign — statements print cents. A
+  // trailing direction marker doesn't make one money ("2026-", "7 CR").
+  if (/^\d+\s*(?:CR|DR|-)?$/i.test(v)) return false;
   return Number.isFinite(parseMoney(v));
 }
 
@@ -71,10 +95,11 @@ export function normalizeMoneyText(s) {
 }
 
 // ---------------------------------------------------------------------------
-// Dates. Month-name dates ("May 23") carry no year, so the year is inferred
-// from the dates that DO have one elsewhere in the document (statement period,
-// due date…). Resolved to ISO here so csvImport's parseDate just passes it
-// through — the shipped CSV path is left untouched.
+// Dates. Month-name dates ("May 23") and year-less numeric ones ("05/23")
+// carry no year, so the year is inferred from the dates that DO have one
+// elsewhere in the document (statement period, due date…). Resolved to ISO
+// here so csvImport's parseDate just passes it through — the shipped CSV path
+// is left untouched.
 // ---------------------------------------------------------------------------
 
 function isoFrom(y, m, d) {
@@ -269,6 +294,8 @@ export function parseFlexibleDate(s, ctx) {
     if (m[3]) return isoFrom(Number(m[3]), mo, day);
     return inferYear(mo, day, ctx);
   }
+  const md = matchMonthDay(v);
+  if (md) return inferYear(md.month, md.day, ctx);
   return parseNumericDate(v);
 }
 
@@ -332,9 +359,16 @@ export function lineCellStarts(line, boundaries, pageWidth) {
 // has to confirm rather than build one from scratch.
 // ---------------------------------------------------------------------------
 
-const HEADER_WORDS = [
-  [/\btrans(action)?\s*date\b|\bpost(ing|ed)?\s*date\b|\bdate\b/i, 'date'],
-  [/\bdescription\b|\bmerchant\b|\bpayee\b|\bdetails?\b|\btransaction\b/i, 'description'],
+// How a MONEY column's header reads. Only money columns consult the header
+// (dates and the description are chosen by content), and the description
+// words are deliberately absent: the old shared list carried \btransaction\b
+// for description, so "Transaction Amount" resolved to description and never
+// claimed the amount role. A running balance comes first and always wins: it
+// is a money-shaped column that is never a transaction amount, and letting it
+// into the debit/credit pairing is how `Date Description Amount Balance`
+// imported every row as (Amount − Balance), all money in.
+const MONEY_HEADER_WORDS = [
+  [/\bbalance\b/i, 'balance'],
   [/\bdebit\b|\bcharges?\b|\bwithdrawals?\b/i, 'debit'],
   [/\bcredit\b|\bpayments?\b|\bdeposits?\b/i, 'credit'],
   [/\bamount\b/i, 'amount'],
@@ -353,7 +387,11 @@ export function findHeaderLines(lines) {
     if (!/\bdate\b/i.test(t)) continue;
     const moneyish = /\bamount\b|\bdebit\b|\bcredit\b|\bcharges?\b|\bpayments?\b|\bdeposits?\b|\bwithdrawals?\b/i.test(t);
     if (!moneyish) continue;
-    if (lines[i].runs.some(r => looksLikeMoney(r.str) || looksLikeDate(r.str))) continue;
+    // A run right after "Page" is a page number, not a value: "1/3" is a
+    // year-less date SHAPE, and a header carrying "Page 1/3" must still count.
+    const runs = lines[i].runs;
+    const isPageNo = k => k > 0 && /\bpage$/i.test(String(runs[k - 1].str).trim());
+    if (runs.some((r, k) => looksLikeMoney(r.str) || (looksLikeDate(r.str) && !isPageNo(k)))) continue;
     out.push(i);
   }
   return out;
@@ -420,32 +458,41 @@ export function suggestRoles(sampleRows, headerCells) {
     stats.push({ c, dates, money, text, nonEmpty, avgLen: nonEmpty ? totalLen / nonEmpty : 0 });
   }
   const roles = new Array(nCols).fill('ignore');
-  const headerRole = c => {
-    const h = (headerCells && headerCells[c]) || '';
-    for (const [re, role] of HEADER_WORDS) if (re.test(h)) return role;
-    return null;
-  };
 
   // Dates: columns where most non-empty cells parse as dates. First = 'date'.
   const dateCols = stats.filter(s => s.nonEmpty && s.dates / s.nonEmpty >= 0.6).map(s => s.c);
   dateCols.forEach((c, i) => { roles[c] = i === 0 ? 'date' : 'date2'; });
 
-  // Money columns.
-  const moneyCols = stats.filter(s => s.nonEmpty && s.money / s.nonEmpty >= 0.6 && roles[s.c] === 'ignore').map(s => s.c);
-  if (moneyCols.length >= 2) {
-    // Two money columns → debit/credit pair; use the header wording when it
-    // disambiguates, else assume left = debit (out), right = credit (in).
-    const named = moneyCols.map(c => headerRole(c));
-    const debitIdx = named.indexOf('debit');
-    const creditIdx = named.indexOf('credit');
-    if (debitIdx >= 0 && creditIdx >= 0) {
-      roles[moneyCols[debitIdx]] = 'debit';
-      roles[moneyCols[creditIdx]] = 'credit';
-    } else {
-      roles[moneyCols[0]] = 'debit';
-      roles[moneyCols[1]] = 'credit';
-    }
-    for (let i = 2; i < moneyCols.length; i++) roles[moneyCols[i]] = 'ignore';
+  // Money columns. A header that says "balance" drops its column out of the
+  // money roles entirely (it stays 'ignore'), whatever else was seen — with
+  // Withdrawals/Deposits/Balance and a Deposits column blank in the sample,
+  // the balance used to be paired in as the credit column.
+  const moneyHeader = c => {
+    const h = (headerCells && headerCells[c]) || '';
+    for (const [re, role] of MONEY_HEADER_WORDS) if (re.test(h)) return role;
+    return null;
+  };
+  const moneyCols = stats
+    .filter(s => s.nonEmpty && s.money / s.nonEmpty >= 0.6 && roles[s.c] === 'ignore')
+    .map(s => s.c)
+    .filter(c => moneyHeader(c) !== 'balance');
+  const named = moneyCols.map(moneyHeader);
+  const debitIdx = named.indexOf('debit');
+  const creditIdx = named.indexOf('credit');
+  const amountIdxs = named.flatMap((n, i) => (n === 'amount' ? [i] : []));
+  if (moneyCols.length >= 2 && debitIdx >= 0 && creditIdx >= 0) {
+    // The header names the pair: Payments → credit, Charges → debit, wherever
+    // they sit.
+    roles[moneyCols[debitIdx]] = 'debit';
+    roles[moneyCols[creditIdx]] = 'credit';
+  } else if (moneyCols.length >= 2 && amountIdxs.length === 1) {
+    // One column the header calls "Amount" IS the signed amount; the others
+    // (a fee, a reference total) are not a debit/credit pair.
+    roles[moneyCols[amountIdxs[0]]] = 'amount';
+  } else if (moneyCols.length >= 2) {
+    // Two UNNAMED money columns → assume left = debit (out), right = credit (in).
+    roles[moneyCols[0]] = 'debit';
+    roles[moneyCols[1]] = 'credit';
   } else if (moneyCols.length === 1) {
     roles[moneyCols[0]] = 'amount';
   }
@@ -822,14 +869,26 @@ function escapeRe(s) {
 // Resolve it here instead of loosening the shipped CSV rule: a negative in one
 // column is exactly a positive in the other, so swap it across. The signed math
 // (debit − credit) then comes out right and the CSV path is untouched.
+//
+// A CR- or DR-marked cell is read AS PRINTED, in either column — CR money in,
+// DR money out, the rule buildRows' single-amount path follows. parseMoney's CR
+// is relative (the opposite of the column's unmarked values), which is right
+// in the Debit column but backwards in the Credit one: a statement that
+// prints a redundant "100.00 CR" in its Credit column would net to a DEBIT
+// and import a deposit as money out, a wrong-signed row no re-import can
+// dedup away. So a marked credit cell keeps parseMoney's own orientation
+// (DR +, CR −) instead of being subtracted: CR in Credit stays a credit, DR
+// in Credit is a reversal (money out), CR in Debit is a reversal (money in).
 export function normalizeDebitCredit(debitRaw, creditRaw) {
   const d = String(debitRaw ?? '').trim();
   const c = String(creditRaw ?? '').trim();
   const dv = d ? parseMoney(d) : 0;
   const cv = c ? parseMoney(c) : 0;
   if (!Number.isFinite(dv) || !Number.isFinite(cv)) return { debit: d, credit: c };
-  // Net the pair, then place the magnitude in the column its sign implies.
-  const net = dv - cv; // positive = money out
+  // Net the pair (positive = money out), then place the magnitude in the
+  // column its sign implies. A debit cell, marked or not, is already oriented
+  // money-out-positive; an unmarked credit cell counts against it.
+  const net = dv + (directionMark(c) ? cv : -cv);
   if (net > 0) return { debit: net.toFixed(2), credit: '' };
   if (net < 0) return { debit: '', credit: (-net).toFixed(2) };
   return { debit: '', credit: '' };

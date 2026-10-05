@@ -252,14 +252,21 @@
   top-level-key allowlist, so an unknown key is a red test locally instead of
   a dead deploy pipeline — add a new legitimate key to the allowlist in the
   same PR.
-- iOS PWA: apple-touch-icon must be PNG; service worker (`public/sw.js`) never
-  caches `/api/*`; bump its CACHE_VERSION when changing it. The ASSET_CACHE
-  prune (cap 40) must target `/assets/*` keys ONLY — the stable-URL precache
-  entries (fonts) also live in ASSET_CACHE and cache HITS never refresh
-  insertion order, so a whole-cache LRU prune evicts the fonts. index.html's
-  woff2 `<link rel=preload>` tags require `crossorigin` EVEN same-origin —
-  font fetches are CORS-mode, and without it the preload is wasted and the
-  font double-fetched.
+- iOS PWA: apple-touch-icon must be PNG. index.html's woff2
+  `<link rel=preload>` tags require `crossorigin` EVEN same-origin — font
+  fetches are CORS-mode, and without it the preload is wasted and the font
+  double-fetched. The service worker's rules (never `/api/*`, the
+  `CACHE_VERSION` bump, the two caches, the navigation budget, the prune) are
+  the `public/sw.js` key row. The wording that stood here — "the stable-URL
+  precache entries (fonts) also live in ASSET_CACHE" — is RETIRED since v8
+  (2026-10-05): precache paths live in, and are served from, `SHELL_CACHE`;
+  the prune's /assets/*-only filter stays as the guard it always was.
+  **Anything a fetch handler starts after `respondWith` must ride in the
+  promise it hands waitUntil**: iOS kills an idle worker, and work outside it
+  (the shell's `cache.put`, the prune loop) is cut off mid-flight with no
+  error anywhere — the first v8 draft started the shell write outside it
+  (fixed in the same PR; `background` in `networkFirstShell` carries both
+  now).
 - **"TypeError: Load failed" on the phone is a request that DIED ON THE WIRE, not
   a server error.** It is Safari's wording for a fetch that never got a response
   (Chrome says "Failed to fetch"); on iOS it is usually the PWA resuming from the
@@ -295,6 +302,18 @@
   Rollup, and the config's chunk-splitting option survives only as a
   compatibility shim (verified by checking the vendor chunks still exist in
   the output, not by trusting the build to succeed).
+- **A new module shared by the entry and a lazy chunk can re-chunk the VENDOR
+  code.** Moving `LazyModal` into its own file — imported by Dashboard (the
+  entry) and by AddAccount (inside the lazy EmptyState chunk) — made Rolldown
+  fold runtime helpers into a new shared app chunk that vendor-react
+  imported, so vendor-react's fingerprint followed app code: every deploy
+  would have re-downloaded React, defeating the vendor split in
+  `vite.config.js` and the sw.js keep-set prune's byte-stable assumption.
+  Build, tests and smoke all pass on it. After changing which app modules the
+  entry and a lazy chunk share, build the base and the branch and compare
+  dist/index.html's vendor-react, vendor-supabase and rolldown-runtime chunk
+  names — an app-only change must not move them (measured 2026-10-05; the fix
+  kept `LazyModal` in ErrorBoundary.jsx — that key row).
 - **pdf.js must be the LEGACY build** (`pdfjs-dist/legacy/build/…`). The modern
   bundle calls `Map.prototype.getOrInsertComputed`, which current Chromium and
   iOS Safari don't have — it throws "getOrInsertComputed is not a function" on a
@@ -311,7 +330,12 @@
   `src/components/ErrorBoundary.jsx` (App.jsx wraps Dashboard and EmptyState;
   CsvImport reuses it with a modal-sized fallback, replacing its private
   `ModalErrorBoundary`) is a backstop showing a themed "something broke — reload"
-  card, not a substitute for the discipline.
+  card, not a substitute for the discipline. A LAZY modal's failed load never
+  reaches that card: every lazy() goes through `src/lazyWithReload.js` (one
+  reload) and every lazy modal renders inside `LazyModal`, whose scoped card
+  replaces only the modal (both key rows). A new lazy modal under a bare
+  Suspense would hand a stale chunk back to App's boundary and blank the whole
+  Dashboard — `test/lazyWithReload.test.js` fails it.
 - **`saveTx`'s optimistic patch is the only refresh some lists ever get, and it
   must recompute every DERIVED field of the tx shape.** `reloadData` refetches
   the CURRENT MONTH only, so `transactions` self-heals but `searchRes`
@@ -341,7 +365,12 @@
 - A bank words the same transaction differently in its CSV and its PDF, so the
   dedup hash differs: importing both formats into ONE manual account
   double-inserts. `transactions.source` records `'csv'|'pdf'` and the importer
-  warns on a mix — one format per account.
+  REFUSES a mix — one format per account: Import and batch start are disabled,
+  every batch file re-checks on its own refetch, and an account whose existing
+  rows can't be read blocks too, because an unread source set looks exactly
+  like an empty account (fail-closed since 2026-10-05 — the
+  `src/components/CsvImport.jsx` row). The wording that stood here, "warns on
+  a mix", was stale before then: `canConfirm` already blocked.
 - A mortgage/loan statement's rows are loan accounting (suspense-account
   postings, reversals), not household spending, and the real payment is already
   in cash flow via the checking feed. Those belong to the future Debt tracker —

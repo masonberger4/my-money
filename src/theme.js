@@ -15,10 +15,12 @@
 
 import { useCallback, useEffect, useState } from 'react';
 
-// Everything below except the five public exports (THEME_PREFS, readToken,
-// subscribeTheme, initTheme, useTheme) is deliberately MODULE-PRIVATE:
-// exporting setThemePref/applyTheme invited a future caller to change the
-// theme while bypassing useTheme's subscription, leaving its state stale.
+// Everything below except the six public exports (THEME_PREFS, readToken,
+// subscribeTheme, initTheme, useTheme, useThemeToken) is deliberately
+// MODULE-PRIVATE: exporting setThemePref/applyTheme invited a future caller to
+// change the theme while bypassing useTheme's subscription, leaving its state
+// stale. useThemeToken only READS, through the already-public readToken and
+// subscribeTheme, so it cannot reopen that hole.
 const THEME_STORAGE_KEY = 'mm:theme';
 
 /** Preference values, in display order. Default is 'system'. */
@@ -38,8 +40,17 @@ function darkMql() {
   }
 }
 
+// A choice made THIS session that storage refused to keep (null when the
+// last write landed). It wins over the stored value: with storage blocked a
+// read says 'system' — or, in old Safari private mode, the read "works" and
+// answers nothing while only the write throws — and initTheme's OS listener
+// re-reads the preference, so an explicit Dark flipped to light at sunset
+// while the gear menu still showed Dark.
+let sessionPref = null;
+
 /** Stored preference: 'system' | 'light' | 'dark' (never throws). */
 function getThemePref() {
+  if (sessionPref) return sessionPref;
   try {
     const v = localStorage.getItem(THEME_STORAGE_KEY);
     return THEME_PREFS.includes(v) ? v : 'system';
@@ -54,9 +65,11 @@ function setThemePref(pref) {
   try {
     if (next === 'system') localStorage.removeItem(THEME_STORAGE_KEY);
     else localStorage.setItem(THEME_STORAGE_KEY, next);
+    sessionPref = null; // storage holds it now
   } catch {
     // Private mode / storage disabled: the choice still applies for this
-    // session, it just won't survive a reload.
+    // session (held in memory, above), it just won't survive a reload.
+    sessionPref = next;
   }
   return applyTheme(next);
 }
@@ -154,6 +167,29 @@ function applyTheme(pref = getThemePref()) {
 export function subscribeTheme(handler) {
   listeners.add(handler);
   return () => listeners.delete(handler);
+}
+
+/**
+ * React binding for ONE token's live value, e.g. useThemeToken('--card').
+ * Read at RUNTIME from src/ui.css — never hardcode a token value in a
+ * component — and re-read whenever a theme is applied, so the value follows a
+ * FORCED theme (the gear menu's picker) exactly as it follows the OS one.
+ * "" is the deliberate fallback: paletteContrast reads an unparseable surface
+ * as "no surface to reason about" and hands the colour back untouched, i.e.
+ * the uncorrected rendering, rather than throwing during render.
+ *
+ * Lives here, not in a component: CsvImport imports PdfTemplateEditor, so
+ * sharing it between those two would make them circular, and the duplicated
+ * copies were one re-read-contract change away from drifting.
+ */
+export function useThemeToken(token) {
+  const [value, setValue] = useState(() => readToken(token, ''));
+  useEffect(() => {
+    const read = () => setValue(readToken(token, ''));
+    read();
+    return subscribeTheme(read);
+  }, [token]);
+  return value;
 }
 
 /**

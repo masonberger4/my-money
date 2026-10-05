@@ -43,6 +43,7 @@ import {
 import { TRANSFER_CATEGORY, FALLBACK_CATEGORY } from '../src/categoryMap.js';
 import {
   run,
+  runRight,
   page,
   textLine,
   CARD,
@@ -115,6 +116,103 @@ test('parseMoney: "(-45.00)" double-flips to POSITIVE — documented current beh
   // Parens set negative, then the inner '-' flips it back. No real bank prints
   // this shape; pinned so a refactor that changes it is a conscious decision.
   assert.equal(parseMoney('(-45.00)'), 45);
+});
+
+// --- 2026-10 import audit (F83): trailing CR / DR / minus ------------------
+// Card statements print a refund as "23.10 CR" and some banks print a
+// trailing minus ("500.00-"). Both failed the money shape, so the row was
+// dropped with no skipped-row entry the UI ever shows — card spending
+// overstated by every refund. CR means "the opposite of this column's
+// unmarked values" (a CR-marked card line is a credit against unmarked
+// charges), DR is the unmarked direction, a trailing minus is a leading one.
+test('parseMoney: trailing CR / DR / minus markers', () => {
+  assert.equal(parseMoney('45.00-'), -45);
+  assert.equal(parseMoney('45.00 CR'), -45);
+  assert.equal(parseMoney('1,234.56CR'), -1234.56);
+  assert.equal(parseMoney('$45.00 cr'), -45, 'case-insensitive');
+  assert.equal(parseMoney('45.00 DR'), 45);
+  assert.ok(Number.isNaN(parseMoney('(45.00) CR')), 'parens AND a marker is ambiguous');
+  assert.ok(Number.isNaN(parseMoney('-45.00-')), 'two signs is ambiguous');
+  assert.ok(Number.isNaN(parseMoney('-45.00 CR')), 'a sign AND a marker is ambiguous');
+  assert.ok(Number.isNaN(parseMoney('CR')));
+  assert.ok(Number.isNaN(parseMoney('-')));
+});
+
+test('looksLikeMoney accepts the trailing-marker shapes and still rejects bare integers', () => {
+  for (const v of ['23.10 CR', '500.00-', '1,234.56CR', '$45.00 DR', '45.00 cr']) {
+    assert.equal(looksLikeMoney(v), true, v);
+  }
+  for (const v of ['CR', '2026-', '123-', '7 CR', 'DR', '-']) {
+    assert.equal(looksLikeMoney(v), false, v);
+  }
+});
+
+test('a CR refund and a trailing-minus payment import as money IN instead of vanishing', () => {
+  const pg = page(1, [
+    ...textLine(60, [['Statement Period: Jul 1, 2026 - Jul 31, 2026', 40]]),
+    run('Date', 40, 200), run('Description', 120, 200), run('Amount', 500, 200),
+    run('Jul 2', 40, 220), run('STARBUCKS STORE 123', 120, 220), run('5.45', 520, 220),
+    run('Jul 9', 40, 236), run('AMAZON RETURN', 120, 236), run('23.10 CR', 505, 236),
+    run('Jul 20', 40, 252), run('PAYMENT RECEIVED', 120, 252), run('500.00-', 505, 252),
+  ]);
+  const tpl = { version: 1, boundaries: [0.18, 0.8], roles: ['date', 'description', 'amount'], amountMode: 'signed', amountSign: 'out_positive', startAnchor: 'Date Description Amount', stopAnchor: '', pages: null };
+  const applied = applyTemplate([pg], tpl);
+  assert.deepEqual(applied.skipped.map(s => s.text), [], 'nothing silently dropped');
+  const { rows } = buildRows(applied.grid, applied.buildOpts);
+  assert.deepEqual(rows.map(r => [r.description, r.amount]), [
+    ['STARBUCKS STORE 123', 5.45],
+    ['AMAZON RETURN', -23.1],
+    ['PAYMENT RECEIVED', -500],
+  ]);
+  assert.deepEqual(rowTotals(rows), { out: 5.45, in: 523.1 });
+});
+
+test('REGRESSION: a dated "New Balance … CR" summary line outside the anchored table is still excluded', () => {
+  const pg = cardStatementPage([['May 26', 'May 27', 'RIVER GROCERY', '45.00'], ['May 30', 'May 31', 'STORE REFUND', '12.00 CR']]);
+  // A summary line ABOVE the start anchor that now passes the money shape.
+  pg.runs.push(run('Jun 23', CARD.x.trans, 70), run('New Balance', CARD.x.desc, 70), runRight('1,234.56 CR', CARD.x.amountRight, 70));
+  const res = applyTemplate([pg], cardTemplate());
+  assert.deepEqual(res.grid.map(r => [r[1], r[4]]), [['RIVER GROCERY', '45.00'], ['STORE REFUND', '12.00 CR']]);
+  const { rows } = buildRows(res.grid, res.buildOpts);
+  assert.deepEqual(rows.map(r => r.amount), [45, -12]);
+});
+
+test('a CR or DR in a Debit/Credit pair is read as printed, in either column (normalizeDebitCredit)', () => {
+  // CR is money in and DR money out wherever the cell sits. A marker that
+  // matches its own column is redundant; one that contradicts it is a reversal.
+  assert.deepEqual(normalizeDebitCredit('', '100.00 CR'), { debit: '', credit: '100.00' }, 'CR in Credit stays a credit');
+  assert.deepEqual(normalizeDebitCredit('100.00 DR', ''), { debit: '100.00', credit: '' }, 'DR in Debit stays a debit');
+  assert.deepEqual(normalizeDebitCredit('45.00 CR', ''), { debit: '', credit: '45.00' }, 'CR in Debit is money in');
+  assert.deepEqual(normalizeDebitCredit('', '45.00 DR'), { debit: '45.00', credit: '' }, 'DR in Credit is money out');
+  assert.deepEqual(normalizeDebitCredit('100.00 DR', '30.00 CR'), { debit: '70.00', credit: '' }, 'both marked, netted as printed');
+  assert.deepEqual(normalizeDebitCredit('', '$1,250.00 cr'), { debit: '', credit: '1250.00' }, 'lower-case marker');
+});
+
+test('REGRESSION: a Credit column printing a redundant "100.00 CR" imports a deposit as money IN', () => {
+  // parseMoney's CR is relative (negative), and the old netting subtracted the
+  // credit cell, so -(-100) landed as a $100 DEBIT — a deposit imported as
+  // spending, wrong-signed for good (the dedup hash includes the amount).
+  const pg = page(1, [
+    ...mortgagePreamble(),
+    ...textLine(100, 'ACTIVITY SINCE LAST STATEMENT'),
+    ...mortgageHeader(120),
+    ...mortgageRow(140, 'Jun 15', 'PAYMENT RECEIVED THANK YOU', { payment: '100.00 CR' }),
+    ...mortgageRow(160, 'Jun 20', 'LATE FEE ASSESSMENT', { charge: '15.00 DR' }),
+    ...mortgageRow(180, 'Jun 22', 'PAYMENT REVERSAL', { payment: '40.00 DR' }),
+  ]);
+  const res = applyTemplate([pg], mortgageTemplate());
+  assert.deepEqual(res.skipped.map(s => s.text), [], 'nothing silently dropped');
+  assert.deepEqual(res.grid.map(r => [r[2], r[3]]), [
+    ['', '100.00'],
+    ['15.00', ''],
+    ['40.00', ''],
+  ]);
+  const { rows } = buildRows(res.grid, res.buildOpts);
+  assert.deepEqual(rows.map(r => [r.description, r.amount]), [
+    ['PAYMENT RECEIVED THANK YOU', -100],
+    ['LATE FEE ASSESSMENT', 15],
+    ['PAYMENT REVERSAL', 40],
+  ]);
 });
 
 test('parseDate: the two-digit-year pivot is at 70', () => {
@@ -230,6 +328,84 @@ test('parseFlexibleDate resolves every supported form, using the window only whe
   assert.equal(parseFlexibleDate('May 23', null), null, 'month-name date with no window cannot resolve');
 });
 
+// --- 2026-10 import audit (F41): year-less numeric M/D dates ---------------
+// Most US card statements print the transaction date as "07/18". Year
+// inference only ran for month-name dates, so every such row failed the date
+// test — 0 rows even with a hand-built template. The CSV parser stays strict
+// (a CSV has no statement period to infer a year from); only the PDF path,
+// which does, accepts the year-less form.
+test('looksLikeDate accepts a whole-cell year-less M/D and rejects near-misses', () => {
+  for (const v of ['07/18', '7/1', '12/31']) assert.equal(looksLikeDate(v), true, v);
+  for (const v of ['13/40', '0/5', '7/0', '1/2/3/4', '07/18/', '07-18', '07/18 PAYMENT', 'Page 1/3']) {
+    assert.equal(looksLikeDate(v), false, v);
+  }
+});
+
+test('parseFlexibleDate infers the year of a numeric M/D from the window, and never guesses without one', () => {
+  const ctx = { min: '2026-06-02', max: '2026-09-30', years: [2026] };
+  assert.equal(parseFlexibleDate('07/18', ctx), '2026-07-18');
+  assert.equal(parseFlexibleDate('7/1', ctx), '2026-07-01');
+  assert.equal(parseFlexibleDate('07/18', null), null, 'no statement period → no year → no date');
+  assert.equal(parseFlexibleDate('2/30', ctx), null, 'an impossible day never resolves');
+  assert.equal(parseDate('07/18'), null, 'the CSV parser stays strict M/D/Y');
+});
+
+test('a numeric M/D resolves across the Dec→Jan wrap from the statement period', () => {
+  const pg = page(1, textLine(40, [['Statement Period: Dec 17, 2025 - Jan 16, 2026', 40]]));
+  const ctx = resolveYearWindow([pg]);
+  assert.equal(parseFlexibleDate('12/20', ctx), '2025-12-20');
+  assert.equal(parseFlexibleDate('01/05', ctx), '2026-01-05');
+});
+
+// A card statement whose dates print as MM/DD, its period as MM/DD/YY.
+function mdCardPage({ footer = true } = {}) {
+  const rows = [['07/18', 'STARBUCKS STORE 123 SEATTLE WA', '5.45'], ['07/20', 'PAYMENT THANK YOU', '-500.00'], ['08/02', 'AMAZON MKTPL', '23.10']];
+  const runs = [
+    ...textLine(60, [['Opening/Closing Date 07/17/26 - 08/16/26', 40]]),
+    run('Date', 40, 200), run('Merchant Name or Transaction Description', 120, 200), runRight('$ Amount', 560, 200),
+  ];
+  rows.forEach(([d, desc, amt], i) => runs.push(run(d, 40, 220 + i * 16), run(desc, 120, 220 + i * 16), runRight(amt, 560, 220 + i * 16)));
+  // A page-number footer whose "1/3" is now a date SHAPE: it carries no money,
+  // so it must never become a row.
+  if (footer) runs.push(run('Page', 40, 760), run('1/3', 70, 760));
+  return page(1, runs);
+}
+
+test('autoDetectTemplate + applyTemplate read a year-less MM/DD card statement', () => {
+  const pg = mdCardPage();
+  const t = autoDetectTemplate([pg]);
+  assert.ok(t, 'the MM/DD rows now count as the table body');
+  assert.deepEqual(t.roles, ['date', 'description', 'amount']);
+  const applied = applyTemplate([pg], t);
+  assert.deepEqual(applied.grid.map(r => [r[0], r[1], r[4]]), [
+    ['2026-07-18', 'STARBUCKS STORE 123 SEATTLE WA', '5.45'],
+    ['2026-07-20', 'PAYMENT THANK YOU', '-500.00'],
+    ['2026-08-02', 'AMAZON MKTPL', '23.10'],
+  ]);
+  const { rows } = buildRows(applied.grid, applied.buildOpts);
+  assert.deepEqual(rowTotals(rows), { out: 28.55, in: 500 });
+});
+
+test('REGRESSION: a page number printed on the header line does not disqualify the header', () => {
+  // "1/3" became a date shape, and findHeaderLines rejects a header carrying
+  // any date run — so the run right after "Page" is exempt.
+  const lines = groupIntoLines([
+    run('Date', 40, 200), run('Description', 120, 200), run('Amount', 480, 200),
+    run('Page', 540, 200), run('1/3', 565, 200),
+  ]);
+  assert.deepEqual(findHeaderLines(lines), [0]);
+});
+
+test('REGRESSION: the card layout keeps its POSTED-date default (the dedup hash depends on it)', () => {
+  const t = autoDetectTemplate([cardStatementPage([
+    ['May 26', 'May 27', 'RIVER GROCERY 1467', '45.00'],
+    ['May 30', 'May 31', 'ACME COFFEE 0042', '6.50'],
+    ['Jun 20', 'Jun 21', 'CAPITAL ONE MOBILE PYMT', '-141.66'],
+  ])]);
+  assert.equal(t.dateColumn, 'date2');
+  assert.deepEqual(t.roles, ['date', 'date2', 'description', 'amount']);
+});
+
 // ---------------------------------------------------------------------------
 // Geometry — groupIntoLines / splitLineIntoCells / lineCellStarts /
 // findHeaderLines / suggestBoundaries / suggestRoles
@@ -303,6 +479,90 @@ test('suggestRoles: two money columns use header wording only to break the debit
   );
   // No header → positional default: left = debit, right = credit.
   assert.deepEqual(suggestRoles(sampleRows, null), ['date', 'description', 'debit', 'credit']);
+});
+
+// --- 2026-10 import audit (F06): a running Balance is never a money role ----
+// The positional debit/credit fallback used to fire on ANY two money columns
+// the header didn't name as a pair — so a checking statement's
+// `Date Description Amount Balance` imported every row as Amount − Balance,
+// all money in, under "Layout detected automatically". The batch path saves
+// that auto layout as the account's template without a preview, and the
+// wrong-signed rows can never be deduped away (the hash includes the amount).
+const BALANCE_ROWS = [
+  ['07/02/2026', 'STARBUCKS STORE 123', '-5.45', '1,994.55'],
+  ['07/15/2026', 'ACME PAYROLL DIRECT DEP', '1,500.00', '3,494.55'],
+  ['07/20/2026', 'CITY WATER BILL', '-60.00', '3,434.55'],
+];
+
+test('suggestRoles: an Amount + Balance pair is ONE amount column, the balance ignored', () => {
+  assert.deepEqual(
+    suggestRoles(BALANCE_ROWS, ['Date', 'Description', 'Amount', 'Balance']),
+    ['date', 'description', 'amount', 'ignore']
+  );
+});
+
+test('suggestRoles: Balance LEFT of Amount reads the same', () => {
+  const rows = BALANCE_ROWS.map(([d, desc, amt, bal]) => [d, desc, bal, amt]);
+  assert.deepEqual(
+    suggestRoles(rows, ['Date', 'Description', 'Balance', 'Amount']),
+    ['date', 'description', 'ignore', 'amount']
+  );
+});
+
+test('suggestRoles: "Transaction Amount" claims the amount role (not description) beside a Balance', () => {
+  assert.deepEqual(
+    suggestRoles(BALANCE_ROWS, ['Date', 'Description', 'Transaction Amount', 'Running Balance']),
+    ['date', 'description', 'amount', 'ignore']
+  );
+});
+
+test('suggestRoles: Withdrawals/Deposits/Balance keeps the named pair and ignores the balance', () => {
+  const rows = [
+    ['07/02/2026', 'STARBUCKS STORE 123', '5.45', '', '1,994.55'],
+    ['07/15/2026', 'ACME PAYROLL DIRECT DEP', '', '1,500.00', '3,494.55'],
+    ['07/20/2026', 'CITY WATER BILL', '60.00', '', '3,434.55'],
+  ];
+  assert.deepEqual(
+    suggestRoles(rows, ['Date', 'Description', 'Withdrawals', 'Deposits', 'Balance']),
+    ['date', 'description', 'debit', 'credit', 'ignore']
+  );
+});
+
+test('suggestRoles: a Balance never becomes the credit column when Deposits is empty in the sample', () => {
+  // The verifier's second trigger: an all-blank Deposits column is not a
+  // money column, so Withdrawals + Balance used to pair up as debit/credit.
+  const rows = [
+    ['07/02/2026', 'STARBUCKS STORE 123', '5.45', '', '1,994.55'],
+    ['07/20/2026', 'CITY WATER BILL', '60.00', '', '1,934.55'],
+  ];
+  const roles = suggestRoles(rows, ['Date', 'Description', 'Withdrawals', 'Deposits', 'Balance']);
+  assert.equal(roles[4], 'ignore', 'the running balance must never carry a money role');
+  assert.ok(!roles.includes('credit'), `no column may be read as credit here: ${roles}`);
+});
+
+test('autoDetectTemplate on a checking layout with a running Balance: signed amount, balance never read', () => {
+  const pg = page(1, [
+    ...textLine(60, [['Statement Period: Jul 1, 2026 - Jul 31, 2026', 40]]),
+    run('Date', 40, 200), run('Description', 120, 200), run('Amount', 430, 200), run('Balance', 520, 200),
+    ...BALANCE_ROWS.flatMap(([d, desc, amt, bal], i) => [
+      run(d, 40, 220 + i * 16), run(desc, 120, 220 + i * 16), run(amt, 435, 220 + i * 16), run(bal, 520, 220 + i * 16),
+    ]),
+  ]);
+  const t = autoDetectTemplate([pg]);
+  assert.ok(t);
+  assert.deepEqual(t.roles, ['date', 'description', 'amount', 'ignore']);
+  assert.equal(t.amountMode, 'signed');
+  const applied = applyTemplate([pg], t);
+  assert.deepEqual(applied.grid.map(r => r[4]), ['-5.45', '1,500.00', '-60.00'], 'the Amount column, never the balance');
+  // This statement prints money OUT as negative, which is the in_positive
+  // reading — the sign the user picks in the editor for it.
+  const { rows } = buildRows(applied.grid, { ...applied.buildOpts, amountSign: 'in_positive' });
+  assert.deepEqual(rows.map(r => [r.description, r.amount]), [
+    ['STARBUCKS STORE 123', 5.45],
+    ['ACME PAYROLL DIRECT DEP', -1500],
+    ['CITY WATER BILL', 60],
+  ]);
+  assert.deepEqual(rowTotals(rows), { out: 65.45, in: 1500 });
 });
 
 // ---------------------------------------------------------------------------

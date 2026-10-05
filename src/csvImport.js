@@ -122,9 +122,17 @@ function isBlankRow(cells) {
 // ---------------------------------------------------------------------------
 const HEADER_SYNONYMS = {
   date: [/^post(ing|ed)?\s*date$/i, /^transaction\s*date$/i, /date/i],
-  description: [/description/i, /^memo$/i, /^name$/i, /payee/i, /^details?$/i, /transaction/i],
+  // Merchant-bearing columns first, Memo late: a Memo column is often blank or
+  // bank boilerplate ("Download from usbank.com."), and preferring it over
+  // Payee/Name imported blank or identical descriptions. The ORDER is part of
+  // the dedup id — the hash includes the normalized description — so any
+  // reorder re-hashes every file whose header lacks a Description column.
+  description: [/description/i, /payee/i, /^name$/i, /^details?$/i, /^memo$/i, /transaction/i],
   debit: [/^debit$/i, /debit/i, /withdrawal/i, /^amount\s*debit$/i, /charges?/i, /money\s*out/i],
-  credit: [/^credit$/i, /credit/i, /deposit/i, /^amount\s*credit$/i, /payments?/i, /money\s*in/i],
+  // Payments only as a whole header ("Payments", "Payments and Credits"): the
+  // loose /payments?/ claimed "Payment Method", a stray text column that then
+  // sent every row down the Debit/Credit path as unreadable.
+  credit: [/^credit$/i, /credit/i, /deposit/i, /^amount\s*credit$/i, /^payments?(\s*(and|&)\s*credits?)?$/i, /money\s*in/i],
   amount: [/^amount$/i, /^transaction\s*amount$/i],
 };
 
@@ -183,6 +191,54 @@ export function resolveTemplateForTarget({ saved = null, auto = null, current = 
   return { template: current, source: current ? 'edited' : null, offerSaved: null };
 }
 
+// The account list the import modal classifies its target against: the
+// parent's `accounts` plus an account THIS modal just created, until the
+// parent's reload brings it in (then the parent's copy wins). The modal
+// ADOPTS the account it creates (target moves off "new" onto it) so a retry
+// after a failed write, a later file, or "Open alone" after a batch imports
+// into that account instead of minting a same-named twin — and the target
+// can only resolve if the new row is in the list it is looked up in.
+export function withCreatedAccount(accounts, created) {
+  const list = Array.isArray(accounts) ? accounts : [];
+  if (!created || created.id == null) return list;
+  return list.some(a => a && a.id === created.id) ? list : [...list, created];
+}
+
+// The account an import writes into. Target "new" CREATES one with `create`
+// and hands it to `adopt` BEFORE anything else can fail — the modal moves its
+// target off "new" onto it — so a retry after a failed write, a later file,
+// or "Open alone" after a batch imports into THIS account instead of minting
+// a same-named twin (createManualAccount has no name dedup). Any other target
+// is used as is and nothing is created. A create that throws, or returns no
+// row, adopts nothing: the target correctly stays "new".
+export async function ensureImportAccount({ target, name, subtype, create, adopt }) {
+  if (target !== 'new') return { id: target, created: null };
+  const acct = await create({ name, subtype });
+  if (!acct || acct.id == null) throw new Error("the new account wasn't created");
+  adopt(acct);
+  return { id: acct.id, created: acct };
+}
+
+// The single-file modal's read of an existing target's ids and sources, which
+// FAILS CLOSED: a rejected read or an unrecognized shape returns `error` with
+// empty Sets (so nothing of the PREVIOUS target lingers) — never two silently
+// empty Sets, which read as "this account holds no other format" and let a
+// CSV import land on an account with PDF history (the formats hash
+// differently; there is no delete path). Never rejects.
+export const EXISTING_IDS_ERROR =
+  "Couldn't read the transactions already on this account, so importing isn't safe — the duplicate check and the one-format-per-account check both need them.";
+export async function readExistingIds(read, accountId) {
+  try {
+    const got = await read(accountId);
+    if (got?.ids instanceof Set && got?.sources instanceof Set) {
+      return { ids: got.ids, sources: got.sources, error: null, cause: null };
+    }
+    throw new Error('unrecognized existing-ids shape');
+  } catch (cause) {
+    return { ids: new Set(), sources: new Set(), error: EXISTING_IDS_ERROR, cause };
+  }
+}
+
 // Which of an account's existing row-sources CONFLICT with the format being
 // imported. The rule is csv-vs-pdf and only that (a bank words the same
 // transaction differently in the two formats, so their dedup hashes differ and
@@ -210,6 +266,28 @@ export function conflictingSources(existingSources, incomingSource, targetIsManu
   return relevant.filter(s => s !== incomingSource);
 }
 
+// One batch file's guard on a FRESH read of the target's rows (runBatch
+// re-reads before EVERY file: file N's inserts must be file N+1's dupes).
+// Returns the id Set; THROWS the reason the file fails. An unrecognized shape
+// is not an empty account — an empty id set means "import everything again".
+// For a write, the one-format-per-account rule is re-checked on THIS read,
+// never on the start-of-batch one, and a read with no sources is the same
+// blindness as a failed one. Compare-only writes nothing, so it needs ids alone.
+export function batchFileIds(fetched, { kind, auditOnly = false, targetIsManual = false } = {}) {
+  const ids = fetched?.ids instanceof Set ? fetched.ids : fetched instanceof Set ? fetched : null;
+  if (!ids) throw new Error("couldn't read this account's existing transactions — not importing blind");
+  if (auditOnly) return ids;
+  if (!(fetched?.sources instanceof Set)) {
+    throw new Error("couldn't read which formats this account already holds — not importing blind");
+  }
+  const clash = conflictingSources(fetched.sources, kind === 'pdf' ? 'pdf' : 'csv', targetIsManual);
+  if (clash.length) {
+    const fmt = clash.includes('pdf') ? 'PDF' : clash.includes('csv') ? 'CSV' : 'older imported';
+    throw new Error(`already holds ${fmt} rows — one format per account`);
+  }
+  return ids;
+}
+
 // Does this mapping carry ONE signed Amount column rather than a Debit/Credit
 // pair? That is the only shape whose sign is ambiguous, so it is the only one
 // that needs the money-in/money-out toggle.
@@ -225,6 +303,9 @@ export function conflictingSources(existingSources, incomingSource, targetIsManu
 // the same -1 convention.
 export function hasSingleAmountColumn(columns) {
   if (!columns) return false;
+  // A Debit/Credit INDICATOR column signs every row itself (see
+  // resolveStrayDirection), so its sign is not ambiguous either.
+  if (columns.indicator >= 0) return false;
   return columns.amount >= 0 && !(columns.debit >= 0) && !(columns.credit >= 0);
 }
 
@@ -235,13 +316,46 @@ function isUsableMapping(m) {
   return (hasDebitCredit || hasAmount) && m.description >= 0;
 }
 
+// A per-row direction marker, as an indicator column prints it.
+const INDICATOR_DEBIT_RE = /^(debit|dr|d)$/i;
+const INDICATOR_CREDIT_RE = /^(credit|cr|c)$/i;
+const INDICATOR_SAMPLE_ROWS = 50;
+const INDICATOR_MIN_SHARE = 0.8;
+
+// An Amount column beside ONE stray debit- or credit-worded column is not a
+// Debit/Credit pair. Either the stray column is a per-row direction marker
+// ("Credit Debit Indicator" reading Debit/Credit — the Navy-Federal shape),
+// which is recorded as `indicator`, or it is something else ("Payment
+// Method") and is dropped. Without this, buildRows read the stray column's
+// text as money and skipped EVERY row, on a header that still counted as
+// detected — so no manual mapper ever mounted to fix it. The marker is
+// decided from the column's DATA (most non-blank cells must be a marker),
+// never from its header wording alone.
+function resolveStrayDirection(m, rows, headerIndex) {
+  if (!(m.amount >= 0) || (m.debit >= 0 && m.credit >= 0)) return m;
+  const stray = m.debit >= 0 ? m.debit : m.credit;
+  if (!(stray >= 0)) return m;
+  let seen = 0;
+  let markers = 0;
+  for (let r = headerIndex + 1; r < rows.length && seen < INDICATOR_SAMPLE_ROWS; r++) {
+    if (isBlankRow(rows[r])) continue;
+    const v = String(rows[r][stray] ?? '').trim();
+    if (!v) continue;
+    seen++;
+    if (INDICATOR_DEBIT_RE.test(v) || INDICATOR_CREDIT_RE.test(v)) markers++;
+  }
+  const out = { ...m, debit: -1, credit: -1 };
+  if (seen > 0 && markers / seen >= INDICATOR_MIN_SHARE) out.indicator = stray;
+  return out;
+}
+
 // Scan rows for the header. Returns { headerIndex, columns } or null.
 export function detectHeader(rows) {
   for (let r = 0; r < rows.length; r++) {
     if (isBlankRow(rows[r])) continue;
     const m = mapHeaderRow(rows[r]);
     if (isUsableMapping(m)) {
-      return { headerIndex: r, columns: m };
+      return { headerIndex: r, columns: resolveStrayDirection(m, rows, r) };
     }
   }
   return null;
@@ -254,9 +368,40 @@ export function detectHeader(rows) {
 // "$1,234.50" | "(45.00)" | "-45" | "" → number magnitude/sign. Returns 0 for
 // blank. Parentheses and a leading minus both denote negatives (used only for
 // the single-amount fallback; Debit/Credit columns are positive magnitudes).
+//
+// Trailing direction markers, as card statements and some banks print them:
+// "45.00-" is a trailing minus (same as a leading one); "45.00 CR" NEGATES and
+// "45.00 DR" is the unmarked direction. CR is read as "the opposite of this
+// column's unmarked values": a statement that prints CR marks its credits
+// (refunds, payments) against unmarked charges, which is exactly the
+// out_positive reading the PDF default and a card CSV use, so the refund lands
+// as money in. That relative number is what the PDF section flip works with;
+// buildRows' single-amount path and the PDF pair's normalizeDebitCredit instead
+// read a CR/DR-marked cell AS PRINTED (see directionMark). A marker COMBINED
+// with parentheses or a leading sign is NaN — two directions on one value is
+// ambiguous, and guessing it wrong mints a wrong-signed row that can never be
+// deduped away.
+const TRAILING_MARK_RE = /^(.*\d.*?)\s*(CR|DR|-)$/i;
+
+// The explicit direction a money cell prints, if any: 'CR' | 'DR' | null. A
+// trailing minus is a SIGN (the same as a leading one), not a direction.
+export function directionMark(raw) {
+  const m = String(raw ?? '').trim().match(TRAILING_MARK_RE);
+  return m && m[2] !== '-' ? m[2].toUpperCase() : null;
+}
 export function parseMoney(raw) {
   let v = String(raw ?? '').trim();
   if (v === '') return 0;
+  const mark = v.match(TRAILING_MARK_RE);
+  if (mark) {
+    const core = mark[1].trim();
+    // Any sign, parenthesis or second marker in what is left is a second
+    // direction on the same value.
+    if (/[-+()]/.test(core) || TRAILING_MARK_RE.test(core)) return NaN;
+    const n = parseMoney(core);
+    if (!Number.isFinite(n)) return NaN;
+    return mark[2].toUpperCase() === 'DR' || n === 0 ? n : -n;
+  }
   let neg = false;
   if (/^\(.*\)$/.test(v)) {
     neg = true;
@@ -362,7 +507,9 @@ export function baseHash(dateIso, amount, normDesc) {
 //   headerIndex   — index of the header row (data starts after it)
 //   columns       — { date, description, debit, credit, amount } indices
 //   amountSign    — for single-amount columns: 'in_positive' (bank statement
-//                   default: positive = deposit) or 'out_positive'.
+//                   default: positive = deposit) or 'out_positive'. Not
+//                   consulted for a cell carrying its own CR/DR marker, nor
+//                   beside an indicator column.
 //   existingIds   — Set of plaid_tx_id already in the DB for the target account
 //                   (used to flag duplicates; empty for a brand-new account).
 //   rules         — learned merchant→category rules (see category_rules).
@@ -404,10 +551,15 @@ export function buildRows(rows, opts = {}) {
     // Compute the signed app amount (positive = money out).
     let amount;
     // No initialiser: every branch below assigns rawDebit before anything reads
-    // it. rawCredit keeps its '' — the single-amount branch never sets it.
+    // it. rawCredit keeps its '' in the single-amount branch, except that an
+    // indicator column's marker rides there so a skipped row shows it.
     let rawDebit;
     let rawCredit = '';
-    if (columns.debit >= 0 || columns.credit >= 0) {
+    let noMarker = false;
+    // The pair path needs BOTH columns — the rule isUsableMapping states. With
+    // only one mapped, the other cell reads '' (0) and an Amount column beside
+    // it was ignored; a lone stray column is the amount path's business.
+    if (columns.debit >= 0 && columns.credit >= 0) {
       rawDebit = String(cell(cells, columns.debit) ?? '').trim();
       rawCredit = String(cell(cells, columns.credit) ?? '').trim();
       const debit = parseMoney(rawDebit);
@@ -426,6 +578,28 @@ export function buildRows(rows, opts = {}) {
       const signed = parseMoney(rawAmt); // may already carry a sign
       if (Number.isNaN(signed)) {
         amount = NaN;
+      } else if (columns.indicator >= 0) {
+        // The row's own Debit/Credit marker decides direction; amountSign is
+        // not consulted (the toggle is hidden for this shape). A row WITHOUT a
+        // readable marker is skipped with a reason rather than guessed — a
+        // wrong-signed row can never be deduped away.
+        const mark = String(cell(cells, columns.indicator) ?? '').trim();
+        rawCredit = mark;
+        if (INDICATOR_DEBIT_RE.test(mark)) amount = Math.abs(signed);
+        else if (INDICATOR_CREDIT_RE.test(mark)) amount = -Math.abs(signed);
+        else { amount = NaN; noMarker = true; }
+      } else if (directionMark(rawAmt)) {
+        // A cell that prints its own CR/DR marker states its direction, so
+        // amountSign is not consulted (the indicator column's rule, per cell):
+        // CR is a credit to the holder — money in — and DR a debit, on a bank
+        // statement and a card one alike, and parseMoney already returns it in
+        // app orientation (DR +, CR −). Read through the 'in_positive' default
+        // instead, a bank file printing "100.00 CR" deposits and "50.00 DR"
+        // withdrawals imported every row inverted — and a wrong-signed row
+        // hashes apart from its twin, so it can never be deduped away.
+        // Unmarked cells (and a trailing minus, which is a sign) still follow
+        // the toggle.
+        amount = signed;
       } else {
         // amountSign describes what a POSITIVE value in the column means.
         amount = amountSign === 'out_positive' ? signed : -signed;
@@ -434,7 +608,8 @@ export function buildRows(rows, opts = {}) {
 
     const problems = [];
     if (!dateIso) problems.push('unparseable date');
-    if (Number.isNaN(amount)) problems.push('unparseable amount');
+    if (noMarker) problems.push('no debit/credit marker');
+    else if (Number.isNaN(amount)) problems.push('unparseable amount');
     if (!rawDesc) problems.push('empty description');
     // A zero-amount row carries no spend/income signal — skip as noise (e.g.
     // memo/informational lines) rather than inserting a $0 transaction.

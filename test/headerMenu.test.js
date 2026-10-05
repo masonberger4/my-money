@@ -68,6 +68,23 @@ test('cycleTheme is gone from both the header and src/theme.js', () => {
     'cycleTheme was deleted from src/theme.js — a surviving export is dead code advertising a removed control');
 });
 
+// --- One runtime token hook, in theme.js (2026-10 import audit, F99) ------
+// CsvImport and PdfTemplateEditor each carried a byte-identical useSurface,
+// "deliberately duplicated" to avoid a CsvImport <-> PdfTemplateEditor import
+// cycle. theme.js imports nothing from components, so the one copy lives
+// there; two copies drift on the next re-read contract change and one surface
+// keeps the old theme's colours after a toggle.
+test('theme.js exports useThemeToken and no component redefines a private copy', () => {
+  const theme = read(THEME);
+  assert.match(theme, /export function useThemeToken\(/);
+  assert.match(theme, /subscribeTheme\(read\)/, 'it must re-read on every theme apply, not just mount');
+  for (const f of ['src/components/CsvImport.jsx', 'src/components/PdfTemplateEditor.jsx']) {
+    const src = read(f);
+    assert.doesNotMatch(src, /function useSurface\b/, `${f} must use theme.js's useThemeToken, not a private copy`);
+    assert.match(src, /import \{[^}]*\buseThemeToken\b[^}]*\} from "\.\.\/theme\.js"/, `${f} imports the shared hook`);
+  }
+});
+
 // --- Pull-to-refresh must be blocked while a sheet is open or already busy --
 // "Busy" includes the bank pull a refresh started (`refreshing`), not just the
 // cache read in front of it: gating on `loading` alone let the chip settle and

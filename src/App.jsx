@@ -1,10 +1,12 @@
-import { lazy, Suspense, useCallback, useEffect, useState } from 'react';
+import { Suspense, useCallback, useEffect, useState } from 'react';
 import { supabase, configError } from './supabaseClient.js';
 import Dashboard from './components/Dashboard.jsx';
+import lazyWithReload from './lazyWithReload.js';
 // Lazy: EmptyState statically imports the CsvImport modal, which Dashboard
 // loads lazily — a static import here would pull the whole import stack back
-// into the main bundle and defeat that split.
-const EmptyState = lazy(() => import('./components/EmptyState.jsx'));
+// into the main bundle and defeat that split. A stale chunk after a deploy
+// reloads once (lazyWithReload) before the ErrorBoundary below shows.
+const EmptyState = lazyWithReload(() => import('./components/EmptyState.jsx'));
 import Login from './components/Login.jsx';
 import ErrorBoundary from './components/ErrorBoundary.jsx';
 

@@ -317,6 +317,18 @@ Conventions / Gotchas. An entry here is a pointer, not a home for rules.
   rejected: the "Audit PR B" decision-journal entry; rules: the Key-files rows,
   Architecture, Conventions and Gotchas they name.
 
+- **Statement-import and PWA-shell audit fixes — audit PR C (2026-10-05)** —
+  the last of the three: PDF auto-detect that never pairs a running Balance,
+  year-less MM/DD PDF dates, CR/DR/trailing-minus amounts, the CSV description
+  order and indicator columns, the import modal's create-and-adopt and
+  fail-closed reads, one runtime token hook and a session-held theme choice;
+  a reload-once for stale lazy chunks with a modal-scoped failure card, sw.js
+  v8 (unversioned asset cache, navigation budget, keep-set prune), the 16px
+  coarse-pointer input rule, and a lockfile-only `npm audit fix`. Item list:
+  the plan doc's "Improvement backlog (2026-10-05 audit)"; decided and
+  rejected: the "Audit PR C" decision-journal entry; rules: the Key-files
+  rows, Conventions and Gotchas they name.
+
 ## Pending branches
 
 None in code, and **no migration is outstanding**: every file in

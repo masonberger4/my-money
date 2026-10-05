@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { applyTemplate, COLUMN_ROLES, splitLineIntoCells, groupIntoLines } from "../pdfImport.js";
 import { markColor, readableInk } from "../paletteContrast.js";
-import { readToken, subscribeTheme } from "../theme.js";
+import { useThemeToken } from "../theme.js";
 
 // Visual "teach it once" template editor.
 //
@@ -41,21 +41,6 @@ const roleHue = (role, surface) => {
   return markColor(raw, surface) || raw;
 };
 
-// Read a theme surface at RUNTIME from src/ui.css — never hardcode a token value
-// here — re-reading whenever the theme is applied so these follow the header
-// toggle, not just the OS. Deliberately duplicated from CsvImport.jsx rather
-// than imported: CsvImport imports THIS file, so sharing it there would make the
-// two modules circular.
-function useSurface(token) {
-  const [value, setValue] = useState(() => readToken(token, ""));
-  useEffect(() => {
-    const read = () => setValue(readToken(token, ""));
-    read();
-    return subscribeTheme(read);
-  }, [token]);
-  return value;
-}
-
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
 export default function PdfTemplateEditor({ pages, template, onChange, rowCount }) {
@@ -67,9 +52,9 @@ export default function PdfTemplateEditor({ pages, template, onChange, rowCount 
   // Surfaces each mark is actually drawn on: the column cards paint --bg, the
   // role <select> paints --input-bg, and the row-count line sits on the import
   // modal's --card panel. Hooks stay above the `if (!page)` early return below.
-  const bgSurface = useSurface("--bg");
-  const inputSurface = useSurface("--input-bg");
-  const cardSurface = useSurface("--card");
+  const bgSurface = useThemeToken("--bg");
+  const inputSurface = useThemeToken("--input-bg");
+  const cardSurface = useThemeToken("--card");
 
   const page = pages?.[Math.min(pageIdx, (pages?.length || 1) - 1)] || null;
 
@@ -116,7 +101,7 @@ export default function PdfTemplateEditor({ pages, template, onChange, rowCount 
   // `template` and the editor's own visibility in the same batch today, so
   // nothing reached it — a caller that nulls the template while this stays
   // mounted would. Found by the linter (2026-09-08); the comment above the
-  // useSurface calls had already stated the rule.
+  // useThemeToken calls had already stated the rule.
   const sample = useMemo(() => {
     if (!page || !template) return null;
     const lines = groupIntoLines(page.runs);
@@ -274,18 +259,18 @@ export default function PdfTemplateEditor({ pages, template, onChange, rowCount 
 
       {/* Amount interpretation. */}
       <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 10, alignItems: "center" }}>
-        <select value={template.amountMode} onChange={e => set({ amountMode: e.target.value })} style={{ ...sel, width: "auto" }}>
+        <select value={template.amountMode} onChange={e => set({ amountMode: e.target.value })} style={{ ...sel, width: "auto", maxWidth: "100%" }}>
           <option value="signed">One Amount column</option>
           <option value="debitcredit">Separate Debit / Credit</option>
         </select>
         {template.amountMode === "signed" && (
-          <select value={template.amountSign} onChange={e => set({ amountSign: e.target.value })} style={{ ...sel, width: "auto" }}>
+          <select value={template.amountSign} onChange={e => set({ amountSign: e.target.value })} style={{ ...sel, width: "auto", maxWidth: "100%" }}>
             <option value="out_positive">+ = money out (charges)</option>
             <option value="in_positive">+ = money in (deposits)</option>
           </select>
         )}
         {roles.includes("date2") && (
-          <select value={template.dateColumn || "date"} onChange={e => set({ dateColumn: e.target.value })} style={{ ...sel, width: "auto" }}>
+          <select value={template.dateColumn || "date"} onChange={e => set({ dateColumn: e.target.value })} style={{ ...sel, width: "auto", maxWidth: "100%" }}>
             <option value="date">Use Date</option>
             <option value="date2">Use Date 2</option>
           </select>

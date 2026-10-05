@@ -18,6 +18,12 @@ import {
   conflictingSources,
   resolveTemplateForTarget,
   parseDate,
+  buildRows,
+  withCreatedAccount,
+  ensureImportAccount,
+  readExistingIds,
+  EXISTING_IDS_ERROR,
+  batchFileIds,
 } from '../src/csvImport.js';
 import { TRANSFER_CATEGORY, FALLBACK_CATEGORY } from '../src/categoryMap.js';
 import { pullWasClean } from '../src/sync.js';
@@ -233,7 +239,7 @@ test('importPlan: newRows never contains a row on or after the boundary', () => 
 
 test('importPlan tolerates junk instead of throwing during render', () => {
   // It runs inside a useMemo in CsvImport's body; a throw there is not caught by
-  // ModalErrorBoundary (which that same body renders) and blanks the whole PWA.
+  // the ErrorBoundary that same body renders and blanks the whole PWA.
   for (const junk of [undefined, null, 'nope', 42, {}]) {
     assert.equal(importPlan(junk).verdict, 'empty');
   }
@@ -556,4 +562,374 @@ test('parseDate still rejects an impossible date, with or without a time', () =>
 test('parseDate leaves M/D/Y strict — no D/M/Y guessing', () => {
   assert.equal(parseDate('8/1/2026'), '2026-08-01');
   assert.equal(parseDate('8/1/2026 14:03'), null, 'a slash date with a time is not a shape we claim to know');
+});
+
+// --- 2026-10 import audit (F44): the description column prefers the merchant -
+// The description synonyms were scanned in the order Description, ^Memo$,
+// ^Name$, Payee — so a Memo column beat Payee and Name. `Date,Payee,Memo,
+// Amount` with empty memos then skipped every row ("empty description"), and
+// the US Bank shape (Date,Transaction,Name,Memo,Amount) imported the
+// boilerplate memo as every row's description: rules couldn't match, and the
+// dedup hash was built from boilerplate. A header with a Description column
+// resolves exactly as before, so its rows keep their ids.
+test('description prefers Payee over Memo, and both rows build', () => {
+  const a = analyzeCsv('Date,Payee,Memo,Amount\n08/01/2026,STARBUCKS,,-5.45\n08/02/2026,ACME PAYROLL,,1500.00\n');
+  assert.equal(a.columns.description, 1);
+  assert.deepEqual(a.rows.map(r => r.description), ['STARBUCKS', 'ACME PAYROLL']);
+  assert.equal(a.skipped.length, 0);
+});
+
+test('description prefers Name over a boilerplate Memo (the US Bank shape)', () => {
+  const a = analyzeCsv(
+    '"Date","Transaction","Name","Memo","Amount"\n' +
+    '"2026-08-01","DEBIT","WEB AUTHORIZED PMT VERIZON","Download from usbank.com.","-45.00"\n'
+  );
+  assert.equal(a.columns.description, 2);
+  assert.equal(a.rows[0].description, 'WEB AUTHORIZED PMT VERIZON');
+});
+
+test('REGRESSION: a Description column still wins over every other synonym', () => {
+  assert.equal(detectHeader([['Transaction Date', 'Description', 'Amount']]).columns.description, 1);
+  assert.equal(detectHeader([['Details', 'Posting Date', 'Description', 'Amount', 'Type', 'Balance']]).columns.description, 2);
+  assert.equal(detectHeader([['Date', 'Memo', 'Payee', 'Description', 'Amount']]).columns.description, 3);
+});
+
+test('REGRESSION: a header whose only text column is Memo still maps it', () => {
+  assert.equal(detectHeader([['Date', 'Memo', 'Amount']]).columns.description, 1);
+  assert.equal(detectHeader([['Date', 'Details', 'Memo', 'Amount']]).columns.description, 1, 'Details beats Memo');
+});
+
+// --- 2026-10 import audit (F40): Amount + one stray debit/credit column -----
+// buildRows took the Debit/Credit branch when EITHER column was mapped, so an
+// Amount column beside one stray debit- or credit-worded column ("Credit
+// Debit Indicator" — the Navy-Federal shape — or "Payment Method") read a
+// non-numeric cell as money and skipped EVERY row. The header still counted
+// as detected, so ManualMapper never mounted and nothing in the modal could
+// fix it. The pair path now needs BOTH columns (the rule isUsableMapping
+// already stated); a stray column whose cells say Debit/Credit becomes a
+// per-row sign, and any other stray column is dropped.
+const NFCU = [
+  'Posting Date,Transaction Date,Amount,Credit Debit Indicator,type,Type Group,Reference,Description,Category',
+  '08/01/2026,07/31/2026,45.12,Debit,POS,Card,123,STARBUCKS #123,Dining',
+  '08/02/2026,08/02/2026,1500.00,Credit,Deposit,Deposit,124,PAYROLL ACME,Income',
+].join('\n') + '\n';
+
+test('a Debit/Credit INDICATOR column beside Amount signs each row (the NFCU shape)', () => {
+  const a = analyzeCsv(NFCU);
+  assert.deepEqual(
+    { amount: a.columns.amount, indicator: a.columns.indicator, debit: a.columns.debit, credit: a.columns.credit },
+    { amount: 2, indicator: 3, debit: -1, credit: -1 }
+  );
+  assert.equal(a.needsManualMapping, false);
+  assert.deepEqual(a.rows.map(r => [r.description, r.amount]), [['STARBUCKS #123', 45.12], ['PAYROLL ACME', -1500]]);
+  assert.equal(a.skipped.length, 0);
+  assert.equal(hasSingleAmountColumn(a.columns), false, 'the sign is unambiguous — no toggle');
+  // The marker wins over the sign toggle: the same rows either way.
+  assert.deepEqual(analyzeCsv(NFCU, { amountSign: 'out_positive' }).rows.map(r => r.amount), [45.12, -1500]);
+});
+
+test('an indicator row with no readable marker is SKIPPED with a reason, never guessed', () => {
+  const a = analyzeCsv(NFCU + '08/03/2026,08/03/2026,9.99,,POS,Card,125,MYSTERY,Misc\n');
+  assert.equal(a.rows.length, 2);
+  assert.equal(a.skipped.length, 1);
+  assert.match(a.skipped[0].reason, /debit\/credit/);
+});
+
+test('short DR/CR markers and a signed Amount both read through the indicator', () => {
+  const a = analyzeCsv('Date,Description,Amount,Debit/Credit\n08/01/2026,COFFEE,-4.50,DR\n08/02/2026,REFUND,4.50,CR\n');
+  assert.equal(a.columns.indicator, 3);
+  assert.deepEqual(a.rows.map(r => r.amount), [4.5, -4.5]);
+});
+
+test('a stray non-indicator column ("Payment Method") is dropped: one signed Amount, the toggle shows', () => {
+  const a = analyzeCsv('Date,Description,Amount,Payment Method\n08/01/2026,COFFEE SHOP,4.50,Visa\n');
+  assert.equal(a.columns.amount, 2);
+  assert.equal(a.columns.debit, -1);
+  assert.equal(a.columns.credit, -1);
+  assert.ok(!(a.columns.indicator >= 0));
+  assert.equal(hasSingleAmountColumn(a.columns), true);
+  assert.equal(a.rows.length, 1);
+});
+
+test('REGRESSION: Payments and "Payments and Credits" still map to credit', () => {
+  assert.equal(detectHeader([['Date', 'Description', 'Charges', 'Payments']]).columns.credit, 3);
+  assert.equal(detectHeader([['Date', 'Description', 'Charges', 'Payments and Credits']]).columns.credit, 3);
+  assert.equal(detectHeader([['Date', 'Description', 'Charges', 'Payments & Credits']]).columns.credit, 3);
+  assert.equal(detectHeader([['Date', 'Description', 'Charges', 'Payment Method']]), null,
+    '"Payment Method" is not a credit column, so Charges alone is no usable mapping');
+});
+
+test('buildRows with Amount and only ONE of debit/credit takes the amount path, not NaN', () => {
+  const rows = [['Date', 'Description', 'Amount', 'Debit'], ['08/01/2026', 'COFFEE', '4.50', 'n/a']];
+  const { rows: built, skipped } = buildRows(rows, {
+    headerIndex: 0,
+    columns: { date: 0, description: 1, debit: 3, credit: -1, amount: 2 },
+    amountSign: 'out_positive',
+  });
+  assert.equal(skipped.length, 0);
+  assert.deepEqual(built.map(r => r.amount), [4.5]);
+});
+
+// --- 2026-10 import audit (F83 repair): a CR/DR marker states its own sign -
+// parseMoney reads CR as "the opposite of the column's unmarked values", which
+// is right under out_positive — but a CSV single-Amount column defaults to
+// in_positive, so a bank file printing "100.00 CR" deposits and "50.00 DR"
+// withdrawals imported EVERY row inverted until the toggle was flipped, and a
+// wrong-signed row hashes apart from its twin, so it can never be deduped
+// away. CR is money in and DR money out on any statement, so a marked cell is
+// read as is (the indicator column's rule, per cell); unmarked cells and a
+// trailing minus still follow the toggle.
+const MARKED = 'Date,Description,Amount\n08/01/2026,PAYROLL ACME,100.00 CR\n08/02/2026,RENT,50.00 DR\n';
+
+test('a CR/DR-marked Amount column reads the same under either sign toggle', () => {
+  for (const amountSign of ['in_positive', 'out_positive']) {
+    const a = analyzeCsv(MARKED, { amountSign });
+    assert.deepEqual(a.rows.map(r => [r.description, r.amount]), [['PAYROLL ACME', -100], ['RENT', 50]], amountSign);
+  }
+  // The default the modal starts on is in_positive — the case that inverted.
+  assert.deepEqual(analyzeCsv(MARKED).rows.map(r => r.amount), [-100, 50]);
+});
+
+test('a marked row hashes like its signed twin, so a re-import of either dedups', () => {
+  const marked = analyzeCsv(MARKED).rows.map(r => r.plaid_tx_id);
+  const signed = analyzeCsv('Date,Description,Amount\n08/01/2026,PAYROLL ACME,100.00\n08/02/2026,RENT,-50.00\n').rows.map(r => r.plaid_tx_id);
+  assert.deepEqual(marked, signed);
+});
+
+test('unmarked cells and a trailing minus still follow the toggle beside marked ones', () => {
+  const card = 'Date,Description,Amount\n08/01/2026,COFFEE,45.00\n08/02/2026,STORE REFUND,23.10 CR\n08/03/2026,PAYMENT,500.00-\n';
+  assert.deepEqual(analyzeCsv(card, { amountSign: 'out_positive' }).rows.map(r => r.amount), [45, -23.1, -500]);
+  assert.deepEqual(analyzeCsv(card, { amountSign: 'in_positive' }).rows.map(r => r.amount), [-45, -23.1, 500]);
+});
+
+// The rescue: a detected header that builds 0 rows had no way out — the
+// mapper only mounted for an UNdetected header. Source pin (the component
+// can't mount in Node): the mapper is gated on a per-file force flag too,
+// the link that sets it exists, and nothing persists it per account
+// (per-account CSV column memory is a deferred feature).
+test('REGRESSION: a detected CSV that builds 0 rows offers "Map columns by hand"', () => {
+  const src = read('src/components/CsvImport.jsx');
+  assert.match(src, /\(analysis\?\.needsManualMapping \|\| forceManual\)\s*&&\s*\(\s*<ManualMapper/,
+    'ManualMapper must mount for a forced remap as well as an undetected header');
+  assert.match(src, /onClick=\{\(\) => setForceManual\(true\)\}[^<]*>\s*Map columns by hand/);
+  assert.match(src, /const canRemap\s*=[^;]*rows\.length === 0[^;]*skipped\.length > 0/);
+  // Reset per file, on both entry points.
+  const load = src.slice(src.indexOf('async function loadSingleFile'), src.indexOf('const isPdf ='));
+  assert.match(load, /setForceManual\(false\)/);
+  const onFile = src.slice(src.indexOf('async function onFile'), src.indexOf('async function loadSingleFile'));
+  assert.match(onFile, /setForceManual\(false\)/);
+  assert.doesNotMatch(src, /setSetting\([^)]*csv/i, 'no per-account CSV column memory');
+});
+
+// --- 2026-10 import audit (F42): an account created for "new" is ADOPTED ----
+// confirm() and runBatch() created the account into a local variable and left
+// `target` on "new" with the name still filled in. A retry after a failed
+// write, or "Open alone" after a batch, then minted a SECOND same-named
+// account (createManualAccount has no name dedup) and imported against an
+// empty id set — the month split across twins, boundary-day rows in both.
+test('withCreatedAccount appends a created account the parent list does not hold yet', () => {
+  const a = [{ id: 'a1' }, { id: 'a2' }];
+  const created = { id: 'n1', name: 'Chase Card', plaid_account_id: 'manual:x' };
+  assert.deepEqual(withCreatedAccount(a, created).map(x => x.id), ['a1', 'a2', 'n1']);
+  assert.deepEqual(a.map(x => x.id), ['a1', 'a2'], 'never mutates the prop');
+});
+
+test('withCreatedAccount does not duplicate once the parent has reloaded it, and is a no-op for null', () => {
+  const a = [{ id: 'a1' }, { id: 'n1', name: 'Chase Card (reloaded)' }];
+  assert.equal(withCreatedAccount(a, { id: 'n1', name: 'Chase Card' }), a, 'the parent copy wins, same array');
+  assert.equal(withCreatedAccount(a, null), a);
+  assert.deepEqual(withCreatedAccount(null, null), []);
+  assert.deepEqual(withCreatedAccount(undefined, { id: 'n1' }).map(x => x.id), ['n1']);
+});
+
+// The create-and-adopt decision lives in ensureImportAccount, so the
+// failure-then-retry path RUNS here: a stand-in for the modal whose `adopt`
+// moves `target` exactly as adoptCreated does, and a write that fails once.
+const modalStandIn = () => {
+  const st = { target: 'new', creates: 0, writes: [] };
+  st.create = async ({ name, subtype }) => ({ id: `n${++st.creates}`, name, subtype });
+  st.adopt = acct => { st.target = acct.id; };
+  st.run = async ({ failWrite = false } = {}) => {
+    const { id } = await ensureImportAccount({ target: st.target, name: 'Chase Card', subtype: 'credit', create: st.create, adopt: st.adopt });
+    if (failWrite) throw new Error('network');
+    st.writes.push(id);
+    return id;
+  };
+  return st;
+};
+
+test('a write that fails after creating "new" retries into the SAME account, never a twin', async () => {
+  const m = modalStandIn();
+  await assert.rejects(m.run({ failWrite: true }), /network/);
+  assert.equal(m.target, 'n1', 'adopted before the write could fail');
+  assert.equal(await m.run(), 'n1', 'the retry imports into the adopted account');
+  assert.equal(await m.run(), 'n1', 'and so does a later file / "Open alone"');
+  assert.equal(m.creates, 1, 'one account, however many runs');
+  assert.deepEqual(m.writes, ['n1', 'n1']);
+});
+
+test('ensureImportAccount: an existing target creates nothing; a failed create adopts nothing', async () => {
+  const adopted = [];
+  const adopt = a => adopted.push(a.id);
+  let creates = 0;
+  const counting = async () => { creates++; return { id: 'x' }; };
+  assert.deepEqual(
+    await ensureImportAccount({ target: 'acct-7', name: 'X', subtype: 'checking', create: counting, adopt }),
+    { id: 'acct-7', created: null }
+  );
+  assert.equal(creates, 0);
+  await assert.rejects(
+    ensureImportAccount({ target: 'new', name: 'X', subtype: 'checking', create: async () => { throw new Error('insert failed'); }, adopt }),
+    /insert failed/
+  );
+  await assert.rejects(
+    ensureImportAccount({ target: 'new', name: 'X', subtype: 'checking', create: async () => null, adopt }),
+    /wasn't created/
+  );
+  assert.deepEqual(adopted, [], 'a target that never got an account stays "new"');
+  const r = await ensureImportAccount({ target: 'new', name: 'Chase Card', subtype: 'credit', create: async o => ({ id: 'n9', ...o }), adopt });
+  assert.equal(r.id, 'n9');
+  assert.deepEqual([r.created.name, r.created.subtype], ['Chase Card', 'credit']);
+  assert.deepEqual(adopted, ['n9']);
+});
+
+// Wiring only — the component can't mount in Node (the abort-ref precedent).
+const csvImportSrc = () => read('src/components/CsvImport.jsx');
+const bodyOf = (src, start, end) => {
+  const i = src.indexOf(start);
+  assert.ok(i >= 0, `anchor moved: ${start}`);
+  const j = src.indexOf(end, i + start.length);
+  assert.ok(j > i, `end anchor moved: ${end}`);
+  return src.slice(i, j);
+};
+
+test('REGRESSION: both import paths create through ensureImportAccount with the one adopt', () => {
+  const src = csvImportSrc();
+  assert.doesNotMatch(src, /await createManualAccount\(/, 'createManualAccount is only ever handed to the helper');
+  const sites = [...src.matchAll(/await ensureImportAccount\(\{[^}]*\}\)/g)].map(m => m[0]);
+  assert.equal(sites.length, 2, 'confirm() and runBatch() — update this pin if a third site appears');
+  for (const site of sites) {
+    assert.match(site, /\btarget,/);
+    assert.match(site, /create: createManualAccount/);
+    assert.match(site, /adopt: adoptCreated/);
+  }
+  // ...and before the first write, in both paths.
+  for (const [start, end] of [['async function confirm()', 'setResult('], ['async function runBatch()', 'setBatchSummary(']]) {
+    const body = bodyOf(src, start, end);
+    const create = body.indexOf('await ensureImportAccount(');
+    assert.ok(create >= 0 && create < body.indexOf('importCsvTransactions('), `${start}: create+adopt precede the write`);
+  }
+  const adopt = bodyOf(src, 'const adoptCreated = acct => {', '};');
+  assert.match(adopt, /setCreatedAcct\(acct\)/, 'the created row must be merged locally until the parent reloads');
+  assert.match(adopt, /setTarget\(acct\.id\)/, 'target must move off "new" or a retry mints a twin');
+  assert.match(adopt, /unreportedAcctRef\.current = true/, 'a created account must reach the parent even if no row lands');
+  // ...reported on CLOSE, not at the failure: in the first-run EmptyState the
+  // parent's refresh swaps this modal for the Dashboard, discarding the
+  // adopted target a retry needs.
+  assert.match(src, /useEffect\(\(\) => \(\) => \{\s*if \(unreportedAcctRef\.current\) \{[^}]*onImportedRef\.current\?\.\(\)/);
+  // Classification reads the MERGED list: the raw prop has no row for the new
+  // id until reloadData lands, which would make targetAcct null (targetIsManual
+  // false) and leave the controlled <select> pointing at no option.
+  assert.match(src, /const allAccounts = withCreatedAccount\(accounts, createdAcct\)/);
+  assert.doesNotMatch(src, /\baccounts\.find\(a => a\.id === target\)/);
+  assert.doesNotMatch(src, /\baccounts\.filter\(/);
+});
+
+// --- 2026-10 import audit (F43): the existing-ids read FAILS CLOSED ----------
+// The single-file effect's catch quietly set existingIds AND existingSources
+// to empty Sets — no error, nothing on screen. An empty source set makes
+// mixedSource false, so a flaky read on an account holding PDF history
+// enabled a CSV import of the same months: every overlapping row duplicated,
+// permanently (the formats hash differently and there is no delete path).
+// runBatch's own comment already said a failed fetch must fail the file, but
+// its per-file refetch read only `ids` and never re-checked the sources.
+test('readExistingIds fails CLOSED: a rejected read is an error with empty Sets', async () => {
+  const r = await readExistingIds(async () => { throw new Error('fetch failed'); }, 'acct-1');
+  assert.equal(r.error, EXISTING_IDS_ERROR);
+  assert.deepEqual([r.ids.size, r.sources.size], [0, 0], 'nothing of the previous target lingers');
+  assert.match(String(r.cause), /fetch failed/);
+  const sync = await readExistingIds(() => { throw new Error('boom'); }, 'acct-1');
+  assert.equal(sync.error, EXISTING_IDS_ERROR, 'a synchronous throw too');
+});
+
+test('readExistingIds treats an unrecognized shape as a failed read, not an empty account', async () => {
+  for (const bad of [undefined, null, {}, { ids: new Set() }, { ids: [], sources: new Set() }, new Set(['csv:a:0'])]) {
+    const r = await readExistingIds(async () => bad, 'acct-1');
+    assert.equal(r.error, EXISTING_IDS_ERROR, String(bad && JSON.stringify(bad)));
+  }
+});
+
+test('readExistingIds passes a good read through for the account asked about', async () => {
+  const ids = new Set(['csv:a:0']);
+  const sources = new Set(['pdf']);
+  let asked;
+  const r = await readExistingIds(async id => { asked = id; return { ids, sources }; }, 'acct-1');
+  assert.equal(asked, 'acct-1');
+  assert.equal(r.ids, ids);
+  assert.equal(r.sources, sources);
+  assert.equal(r.error, null);
+});
+
+test('batchFileIds re-checks the formats on each fresh read and fails the file on a clash', () => {
+  const ids = new Set(['csv:a:0']);
+  assert.throws(() => batchFileIds({ ids, sources: new Set(['pdf']) }, { kind: 'csv', targetIsManual: true }),
+    /already holds PDF rows — one format per account/);
+  assert.throws(() => batchFileIds({ ids, sources: new Set(['csv']) }, { kind: 'pdf', targetIsManual: true }),
+    /already holds CSV rows/);
+  assert.throws(() => batchFileIds({ ids, sources: new Set(['plaid']) }, { kind: 'csv', targetIsManual: true }),
+    /already holds older imported rows/);
+  assert.equal(batchFileIds({ ids, sources: new Set(['pdf']) }, { kind: 'pdf', targetIsManual: true }), ids);
+  assert.equal(batchFileIds({ ids, sources: new Set(['manual', 'csv']) }, { kind: 'csv', targetIsManual: true }), ids,
+    'a quick-add never conflicts');
+  assert.equal(batchFileIds({ ids, sources: new Set(['simplefin', 'csv']) }, { kind: 'csv', targetIsManual: false }), ids,
+    'a fed account holds its own feed rows beside imported history');
+  assert.equal(batchFileIds({ ids, sources: new Set(['pdf']) }, { kind: 'csv', auditOnly: true, targetIsManual: true }), ids,
+    'compare-only writes nothing, so it does not need the format check');
+});
+
+test('batchFileIds fails the file on an unreadable read instead of importing blind', () => {
+  for (const bad of [undefined, null, {}, { ids: [] }]) {
+    assert.throws(() => batchFileIds(bad, { kind: 'csv' }), /not importing blind/);
+  }
+  assert.throws(() => batchFileIds({ ids: new Set() }, { kind: 'csv', targetIsManual: true }), /which formats/,
+    'ids with no sources: the format check cannot run, so a write fails');
+  assert.equal(batchFileIds({ ids: new Set(['x']) }, { kind: 'csv', auditOnly: true }).size, 1);
+});
+
+test('REGRESSION: the modal reads ids through readExistingIds, raises idsError, and Retry re-reads', () => {
+  const src = csvImportSrc();
+  assert.doesNotMatch(src, /getExistingTxIds\(target\)/, 'no second, unguarded read');
+  const effect = bodyOf(src, 'readExistingIds(getExistingTxIds, target)', '}, [target');
+  assert.match(effect, /setExistingSources\(r\.sources\)/);
+  assert.match(effect, /setIdsError\(r\.error\)/);
+  assert.match(src, /readExistingIds\(getExistingTxIds, target\)[\s\S]{0,600}?\}, \[target, idsEpoch\]\);/, 'Retry (idsEpoch) must re-run the read');
+  assert.match(src, /onClick=\{\(\) => setIdsEpoch\(n => n \+ 1\)\}/, 'the error offers a Retry');
+});
+
+test('REGRESSION: an unreadable account blocks Import and batch start', () => {
+  const src = csvImportSrc();
+  assert.match(bodyOf(src, 'const canConfirm =', ';'), /!idsError/);
+  assert.match(bodyOf(src, 'const batchCanStart =', ';'), /!idsError/);
+  assert.match(bodyOf(src, 'async function confirm()', 'setBusy(true)'), /if \(idsError\) return;/);
+});
+
+// Adoption moves the target off "new" BEFORE the write, so the effect's read
+// runs alongside (or ahead of) the rows it should see, and nothing re-read
+// after. A modal left open — a retry after a write that committed earlier
+// slices and then threw, or "Open alone" after a batch — flagged duplicates
+// and ran the one-format guard on that stale snapshot: a CSV picked after a
+// part-written PDF passed it. Wiring only (the component can't mount in Node).
+test('REGRESSION: the target ids re-read once each import path has settled', () => {
+  const src = csvImportSrc();
+  assert.match(src, /const rereadExistingIds = \(\) => setIdsEpoch\(n => n \+ 1\);/);
+  const confirm = bodyOf(src, 'async function confirm()', '// --------');
+  assert.match(confirm, /\} finally \{[\s\S]*?rereadExistingIds\(\);[\s\S]*?\n {2}\}/,
+    'in confirm()\'s finally: a throw can leave earlier slices written');
+  const batchTail = bodyOf(src, 'setBatchSummary({ ...totals, files: queue.length });', 'const panelStyle');
+  assert.match(batchTail, /rereadExistingIds\(\);/, 'a finished batch re-reads before "Open alone" can hand a file over');
+});
+
+test('REGRESSION: every batch file guards its own refetch through batchFileIds', () => {
+  const loop = bodyOf(csvImportSrc(), 'async function runBatch()', 'let builtRows;');
+  assert.match(loop, /const freshIds = batchFileIds\(await getExistingTxIds\(accountId\), \{ kind, auditOnly, targetIsManual: targetManual \}\);/);
 });

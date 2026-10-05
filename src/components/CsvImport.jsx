@@ -1,13 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { analyzeCsv, toInsertRow, parseCsv, reconcileCsv, csvDateRange, buildRows, importPlan, planFileBatch, fileKindOf, hasSingleAmountColumn, conflictingSources, resolveTemplateForTarget } from "../csvImport.js";
+import { analyzeCsv, toInsertRow, parseCsv, reconcileCsv, csvDateRange, buildRows, importPlan, planFileBatch, fileKindOf, hasSingleAmountColumn, conflictingSources, resolveTemplateForTarget, withCreatedAccount, ensureImportAccount, readExistingIds, batchFileIds } from "../csvImport.js";
 import { applyTemplate, autoDetectTemplate, defaultTemplate, rowTotals, TEMPLATE_VERSION } from "../pdfImport.js";
 import { createManualAccount, importCsvTransactions, getExistingTxIds, getAccountTransactionsInRange, isManualAccount, isSimpleFinAccount, getCategoryRules, getFeedCoverageStart } from "../dataAdapter.js";
 import { FEED_OVERLAP_DAYS, FEED_REACH_DAYS } from "../coverage.js";
 import { getSetting, setSetting } from "../db.js";
 import { runSync, pullWasClean } from "../sync.js";
 import { chipStyle, markColor, readableInk } from "../paletteContrast.js";
-import { readToken, subscribeTheme } from "../theme.js";
+import { useThemeToken } from "../theme.js";
 import { fmtX } from "../format.js"; // negative = money in, rendered −$1,234.56
 import PdfTemplateEditor from "./PdfTemplateEditor.jsx";
 import ErrorBoundary from "./ErrorBoundary.jsx";
@@ -58,22 +58,6 @@ function todayIso() {
 
 const ROLE_LABELS = { date: "Date", description: "Description", debit: "Debit", credit: "Credit", amount: "Amount (signed)" };
 
-// Read a theme surface at RUNTIME from src/ui.css — never hardcode a token
-// value here — and re-read it whenever the theme is applied, so these colours
-// follow a FORCED theme (the header toggle) exactly as they follow the OS one.
-// "" is the deliberate fallback: paletteContrast reads an unparseable surface as
-// "no surface to reason about" and hands the colour back untouched, i.e. exactly
-// today's rendering, rather than throwing during render.
-function useSurface(token) {
-  const [value, setValue] = useState(() => readToken(token, ""));
-  useEffect(() => {
-    const read = () => setValue(readToken(token, ""));
-    read();
-    return subscribeTheme(read);
-  }, [token]);
-  return value;
-}
-
 // The good/money-in green and the comparison-bucket hues are DATA — a status
 // palette, not theme tokens: the four buckets have to stay tellable apart from
 // each other, and #1D9E75/#D85A30 are the app-wide good/bad pair whose STORED
@@ -110,8 +94,37 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
   const [fileName, setFileName] = useState(null);
   const [fileText, setFileText] = useState(null);
   const [manualCols, setManualCols] = useState(null); // {headerIndex,date,description,debit,credit,amount}
+  // The user asked to map a DETECTED header by hand (it built no rows). Per
+  // file, never persisted — per-account CSV column memory is a deferred
+  // feature, not this.
+  const [forceManual, setForceManual] = useState(false);
   const [amountSign, setAmountSign] = useState("in_positive");
   const [target, setTarget] = useState("new"); // "new" | accountId
+  // The account this modal created for target "new", ADOPTED as the target
+  // (see withCreatedAccount) so nothing later can mint a same-named twin.
+  const [createdAcct, setCreatedAcct] = useState(null);
+  // True while an account this modal created has not been reported to the
+  // parent (its rows failed, or a batch wrote nothing). Reported on CLOSE, not
+  // at the failure: in the first-run EmptyState that refresh swaps this modal
+  // for the Dashboard, throwing away the adopted target a retry needs — and a
+  // fresh modal defaults to "new" again, which is the twin all over.
+  const unreportedAcctRef = useRef(false);
+  const onImportedRef = useRef(onImported);
+  useEffect(() => { onImportedRef.current = onImported; }, [onImported]);
+  useEffect(() => () => {
+    if (unreportedAcctRef.current) { unreportedAcctRef.current = false; onImportedRef.current?.(); }
+  }, []);
+  const reportImported = () => {
+    unreportedAcctRef.current = false;
+    if (onImported) onImported();
+  };
+  // ensureImportAccount's `adopt`: the ONE place a created account becomes the
+  // target, shared by confirm() and runBatch().
+  const adoptCreated = acct => {
+    setCreatedAcct(acct);
+    setTarget(acct.id);
+    unreportedAcctRef.current = true;
+  };
   const [newName, setNewName] = useState("");
   const [newSubtype, setNewSubtype] = useState("checking");
   const [existingIds, setExistingIds] = useState(new Set());
@@ -131,6 +144,20 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
   const [compareOnly, setCompareOnly] = useState(false);
   const [syncState, setSyncState] = useState("idle"); // idle | running | done | failed
   const [loadingIds, setLoadingIds] = useState(false);
+  // The target's existing ids/sources could NOT be read. Distinct from "the
+  // account is empty" — see the effect that loads them.
+  const [idsError, setIdsError] = useState(null);
+  // Bumped by Retry, and once each import's writes have settled (see
+  // rereadExistingIds).
+  const [idsEpoch, setIdsEpoch] = useState(0);
+  // Re-read the target's ids and sources AFTER a write attempt settles. The
+  // effect below reads on a target change, and adoption changes the target
+  // BEFORE the write, so the snapshot was taken concurrently with (or ahead
+  // of) the rows it should hold. A modal that stays open afterwards — a retry
+  // after a failed write that committed earlier slices, or "Open alone" after
+  // a batch — then flagged duplicates and ran the one-format-per-account
+  // guard against stale data: a CSV picked after a part-written PDF passed it.
+  const rereadExistingIds = () => setIdsEpoch(n => n + 1);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [pdfAdvisory, setPdfAdvisory] = useState(null); // non-fatal guidance, not the terminal error slot
@@ -174,20 +201,24 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
   const fileRef = useRef(null);
   // The modal panel is --card, so that is the surface the preview amounts and
   // the audit chips are actually read against.
-  const cardSurface = useSurface("--card");
+  const cardSurface = useThemeToken("--card");
 
-  const manual = accounts.filter(isManualAccount);
-  const simplefin = accounts.filter(isSimpleFinAccount);
+  // The parent's list plus the account this modal created, until the parent's
+  // reload brings it in — the adopted target must resolve to a manual account
+  // and to an option of the controlled <select> below.
+  const allAccounts = withCreatedAccount(accounts, createdAcct);
+  const manual = allAccounts.filter(isManualAccount);
+  const simplefin = allAccounts.filter(isSimpleFinAccount);
   // Neither manual nor SimpleFIN. Normally empty now that Plaid is gone, but
   // reachable from a hand-edited row or a half-applied migration. Its dedup
   // namespace is unknown, so it can only ever be COMPARED against, never
   // imported into.
-  const other = accounts.filter(a => !isManualAccount(a) && !isSimpleFinAccount(a));
+  const other = allAccounts.filter(a => !isManualAccount(a) && !isSimpleFinAccount(a));
   // Every account fed by something other than this importer — i.e. anything a
   // statement could ALREADY be covered by. Deliberately "not manual" rather
   // than "is SimpleFIN", so a feed we don't recognise still triggers the
   // duplicate-account warning below; erring toward warning is the safe side.
-  const fedAccounts = accounts.filter(a => !isManualAccount(a));
+  const fedAccounts = allAccounts.filter(a => !isManualAccount(a));
 
   // Target classification, stated POSITIVELY. The old code derived
   // `targetIsManual = !targetIsPlaid`, which quietly became true for every
@@ -195,7 +226,7 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
   // derivation that survives only as long as the thing it negates exists.
   // `targetIsUnknown` is the fail-closed branch that used to be provided
   // accidentally by `plaid` catching everything unrecognised.
-  const targetAcct = target !== "new" ? accounts.find(a => a.id === target) : null;
+  const targetAcct = target !== "new" ? allAccounts.find(a => a.id === target) : null;
   const targetIsExisting = !!targetAcct;
   const targetIsSimpleFin = !!targetAcct && isSimpleFinAccount(targetAcct);
   const targetIsManual = !!targetAcct && isManualAccount(targetAcct);
@@ -337,6 +368,11 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
   // import as the only exits. Same predicate the batch probe uses.
   const signRelevant = fileKind === "csv" && !!analysis && !analysis.error
     && !analysis.needsManualMapping && hasSingleAmountColumn(analysis.columns);
+  // A header that WAS detected but built nothing (every row skipped) used to be
+  // a dead end: ManualMapper only mounted for an UNdetected header, so "N found,
+  // N skipped" offered no control that changed the outcome. This is the way out.
+  const canRemap = fileKind === "csv" && !!fileText && !!analysis && !analysis.error && !analysis.needsManualMapping
+    && !forceManual && rows.length === 0 && skipped.length > 0;
 
   // An unknown target can only be compared. `compareOnly` is the user's
   // override. `verdict === 'audit'` is the file's own answer: every row is
@@ -385,16 +421,30 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
   // nothing, but the same account can now be a backfill target in the same
   // session, and `isDuplicate` is what makes re-importing a statement
   // idempotent. Only a brand-new account has nothing to fetch.
+  //
+  // A FAILED read fails CLOSED. It used to land as two empty Sets with no
+  // error, and an empty source set reads as "this account holds no other
+  // format" — so a flaky read on an account with PDF history enabled a CSV
+  // import of the same months, duplicating every overlapping row for good
+  // (the formats hash differently; there is no delete path). The sets are
+  // still emptied so nothing from the PREVIOUS target lingers, but idsError
+  // blocks Import and batch start until a Retry reads them.
   useEffect(() => {
-    if (target === "new") { setExistingIds(new Set()); setExistingSources(new Set()); return; }
+    setIdsError(null);
+    if (target === "new") { setExistingIds(new Set()); setExistingSources(new Set()); setLoadingIds(false); return; }
     let cancelled = false;
     setLoadingIds(true);
-    getExistingTxIds(target)
-      .then(({ ids, sources }) => { if (!cancelled) { setExistingIds(ids); setExistingSources(sources); } })
-      .catch(() => { if (!cancelled) { setExistingIds(new Set()); setExistingSources(new Set()); } })
+    readExistingIds(getExistingTxIds, target)
+      .then(r => {
+        if (r.error) console.error("existing-ids lookup failed", r.cause);
+        if (cancelled) return;
+        setExistingIds(r.ids);
+        setExistingSources(r.sources);
+        setIdsError(r.error);
+      })
       .finally(() => { if (!cancelled) setLoadingIds(false); });
     return () => { cancelled = true; };
-  }, [target]);
+  }, [target, idsEpoch]);
 
   // A bank words the same transaction differently in its CSV and its PDF, so
   // the dedup hash differs and feeding one account both formats double-inserts.
@@ -465,6 +515,7 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
       setTemplateSource(null);
       setShowEditor(false);
       setManualCols(null);
+      setForceManual(false);
       setResult(null);
       setPdfAdvisory(null);
       setFileName(null);
@@ -526,6 +577,7 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
     setPdfAdvisory(null);
     setResult(null);
     setManualCols(null);
+    setForceManual(false);
     setFileName(f.name);
     setPdfPages(null);
     setPdfTemplate(null);
@@ -673,7 +725,7 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
   // transactions, so importing a second format into the same account would
   // permanently double-count it until someone runs SQL against the database.
   const canConfirm =
-    !!analysis && !analysis.needsManualMapping && !analysis.error && !busy && !loadingIds &&
+    !!analysis && !analysis.needsManualMapping && !analysis.error && !busy && !loadingIds && !idsError &&
     !auditOnly && !mixedSource &&
     boundaryState !== "loading" && boundaryState !== "error" && boundaryState !== "unsynced" &&
     newRows.length > 0 &&
@@ -695,19 +747,22 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
     // inside an async handler, so they land in the catch below as a visible
     // error — never as a render blank.
     if (auditOnly) return;
+    if (idsError) return;
     if (targetIsSimpleFin && !overlapFrom) {
       throw new Error("internal: no feed boundary — refusing to import into a fed account");
     }
     setBusy(true);
     setError(null);
     try {
-      let accountId = target;
       let accountName = targetAcct ? (targetAcct.nickname || targetAcct.name) : newName.trim();
-      if (target === "new") {
-        const acct = await createManualAccount({ name: newName.trim(), subtype: newSubtype });
-        accountId = acct.id;
-        accountName = acct.name;
-      }
+      // Target "new" is created and ADOPTED before anything else can fail: with
+      // target left on "new" and the name still filled in, Import again (or
+      // "Open alone") created a second same-named account. The rest of THIS
+      // run keeps the local id — the state update isn't visible in this closure.
+      const { id: accountId, created } = await ensureImportAccount({
+        target, name: newName.trim(), subtype: newSubtype, create: createManualAccount, adopt: adoptCreated,
+      });
+      if (created) accountName = created.name;
       const payload = newRows.map(toInsertRow);
       if (overlapFrom && payload.some(r => r.date >= overlapFrom)) {
         throw new Error("internal: a row on/after the feed boundary reached the insert payload");
@@ -723,12 +778,15 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
         }
       }
       setResult({ written, dupCount, skipped: skipped.length, accountName, savedTemplate: fileKind === "pdf" });
-      if (onImported) onImported();
+      reportImported();
     } catch (e) {
       console.error("csv import failed", e);
       setError(e.message || "Import failed.");
     } finally {
       setBusy(false);
+      // Success or failure: importCsvTransactions commits slice by slice, so a
+      // throw can leave earlier slices written.
+      rereadExistingIds();
     }
   }
 
@@ -753,8 +811,9 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
     // same reason — mixedSource is computed from existingSources, and until the
     // target's sources have loaded it reflects the PREVIOUS target. Without
     // this, pick-account-then-tap-fast lands CSV rows in a PDF-history account
-    // during the fetch window, and there is no delete path to undo it.
-    !loadingIds &&
+    // during the fetch window, and there is no delete path to undo it. A
+    // FAILED read is the same blindness, permanently — so it blocks too.
+    !loadingIds && !idsError &&
     // Same boundary gate as canConfirm — unless nothing will be written anyway.
     (batchAuditOnly || !targetIsSimpleFin || boundaryState === "ok") &&
     // Batch Compare needs an EXISTING account to compare AGAINST — mirrors the
@@ -822,20 +881,23 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
     const boundary = overlapFrom; // one target account ⇒ one feed boundary
     const auditOnly = batchAuditOnly;
     const batchRules = rules || {};
+    // A batch into "new" creates a manual account below.
+    const targetManual = target === "new" || targetIsManual;
     const totals = { written: 0, compared: 0, dup: 0, skippedFiles: 0, failedFiles: 0, importedFiles: 0,
       skippedRows: 0, matched: 0, csvOnly: 0, mismatches: 0 };
 
-    let accountId = target;
+    let accountId;
     try {
       // Defence in depth — the same money-costing invariant confirm() restates.
       if (!auditOnly && targetIsSimpleFin && !boundary) {
         throw new Error("internal: no feed boundary — refusing to import into a fed account");
       }
-      if (target === "new") {
-        // One new account for the whole batch, created before the first file.
-        const acct = await createManualAccount({ name: newName.trim(), subtype: newSubtype });
-        accountId = acct.id;
-      }
+      // One new account for the whole batch, created before the first file,
+      // and ADOPTED as the target — "Open alone" on a failed file afterwards
+      // must import into THIS account, not mint a same-named twin.
+      accountId = (await ensureImportAccount({
+        target, name: newName.trim(), subtype: newSubtype, create: createManualAccount, adopt: adoptCreated,
+      })).id;
     } catch (e) {
       console.error("batch setup failed", e);
       setError(e.message || "Couldn't start the import.");
@@ -862,15 +924,9 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
         // move getFeedCoverageStart, which reads sfin: rows only.) A FAILED
         // fetch fails the file rather than degrading to an empty set — an
         // empty set here means "import everything again".
-        const fetched = await getExistingTxIds(accountId);
-        const freshIds =
-          fetched?.ids instanceof Set ? fetched.ids : fetched instanceof Set ? fetched : null;
-        if (!freshIds) {
-          // Matches the comment above: an unrecognized return shape must FAIL
-          // the file, not degrade to an empty set — an empty set means
-          // "import everything again".
-          throw new Error("couldn't read this account's existing transactions — not importing blind");
-        }
+        // The one-format-per-account guard is re-checked on THIS fetch too,
+        // never on the start-of-batch read (batchFileIds).
+        const freshIds = batchFileIds(await getExistingTxIds(accountId), { kind, auditOnly, targetIsManual: targetManual });
 
         // Each file flows through the SAME pipeline a single file takes:
         // parse → analyzeCsv / applyTemplate+buildRows → importPlan → import.
@@ -1004,13 +1060,21 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
     }
     if (batchAbortRef.current) {
       // Unmounted mid-run: no UI left to show a summary, but rows already
-      // landed — refresh the Dashboard so they appear.
-      if (totals.written > 0 && onImported) onImported();
+      // landed — refresh the Dashboard so they appear. (An account created
+      // with nothing written is reported by the unmount effect.) When the
+      // unmount effect DID report an adopted account, this second call is
+      // not redundant: the abort check only runs before the next file, so the
+      // file in flight at unmount can still write AFTER that first refresh,
+      // and only this one shows its rows.
+      if (totals.written > 0) reportImported();
       return;
     }
     setBatchSummary({ ...totals, files: queue.length });
     setBatchRunning(false);
-    if (totals.written > 0 && onImported) onImported();
+    // "Open alone" hands a file to the single-file path, which must see what
+    // this run wrote.
+    rereadExistingIds();
+    if (totals.written > 0) reportImported();
   }
 
   const panelStyle = {
@@ -1106,6 +1170,13 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
         </div>
       )}
 
+      {idsError && (
+        <div style={{ marginTop: 10, fontSize: 12, color: "var(--danger)", background: "var(--danger-bg)", border: "1px solid var(--danger-border)", borderRadius: 8, padding: "10px 12px", lineHeight: 1.5 }}>
+          {idsError}{" "}
+          <button className="ibtn" style={{ fontSize: 11 }} disabled={batchRunning} onClick={() => setIdsEpoch(n => n + 1)}>Retry</button>
+        </div>
+      )}
+
       {targetIsUnknown && (
         <div style={{ marginTop: 10, fontSize: 12, color: "var(--warn)", background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 8, padding: "10px 12px", lineHeight: 1.5 }}>
           This account isn't recognised as connected or imported, so nothing can be imported into it — only compared.
@@ -1167,6 +1238,12 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                     )}
                   </div>
                 )}
+                {!batchMode && canRemap && (
+                  <div style={{ marginTop: 8, fontSize: 12, color: "var(--muted)", lineHeight: 1.5 }}>
+                    None of its rows could be read with the columns its header suggested.{" "}
+                    <button className="ibtn" style={{ fontSize: 11 }} onClick={() => setForceManual(true)}>Map columns by hand</button>
+                  </div>
+                )}
                 {(analysis?.error || pdfApplyError) && (
                   <div style={{ fontSize: 12, color: "var(--danger)", marginTop: 8 }}>{analysis?.error || pdfApplyError}</div>
                 )}
@@ -1177,9 +1254,13 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                 )}
               </div>
 
-              {/* 1b — Manual column mapping fallback (non-BECU / undetected header) */}
-              {fileKind === "csv" && fileText && analysis?.needsManualMapping && (
-                <ManualMapper fileText={fileText} onApply={setManualCols} amountSign={amountSign} setAmountSign={setAmountSign} selStyle={selStyle} sectionLabel={sectionLabel} />
+              {/* 1b — Manual column mapping: the fallback for an undetected
+                  header, or asked for when a detected one built no rows.
+                  Keyed per file so a seeded mapping never carries over. */}
+              {fileKind === "csv" && fileText && (analysis?.needsManualMapping || forceManual) && (
+                <ManualMapper key={fileName || ""} fileText={fileText} onApply={setManualCols} amountSign={amountSign} setAmountSign={setAmountSign} selStyle={selStyle} sectionLabel={sectionLabel}
+                  title={analysis?.needsManualMapping ? "Map columns (header not auto-detected)" : "Map columns by hand"}
+                  initial={analysis && !analysis.needsManualMapping && analysis.columns ? { headerIndex: analysis.header, ...analysis.columns } : null} />
               )}
 
               {/* 1c — PDF layout template: auto-detected or previously taught. */}
@@ -1287,9 +1368,9 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                       ) : verdict !== "audit" && (
                         <button
                           className="ibtn"
-                          style={{ width: "100%", justifyContent: "center", minHeight: 44, opacity: !loadingIds && existingIds.size === 0 ? .45 : 1 }}
-                          disabled={!loadingIds && existingIds.size === 0}
-                          title={!loadingIds && existingIds.size === 0 ? "Nothing on this account to compare against" : ""}
+                          style={{ width: "100%", justifyContent: "center", minHeight: 44, opacity: !loadingIds && !idsError && existingIds.size === 0 ? .45 : 1 }}
+                          disabled={!loadingIds && !idsError && existingIds.size === 0}
+                          title={!loadingIds && !idsError && existingIds.size === 0 ? "Nothing on this account to compare against" : ""}
                           onClick={() => setCompareOnly(true)}>
                           Compare only — don't import
                         </button>
@@ -1318,7 +1399,7 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                         This file has one Amount column, so only you can say which way it points.
                         <div style={{ marginTop: 6 }}>
                           <select value={amountSign} onChange={e => setAmountSign(e.target.value)}
-                            style={{ ...selStyle, width: "auto", fontSize: 12 }}>
+                            style={{ ...selStyle, width: "auto", maxWidth: "100%", fontSize: 12 }}>
                             <option value="in_positive">Positive numbers are money IN (deposits)</option>
                             <option value="out_positive">Positive numbers are money OUT (spending)</option>
                           </select>
@@ -1480,7 +1561,7 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                       wrong-signed rows can never be deduped away later.
                       <div style={{ marginTop: 6 }}>
                         <select value={amountSign} onChange={e => setAmountSign(e.target.value)}
-                          style={{ ...selStyle, width: "auto", fontSize: 12 }}>
+                          style={{ ...selStyle, width: "auto", maxWidth: "100%", fontSize: 12 }}>
                           <option value="in_positive">Positive numbers are money IN (deposits)</option>
                           <option value="out_positive">Positive numbers are money OUT (spending)</option>
                         </select>
@@ -1546,10 +1627,16 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
 
 // Fallback when the header can't be auto-detected: show the first parsed rows
 // and let the user assign each column role by index. Feeds the same buildRows.
-function ManualMapper({ fileText, onApply, amountSign, setAmountSign, selStyle, sectionLabel }) {
-  const [headerIndex, setHeaderIndex] = useState(0);
-  const [cols, setCols] = useState({ date: -1, description: -1, debit: -1, credit: -1, amount: -1 });
-  const [mode, setMode] = useState("debitcredit"); // or "amount"
+// `initial` seeds it from a DETECTED mapping when the user asked to remap one,
+// so only the wrong column needs changing.
+function ManualMapper({ fileText, onApply, amountSign, setAmountSign, selStyle, sectionLabel, title = "Map columns (header not auto-detected)", initial = null }) {
+  const idx = v => (Number.isInteger(v) && v >= 0 ? v : -1);
+  const [headerIndex, setHeaderIndex] = useState(() => Math.max(0, idx(initial?.headerIndex)));
+  const [cols, setCols] = useState(() => ({
+    date: idx(initial?.date), description: idx(initial?.description),
+    debit: idx(initial?.debit), credit: idx(initial?.credit), amount: idx(initial?.amount),
+  }));
+  const [mode, setMode] = useState(() => (initial && !(idx(initial.debit) >= 0 && idx(initial.credit) >= 0) && idx(initial.amount) >= 0 ? "amount" : "debitcredit"));
 
   // First few parsed rows as a grid to eyeball while assigning column roles.
   const grid = useMemo(() => parseCsv(fileText).slice(0, 6), [fileText]);
@@ -1569,7 +1656,7 @@ function ManualMapper({ fileText, onApply, amountSign, setAmountSign, selStyle, 
 
   return (
     <div style={{ marginBottom: 18, background: "var(--bg)", borderRadius: 10, padding: 12 }}>
-      <div style={sectionLabel}>Map columns (header not auto-detected)</div>
+      <div style={sectionLabel}>{title}</div>
       <div style={{ overflowX: "auto", marginBottom: 10 }}>
         <table style={{ borderCollapse: "collapse", fontSize: 11 }}>
           <tbody>
@@ -1589,12 +1676,12 @@ function ManualMapper({ fileText, onApply, amountSign, setAmountSign, selStyle, 
           <input type="number" min={0} value={headerIndex} onChange={e => setHeaderIndex(Math.max(0, +e.target.value || 0))}
             style={{ ...selStyle, width: 60, marginLeft: 6, display: "inline-block", padding: "4px 6px" }} />
         </label>
-        <select value={mode} onChange={e => setMode(e.target.value)} style={{ ...selStyle, width: "auto" }}>
+        <select value={mode} onChange={e => setMode(e.target.value)} style={{ ...selStyle, width: "auto", maxWidth: "100%" }}>
           <option value="debitcredit">Separate Debit / Credit</option>
           <option value="amount">Single signed Amount</option>
         </select>
         {mode === "amount" && (
-          <select value={amountSign} onChange={e => setAmountSign(e.target.value)} style={{ ...selStyle, width: "auto" }}>
+          <select value={amountSign} onChange={e => setAmountSign(e.target.value)} style={{ ...selStyle, width: "auto", maxWidth: "100%" }}>
             <option value="in_positive">+ = money in</option>
             <option value="out_positive">+ = money out</option>
           </select>
@@ -1650,7 +1737,7 @@ function ReconRow({ left, sub, amount, amountNote }) {
 function ReconSection({ title, hint, color, count, children }) {
   // Hook before the early return — the section header paints --bg, so the dot
   // is corrected against --bg, not against the card behind it.
-  const bgSurface = useSurface("--bg");
+  const bgSurface = useThemeToken("--bg");
   if (!count) return null;
   return (
     <div style={{ marginBottom: 12, border: "1px solid var(--border)", borderRadius: 10, overflow: "hidden" }}>
@@ -1673,8 +1760,8 @@ function Reconciliation({ recon, loading, sectionLabel, step = 3 }) {
   // runtime rather than the #888780 literal it used to hardcode — that literal
   // was light mode's --muted value verbatim, so it stayed a light-mode grey on a
   // dark card. As a token it adapts, and still reads as the neutral of the four.
-  const cardSurface = useSurface("--card");
-  const neutralHue = useSurface("--muted");
+  const cardSurface = useThemeToken("--card");
+  const neutralHue = useThemeToken("--muted");
   if (loading) {
     return <div style={{ marginBottom: 10 }}><div style={sectionLabel}>Comparing against the feed…</div>
       <div style={{ fontSize: 12, color: "var(--muted)" }}>Reconciling the CSV against what's already synced — nothing will be imported.</div></div>;

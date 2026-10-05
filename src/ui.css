@@ -272,3 +272,19 @@ html, body { overscroll-behavior-y: contain; }
 
 .bar-bg { flex: 1; height: 5px; background: var(--track); border-radius: 3px; overflow: hidden; }
 .bar-fill { height: 100%; border-radius: 3px; transition: width .5s ease; }
+
+/* iOS Safari zooms the page when a form control under 16px takes focus, and
+   does not zoom back out when the keyboard closes. The app's inputs are sized
+   inline (11–14px in dense rows), so on a COARSE pointer every text-entry
+   control is lifted to 16px here instead of at each site. `!important` is the
+   mechanism, not a smell: an inline declaration beats any normal stylesheet
+   rule, and only an !important one beats it. Desktop (fine pointer) keeps the
+   inline sizes. No control renders above 16px today; one that should on a
+   phone needs its own !important rule. `maximum-scale=1` in index.html's
+   viewport meta would also stop the zoom, and is deliberately NOT used: it
+   disables pinch-zoom, an accessibility regression. */
+@media (pointer: coarse) {
+  input:not([type=checkbox]):not([type=radio]):not([type=range]):not([type=color]):not([type=file]),
+  select,
+  textarea { font-size: 16px !important; }
+}
