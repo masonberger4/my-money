@@ -138,16 +138,19 @@ async function pruneAssetCache(keep) {
 function networkFirstShell(req) {
   const net = fetch(req).then(async (fresh) => {
     const cache = await caches.open(SHELL_CACHE);
-    if (fresh.ok) cache.put('/', fresh.clone());
-    // Read the copy for the prune NOW, before `fresh` goes to the page and
-    // its body is consumed.
+    // Both copies are taken NOW, before `fresh` goes to the page and its body
+    // is consumed; `put` rides in `background` so waitUntil covers the write.
+    const put = fresh.ok ? cache.put('/', fresh.clone()) : null;
     const html = fresh.ok ? fresh.clone().text() : null;
-    return { fresh, html };
+    return { fresh, html, put };
   });
   // A successful navigation means a (possibly new) deploy just loaded —
   // prune old fingerprinted assets, sparing everything this shell uses.
   const background = net
-    .then(({ html }) => html && html.then((text) => pruneAssetCache(shellAssetUrls(text))))
+    .then(({ html, put }) => Promise.all([
+      put && put.catch(() => {}),
+      html && html.then((text) => pruneAssetCache(shellAssetUrls(text))),
+    ]))
     .catch(() => {});
   const live = net.then(({ fresh }) => fresh);
   // Handled below, but only after the cache lookup — an offline fetch can
