@@ -318,3 +318,41 @@ test('each panel fetches from an effect keyed on [open, epoch], seq-guarded, and
   assert.ok(!/covData===null&&!covErr/.test(code),
     'gating the coverage fetch on !covErr is what made one transient error permanent until relaunch');
 });
+
+// --- 2026-10 audit: teaching on a flaky connection ---------------------------
+// learnMerchant ran setCategoryRule, the history rewrite, the reloads and
+// invalidateRules in ONE try whose catch alerted "Couldn't save that rule" —
+// so a rewrite that failed AFTER the rule committed told the user the rule
+// wasn't saved (the next sync used it anyway) and left the taught-rules list
+// stale. And applyCategoryRuleToHistory invalidated the envelope cache only
+// after the whole batched rewrite returned, so a batch that threw after
+// earlier ones wrote skipped it.
+test('applyCategoryRuleToHistory invalidates in a finally, so a mid-rewrite throw still drops the caches', () => {
+  const body = stripComments(exportedFunction(adapter, 'applyCategoryRuleToHistory'));
+  const fin = body.indexOf('} finally {');
+  assert.ok(fin > body.indexOf('applyRuleToHistory('), 'the rewrite sits inside the try');
+  assert.ok(body.indexOf('if (!dryRun) invalidateEnvelopeSpending();', fin) > fin,
+    'the invalidation runs in the finally');
+});
+
+test('learnMerchant: only a failed RULE write says "Couldn\'t save that rule"; after it, the rules list always refreshes', () => {
+  const code = stripComments(dashboard);
+  const start = code.indexOf('async function learnMerchant(){');
+  const body = code.slice(start, code.indexOf('function patchAllTxLists', start));
+  const ruleWrite = body.indexOf('await setCategoryRule(');
+  const ruleCatch = body.indexOf('}catch(err){', ruleWrite);
+  const saveAlert = body.indexOf("Couldn't save that rule");
+  const ruleEnd = body.indexOf('return;', ruleCatch);
+  assert.ok(ruleWrite > 0 && ruleCatch > ruleWrite && saveAlert > ruleCatch && ruleEnd > saveAlert,
+    'the "Couldn\'t save" alert belongs to the rule write\'s own catch, which returns');
+  const apply = body.indexOf('await applyCategoryRuleToHistory(');
+  assert.ok(apply > ruleEnd, 'the history rewrite runs in its own try, after the rule is saved');
+  const fin = body.indexOf('}finally{', apply);
+  assert.ok(fin > apply, 'the post-save block ends in a finally');
+  const tail = body.slice(fin);
+  assert.ok(tail.indexOf('invalidateRules();') > 0, 'invalidateRules runs whatever the rewrite did');
+  assert.ok(tail.indexOf('await reloadViewed();') > 0 && tail.indexOf('refetchOpenLists(sid)') > 0,
+    'and the viewed month + open lists reload (a partial rewrite still moved rows)');
+  assert.equal(body.split("Couldn't save that rule").length - 1, 1, 'no second "Couldn\'t save" for a saved rule');
+  assert.match(body.slice(apply, fin), /past transactions couldn't be updated/);
+});

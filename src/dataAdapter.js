@@ -859,33 +859,37 @@ export async function applyCategoryRuleToHistory(descriptor, category, { dryRun 
   // see applyRuleToHistory's `rules` contract). getCategoryRules degrades to
   // {} pre-migration, which bagWithRule treats as "only the taught rule".
   const rules = await getCategoryRules();
-  const result = await applyRuleToHistory({
-    descriptor,
-    category,
-    amount,
-    dryRun,
-    rules,
-    fetchPage: (pat, from, to) =>
-      supabase
-        .from('transactions')
-        // `amount` is selected because an amount-scoped rule is re-matched
-        // against the ROW's amount — without the column it would match nothing.
-        .select('id, description, merchant_name, mapped_category, amount')
-        .or(`description.ilike.${pat},merchant_name.ilike.${pat}`)
-        // Same tiebreaker reasoning as getTransactionsBetween: paging an
-        // unordered result set can drop or repeat rows across the boundary,
-        // and a dropped row here is a transaction the rule silently fails to
-        // fix.
-        .order('id', { ascending: true })
-        .range(from, to),
-    updateBatch: (ids, cat) =>
-      supabase.from('transactions').update({ mapped_category: cat }).in('id', ids),
-  });
-  // A real apply rewrites other rows' mapped_category — a write, so it is an
-  // invalidation moment (spend sums shift when categories move between
-  // spending and the transfer bucket's veto).
-  if (!dryRun) invalidateEnvelopeSpending();
-  return result;
+  try {
+    return await applyRuleToHistory({
+      descriptor,
+      category,
+      amount,
+      dryRun,
+      rules,
+      fetchPage: (pat, from, to) =>
+        supabase
+          .from('transactions')
+          // `amount` is selected because an amount-scoped rule is re-matched
+          // against the ROW's amount — without the column it would match nothing.
+          .select('id, description, merchant_name, mapped_category, amount')
+          .or(`description.ilike.${pat},merchant_name.ilike.${pat}`)
+          // Same tiebreaker reasoning as getTransactionsBetween: paging an
+          // unordered result set can drop or repeat rows across the boundary,
+          // and a dropped row here is a transaction the rule silently fails to
+          // fix.
+          .order('id', { ascending: true })
+          .range(from, to),
+      updateBatch: (ids, cat) =>
+        supabase.from('transactions').update({ mapped_category: cat }).in('id', ids),
+    });
+  } finally {
+    // A real apply rewrites other rows' mapped_category — a write, so it is an
+    // invalidation moment (spend sums shift when categories move between
+    // spending and the transfer bucket's veto). In a FINALLY: the rewrite runs
+    // in batches, and a batch that throws after earlier ones already wrote
+    // must not leave the envelope cache serving the pre-write sums.
+    if (!dryRun) invalidateEnvelopeSpending();
+  }
 }
 
 // --- Envelope budgeting (YNAB rules 1–3) -------------------------------------

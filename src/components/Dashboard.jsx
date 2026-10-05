@@ -3520,33 +3520,47 @@ export default function Dashboard({ refreshTick = 0 }) {
 
   async function learnMerchant(){
     if(!learnPrompt)return;
+    const p=learnPrompt;
     // Before the awaits: this closure's search query is the one current NOW.
     const sid=searchSeq.current;
     setLearning(true);
+    const amt=p.scope==="amount"?p.amount:null;
+    // The subject has to name the SCOPE — "ZELLE TRANSFER is Rent" would be a
+    // false statement of what was just saved when only the $1,800.00 ones are.
+    const subject=amt===null?p.key:`${p.key} for ${fmtX(amt)}`;
     try{
-      const amt=learnPrompt.scope==="amount"?learnPrompt.amount:null;
-      await setCategoryRule(learnPrompt.descriptor,learnPrompt.category,amt);
-      const n=await applyCategoryRuleToHistory(learnPrompt.descriptor,learnPrompt.category,{amount:amt});
-      setLearnPrompt(null);
-      // Say which of the two things happened. "Remembered" alone reads as
-      // success even when nothing was relabelled. The subject has to name the
-      // SCOPE too — "ZELLE TRANSFER is Rent" would be a false statement of
-      // what was just saved when only the $1,800.00 ones are.
-      const subject=amt===null?learnPrompt.key:`${learnPrompt.key} for ${fmtX(amt)}`;
-      setLearnedNote(n>0
-        ? `Remembered — ${subject} is ${getName(learnPrompt.category)}, and ${n} past transaction${n!==1?"s":""} updated.`
-        : `Remembered — ${subject} is ${getName(learnPrompt.category)}. No past transactions needed changing; future ones will use it.`);
-      await reloadViewed();
-      await refetchOpenLists(sid);
-      // The taught-rules list has a new row — refresh it too, or the screen
-      // opened right after teaching is missing the rule just created.
-      invalidateRules();
+      await setCategoryRule(p.descriptor,p.category,amt);
     }catch(err){
       console.error("learning the merchant failed",err);
       setLearnPrompt(null);
       setLearnedNote(null);
+      setLearning(false);
       window.alert(`Couldn't save that rule: ${friendlyError(err)}`);
+      return;
+    }
+    // The rule is SAVED from here on — the next sync will use it whatever
+    // happens below. So the history rewrite gets its own failure message
+    // (never "Couldn't save that rule" for a rule that was saved), and the
+    // taught-rules list + month/open lists refresh no matter what: a partial
+    // rewrite still changed rows, and the list has a new rule either way.
+    try{
+      const n=await applyCategoryRuleToHistory(p.descriptor,p.category,{amount:amt});
+      // Say which of the two things happened. "Remembered" alone reads as
+      // success even when nothing was relabelled.
+      setLearnedNote(n>0
+        ? `Remembered — ${subject} is ${getName(p.category)}, and ${n} past transaction${n!==1?"s":""} updated.`
+        : `Remembered — ${subject} is ${getName(p.category)}. No past transactions needed changing; future ones will use it.`);
+    }catch(err){
+      console.error("applying the taught rule to past transactions failed",err);
+      setLearnedNote(null);
+      window.alert(`Remembered — future ${subject} transactions will be ${getName(p.category)}, but past transactions couldn't be updated: ${friendlyError(err)}. Choose Always again to retry.`);
     }finally{
+      setLearnPrompt(null);
+      invalidateRules();
+      try{
+        await reloadViewed();
+        await refetchOpenLists(sid);
+      }catch(err){console.error("reloading after a teach failed",err);}
       setLearning(false);
     }
   }
