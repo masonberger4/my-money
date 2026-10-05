@@ -1265,9 +1265,10 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
               </div>
 
               {/* 1b — Manual column mapping: the fallback for an undetected
-                  header, or asked for when a detected one built no rows. */}
+                  header, or asked for when a detected one built no rows.
+                  Keyed per file so a seeded mapping never carries over. */}
               {fileKind === "csv" && fileText && (analysis?.needsManualMapping || forceManual) && (
-                <ManualMapper fileText={fileText} onApply={setManualCols} amountSign={amountSign} setAmountSign={setAmountSign} selStyle={selStyle} sectionLabel={sectionLabel}
+                <ManualMapper key={fileName || ""} fileText={fileText} onApply={setManualCols} amountSign={amountSign} setAmountSign={setAmountSign} selStyle={selStyle} sectionLabel={sectionLabel}
                   title={analysis?.needsManualMapping ? "Map columns (header not auto-detected)" : "Map columns by hand"}
                   initial={analysis && !analysis.needsManualMapping && analysis.columns ? { headerIndex: analysis.header, ...analysis.columns } : null} />
               )}
