@@ -46,19 +46,28 @@ export function localShortDate(d) { return d.toLocaleDateString("default",{month
 // Negatives render as −$1,234.56 (U+2212), not $-1,234.56. Debts always
 // display negative, and money-in transactions already did, so this is the
 // common case rather than an edge one.
+//
+// The sign comes from the DISPLAYED digits, not the raw float: a fully
+// refunded category nets to a residue like −3.55e-15 (10.10 + 20.20 − 30.30),
+// and a sign read off that value printed "−$0". A value that rounds to zero
+// at the shown precision is unsigned. Deliberately no Math.round pre-round:
+// it rounds −2.5 to −2 where toLocaleString rounds half away from zero, so it
+// would change digits the app has always shown.
+const hasDigit = s => /[1-9]/.test(s);
 export function fmt(n) {
   const v = Number(n);
   const s = "$"+Math.abs(v).toLocaleString("en-US",{maximumFractionDigits:0});
-  return v < 0 ? "−"+s : s;
+  return v < 0 && hasDigit(s) ? "−"+s : s;
 }
 export function fmtX(n) {
   const v = Number(n);
   const s = "$"+Math.abs(v).toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2});
-  return v < 0 ? "−"+s : s;
+  return v < 0 && hasDigit(s) ? "−"+s : s;
 }
 // "$1,234" for whole dollars, "$1,234.56" when there are cents to show.
 export function fmtAuto(n) { return Math.round(Number(n)*100)%100===0?fmt(n):fmtX(n); }
-export function signed(n) { return `${n>0?"+":""}${fmtAuto(n)}`; }
+// Same displayed-digits rule for the "+": never "+$0".
+export function signed(n) { const body=fmtAuto(n); return `${Number(n)>0&&hasDigit(body)?"+":""}${body}`; }
 
 // "Jun 2027" from a 'YYYY-MM-DD' target date.
 export function monthYear(dateStr) {

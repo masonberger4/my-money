@@ -106,3 +106,38 @@ test('ONE copy: Dashboard and CsvImport import the formatters instead of redefin
   assert.doesNotMatch(csv, /function money\s*\(/i, 'CsvImport\'s fmtX copy is gone');
   assert.match(csv, /import \{[^}]*\bfmtX\b[^}]*\} from "\.\.\/format\.js"/);
 });
+
+test('REGRESSION: a rounding leftover never renders as −$0 or +$0', () => {
+  // A credit-card refund that fully nets a purchase leaves spendingGroups
+  // with a float residue, not zero: 10.10 + 20.20 − 30.30 = −3.55e-15. The
+  // sign used to come from that raw value, so a fully refunded category read
+  // "−$0" on Categories, the Home legend and the drill-in sheet. The sign
+  // now comes from the DISPLAYED digits.
+  const x = 10.10 + 20.20 - 30.30;
+  assert.ok(x < 0 && x > -1e-12, 'the residue this test exists for');
+  assert.equal(fmt(x), '$0');
+  assert.equal(fmtX(x), '$0.00');
+  assert.equal(fmtAuto(x), '$0');
+  assert.equal(signed(x), '$0');
+  assert.equal(signed(-x), '$0', 'and never +$0 the other way');
+  assert.equal(fmt(-0), '$0');
+  assert.equal(fmtX(-0), '$0.00');
+});
+
+test('REGRESSION: a real sub-unit amount that rounds to zero is unsigned too', () => {
+  assert.equal(fmt(-0.4), '$0');
+  assert.equal(fmtX(-0.004), '$0.00');
+  assert.equal(signed(0.004), '$0');
+});
+
+test('the −$0 guard changes no digits: rounding stays half away from zero', () => {
+  // A Math.round pre-round would turn −2.5 into −2; toLocaleString rounds
+  // half away from zero, and those are the digits the app has always shown.
+  assert.equal(fmt(-0.5), '−$1');
+  assert.equal(fmt(-2.5), '−$3');
+  assert.equal(fmt(2.5), '$3');
+  assert.equal(fmtX(-0.005), '−$0.01');
+  assert.equal(fmtX(-1234.56), '−$1,234.56');
+  assert.equal(signed(0.01), '+$0.01');
+  assert.equal(signed(-0.01), '−$0.01');
+});
