@@ -1,6 +1,7 @@
 // Source pins for Dashboard.jsx's small inline editors (EditName, BudgetEdit,
-// AssignEdit, IncomeEdit, Swatch) — wiring that lives in JSX and DOM event
-// order, which no Node unit test can drive. In the test/headerMenu.test.js
+// AssignEdit, IncomeEdit, Swatch), TargetSheet and the taught-rules confirm —
+// wiring that lives in JSX and DOM event order, which no Node unit test can
+// drive. In the test/headerMenu.test.js
 // mold: assertions read the SOURCE (comments stripped, so prose about a token
 // can't satisfy or trip a scan), never a pasted copy of it.
 import test from 'node:test';
@@ -101,4 +102,24 @@ test('TargetSheet uses monthsUntil and pickedMonthKey, not inline month math', (
   assert.match(body, /date:kind==="by_date"\?`\$\{ymKey\}-01`/, 'the save must store the validated key');
   assert.match(body, /<input type="month"[^\n]*placeholder="YYYY-MM"/,
     'the month input needs a format hint where it degrades to a text box');
+});
+
+// --- The forget-a-rule confirm renders under ITS row --------------------------
+// Rendered once after rules.map, inside an 82vh scrolling modal, it opened
+// ~1,800px below a rule near the top of a long list: the ✕ looked dead, and a
+// second ✕ silently retargeted the off-screen panel.
+test('RulesSheet renders ForgetRuleConfirm inside the rules.map row, keyed to that rule', () => {
+  const body = fnBody('RulesSheet');
+  const mapAt = body.indexOf('rules.map(r=>{');
+  assert.ok(mapAt > 0, 'the rules.map row moved — update this test');
+  const mapEnd = body.indexOf('})}', mapAt);
+  const row = body.slice(mapAt, mapEnd);
+  assert.match(row, /deleting&&ruleId\(deleting\)===rid&&\(\s*<ForgetRuleConfirm /,
+    'the confirm must render inside the row whose ✕ was tapped');
+  assert.equal((body.match(/<ForgetRuleConfirm /g) || []).length, 1, 'exactly one confirm render site');
+  assert.doesNotMatch(body.slice(mapEnd), /Forget it|ForgetRuleConfirm/,
+    'nothing after the list may render the confirm again');
+  const confirm = fnBody('ForgetRuleConfirm');
+  assert.match(confirm, /scrollIntoView\?\.\(\{block:"nearest"\}\)/, 'the confirm brings itself into view');
+  assert.match(confirm, />Forget it</);
 });

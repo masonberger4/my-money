@@ -1680,6 +1680,43 @@ function IncomeSheet({report,when,busy,failed,surf,acctById,acctLabel,acctColor,
 // paints under another's label.
 function ruleId(r){ return `${r.merchant_key}|${r.amount==null?"":r.amount}`; }
 
+// The forget-a-rule confirm, rendered INLINE under its own row (RulesSheet):
+// rendered once after the list, it opened ~1,800px below a rule near the top
+// of a long list — the ✕ looked dead, and a second ✕ silently retargeted the
+// hidden panel. It also scrolls itself into view on mount, since under a row
+// near the bottom of the 82vh sheet it would otherwise open below the fold.
+// The copy is unchanged.
+function ForgetRuleConfirm({rule,onCancel,onConfirm}) {
+  const ref=useRef(null);
+  useEffect(()=>{ref.current?.scrollIntoView?.({block:"nearest"});},[]);
+  return (
+    <div ref={ref} style={{marginTop:10,padding:12,borderRadius:10,background:"var(--bg)",fontSize:12,lineHeight:1.55}}>
+      <div style={{fontWeight:600,marginBottom:6}}>
+        Forget “{rule.merchant_key}{rule.amount!=null?` for ${fmtX(rule.amount)}`:""}”?
+      </div>
+      {/* Naming the scope matters most when both exist: forgetting the
+          $1,800.00 rule leaves the merchant-wide one running, and the
+          user needs to know which one is about to go. */}
+      {rule.amount!=null&&(
+        <div style={{color:"var(--muted)",marginBottom:6}}>
+          Only the {fmtX(rule.amount)} rule. Any rule for other {rule.merchant_key} transactions stays.
+        </div>
+      )}
+      <div style={{color:"var(--muted)"}}>
+        Future transactions from this merchant go back to the app's own guess until you teach it
+        again — which may be a different category, not necessarily uncategorized.{" "}
+        <strong style={{color:"var(--text)"}}>Transactions already categorized keep their
+        category</strong> — this only changes what happens next time.
+      </div>
+      <div style={{display:"flex",gap:8,marginTop:10}}>
+        <button className="ibtn" onClick={onCancel} style={{minHeight:36,padding:"0 12px"}}>Cancel</button>
+        <button className="ibtn" onClick={onConfirm}
+          style={{minHeight:36,padding:"0 12px",color:"var(--danger)",fontWeight:600}}>Forget it</button>
+      </div>
+    </div>
+  );
+}
+
 function RulesSheet({rules,monthRows,monthLabel,txDescriptor,surf,getName,getColor,onDelete,onClose}) {
   useEscClose(onClose);
   const [counts,setCounts]=useState({});   // ruleId → {n} | {error}
@@ -1780,36 +1817,14 @@ function RulesSheet({rules,monthRows,monthLabel,txDescriptor,surf,getName,getCol
                     style={{fontSize:11,minHeight:32,padding:"0 6px",color:"var(--muted)"}}>Count all…</button>
                 )}
               </div>
+              {/* Inline under THIS row — see ForgetRuleConfirm. */}
+              {deleting&&ruleId(deleting)===rid&&(
+                <ForgetRuleConfirm rule={deleting} onCancel={()=>setDeleting(null)}
+                  onConfirm={()=>{const d=deleting;setDeleting(null);onDelete(d);}}/>
+              )}
             </div>
           );
         })}
-
-        {deleting&&(
-          <div style={{marginTop:14,padding:12,borderRadius:10,background:"var(--bg)",fontSize:12,lineHeight:1.55}}>
-            <div style={{fontWeight:600,marginBottom:6}}>
-              Forget “{deleting.merchant_key}{deleting.amount!=null?` for ${fmtX(deleting.amount)}`:""}”?
-            </div>
-            {/* Naming the scope matters most when both exist: forgetting the
-                $1,800.00 rule leaves the merchant-wide one running, and the
-                user needs to know which one is about to go. */}
-            {deleting.amount!=null&&(
-              <div style={{color:"var(--muted)",marginBottom:6}}>
-                Only the {fmtX(deleting.amount)} rule. Any rule for other {deleting.merchant_key} transactions stays.
-              </div>
-            )}
-            <div style={{color:"var(--muted)"}}>
-              Future transactions from this merchant go back to the app's own guess until you teach it
-              again — which may be a different category, not necessarily uncategorized.{" "}
-              <strong style={{color:"var(--text)"}}>Transactions already categorized keep their
-              category</strong> — this only changes what happens next time.
-            </div>
-            <div style={{display:"flex",gap:8,marginTop:10}}>
-              <button className="ibtn" onClick={()=>setDeleting(null)} style={{minHeight:36,padding:"0 12px"}}>Cancel</button>
-              <button className="ibtn" onClick={()=>{const d=deleting;setDeleting(null);onDelete(d);}}
-                style={{minHeight:36,padding:"0 12px",color:"var(--danger)",fontWeight:600}}>Forget it</button>
-            </div>
-          </div>
-        )}
 
         <div style={{display:"flex",justifyContent:"flex-end",marginTop:14}}>
           <button className="ibtn" onClick={onClose} style={{minHeight:36,padding:"0 14px"}}>Done</button>
