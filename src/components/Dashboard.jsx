@@ -297,7 +297,9 @@ function numericish(s,{negative=true}={}) {
 // credit limit) on a Debt card. Uncontrolled: commits the parsed number on
 // blur (Enter just blurs), empty clears to null, and the field echoes back
 // what was actually saved. `id` keys the remount so state can't bleed
-// between accounts.
+// between accounts. `width` is px at the inline 12px; it is applied in em so
+// the field widens with ui.css's 16px coarse-pointer input rule instead of
+// clipping its value on a phone ("24.99" did, at 56px).
 function DebtNum({id,value,onSave,placeholder,prefix,suffix,width=74}) {
   return (
     <span style={{display:"inline-flex",alignItems:"center",gap:3,fontSize:12,color:"var(--muted)"}}>
@@ -311,7 +313,7 @@ function DebtNum({id,value,onSave,placeholder,prefix,suffix,width=74}) {
           e.target.value=v==null?"":String(v); // show what was actually saved
           if(v!==(value??null))onSave(v);
         }}
-        style={{width,padding:"5px 7px",borderRadius:8,border:"1px solid var(--border)",background:"var(--bg)",
+        style={{width:`${width/12}em`,padding:"5px 7px",borderRadius:8,border:"1px solid var(--border)",background:"var(--bg)",
           color:"var(--text)",fontSize:12,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",outline:"none",textAlign:"right"}}/>
       {suffix}
     </span>
@@ -351,7 +353,7 @@ function AddDebtForm({busy,surf,onSave,onClose}) {
           owed $
           <input value={bal} inputMode="decimal" placeholder="0"
             onChange={e=>setBal(numericish(e.target.value,{negative:false}))}
-            style={{width:80,padding:"6px 8px",borderRadius:8,border:"1px solid var(--border)",background:"var(--card)",
+            style={{width:"6.67em"/* 80px at 12px; em widens it under the coarse-pointer 16px rule */,padding:"6px 8px",borderRadius:8,border:"1px solid var(--border)",background:"var(--card)",
               color:"var(--text)",fontSize:12,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",outline:"none",textAlign:"right"}}/>
         </span>
       </div>
@@ -5639,6 +5641,10 @@ export default function Dashboard({ refreshTick = 0 }) {
             {(()=>{
               const fSt={padding:"6px 8px",borderRadius:8,border:"1px solid var(--border)",background:"var(--bg)",
                 color:"var(--text)",fontSize:12,fontFamily:"inherit",outline:"none"};
+              // Field widths are em (= the old px at fSt's 12px), so they widen
+              // with ui.css's 16px coarse-pointer rule instead of clipping "± $ min".
+              // A date's picker icon doesn't scale, so it gets max(126px,8.75em):
+              // 126px on desktop as before, 140px at 16px.
               const setBoth=(k,v)=>{setFilterDraft(f=>({...f,[k]:v}));setSearchFilters(f=>({...f,[k]:v}));};
               const commitDate=(k,v)=>setSearchFilters(f=>f[k]===v?f:{...f,[k]:v});
               const anyActive=!!buildSearchFilters(searchFilters);
@@ -5646,16 +5652,16 @@ export default function Dashboard({ refreshTick = 0 }) {
                 <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center",marginBottom:12}}>
                   <input inputMode="decimal" value={filterDraft.amtMin} placeholder="± $ min"
                     title="Smallest transaction size — matches money in or out"
-                    onChange={e=>setBoth("amtMin",e.target.value)} style={{...fSt,width:70}}/>
+                    onChange={e=>setBoth("amtMin",e.target.value)} style={{...fSt,width:"5.83em"}}/>
                   <input inputMode="decimal" value={filterDraft.amtMax} placeholder="± $ max"
                     title="Largest transaction size — matches money in or out"
-                    onChange={e=>setBoth("amtMax",e.target.value)} style={{...fSt,width:70}}/>
+                    onChange={e=>setBoth("amtMax",e.target.value)} style={{...fSt,width:"5.83em"}}/>
                   <input type="date" value={filterDraft.dateFrom} title="From date"
                     onChange={e=>setFilterDraft(f=>({...f,dateFrom:e.target.value}))}
-                    onBlur={e=>commitDate("dateFrom",e.target.value)} style={{...fSt,width:126}}/>
+                    onBlur={e=>commitDate("dateFrom",e.target.value)} style={{...fSt,width:"max(126px,8.75em)"}}/>
                   <input type="date" value={filterDraft.dateTo} title="To date"
                     onChange={e=>setFilterDraft(f=>({...f,dateTo:e.target.value}))}
-                    onBlur={e=>commitDate("dateTo",e.target.value)} style={{...fSt,width:126}}/>
+                    onBlur={e=>commitDate("dateTo",e.target.value)} style={{...fSt,width:"max(126px,8.75em)"}}/>
                   {anyActive&&(
                     <button className="ibtn" style={{fontSize:11}}
                       onClick={()=>{setFilterDraft(EMPTY_SEARCH_FILTERS);setSearchFilters(EMPTY_SEARCH_FILTERS);}}>
@@ -6766,7 +6772,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                   extra $
                   <input value={debtExtra} inputMode="decimal" placeholder="0"
                     onChange={e=>setDebtExtra(numericish(e.target.value,{negative:false}))}
-                    style={{width:64,padding:"5px 7px",borderRadius:8,border:"1px solid var(--border)",background:"var(--bg)",
+                    style={{width:"5.33em"/* 64px at 12px; em widens it under the coarse-pointer 16px rule */,padding:"5px 7px",borderRadius:8,border:"1px solid var(--border)",background:"var(--bg)",
                       color:"var(--text)",fontSize:12,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",outline:"none",textAlign:"right"}}/>
                   /mo
                 </span>
@@ -6967,7 +6973,7 @@ export default function Dashboard({ refreshTick = 0 }) {
               <input value={chatInput} onChange={e=>setChatInput(e.target.value)}
                 onKeyDown={e=>{if(e.key==="Enter")sendChat();}}
                 placeholder="Ask about your spending…" disabled={chatBusy}
-                style={{flex:1,padding:"10px 12px",borderRadius:10,border:"1px solid var(--border)",background:"var(--bg)",
+                style={{flex:1,minWidth:0,padding:"10px 12px",borderRadius:10,border:"1px solid var(--border)",background:"var(--bg)",
                   color:"var(--text)",fontSize:13,fontFamily:"inherit",outline:"none"}}/>
               <button onClick={()=>sendChat()} disabled={chatBusy||!chatInput.trim()}
                 style={{padding:"0 16px",borderRadius:10,border:"none",background:"var(--accent)",color:"var(--accent-text)",fontFamily:"inherit",
