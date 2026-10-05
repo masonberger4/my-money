@@ -8,6 +8,7 @@ import { getSetting, setSetting } from "../db.js";
 import { runSync, pullWasClean } from "../sync.js";
 import { chipStyle, markColor, readableInk } from "../paletteContrast.js";
 import { readToken, subscribeTheme } from "../theme.js";
+import { fmtX } from "../format.js"; // negative = money in, rendered −$1,234.56
 import PdfTemplateEditor from "./PdfTemplateEditor.jsx";
 import ErrorBoundary from "./ErrorBoundary.jsx";
 
@@ -53,12 +54,6 @@ function padIso(iso, days) {
 function todayIso() {
   const d = new Date();
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
-}
-
-function money(n) {
-  const v = Number(n);
-  const s = "$" + Math.abs(v).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  return v < 0 ? "−" + s : s; // negative = money in
 }
 
 const ROLE_LABELS = { date: "Date", description: "Description", debit: "Debit", credit: "Credit", amount: "Amount (signed)" };
@@ -1228,8 +1223,8 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                               ? <>Using the layout you saved for this account. </>
                               : <>Layout detected automatically. </>}
                             <strong style={{ color: "var(--text)" }}>{rows.length}</strong> transactions read,
-                            totalling <strong style={{ color: "var(--text)" }}>{money(t.out)} out</strong>
-                            {t.in > 0 && <> and <strong style={{ color: "var(--text)" }}>{money(t.in)} in</strong></>}.
+                            totalling <strong style={{ color: "var(--text)" }}>{fmtX(t.out)} out</strong>
+                            {t.in > 0 && <> and <strong style={{ color: "var(--text)" }}>{fmtX(t.in)} in</strong></>}.
                             <br />Compare those totals with the ones printed on your statement — if they match, the whole
                             statement was read correctly.
                           </>
@@ -1335,7 +1330,7 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                           <div style={{ marginTop: 6 }}>
                             First row: “{preview[0].merchant_name || preview[0].description || "—"}” imports as{" "}
                             <strong style={{ color: "var(--text)" }}>
-                              {preview[0].amount >= 0 ? "money out" : "money in"} ({money(Math.abs(preview[0].amount))})
+                              {preview[0].amount >= 0 ? "money out" : "money in"} ({fmtX(Math.abs(preview[0].amount))})
                             </strong>.
                           </div>
                         )}
@@ -1367,7 +1362,7 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                             </div>
                           </div>
                           <div style={{ fontSize: 12, fontFamily: "var(--font-num)", fontVariantNumeric: "tabular-nums", fontWeight: 500, flexShrink: 0, color: r.amount < 0 ? readableInk(MONEY_IN, cardSurface) : "var(--text)" }}>
-                            {money(r.amount)}
+                            {fmtX(r.amount)}
                           </div>
                         </div>
                       ))}
@@ -1716,7 +1711,7 @@ function Reconciliation({ recon, loading, sectionLabel, step = 3 }) {
 
       <ReconSection title="In your statement, missing here" hint="Possible sync gaps — the feed may not have picked these up." color={SYNC_GAP} count={recon.csvOnly.length}>
         {recon.csvOnly.slice(0, RECON_CAP).map((r, i) => (
-          <ReconRow key={i} left={r.description} sub={r.date} amount={money(r.amount)} />
+          <ReconRow key={i} left={r.description} sub={r.date} amount={fmtX(r.amount)} />
         ))}
         {recon.csvOnly.length > RECON_CAP && <div style={{ fontSize: 11, color: "var(--muted)", textAlign: "center", padding: "6px 0" }}>+{recon.csvOnly.length - RECON_CAP} more</div>}
       </ReconSection>
@@ -1725,14 +1720,14 @@ function Reconciliation({ recon, loading, sectionLabel, step = 3 }) {
         {recon.amountMismatches.slice(0, RECON_CAP).map((m, i) => (
           <ReconRow key={i} left={m.csv.description}
             sub={`statement ${m.csv.date} · feed ${m.plaid.date}`}
-            amount={`${money(m.csv.amount)} → ${money(m.plaid.amount)}`}
-            amountNote={`${m.amountDiff > 0 ? "+" : ""}${money(m.amountDiff)}`} />
+            amount={`${fmtX(m.csv.amount)} → ${fmtX(m.plaid.amount)}`}
+            amountNote={`${m.amountDiff > 0 ? "+" : ""}${fmtX(m.amountDiff)}`} />
         ))}
       </ReconSection>
 
       <ReconSection title="On this account, not in your statement" hint="Pending, timing, or simply not in this export yet." color={neutralHue} count={recon.plaidOnly.length}>
         {recon.plaidOnly.slice(0, RECON_CAP).map((r, i) => (
-          <ReconRow key={i} left={r.description || r.merchant_name || "Transaction"} sub={`${r.date}${r.pending ? " · pending" : ""}`} amount={money(r.amount)} />
+          <ReconRow key={i} left={r.description || r.merchant_name || "Transaction"} sub={`${r.date}${r.pending ? " · pending" : ""}`} amount={fmtX(r.amount)} />
         ))}
         {recon.plaidOnly.length > RECON_CAP && <div style={{ fontSize: 11, color: "var(--muted)", textAlign: "center", padding: "6px 0" }}>+{recon.plaidOnly.length - RECON_CAP} more</div>}
       </ReconSection>
@@ -1742,7 +1737,7 @@ function Reconciliation({ recon, loading, sectionLabel, step = 3 }) {
           <ReconRow key={i} left={m.csv.description}
             sub={[m.dateMismatch ? `date ${m.csv.date}→${m.plaid.date}` : null,
                   m.categoryMismatch ? `category statement "${m.csv.mapped_category}" vs feed "${m.plaid.user_category || m.plaid.mapped_category}"` : null].filter(Boolean).join(" · ")}
-            amount={money(m.csv.amount)} />
+            amount={fmtX(m.csv.amount)} />
         ))}
       </ReconSection>
 
