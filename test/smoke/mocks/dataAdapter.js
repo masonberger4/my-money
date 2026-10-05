@@ -4,6 +4,7 @@
 import { toTxShape, spendingGroups, biggestMovers } from '../../../src/spending.js';
 import { markInternalTransfers, cashIncome } from '../../../src/cashFlow.js';
 import { setRegistryParent } from '../../../src/categoryTree.js';
+import { setEmapEntryIn, setDmapEntryIn } from '../../../src/taxReport.js';
 // The aliased settings store — the registry updaters below read-merge-write
 // the same rows Dashboard's mount reads hit, so the adopt-merged-value path
 // renders honestly.
@@ -348,6 +349,12 @@ export const updateCategoryColor = (cat, color) =>
   mergeSettingRow('dash:colors', {}, cur => ({ ...cur, [cat]: color }));
 export const updateCategoryAlias = (cat, alias) =>
   mergeSettingRow('dash:names', {}, cur => ({ ...cur, [cat]: alias }));
+// tax:maps — same contract (setEmapEntryIn/setDmapEntryIn tolerate a
+// corrupt or empty row on their own).
+export const setTaxMapEntry = (entityId, cat, value) =>
+  mergeSettingRow('tax:maps', {}, cur => setEmapEntryIn(cur, entityId, cat, value));
+export const setDeductionMapEntry = (cat, bucket) =>
+  mergeSettingRow('tax:maps', {}, cur => setDmapEntryIn(cur, cat, bucket));
 export const FEED_GAP_SCAN_CAP = 25;
 export function isManualAccount(a) { return !!a?.is_manual; }
 export function isSimpleFinAccount(a) { return String(a?.plaid_account_id || '').startsWith('sfin:'); }

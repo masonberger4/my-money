@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from "react";
-import { getOverview, getSpending, getBiggestMovers, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, quickAddTargets, ACCOUNT_TYPES, ACCOUNT_SUBTYPES, setCategoryRule, applyCategoryRuleToHistory, listCategoryRules, countCategoryRuleMatches, deleteCategoryRule, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, getActualIncome, resolveBudgetIncome, invalidateEnvelopeSpending, isEnvelopeSchemaMissing, targetNeed, readyToAssign, envelopePace, updateEnvPace as persistEnvPace, updateRecIgnore, getStartupSettings, monthKey, getEntities, createEntity, updateEntity, getTaxYearTransactions, getMileage, addMileage, deleteMileage, getReceiptTxIds, getDebts, getBalanceSnapshots, getNetWorthSeries, addManualTransaction, createManualAccount, updateManualBalance, getDataCoverage, getFeedCoverageGaps, FEED_GAP_SCAN_CAP, getReconciliation, getRestoreRecord, signOut, autoFillMonth, setTargetOverride, effectiveTarget, getExpectedTransactions, addExpected, dismissExpected, matchExpectedManually, getSavedChats, saveChatToApp, deleteSavedChat, addRegistryEntry, updateRegistryParent, removeRegistryEntry, updateCategoryColor, updateCategoryAlias } from "../dataAdapter.js";
+import { getOverview, getSpending, getBiggestMovers, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, quickAddTargets, ACCOUNT_TYPES, ACCOUNT_SUBTYPES, setCategoryRule, applyCategoryRuleToHistory, listCategoryRules, countCategoryRuleMatches, deleteCategoryRule, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, getActualIncome, resolveBudgetIncome, invalidateEnvelopeSpending, isEnvelopeSchemaMissing, targetNeed, readyToAssign, envelopePace, updateEnvPace as persistEnvPace, updateRecIgnore, getStartupSettings, monthKey, getEntities, createEntity, updateEntity, getTaxYearTransactions, getMileage, addMileage, deleteMileage, getReceiptTxIds, getDebts, getBalanceSnapshots, getNetWorthSeries, addManualTransaction, createManualAccount, updateManualBalance, getDataCoverage, getFeedCoverageGaps, FEED_GAP_SCAN_CAP, getReconciliation, getRestoreRecord, signOut, autoFillMonth, setTargetOverride, effectiveTarget, getExpectedTransactions, addExpected, dismissExpected, matchExpectedManually, getSavedChats, saveChatToApp, deleteSavedChat, addRegistryEntry, updateRegistryParent, removeRegistryEntry, updateCategoryColor, updateCategoryAlias, setTaxMapEntry, setDeductionMapEntry } from "../dataAdapter.js";
 import { FLOW_LABELS } from "../reconciliation.js";
 import { clampSeries } from "../netWorth.js";
 // Pure cores imported directly (never Supabase — the mock-harness alias rule
@@ -8,7 +8,7 @@ import { planAutoFill, envelopeBar, assignUnchanged, targetUnchanged, monthsUnti
 import { buildSearchFilters, searchIsActive } from "../searchFilters.js";
 import { expectedByCategory, expectedStatus, isMissedExpected, seedFromRecurring, projectFutureCycles, homeBillsWindow } from "../expectedTx.js";
 import { payoffWhatIf, debtFreeMonth, isMortgage, amortizationSchedule, addMonths, MAX_MONTHS, payoffProgress, utilization } from "../debtPayoff.js";
-import { SCHEDULE_E_LINES, RENTS_KEY, DEFAULT_SCHEDULE_E_MAP, scheduleEReport, entityMonthly, entityLedger, personalDeductionReport, DEDUCTION_BUCKETS, DEFAULT_DEDUCTION_MAP, mileageDeduction, scheduleECsv } from "../taxReport.js";
+import { SCHEDULE_E_LINES, RENTS_KEY, DEFAULT_SCHEDULE_E_MAP, scheduleEReport, entityMonthly, entityLedger, personalDeductionReport, DEDUCTION_BUCKETS, DEFAULT_DEDUCTION_MAP, mileageDeduction, scheduleECsv, parseTaxMaps, setEmapEntryIn, setDmapEntryIn } from "../taxReport.js";
 import { merchantKey, matchLearnedRule, isKeyPrefix } from "../txClassify.js";
 import { trimChatMsgs, buildSavedChat } from "../savedChats.js";
 import { patchTxShape } from "../spending.js";
@@ -2468,7 +2468,7 @@ export default function Dashboard({ refreshTick = 0 }) {
   // writes in dataAdapter (the updateRecIgnore discipline): the merge runs
   // against the STORED row, so the mount read degrading to []/{} above can
   // never let a rebuilt-from-state value wipe the other phone's categories on
-  // the first edit. Optimistic with rollback + alert (the saveTaxMaps shape) —
+  // the first edit. Optimistic with rollback + alert (shared with saveTaxMapEdit) —
   // the old swallowed catch{} lost a just-created category while its taught
   // rules persisted. Success adopts the merged stored value, which may carry
   // entries the other phone added since mount.
@@ -2562,33 +2562,38 @@ export default function Dashboard({ refreshTick = 0 }) {
   function saveAsstEffort(e){setAsstEffort(e);setSetting("asst:effort",e).catch(()=>{});}
 
   // --- Rental & tax handlers ---
-  // Optimistic with rollback + alert: a dropped mapping edit would leave the
-  // worksheet on screen disagreeing with what the other phone (and the next
-  // Tax-tab load) reads back.
-  async function saveTaxMaps(next){
+  // tax:maps edits are serialized read-merge-writes in settingsIO (the
+  // dash:* discipline): each applies ONE entry to the STORED row, so a failed
+  // Tax-tab read (state degraded to "no mappings") or a phone holding an older
+  // read can never wipe the stored mappings with a whole map rebuilt from this
+  // render. Optimistic with rollback + alert; success adopts the merged stored
+  // value, which carries the other phone's mappings too. taxMapsWrites tells
+  // the Tax-tab load not to adopt a read that may predate an edit (pending
+  // count + a generation bumped at every edit's start and settle).
+  const taxMapsWrites=useRef({pending:0,gen:0});
+  async function saveTaxMapEdit(mutate,write){
     const prev=taxMaps;
-    setTaxMaps(next);
-    try{await setSetting("tax:maps",JSON.stringify(next));}
+    const w=taxMapsWrites.current;
+    w.pending++;w.gen++;
+    setTaxMaps(mutate(prev));
+    try{setTaxMaps(await write());}
     catch(err){
       console.error("saving tax maps failed",err);
       setTaxMaps(prev);
       window.alert(`Couldn't save that tax mapping: ${friendlyError(err)}`);
-    }
+    }finally{w.pending--;w.gen++;}
   }
   // A fresh entity's Schedule E mapping starts from the conservative defaults;
   // the FIRST edit copies them into the stored map and edits that. Never merge
   // the defaults over a stored map — that would resurrect a default the user
-  // explicitly un-mapped, making "Not mapped" a silent no-op for those rows.
+  // explicitly un-mapped, making "Not mapped" a silent no-op for those rows
+  // (setEmapEntryIn in taxReport.js; null DELETES the key).
   const emapFor=useCallback(id=>taxMaps?.emap?.[id]??DEFAULT_SCHEDULE_E_MAP,[taxMaps]);
   function setEmapEntry(entityId,category,value){
-    const next={...emapFor(entityId)};
-    if(value==null)delete next[category];else next[category]=value;
-    saveTaxMaps({...(taxMaps||{dmap:{...DEFAULT_DEDUCTION_MAP}}),emap:{...(taxMaps?.emap||{}),[entityId]:next}});
+    saveTaxMapEdit(m=>setEmapEntryIn(m,entityId,category,value),()=>setTaxMapEntry(entityId,category,value));
   }
   function setDmapEntry(category,bucket){
-    const next={...(taxMaps?.dmap||{...DEFAULT_DEDUCTION_MAP})};
-    if(bucket==null)delete next[category];else next[category]=bucket;
-    saveTaxMaps({...(taxMaps||{}),emap:taxMaps?.emap||{},dmap:next});
+    saveTaxMapEdit(m=>setDmapEntryIn(m,category,bucket),()=>setDeductionMapEntry(category,bucket));
   }
   async function handleAddEntity(){
     const name=newEntityName.trim();
@@ -3126,11 +3131,15 @@ export default function Dashboard({ refreshTick = 0 }) {
   useEffect(()=>{
     if(tab!=="tax"||taxData)return;
     const seq=++taxSeq.current;
+    const mapsGen=taxMapsWrites.current.gen;
     setTaxLoading(true);
     Promise.all([
       getTaxYearTransactions(taxYear),
       getMileage(taxYear).catch(err=>{console.error("mileage load failed",err);return {mileage:[]};}),
-      getSetting("tax:maps").catch(()=>null),
+      // A FAILED read is not "no mappings": keep what's on screen (or show
+      // none) — edits stay safe either way, since the settingsIO chain
+      // re-reads the stored row and aborts on a failed read.
+      getSetting("tax:maps").then(parseTaxMaps,err=>{console.error("tax maps load failed",err);return null;}),
       getReceiptTxIds().catch(err=>{console.error("receipt ids load failed",err);return null;}),
     ])
       .then(([t,m,maps,rids])=>{
@@ -3138,14 +3147,12 @@ export default function Dashboard({ refreshTick = 0 }) {
         setTaxData(t);
         setMileage(m.mileage||[]);
         setReceiptTxIds(rids);
-        setTaxMaps(prev=>{
-          if(prev)return prev; // don't clobber unsaved edits with a stale read
-          let parsed=null;
-          try{parsed=maps?JSON.parse(maps):null;}catch{ /* unparseable saved maps fall back to the defaults below */ }
-          return (parsed&&typeof parsed==="object")
-            ?{emap:parsed.emap||{},dmap:parsed.dmap||{...DEFAULT_DEDUCTION_MAP}}
-            :{emap:{},dmap:{...DEFAULT_DEDUCTION_MAP}};
-        });
+        // Adopt the STORED value on every load (a refetch must pick up the
+        // other phone's mappings) unless an edit started or settled since
+        // this read began — that edit resolves with a fresher merged value.
+        const w=taxMapsWrites.current;
+        const fresh=maps&&w.pending===0&&w.gen===mapsGen;
+        setTaxMaps(prev=>fresh?maps:(prev||parseTaxMaps(null)));
       })
       .catch(err=>{if(seq===taxSeq.current){console.error(err);setTaxData({transactions:[]});}})
       .finally(()=>{if(seq===taxSeq.current)setTaxLoading(false);});

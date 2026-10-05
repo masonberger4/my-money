@@ -238,6 +238,57 @@ export const DEDUCTION_BUCKETS = [
 // via `tax:maps`; unmapped stays visible.
 export const DEFAULT_DEDUCTION_MAP = {};
 
+// ---------------------------------------------------------------------------
+// The `tax:maps` settings row: `{emap:{entityId:{cat:line|'rents'}},dmap:{cat:bucket}}`.
+// Written ONLY through the serialized read-merge-write chain in
+// src/adapters/settingsIO.js (the dash:* / rec:ignore discipline): each edit
+// re-reads the STORED row and applies one entry, so a failed Tax-tab read or
+// the other phone's newer mappings can never be overwritten by a whole map
+// rebuilt from component state (2026-10 audit).
+
+const isPlainObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+
+// Tolerant parse (the parseCatMap idiom): a missing or CORRUPT row reads as
+// "no mappings" — what the worksheet already showed for it — while a FAILED
+// read rejects upstream and never reaches here. Unknown top-level keys are
+// carried through untouched so a newer client's additions survive an edit.
+export function parseTaxMaps(raw) {
+  let v = null;
+  if (typeof raw === 'string' && raw) {
+    try { v = JSON.parse(raw); } catch { v = null; }
+  } else if (isPlainObject(raw)) {
+    v = raw;
+  }
+  const base = isPlainObject(v) ? v : {};
+  return {
+    ...base,
+    emap: isPlainObject(base.emap) ? base.emap : {},
+    dmap: isPlainObject(base.dmap) ? base.dmap : { ...DEFAULT_DEDUCTION_MAP },
+  };
+}
+
+// One Schedule E entry for one entity. A null/undefined value DELETES the key
+// ("Not mapped"). An entity's FIRST edit starts from DEFAULT_SCHEDULE_E_MAP;
+// the defaults are never merged over a stored map — that would resurrect a
+// mapping the user explicitly removed. Pure: returns a new maps object.
+export function setEmapEntryIn(maps, entityId, category, value) {
+  const m = parseTaxMaps(maps);
+  const cur = isPlainObject(m.emap[entityId]) ? m.emap[entityId] : DEFAULT_SCHEDULE_E_MAP;
+  const next = { ...cur };
+  if (value == null) delete next[category];
+  else next[category] = value;
+  return { ...m, emap: { ...m.emap, [entityId]: next } };
+}
+
+// One personal-deduction entry; null/undefined DELETES it. Leaves emap alone.
+export function setDmapEntryIn(maps, category, bucket) {
+  const m = parseTaxMaps(maps);
+  const next = { ...m.dmap };
+  if (bucket == null) delete next[category];
+  else next[category] = bucket;
+  return { ...m, dmap: next };
+}
+
 const DEDUCTION_KEYS = new Set(DEDUCTION_BUCKETS.map((b) => b.key));
 
 // rows: NON-entity transactions for the year; mapping { [category]: bucketKey }.

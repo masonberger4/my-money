@@ -1,11 +1,13 @@
 // Settings-backed household preferences with the serialized read-merge-write
-// discipline: the recurring-charge ignore list, the saved Ask-tab chats, and
-// the category registry rows (dash:cats / dash:colors / dash:names).
+// discipline: the recurring-charge ignore list, the saved Ask-tab chats, the
+// category registry rows (dash:cats / dash:colors / dash:names), and the Tax
+// tab's category→line mappings (tax:maps).
 // Split out of dataAdapter.js (2026-08-04 code-health session); INTERNAL:
 // only dataAdapter.js imports this module and re-exports its API.
 import { parseIgnoreList, toggleIgnoreKey } from '../recurring.js';
 import { parseSavedChats, addSavedChat, removeSavedChat } from '../savedChats.js';
 import { setRegistryParent } from '../categoryTree.js';
+import { parseTaxMaps, setEmapEntryIn, setDmapEntryIn } from '../taxReport.js';
 import { getSetting, setSetting } from '../db.js';
 import { makeSerializedUpdater } from '../serializedUpdater.js';
 
@@ -37,6 +39,14 @@ const ASST_CHATS_KEY = 'asst:chats';
 const CATS_KEY = 'dash:cats';
 const COLORS_KEY = 'dash:colors';
 const NAMES_KEY = 'dash:names';
+
+// The Tax tab's mappings — ONE household row, `{emap:{entityId:{cat:line}},
+// dmap:{cat:bucket}}` (parse + single-entry merges pure in src/taxReport.js).
+// It was the last household JSON row still written as a whole value rebuilt
+// from component state: a failed Tax-tab read degraded state to "no mappings"
+// and the first edit then wiped every stored mapping, and a phone holding an
+// older read silently erased the other phone's newer mapping (2026-10 audit).
+const TAX_MAPS_KEY = 'tax:maps';
 
 // Tolerant parses (the parseIgnoreList idiom): a CORRUPT row reads as empty,
 // matching what every renderer of these rows already shows for it — distinct
@@ -127,6 +137,7 @@ export function makeSettingsChains(db) {
   const updateCats = bindRow(CATS_KEY, parseCatRegistry);
   const updateColors = bindRow(COLORS_KEY, parseCatMap);
   const updateNames = bindRow(NAMES_KEY, parseCatMap);
+  const updateTaxMaps = bindRow(TAX_MAPS_KEY, parseTaxMaps);
 
   const trimmedName = c => (c?.name || '').trim();
 
@@ -151,6 +162,13 @@ export function makeSettingsChains(db) {
     removeRegistryEntry: id => updateCats(current => current.filter(c => c?.id !== id)),
     updateCategoryColor: (cat, color) => updateColors(current => ({ ...current, [cat]: color })),
     updateCategoryAlias: (cat, alias) => updateNames(current => ({ ...current, [cat]: alias })),
+    // tax:maps: one entry per call against the STORED row (null deletes);
+    // resolves with the whole merged maps object so the Tax tab adopts the
+    // other phone's mappings along with its own edit.
+    setTaxMapEntry: (entityId, cat, value) =>
+      updateTaxMaps(current => setEmapEntryIn(current, entityId, cat, value)),
+    setDeductionMapEntry: (cat, bucket) =>
+      updateTaxMaps(current => setDmapEntryIn(current, cat, bucket)),
   };
 }
 
@@ -169,4 +187,6 @@ export const {
   removeRegistryEntry,
   updateCategoryColor,
   updateCategoryAlias,
+  setTaxMapEntry,
+  setDeductionMapEntry,
 } = bound;

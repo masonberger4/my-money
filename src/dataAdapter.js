@@ -70,6 +70,8 @@ export {
   removeRegistryEntry,
   updateCategoryColor,
   updateCategoryAlias,
+  setTaxMapEntry,
+  setDeductionMapEntry,
 } from './adapters/settingsIO.js';
 export {
   getEntities,

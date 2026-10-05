@@ -23,6 +23,9 @@ import {
   DEDUCTION_BUCKETS,
   DEFAULT_SCHEDULE_E_MAP,
   DEFAULT_DEDUCTION_MAP,
+  parseTaxMaps,
+  setEmapEntryIn,
+  setDmapEntryIn,
   MILEAGE_RATES,
   mileageRate,
   mileageDeduction,
@@ -355,4 +358,44 @@ test('scheduleECsv escapes and carries the sign-convention column name', () => {
   assert.ok(csv.includes('amount_positive_is_outflow'));
   assert.ok(csv.includes('"Doors, ""Custom"" Co"'), 'RFC-4180 quoting for commas and quotes');
   assert.ok(csv.includes('Not tax advice'));
+});
+
+// --- tax:maps parse + single-entry merges (2026-10 audit) --------------------
+// The pure halves of the settingsIO read-merge-write chain: a corrupt row
+// reads as "no mappings" (a FAILED read rejects upstream, never reaching
+// here), and an edit touches exactly one key without merging defaults.
+
+test('parseTaxMaps is tolerant: missing, corrupt and wrong-shaped rows read as empty maps', () => {
+  const empty = { emap: {}, dmap: {} };
+  assert.deepEqual(parseTaxMaps(null), empty);
+  assert.deepEqual(parseTaxMaps(''), empty);
+  assert.deepEqual(parseTaxMaps('{'), empty);
+  assert.deepEqual(parseTaxMaps('[]'), empty);
+  assert.deepEqual(parseTaxMaps('5'), empty);
+  assert.deepEqual(parseTaxMaps('{"emap":5,"dmap":[1]}'), empty);
+  assert.deepEqual(
+    parseTaxMaps('{"emap":{"P":{"Repairs":14}},"dmap":{"Gifts":"charitable"}}'),
+    { emap: { P: { Repairs: 14 } }, dmap: { Gifts: 'charitable' } },
+  );
+  assert.deepEqual(parseTaxMaps('{"emap":{},"dmap":{},"v":2}').v, 2, 'unknown keys survive');
+  assert.deepEqual(parseTaxMaps({ emap: { P: {} } }), { emap: { P: {} }, dmap: {} }, 'accepts a parsed object');
+});
+
+test('setEmapEntryIn sets or DELETES one key for one entity and never merges the defaults', () => {
+  const maps = { emap: { P: { Repairs: 14 }, Q: { Taxes: 16 } }, dmap: { Gifts: 'charitable' } };
+  const added = setEmapEntryIn(maps, 'P', 'Insurance', 9);
+  assert.deepEqual(added, { emap: { P: { Repairs: 14, Insurance: 9 }, Q: { Taxes: 16 } }, dmap: { Gifts: 'charitable' } });
+  assert.deepEqual(maps.emap.P, { Repairs: 14 }, 'the input is not mutated');
+  const removed = setEmapEntryIn(added, 'P', 'Repairs', null);
+  assert.equal('Repairs' in removed.emap.P, false, 'null deletes the key ("Not mapped")');
+  assert.deepEqual(setEmapEntryIn(null, 'N', 'Rent', RENTS_KEY), { emap: { N: { Rent: RENTS_KEY } }, dmap: {} },
+    'a first edit starts from the (empty) defaults');
+});
+
+test('setDmapEntryIn sets or DELETES one bucket key and leaves emap alone', () => {
+  const maps = { emap: { P: { Repairs: 14 } }, dmap: { Gifts: 'charitable' } };
+  assert.deepEqual(setDmapEntryIn(maps, 'Doctor', 'medical').dmap, { Gifts: 'charitable', Doctor: 'medical' });
+  const removed = setDmapEntryIn(maps, 'Gifts', null);
+  assert.deepEqual(removed.dmap, {});
+  assert.deepEqual(removed.emap, { P: { Repairs: 14 } });
 });
