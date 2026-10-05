@@ -727,3 +727,45 @@ test('REGRESSION: every createManualAccount in the import modal adopts the accou
   assert.doesNotMatch(src, /\baccounts\.find\(a => a\.id === target\)/);
   assert.doesNotMatch(src, /\baccounts\.filter\(/);
 });
+
+// --- 2026-10 import audit (F43): the existing-ids read FAILS CLOSED ----------
+// The single-file effect's catch quietly set existingIds AND existingSources
+// to empty Sets — no error, nothing on screen. An empty source set makes
+// mixedSource false, so a flaky read on an account holding PDF history
+// enabled a CSV import of the same months: every overlapping row duplicated,
+// permanently (the formats hash differently and there is no delete path).
+// runBatch's own comment already said a failed fetch must fail the file, but
+// its per-file refetch read only `ids` and never re-checked the sources.
+// Source pins: the component can't mount in Node (the abort-ref precedent).
+const csvImportSrc = () => read('src/components/CsvImport.jsx');
+const bodyOf = (src, start, end) => {
+  const i = src.indexOf(start);
+  assert.ok(i >= 0, `anchor moved: ${start}`);
+  const j = src.indexOf(end, i + start.length);
+  assert.ok(j > i, `end anchor moved: ${end}`);
+  return src.slice(i, j);
+};
+
+test('REGRESSION: a failed existing-ids read sets an error state instead of an empty set', () => {
+  const src = csvImportSrc();
+  assert.doesNotMatch(src, /\.catch\(\(\)\s*=>\s*\{[^}]*setExistingIds\(new Set\(\)\)/,
+    'the silent empty-set catch disarms the one-format-per-account guard');
+  const effect = bodyOf(src, 'getExistingTxIds(target)', '}, [target');
+  assert.match(effect, /\.catch\([\s\S]*setIdsError\(/, 'the catch must raise idsError');
+  assert.match(src, /getExistingTxIds\(target\)[\s\S]{0,900}?\}, \[target, idsEpoch\]\);/, 'Retry (idsEpoch) must re-run the read');
+  assert.match(src, /onClick=\{\(\) => setIdsEpoch\(n => n \+ 1\)\}/, 'the error offers a Retry');
+});
+
+test('REGRESSION: an unreadable account blocks Import and batch start', () => {
+  const src = csvImportSrc();
+  assert.match(bodyOf(src, 'const canConfirm =', ';'), /!idsError/);
+  assert.match(bodyOf(src, 'const batchCanStart =', ';'), /!idsError/);
+  assert.match(bodyOf(src, 'async function confirm()', 'setBusy(true)'), /if \(idsError\) return;/);
+});
+
+test('REGRESSION: every batch file re-checks the account\'s formats on its own refetch', () => {
+  const src = csvImportSrc();
+  const loop = bodyOf(src, 'const fetched = await getExistingTxIds(accountId);', 'let builtRows;');
+  assert.match(loop, /conflictingSources\(/, 'the per-file refetch must re-run the format check');
+  assert.match(loop, /throw new Error\(`already holds/, 'a conflict fails the file rather than writing it');
+});

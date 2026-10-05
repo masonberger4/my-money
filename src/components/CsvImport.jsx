@@ -158,6 +158,10 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
   const [compareOnly, setCompareOnly] = useState(false);
   const [syncState, setSyncState] = useState("idle"); // idle | running | done | failed
   const [loadingIds, setLoadingIds] = useState(false);
+  // The target's existing ids/sources could NOT be read. Distinct from "the
+  // account is empty" — see the effect that loads them.
+  const [idsError, setIdsError] = useState(null);
+  const [idsEpoch, setIdsEpoch] = useState(0); // bumped by Retry
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [pdfAdvisory, setPdfAdvisory] = useState(null); // non-fatal guidance, not the terminal error slot
@@ -421,16 +425,32 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
   // nothing, but the same account can now be a backfill target in the same
   // session, and `isDuplicate` is what makes re-importing a statement
   // idempotent. Only a brand-new account has nothing to fetch.
+  //
+  // A FAILED read fails CLOSED. It used to land as two empty Sets with no
+  // error, and an empty source set reads as "this account holds no other
+  // format" — so a flaky read on an account with PDF history enabled a CSV
+  // import of the same months, duplicating every overlapping row for good
+  // (the formats hash differently; there is no delete path). The sets are
+  // still emptied so nothing from the PREVIOUS target lingers, but idsError
+  // blocks Import and batch start until a Retry reads them.
   useEffect(() => {
-    if (target === "new") { setExistingIds(new Set()); setExistingSources(new Set()); return; }
+    setIdsError(null);
+    if (target === "new") { setExistingIds(new Set()); setExistingSources(new Set()); setLoadingIds(false); return; }
     let cancelled = false;
     setLoadingIds(true);
     getExistingTxIds(target)
       .then(({ ids, sources }) => { if (!cancelled) { setExistingIds(ids); setExistingSources(sources); } })
-      .catch(() => { if (!cancelled) { setExistingIds(new Set()); setExistingSources(new Set()); } })
+      .catch(err => {
+        console.error("existing-ids lookup failed", err);
+        if (!cancelled) {
+          setExistingIds(new Set());
+          setExistingSources(new Set());
+          setIdsError("Couldn't read the transactions already on this account, so importing isn't safe — the duplicate check and the one-format-per-account check both need them.");
+        }
+      })
       .finally(() => { if (!cancelled) setLoadingIds(false); });
     return () => { cancelled = true; };
-  }, [target]);
+  }, [target, idsEpoch]);
 
   // A bank words the same transaction differently in its CSV and its PDF, so
   // the dedup hash differs and feeding one account both formats double-inserts.
@@ -711,7 +731,7 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
   // transactions, so importing a second format into the same account would
   // permanently double-count it until someone runs SQL against the database.
   const canConfirm =
-    !!analysis && !analysis.needsManualMapping && !analysis.error && !busy && !loadingIds &&
+    !!analysis && !analysis.needsManualMapping && !analysis.error && !busy && !loadingIds && !idsError &&
     !auditOnly && !mixedSource &&
     boundaryState !== "loading" && boundaryState !== "error" && boundaryState !== "unsynced" &&
     newRows.length > 0 &&
@@ -733,6 +753,7 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
     // inside an async handler, so they land in the catch below as a visible
     // error — never as a render blank.
     if (auditOnly) return;
+    if (idsError) return;
     if (targetIsSimpleFin && !overlapFrom) {
       throw new Error("internal: no feed boundary — refusing to import into a fed account");
     }
@@ -798,8 +819,9 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
     // same reason — mixedSource is computed from existingSources, and until the
     // target's sources have loaded it reflects the PREVIOUS target. Without
     // this, pick-account-then-tap-fast lands CSV rows in a PDF-history account
-    // during the fetch window, and there is no delete path to undo it.
-    !loadingIds &&
+    // during the fetch window, and there is no delete path to undo it. A
+    // FAILED read is the same blindness, permanently — so it blocks too.
+    !loadingIds && !idsError &&
     // Same boundary gate as canConfirm — unless nothing will be written anyway.
     (batchAuditOnly || !targetIsSimpleFin || boundaryState === "ok") &&
     // Batch Compare needs an EXISTING account to compare AGAINST — mirrors the
@@ -867,6 +889,8 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
     const boundary = overlapFrom; // one target account ⇒ one feed boundary
     const auditOnly = batchAuditOnly;
     const batchRules = rules || {};
+    // A batch into "new" creates a manual account below.
+    const targetManual = target === "new" || targetIsManual;
     const totals = { written: 0, compared: 0, dup: 0, skippedFiles: 0, failedFiles: 0, importedFiles: 0,
       skippedRows: 0, matched: 0, csvOnly: 0, mismatches: 0 };
 
@@ -920,6 +944,21 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
           // the file, not degrade to an empty set — an empty set means
           // "import everything again".
           throw new Error("couldn't read this account's existing transactions — not importing blind");
+        }
+        // The one-format-per-account guard, re-checked on THIS fetch: the
+        // start-of-batch check read the sources once, and a file must never
+        // write CSV rows into an account whose rows came from PDFs (or the
+        // reverse) on the strength of a read taken before it.
+        if (!auditOnly) {
+          const clash = conflictingSources(
+            fetched?.sources instanceof Set ? fetched.sources : new Set(),
+            kind === "pdf" ? "pdf" : "csv",
+            targetManual
+          );
+          if (clash.length) {
+            const fmt = clash.includes("pdf") ? "PDF" : clash.includes("csv") ? "CSV" : "older imported";
+            throw new Error(`already holds ${fmt} rows — one format per account`);
+          }
         }
 
         // Each file flows through the SAME pipeline a single file takes:
@@ -1157,6 +1196,13 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
         </div>
       )}
 
+      {idsError && (
+        <div style={{ marginTop: 10, fontSize: 12, color: "var(--danger)", background: "var(--danger-bg)", border: "1px solid var(--danger-border)", borderRadius: 8, padding: "10px 12px", lineHeight: 1.5 }}>
+          {idsError}{" "}
+          <button className="ibtn" style={{ fontSize: 11 }} disabled={batchRunning} onClick={() => setIdsEpoch(n => n + 1)}>Retry</button>
+        </div>
+      )}
+
       {targetIsUnknown && (
         <div style={{ marginTop: 10, fontSize: 12, color: "var(--warn)", background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 8, padding: "10px 12px", lineHeight: 1.5 }}>
           This account isn't recognised as connected or imported, so nothing can be imported into it — only compared.
@@ -1347,9 +1393,9 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                       ) : verdict !== "audit" && (
                         <button
                           className="ibtn"
-                          style={{ width: "100%", justifyContent: "center", minHeight: 44, opacity: !loadingIds && existingIds.size === 0 ? .45 : 1 }}
-                          disabled={!loadingIds && existingIds.size === 0}
-                          title={!loadingIds && existingIds.size === 0 ? "Nothing on this account to compare against" : ""}
+                          style={{ width: "100%", justifyContent: "center", minHeight: 44, opacity: !loadingIds && !idsError && existingIds.size === 0 ? .45 : 1 }}
+                          disabled={!loadingIds && !idsError && existingIds.size === 0}
+                          title={!loadingIds && !idsError && existingIds.size === 0 ? "Nothing on this account to compare against" : ""}
                           onClick={() => setCompareOnly(true)}>
                           Compare only — don't import
                         </button>
