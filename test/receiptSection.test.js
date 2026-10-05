@@ -53,7 +53,7 @@ test('a failure after the sheet closed alerts through friendlyError instead of a
 });
 
 test('an image-unavailable tile opens the viewer, which offers Retry when the photo can\'t load', () => {
-  assert.match(src, /aria-label="Receipt \(image unavailable\)"[^>]*\n?\s*onClick=\{e => \{ e\.stopPropagation\(\); setViewing\(r\); \}\}/,
+  assert.match(src, /aria-label="Receipt \(image unavailable\)"[^>]*\n?\s*onClick=\{openViewer\(r\)\}/,
     'the placeholder tile must reach the viewer (and its Delete)');
   assert.doesNotMatch(src, /onClick=\{e => e\.stopPropagation\(\)\} \/>/, 'no inert tile');
   const viewer = body('{viewing && (', 'Delete receipt');
@@ -62,4 +62,28 @@ test('an image-unavailable tile opens the viewer, which offers Retry when the ph
   const retry = body('async function onRetryUrl(', 'const tile =');
   assert.match(retry, /await getReceiptUrl\(r\.storage_path\)/);
   assert.match(retry, /mounted\.current && s === seq\.current/, 'a late retry never writes into a closed or switched sheet');
+});
+
+// Reviewer repair (F65): the unavailable tile became role="button" with an
+// onClick but no tabIndex or key handler, so on the laptop the keyboard could
+// never reach the viewer's Retry/Delete — and the loaded thumbnail (an img
+// with onClick) never could either. Both are focusable and open on
+// Enter/Space; the key event stops at the tile, or the row around it (whose
+// own Enter/Space means "add photo") would open the file picker too.
+test('both thumbnail kinds are keyboard targets that open the viewer, not the picker', () => {
+  for (const [label, re] of [
+    ['loaded thumbnail', /<img key=\{r\.id\}[^>]*\/>/],
+    ['unavailable tile', /<div key=\{r\.id\} role="button"[^>]*\/>/],
+  ]) {
+    const m = src.match(re);
+    assert.ok(m, `fixture assumption: the ${label} renders`);
+    assert.match(m[0], /role="button"/, `the ${label} is announced as a button`);
+    assert.match(m[0], /tabIndex=\{0\}/, `the ${label} is in the tab order`);
+    assert.match(m[0], /onClick=\{openViewer\(r\)\}/, `a ${label} click opens the viewer`);
+    assert.match(m[0], /onKeyDown=\{openViewer\(r\)\}/, `Enter/Space on the ${label} opens the viewer`);
+  }
+  const open = body('const openViewer = r => e => {', 'return (');
+  assert.match(open, /e\.key !== "Enter" && e\.key !== " "/, 'only Enter and Space open it');
+  assert.match(open, /e\.stopPropagation\(\);/, 'the key event must not reach the add-photo row');
+  assert.match(open, /setViewing\(r\);/);
 });

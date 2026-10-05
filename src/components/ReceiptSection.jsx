@@ -171,6 +171,15 @@ export default function ReceiptSection({ txId, onChanged }) {
 
   const canAdd = !busy && receipts !== null;
   const openPicker = () => { if (canAdd) fileRef.current?.click(); };
+  // A thumbnail is the only way into the viewer (and its Retry/Delete), so
+  // it is a keyboard target too: focusable, Enter/Space opens it. The key
+  // event stops here — the row around it treats Enter/Space as "add photo".
+  const openViewer = r => e => {
+    if (e.type === "keydown" && e.key !== "Enter" && e.key !== " ") return;
+    if (e.type === "keydown") e.preventDefault();
+    e.stopPropagation();
+    setViewing(r);
+  };
 
   return (
     <>
@@ -189,10 +198,10 @@ export default function ReceiptSection({ txId, onChanged }) {
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
           {(receipts || []).map(r => (
             urls[r.id]
-              ? <img key={r.id} src={urls[r.id]} alt="Receipt" style={tile}
-                  onClick={e => { e.stopPropagation(); setViewing(r); }} />
-              : <div key={r.id} role="button" aria-label="Receipt (image unavailable)" style={tile}
-                  onClick={e => { e.stopPropagation(); setViewing(r); }} />
+              ? <img key={r.id} src={urls[r.id]} alt="Receipt" role="button" tabIndex={0} style={tile}
+                  onClick={openViewer(r)} onKeyDown={openViewer(r)} />
+              : <div key={r.id} role="button" tabIndex={0} aria-label="Receipt (image unavailable)" style={tile}
+                  onClick={openViewer(r)} onKeyDown={openViewer(r)} />
           ))}
         </div>
       </div>
