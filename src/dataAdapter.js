@@ -1294,6 +1294,23 @@ export function isManualAccount(a) {
   );
 }
 
+// The accounts QuickAddSheet may write a hand-typed row to: manual, not
+// SimpleFIN-fed (a manual: id would collide with the feed's id space), not a
+// loan (a loan's rows never count as spending, so a cash purchase parked there
+// would vanish from every total), and not HIDDEN — hidden accounts are
+// excluded at the query level, so the row would show optimistically and then
+// vanish on the reload, reading as "it didn't save". Depository first: the
+// sheet defaults to the first target, quick-add exists for cash, and
+// getAccounts' type-ascending order would otherwise put a card ahead of the
+// cash account. Stable within each group (getAccounts' name order). Empty when
+// nothing qualifies, which is the sheet's create-an-"Imported"-account path.
+export function quickAddTargets(accounts) {
+  const ok = (accounts || []).filter(
+    a => isManualAccount(a) && !isSimpleFinAccount(a) && a.type !== 'loan' && !a.hidden,
+  );
+  return [...ok.filter(a => a.type === 'depository'), ...ok.filter(a => a.type !== 'depository')];
+}
+
 // Find (or create) the single household-wide "Imported" institution that owns
 // every manual account. status='disabled' keeps api/sync.js from ever
 // processing it (it filters .neq('status','disabled')), so no bogus

@@ -351,6 +351,13 @@ export const updateCategoryAlias = (cat, alias) =>
 export const FEED_GAP_SCAN_CAP = 25;
 export function isManualAccount(a) { return !!a?.is_manual; }
 export function isSimpleFinAccount(a) { return String(a?.plaid_account_id || '').startsWith('sfin:'); }
+// Same shape as the real quickAddTargets (pure, but dataAdapter.js imports
+// Supabase, so the mock keeps its own copy over the mock predicates above).
+export function quickAddTargets(accounts) {
+  const ok = (accounts || []).filter(
+    a => isManualAccount(a) && !isSimpleFinAccount(a) && a.type !== 'loan' && !a.hidden);
+  return [...ok.filter(a => a.type === 'depository'), ...ok.filter(a => a.type !== 'depository')];
+}
 export async function setCategoryRule() {}
 // Returns a COUNT — the real adapter returns matches.length (a number the
 // learn-confirm renders as "updates N past transactions"). The first version

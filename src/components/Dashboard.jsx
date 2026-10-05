@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from "react";
-import { getOverview, getSpending, getBiggestMovers, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES, ACCOUNT_SUBTYPES, setCategoryRule, applyCategoryRuleToHistory, listCategoryRules, countCategoryRuleMatches, deleteCategoryRule, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, getActualIncome, resolveBudgetIncome, invalidateEnvelopeSpending, isEnvelopeSchemaMissing, targetNeed, readyToAssign, envelopePace, updateEnvPace as persistEnvPace, updateRecIgnore, getStartupSettings, monthKey, getEntities, createEntity, updateEntity, getTaxYearTransactions, getMileage, addMileage, deleteMileage, getReceiptTxIds, getDebts, getBalanceSnapshots, getNetWorthSeries, addManualTransaction, createManualAccount, updateManualBalance, getDataCoverage, getFeedCoverageGaps, FEED_GAP_SCAN_CAP, getReconciliation, getRestoreRecord, signOut, autoFillMonth, setTargetOverride, effectiveTarget, getExpectedTransactions, addExpected, dismissExpected, matchExpectedManually, getSavedChats, saveChatToApp, deleteSavedChat, addRegistryEntry, updateRegistryParent, removeRegistryEntry, updateCategoryColor, updateCategoryAlias } from "../dataAdapter.js";
+import { getOverview, getSpending, getBiggestMovers, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, quickAddTargets, ACCOUNT_TYPES, ACCOUNT_SUBTYPES, setCategoryRule, applyCategoryRuleToHistory, listCategoryRules, countCategoryRuleMatches, deleteCategoryRule, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, getActualIncome, resolveBudgetIncome, invalidateEnvelopeSpending, isEnvelopeSchemaMissing, targetNeed, readyToAssign, envelopePace, updateEnvPace as persistEnvPace, updateRecIgnore, getStartupSettings, monthKey, getEntities, createEntity, updateEntity, getTaxYearTransactions, getMileage, addMileage, deleteMileage, getReceiptTxIds, getDebts, getBalanceSnapshots, getNetWorthSeries, addManualTransaction, createManualAccount, updateManualBalance, getDataCoverage, getFeedCoverageGaps, FEED_GAP_SCAN_CAP, getReconciliation, getRestoreRecord, signOut, autoFillMonth, setTargetOverride, effectiveTarget, getExpectedTransactions, addExpected, dismissExpected, matchExpectedManually, getSavedChats, saveChatToApp, deleteSavedChat, addRegistryEntry, updateRegistryParent, removeRegistryEntry, updateCategoryColor, updateCategoryAlias } from "../dataAdapter.js";
 import { FLOW_LABELS } from "../reconciliation.js";
 import { clampSeries } from "../netWorth.js";
 // Pure cores imported directly (never Supabase — the mock-harness alias rule
@@ -1022,8 +1022,9 @@ function QuickAddSheet({manualAccounts,allCats,getName,getColor,acctLabel,acctCo
   const [dateRaw,setDateRaw]=useState(today);
   const [description,setDescription]=useState("");
   const [category,setCategory]=useState(null);
-  // Default target: the sole manual account, else none (created on save).
-  const [acctId,setAcctId]=useState(manualAccounts.length===1?manualAccounts[0].id:(manualAccounts[0]?.id||""));
+  // Default target: the first offered account (quickAddTargets puts
+  // depository first), else none — an "Imported" account is created on save.
+  const [acctId,setAcctId]=useState(manualAccounts[0]?.id||"");
   const n=Number(amount);
   const valid=Number.isFinite(n)&&n>0&&!!description.trim()&&/^\d{4}-\d{2}-\d{2}$/.test(date);
   const commitDate=()=>{
@@ -8476,10 +8477,9 @@ export default function Dashboard({ refreshTick = 0 }) {
 
       {/* Manual transaction quick-add */}
       {quickAdd&&(()=>{
-        // Loan accounts excluded: a loan's own ledger rows never count as
-        // spending (isLoanAccount), so a hand-typed cash purchase parked there
-        // would silently vanish from every total.
-        const manualAccounts=accounts.filter(a=>isManualAccount(a)&&!isSimpleFinAccount(a)&&a.type!=="loan");
+        // Manual, non-SimpleFIN, non-loan, non-hidden, depository first — the
+        // reasons live on quickAddTargets (dataAdapter.js).
+        const manualAccounts=quickAddTargets(accounts);
         // Uncategorized is never an offerable pick (same rule as the detail sheet).
         return (
           <QuickAddSheet accounts={accounts} manualAccounts={manualAccounts} allCats={userCats}
