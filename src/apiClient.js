@@ -7,8 +7,11 @@ import { makeRetryingFetch } from './netRetry.js';
 
 // Same wire-death retry the Supabase client gets (src/netRetry.js): a GET or
 // the one DELETE here is re-sent if it never got a response; the POST routes
-// (sync, unlink, claim, assistant) are never re-sent.
-const retryingFetch = makeRetryingFetch();
+// (sync, unlink, claim, assistant) are never re-sent. GET is opted IN here
+// (the default set leaves reads to postgrest-js's own retry, which this
+// plain fetch doesn't have — without it the status read on a resumed PWA
+// failed once and the feed-health banner silently never appeared).
+const retryingFetch = makeRetryingFetch({ methods: ['GET', 'PUT', 'PATCH', 'DELETE'] });
 
 async function request(method, url, body) {
   const token = await getAccessToken();

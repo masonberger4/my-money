@@ -1,6 +1,7 @@
 // makeRetryingFetch / friendlyError — the iOS "TypeError: Load failed" fix.
-// Pins: a write that died on the wire is re-sent (PATCH/PUT/DELETE only —
-// reads are postgrest-js's own retry budget), an answered request is never
+// Pins: a write that died on the wire is re-sent (PATCH/PUT/DELETE by default —
+// reads are postgrest-js's own retry budget; a `methods` opt-in adds GET for
+// apiClient's plain fetch), an answered request is never
 // re-sent, POST and non-reusable bodies are left alone, an aborted request is
 // not retried, and the alert wording.
 import test from 'node:test';
@@ -13,7 +14,7 @@ const failedToFetch = () => new TypeError('Failed to fetch'); // Chrome's
 
 // A scripted fetch: each entry is either an Error (rejects) or a value
 // (resolves). Records calls and the waits between them.
-function harness(script, delays = [10, 20]) {
+function harness(script, delays = [10, 20], opts = {}) {
   const calls = [];
   const waits = [];
   const fetch = async (input, init) => {
@@ -23,7 +24,7 @@ function harness(script, delays = [10, 20]) {
     return next;
   };
   const sleep = async ms => { waits.push(ms); };
-  return { calls, waits, fetch: makeRetryingFetch({ fetch, delays, sleep }) };
+  return { calls, waits, fetch: makeRetryingFetch({ fetch, delays, sleep, ...opts }) };
 }
 
 test('a PATCH that dies on the wire is re-sent and the second answer returned', async () => {
@@ -91,6 +92,17 @@ test('reads are left to postgrest-js: GET (explicit or by omission) is not retri
   await assert.rejects(h.fetch('https://x/a', { method: 'get' }), /Load failed/);
   assert.equal(h.calls.length, 2);
   assert.deepEqual(h.waits, []);
+});
+
+test('the methods option opts GET in for a caller with no postgrest budget (apiClient)', async () => {
+  const h = harness([loadFailed(), { ok: true }, loadFailed(), { ok: true }], [10, 20], { methods: ['get', 'DELETE'] });
+  const res = await h.fetch('https://x/api/simplefin-status', { method: 'GET' });
+  assert.equal(res.ok, true);
+  assert.equal(h.calls.length, 2, 'the GET is re-sent');
+  assert.deepEqual(h.waits, [10]);
+  // A method absent from the list keeps the default refusal — POST above all.
+  await assert.rejects(h.fetch('https://x/api/sync', { method: 'POST', body: '{}' }), /Load failed/);
+  assert.equal(h.calls.length, 3);
 });
 
 test('a URL input and a lower-case method are accepted for a write', async () => {

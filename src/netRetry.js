@@ -26,7 +26,11 @@
 //     RETRYABLE_METHODS, on by default), which is exactly why reads on the
 //     phone self-heal and only writes ever showed the alert; stacking a
 //     second budget on top would multiply the wait on a phone that really is
-//     offline. POST is excluded on purpose — a plain `.insert()` sent twice
+//     offline. That read exclusion is the DEFAULT method set, sized for the
+//     Supabase client; a caller with no postgrest budget behind it opts its
+//     reads in with `methods` (src/apiClient.js does, for its plain-fetch
+//     GET — nothing else would ever re-send it).
+//     POST is excluded on purpose — a plain `.insert()` sent twice
 //     is a duplicate row, and a lost auth-refresh POST re-sent could burn a
 //     single-use refresh token — and so is any body that can't be re-sent
 //     (a stream). Two short waits, ~1.6 s worst case, so a genuinely offline
@@ -66,12 +70,12 @@ function reusableBody(body) {
   return false;
 }
 
-function canRetry(input, init) {
+function canRetry(input, init, allowed) {
   // A Request object may carry a one-shot body; only the (url, init) form is
   // retried, which is the form every supabase-js sub-client uses.
   if (typeof input !== 'string' && !(typeof URL !== 'undefined' && input instanceof URL)) return false;
   const method = String((init && init.method) || 'GET').toUpperCase();
-  if (!RETRIED_METHODS.has(method)) return false;
+  if (!allowed.has(method)) return false;
   return reusableBody(init && init.body);
 }
 
@@ -83,10 +87,14 @@ const defaultSleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 //   fetch with "Illegal invocation").
 // opts.delays: waits between attempts; its length is the retry budget.
 // opts.sleep: injectable for tests.
-export function makeRetryingFetch({ fetch, delays = DEFAULT_DELAYS_MS, sleep = defaultSleep } = {}) {
+// opts.methods: the methods re-sent on wire death (default PUT/PATCH/DELETE —
+//   the Supabase client's set). Only a caller whose reads nothing else
+//   re-sends should add GET; never add POST (see the header).
+export function makeRetryingFetch({ fetch, delays = DEFAULT_DELAYS_MS, sleep = defaultSleep, methods = RETRIED_METHODS } = {}) {
+  const allowed = new Set([...methods].map(m => String(m).toUpperCase()));
   const underlying = (input, init) => (fetch ? fetch(input, init) : globalThis.fetch(input, init));
   return async function retryingFetch(input, init) {
-    const retriable = canRetry(input, init);
+    const retriable = canRetry(input, init, allowed);
     for (let attempt = 0; ; attempt += 1) {
       try {
         return await underlying(input, init);
