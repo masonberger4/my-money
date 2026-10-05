@@ -27,6 +27,8 @@ import {
   envelopePace,
   PACE_MARGIN,
   resolveBudgetIncome,
+  assignUnchanged,
+  targetUnchanged,
 } from '../src/envelopes.js';
 
 const a = (category, month, assigned) => ({ category, month, assigned });
@@ -845,4 +847,51 @@ test('envelopeBar: ordinary positive pots are untouched', () => {
   assert.equal(envelopeBar({ assigned: 100, rolledOver: 0, spent: 250 }).width, 100);
   assert.equal(envelopeBar({ assigned: 1, rolledOver: 0, spent: 129 }).label, '>999%');
   assert.equal(envelopeBar({ assigned: 200, rolledOver: 0, spent: -20 }).width, 0, 'a refund cannot go negative-width');
+});
+
+// --- the inline editors' "a look must not write" predicates ------------------
+// AssignEdit / BudgetEdit commit on blur (the iPhone decimal pad has no Return),
+// so tapping a figure and tapping away used to upsert the figure THIS device
+// last loaded — silently reverting the other phone's newer edit. Unchanged
+// means "the adapter would store what is already there".
+test('assignUnchanged: equal-as-stored assignments are unchanged', () => {
+  assert.equal(assignUnchanged('400', 400), true);
+  assert.equal(assignUnchanged('400.00', 400), true);
+  assert.equal(assignUnchanged(' 400 ', 400), true);
+  assert.equal(assignUnchanged('-50', -50), true);
+  // Empty, null, undefined and 0 are one "nothing assigned" state — the
+  // editor shows 0 as an empty field, and setAssigned stores '' as 0.
+  assert.equal(assignUnchanged('', 0), true);
+  assert.equal(assignUnchanged('', null), true);
+  assert.equal(assignUnchanged('', undefined), true);
+  assert.equal(assignUnchanged('0', null), true);
+  assert.equal(assignUnchanged('-0', 0), true);
+  // setAssigned ignores an unparseable value, so there is nothing to write.
+  assert.equal(assignUnchanged('-', 400), true);
+  assert.equal(assignUnchanged('.', 400), true);
+});
+
+test('assignUnchanged: a real edit, a clear, or a pull-back is a change', () => {
+  assert.equal(assignUnchanged('450', 400), false);
+  assert.equal(assignUnchanged('', 400), false, 'clearing an assignment is a write');
+  assert.equal(assignUnchanged('0', 400), false);
+  assert.equal(assignUnchanged('-50', 0), false);
+  assert.equal(assignUnchanged('400.01', 400), false);
+  assert.equal(assignUnchanged('25', null), false);
+});
+
+test('targetUnchanged: mirrors setBudget (a positive figure, anything else clears)', () => {
+  assert.equal(targetUnchanged('400', 400), true);
+  assert.equal(targetUnchanged('400.00', 400), true);
+  assert.equal(targetUnchanged(' 400 ', '400'), true);
+  assert.equal(targetUnchanged('', null), true);
+  assert.equal(targetUnchanged('', undefined), true);
+  // setBudget stores 0 as "no target", so 0 against no target asserts nothing.
+  assert.equal(targetUnchanged('0', null), true);
+  assert.equal(targetUnchanged('.', null), true);
+
+  assert.equal(targetUnchanged('', 400), false, 'clearing a target is a write');
+  assert.equal(targetUnchanged('0', 400), false, '0 clears a target, so it is a change');
+  assert.equal(targetUnchanged('500', 400), false);
+  assert.equal(targetUnchanged('25', null), false);
 });

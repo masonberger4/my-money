@@ -71,3 +71,16 @@ test('Swatch commits on a native change listener, bound and unbound', () => {
   assert.doesNotMatch(onChangeAttr.slice(0, onChangeAttr.indexOf('onBlur')), /onChange\(/,
     'the per-step React onChange must only preview, never call the parent onChange');
 });
+
+// --- A look at a Budget-tab figure must not write ----------------------------
+// The predicates are unit-tested in test/envelopes.test.js; this pins that both
+// blur-commit editors actually consult them BEFORE calling onSave.
+test('AssignEdit and BudgetEdit skip onSave when the value is unchanged', () => {
+  for (const [name, pred, arg] of [['AssignEdit', 'assignUnchanged', 'value'], ['BudgetEdit', 'targetUnchanged', 'limit']]) {
+    const body = fnBody(name);
+    const commit = body.slice(body.indexOf('function commit('), body.indexOf('if(ed) return'));
+    const guard = commit.search(new RegExp(`if\\(${pred}\\(t,${arg}\\)\\)\\{[^}]*return;\\}`));
+    assert.ok(guard > 0, `${name}'s commit must return early when ${pred}(t,${arg})`);
+    assert.ok(guard < commit.indexOf('onSave('), `${name}'s unchanged guard must run before onSave`);
+  }
+});

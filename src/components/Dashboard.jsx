@@ -4,7 +4,7 @@ import { FLOW_LABELS } from "../reconciliation.js";
 import { clampSeries } from "../netWorth.js";
 // Pure cores imported directly (never Supabase — the mock-harness alias rule
 // only covers dataAdapter/sync/db/apiClient; pure modules are safe).
-import { planAutoFill, envelopeBar } from "../envelopes.js";
+import { planAutoFill, envelopeBar, assignUnchanged, targetUnchanged } from "../envelopes.js";
 import { buildSearchFilters, searchIsActive } from "../searchFilters.js";
 import { expectedByCategory, expectedStatus, isMissedExpected, seedFromRecurring, projectFutureCycles } from "../expectedTx.js";
 import { payoffWhatIf, debtFreeMonth, isMortgage, amortizationSchedule, addMonths, MAX_MONTHS, payoffProgress, utilization } from "../debtPayoff.js";
@@ -779,7 +779,12 @@ function BudgetEdit({limit,onSave}) {
   const ref=useRef();
   useEffect(()=>{setVal(limit!=null?String(limit):"");},[limit]);
   useEffect(()=>{if(ed)ref.current?.select();},[ed]);
-  function commit(){setEd(false);const t=val.trim();onSave(t===""?null:t);}
+  // A look-and-tap-away must not write — see targetUnchanged (envelopes.js).
+  function commit(){
+    setEd(false);const t=val.trim();
+    if(targetUnchanged(t,limit)){setVal(limit!=null?String(limit):"");return;}
+    onSave(t===""?null:t);
+  }
   if(ed) return (
     <input ref={ref} value={val} inputMode="decimal" placeholder="$/mo" data-mm-esc-local=""
       onChange={e=>setVal(numericish(e.target.value,{negative:false}))}
@@ -806,7 +811,12 @@ function AssignEdit({value,onSave}) {
   const ref=useRef();
   useEffect(()=>{setVal(value?String(value):"");},[value]);
   useEffect(()=>{if(ed)ref.current?.select();},[ed]);
-  function commit(){setEd(false);const t=val.trim();onSave(t===""?null:t);}
+  // A look-and-tap-away must not write — see assignUnchanged (envelopes.js).
+  function commit(){
+    setEd(false);const t=val.trim();
+    if(assignUnchanged(t,value)){setVal(value?String(value):"");return;}
+    onSave(t===""?null:t);
+  }
   if(ed) return (
     <input ref={ref} value={val} inputMode="decimal" placeholder="$" data-mm-esc-local=""
       onChange={e=>setVal(numericish(e.target.value))}

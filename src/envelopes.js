@@ -66,6 +66,34 @@ export function monthsUntil(dateStr, year, month) {
   return diff > 0 ? diff : 1;
 }
 
+// The Budget-tab inline editors (AssignEdit / BudgetEdit) commit on blur, and
+// on the iPhone's decimal pad blur is the only way out of the field — so a
+// LOOK (tap the figure, tap away) must not write. An unchanged commit is not a
+// harmless no-op: each one is a full upsert of the figure THIS device last
+// loaded, which silently reverts the other phone's newer edit (and, for an
+// assignment, every later month's carry), plus three refetches under envBusy.
+// Each predicate mirrors what its adapter would store (setAssigned / setBudget,
+// src/adapters/envelopeIO.js), so "unchanged" means "the write would store
+// what is already there", not "the text is identical": '400.00' vs 400 and
+// '' vs 0 are the same assignment.
+export function assignUnchanged(raw, value) {
+  const t = String(raw ?? '').trim();
+  const n = t === '' ? 0 : Number(t);
+  // setAssigned ignores an unparseable value, so there is no write to keep.
+  if (!Number.isFinite(n)) return true;
+  return n === Number(value || 0);
+}
+
+// setBudget stores a positive figure and clears anything else (empty, 0).
+export function targetUnchanged(raw, limit) {
+  const stored = (v) => {
+    const t = v == null ? '' : String(v).trim();
+    const n = t === '' ? NaN : Number(t);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  };
+  return stored(raw) === stored(limit);
+}
+
 // The target the viewed month actually answers to: this month's override when
 // one is set, else the category-level target. An override of 0 is a REAL
 // answer ("ask nothing this month"), distinct from null (no override).
