@@ -8,10 +8,12 @@
 // display-only REGRESSION: walkEnvelopes output is byte-identical whether or
 // not the expectations pipeline ran over the same rows.
 import test from 'node:test';
+import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import {
   matchExpected, expectedByCategory, rollForwardDate, projectFutureCycles,
   expectedStatus, isMissedExpected, seedFromRecurring, isDuplicateExpected, isDuplicateRollForward,
+  homeBillsWindow,
   EXPECTED_WINDOW_DAYS, EXPECTED_STALE_DAYS, EXPECTED_DUP_TOL_DAYS,
 } from '../src/expectedTx.js';
 import { walkEnvelopes } from '../src/envelopes.js';
@@ -349,4 +351,55 @@ test('matchExpected does not match two wordless descriptors on an empty merchant
   const exp = { id: 'e1', description: '1234', amount: 40, due_date: '2026-06-10', cadence: 'monthly', account_id: null };
   const tx = { id: 't1', transaction_date: '2026-06-10', amount: 40, account_id: 'a1', merchant_name: '9999', description: '9999' };
   assert.deepEqual(matchExpected([exp], [tx]), []);
+});
+
+// --- Home bills line ------------------------------------------------------------
+
+test('REGRESSION: homeBillsWindow keeps an old missed bill out of "the next 7 days" — and visible as overdue', () => {
+  // The Home line filtered only due_date <= today+7, so a July bill nobody
+  // matched or dismissed counted as "expected in the next 7 days" in October.
+  const july = exp({ due_date: '2026-07-12', amount: 88.4 });
+  const dueToday = exp({ due_date: '2026-10-05', amount: 100 });
+  const inThree = exp({ due_date: '2026-10-08', amount: 15.99 });
+  const { upcoming, overdue } = homeBillsWindow([july, dueToday, inThree], '2026-10-05');
+  assert.deepEqual(upcoming.rows.map(r => r.due_date), ['2026-10-05', '2026-10-08'],
+    'today counts as upcoming (expectedStatus is strict <)');
+  assert.deepEqual(overdue.rows.map(r => r.due_date), ['2026-07-12'], 'never dropped — the unmatched bill IS the alarm');
+  assert.ok(Math.abs(upcoming.total - 115.99) < 1e-9);
+  assert.ok(Math.abs(overdue.total - 88.4) < 1e-9);
+});
+
+test('homeBillsWindow: the window is today..today+7 inclusive, across a month end', () => {
+  const rows = [exp({ due_date: '2026-11-04' }), exp({ due_date: '2026-11-05' })];
+  const { upcoming, overdue } = homeBillsWindow(rows, '2026-10-28');
+  assert.deepEqual(upcoming.rows.map(r => r.due_date), ['2026-11-04'], 'day 7 in, day 8 out');
+  assert.equal(overdue.rows.length, 0);
+});
+
+test('homeBillsWindow: totals read Number(amount)||0; stored non-pending rows and garbage are skipped', () => {
+  const rows = [
+    exp({ due_date: '2026-10-06', amount: '20.5' }),
+    exp({ due_date: '2026-10-06', amount: null }),
+    exp({ due_date: '2026-10-06', status: 'matched' }),
+    exp({ due_date: '2026-09-01', status: 'dismissed' }),
+    exp({ due_date: null }),
+    null,
+  ];
+  const { upcoming, overdue } = homeBillsWindow(rows, '2026-10-05');
+  assert.equal(upcoming.rows.length, 2);
+  assert.equal(upcoming.total, 20.5);
+  assert.equal(overdue.rows.length, 0);
+});
+
+test('homeBillsWindow: empty, null or clockless input gives two empty lists', () => {
+  const empty = { upcoming: { rows: [], total: 0 }, overdue: { rows: [], total: 0 } };
+  assert.deepEqual(homeBillsWindow([], '2026-10-05'), empty);
+  assert.deepEqual(homeBillsWindow(null, '2026-10-05'), empty);
+  assert.deepEqual(homeBillsWindow([exp()], null), empty);
+});
+
+test('the Home bills line reads homeBillsWindow on the Plan tab\'s clock', () => {
+  const dash = readFileSync(new URL('../src/components/Dashboard.jsx', import.meta.url), 'utf8');
+  assert.match(dash, /homeBillsWindow\(expected\.pending,paceToday\)/);
+  assert.doesNotMatch(dash, /expected\.pending\.filter\(r=>String\(r\.due_date\)<=limit\)/, 'the upper-bound-only filter is gone');
 });

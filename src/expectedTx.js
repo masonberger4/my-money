@@ -212,6 +212,32 @@ export function isMissedExpected(row, today) {
   return dayNumber(today) - dayNumber(String(row.due_date)) > stale;
 }
 
+// The Home tab's one-line bills summary, split in two. `upcoming` is due from
+// today through today+days (inclusive; today is upcoming, not overdue — the
+// strict < in expectedStatus). `overdue` is every pending row expectedStatus
+// calls overdue, however old. The old single filter had only the upper bound,
+// so a July bill nobody matched or dismissed kept being counted as "expected
+// in the next 7 days", amount and all, for months. Overdue rows stay VISIBLE
+// (labelled) rather than dropping off Home: nothing auto-dismisses — the
+// unmatched bill IS the alarm. Display-only like everything here.
+export function homeBillsWindow(pending, today, days = 7) {
+  const upcoming = [];
+  const overdue = [];
+  if (today) {
+    const start = dayNumber(today);
+    const end = start + days;
+    for (const r of pending || []) {
+      const st = expectedStatus(r, today);
+      if (st === 'overdue') { overdue.push(r); continue; }
+      if (st !== 'pending') continue;
+      const due = dayNumber(String(r.due_date));
+      if (due >= start && due <= end) upcoming.push(r);
+    }
+  }
+  const total = rows => rows.reduce((s, r) => s + (Number(r.amount) || 0), 0);
+  return { upcoming: { rows: upcoming, total: total(upcoming) }, overdue: { rows: overdue, total: total(overdue) } };
+}
+
 // --- Seeding -------------------------------------------------------------------
 // Build the insert fields from a detectRecurring item. Amount is the LAST
 // charge, not the median (last-amount seeding — after a price hike the next

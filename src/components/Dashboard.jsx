@@ -6,7 +6,7 @@ import { clampSeries } from "../netWorth.js";
 // only covers dataAdapter/sync/db/apiClient; pure modules are safe).
 import { planAutoFill, envelopeBar, assignUnchanged, targetUnchanged, monthsUntil, pickedMonthKey } from "../envelopes.js";
 import { buildSearchFilters, searchIsActive } from "../searchFilters.js";
-import { expectedByCategory, expectedStatus, isMissedExpected, seedFromRecurring, projectFutureCycles } from "../expectedTx.js";
+import { expectedByCategory, expectedStatus, isMissedExpected, seedFromRecurring, projectFutureCycles, homeBillsWindow } from "../expectedTx.js";
 import { payoffWhatIf, debtFreeMonth, isMortgage, amortizationSchedule, addMonths, MAX_MONTHS, payoffProgress, utilization } from "../debtPayoff.js";
 import { SCHEDULE_E_LINES, RENTS_KEY, DEFAULT_SCHEDULE_E_MAP, scheduleEReport, entityMonthly, entityLedger, personalDeductionReport, DEDUCTION_BUCKETS, DEFAULT_DEDUCTION_MAP, mileageDeduction, scheduleECsv } from "../taxReport.js";
 import { merchantKey, matchLearnedRule, isKeyPrefix } from "../txClassify.js";
@@ -5067,15 +5067,22 @@ export default function Dashboard({ refreshTick = 0 }) {
         {tab==="overview"&&(
           <div style={{display:"flex",flexDirection:"column",gap:12}}>
             {/* At most ONE expected-bills line, only when nonzero; hidden
-                entirely pre-migration (expected null) or before load. */}
+                entirely pre-migration (expected null) or before load. Due in
+                the next 7 days and OVERDUE are separate (homeBillsWindow): an
+                old unmatched bill used to pose as "expected in the next 7
+                days" forever. It stays on the line, labelled overdue in the
+                over ink — nothing auto-dismisses. Same clock as the Plan
+                tab's due/overdue labels (paceToday). */}
             {expected&&(()=>{
-              const limit=addLocalDays(7);
-              const due=expected.pending.filter(r=>String(r.due_date)<=limit);
-              if(!due.length)return null;
-              const tot=due.reduce((s,r)=>s+(Number(r.amount)||0),0);
+              const {upcoming,overdue}=homeBillsWindow(expected.pending,paceToday);
+              const n=upcoming.rows.length,k=overdue.rows.length;
+              if(!n&&!k)return null;
+              const num={fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums"};
               return (
                 <div className="card" style={{padding:"10px 16px",fontSize:12,color:"var(--muted)"}}>
-                  📅 {due.length} bill{due.length===1?"":"s"} expected in the next 7 days · <span style={{fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",color:"var(--text)"}}>{fmtAuto(tot)}</span>
+                  📅 {n>0&&<>{n} bill{n===1?"":"s"} expected in the next 7 days · <span style={{...num,color:"var(--text)"}}>{fmtAuto(upcoming.total)}</span></>}
+                  {n>0&&k>0&&" · "}
+                  {k>0&&<span style={{color:inkOn(OVER_MONEY,surf.card)}}>{n>0?k:`${k} bill${k===1?"":"s"}`} overdue · <span style={num}>{fmtAuto(overdue.total)}</span></span>}
                 </div>
               );
             })()}
