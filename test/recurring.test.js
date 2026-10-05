@@ -564,6 +564,97 @@ test('a price step must be a clean step: an interleaved second amount is never r
   assert.equal(detectRecurring(groceries).length, 0);
 });
 
+// --- two subscriptions under one merchant string (F29) -------------------------
+// Charges group by normalizeMerchant alone, so APPLE.COM/BILL at $2.99 and at
+// $10.99 shared one group whose median sat between the prices: neither kept
+// 80% within ±20% and BOTH subscriptions vanished.
+
+const twoSubs = (months = [4, 5, 6, 7, 8, 9]) =>
+  months.flatMap(m => [
+    tx(`2026-${String(m).padStart(2, '0')}-05`, 2.99, 'APPLE.COM/BILL'),
+    tx(`2026-${String(m).padStart(2, '0')}-12`, 10.99, 'APPLE.COM/BILL'),
+  ]);
+
+test('two subscriptions billed under one merchant string are both detected', () => {
+  const out = detectRecurring(twoSubs(), '2026-09-20');
+  assert.equal(out.length, 2);
+  const byKey = Object.fromEntries(out.map(r => [r.key, r]));
+  // The cluster whose first charge is oldest keeps the plain key, so a
+  // rec:ignore entry or seeded bill made before the second sub started stays
+  // attached to the sub it was made for.
+  const a = byKey['APPLE COM BILL'];
+  const b = byKey['APPLE COM BILL #2'];
+  assert.ok(a && b, `keys: ${out.map(r => r.key)}`);
+  assert.equal(a.monthlyAmount, 2.99);
+  assert.equal(a.lastDate, '2026-09-05');
+  assert.equal(a.nextDate, '2026-10-06', 'Sep 5 + the 31-day median gap');
+  assert.equal(a.count, 6);
+  assert.equal(b.monthlyAmount, 10.99);
+  assert.equal(b.lastDate, '2026-09-12');
+  assert.equal(b.count, 6);
+  for (const r of out) {
+    assert.equal(r.cadence, 'monthly');
+    assert.equal(r.priceCreep, false);
+    assert.equal(r.name, 'APPLE.COM/BILL');
+  }
+  assert.deepEqual(out.map(r => r.key), ['APPLE COM BILL #2', 'APPLE COM BILL'], 'still sorted by monthly cost');
+  // A suffixed key can never collide with a real merchant key: normalizeMerchant
+  // strips '#' and digits, so no merchant string normalizes to 'X #2'.
+  assert.equal(normalizeMerchant('APPLE COM BILL #2'), 'APPLE COM BILL');
+  // Deterministic under input order.
+  assert.deepEqual(detectRecurring([...twoSubs()].reverse(), '2026-09-20'), out);
+});
+
+test('a second subscription starting later never takes the incumbent key', () => {
+  // A $2.99 sub for a year; a $10.99 one starts beside it. At two charges the
+  // newcomer is not yet a subscription and must not hijack the $2.99 item as
+  // a fake hike; from its third charge it is listed under '#2'.
+  const base = every('2025-10-05', 30, 12, 2.99, 'APPLE.COM/BILL');
+  const newcomer = k => every(addDays('2025-10-05', 30 * 9 + 7), 30, k, 10.99, 'APPLE.COM/BILL');
+  const two = detectRecurring([...base, ...newcomer(2)]);
+  assert.equal(two.length, 1);
+  assert.equal(two[0].key, 'APPLE COM BILL');
+  assert.equal(two[0].monthlyAmount, 2.99);
+  assert.equal(two[0].priceCreep, false, 'no "was $2.99 now $10.99"');
+  const three = detectRecurring([...base, ...newcomer(3)]);
+  assert.deepEqual(three.map(r => [r.key, r.monthlyAmount]).sort((x, y) => (x[0] < y[0] ? -1 : 1)), [['APPLE COM BILL', 2.99], ['APPLE COM BILL #2', 10.99]]);
+});
+
+test('variable spend at one merchant is still not a subscription, even with a regular cluster inside it', () => {
+  // A tight monthly $20 cluster plus five scattered amounts: the cluster is
+  // under 80% of the merchant's charges, so nothing is listed.
+  const scattered = [5, 45, 90, 150, 300].map((a, i) => tx(addDays('2026-01-08', 30 * i + 11), a, 'CORNER STORE'));
+  const rows = [...every('2026-01-08', 30, 4, 20, 'CORNER STORE'), ...scattered];
+  assert.deepEqual(detectRecurring(rows), []);
+  // Two real subs plus an irregular ≥3-charge cluster: every cluster big
+  // enough to judge must be a subscription, or the merchant is variable
+  // spend and nothing is listed.
+  const irregular = ['2026-04-02', '2026-04-09', '2026-08-21'].map(d => tx(d, 55, 'APPLE.COM/BILL'));
+  assert.deepEqual(detectRecurring([...twoSubs(), ...irregular]), []);
+  // ...but one or two stray purchases beside the subs do not hide them.
+  const stray = [tx('2026-06-20', 55, 'APPLE.COM/BILL'), tx('2026-08-02', 0.99, 'APPLE.COM/BILL')];
+  assert.equal(detectRecurring([...twoSubs(), ...stray]).length, 2);
+});
+
+test('a single-amount merchant is untouched by clustering; a price step stays ONE item', () => {
+  const plain = every('2026-01-05', 30, 6, 15.99, 'STREAMFLIX.COM');
+  const [r] = detectRecurring(plain);
+  assert.equal(r.key, 'STREAMFLIX COM');
+  assert.equal(r.count, 6);
+  // $10 → $13 on the newest charges is a hike, not a second subscription.
+  const hike = [...every('2026-01-05', 30, 6, 10, 'HIKE BOX'), ...every(addDays('2026-01-05', 180), 30, 2, 13, 'HIKE BOX')];
+  const out = detectRecurring(hike);
+  assert.equal(out.length, 1);
+  assert.equal(out[0].key, 'HIKE BOX');
+  assert.equal(out[0].monthlyAmount, 13);
+});
+
+test('the ignore list round-trips a suffixed cluster key', () => {
+  assert.deepEqual(parseIgnoreList('["APPLE COM BILL #2","APPLE COM BILL"]'), ['APPLE COM BILL #2', 'APPLE COM BILL']);
+  assert.deepEqual(toggleIgnoreKey(['APPLE COM BILL'], 'APPLE COM BILL #2', true), ['APPLE COM BILL', 'APPLE COM BILL #2']);
+  assert.deepEqual(toggleIgnoreKey(['APPLE COM BILL', 'APPLE COM BILL #2'], 'APPLE COM BILL #2', false), ['APPLE COM BILL']);
+});
+
 test('CANDIDATE_WINDOW_MONTHS keeps an annual sub detectable year-round, not just in its renewal month', () => {
   // Replicates getRecurringCandidates' window rule — transactions from the
   // 1st of (current month − (months−1)) through today — and sweeps `today`

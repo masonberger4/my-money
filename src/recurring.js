@@ -11,7 +11,9 @@
 // every band (biweekly ~14, quarterly ~91) stay undetected. A price change
 // bigger than the ±20% band is read as a PRICE STEP (priceStep below) rather
 // than as variable spend, so a hiked sub keeps its key and reports its new
-// price instead of vanishing for months.
+// price instead of vanishing for months. A merchant string that bills SEVERAL
+// subscriptions at different prices (APPLE.COM/BILL) is split into amount
+// clusters when it fails as a whole (clusterHits below).
 
 import { TRANSFER_CATEGORY, RETURN_CATEGORY, UNCATEGORIZED } from './categoryMap.js';
 
@@ -152,9 +154,13 @@ export function detectRecurring(transactions, today = null) {
       (a, b) => dayNumber(a.transaction_date) - dayNumber(b.transaction_date)
     );
     const hit = evaluateGroup(all);
-    if (!hit) continue;
-    const item = buildItem(key, hit, todayDay);
-    if (item) out.push(item);
+    // The merchant as a whole is one subscription (or none) — the original
+    // path, untouched. Only a merchant that FAILS it is split by amount.
+    const hits = hit ? [{ key, hit }] : clusterHits(key, all);
+    for (const h of hits) {
+      const item = buildItem(h.key, h.hit, todayDay);
+      if (item) out.push(item);
+    }
   }
 
   // Monthly-equivalent cost so mixed cadences rank sensibly ($10/wk beats
@@ -182,7 +188,7 @@ const medianOf = rows => median(rows.map(t => t.amount).sort((a, b) => a - b));
 // "Every older charge clear of the new price" is what tells a step from a
 // SECOND subscription at the same merchant: a new $10.99 sub beside a $2.99
 // one keeps sending $2.99 charges after its own first $10.99, so it is never
-// a clean step.
+// a clean step (clusterHits lists the two separately).
 // One side must carry the >=3-charge evidence the detector always demands:
 // the old price (a fresh step) or the new one (a settled step whose old-price
 // tail is down to one or two charges in the slice).
@@ -273,6 +279,60 @@ function evaluateGroup(all) {
   return null;
 }
 
+// SEVERAL SUBSCRIPTIONS UNDER ONE MERCHANT STRING (F29). Charges group by
+// normalizeMerchant alone, so APPLE.COM/BILL at $2.99 and at $10.99 share a
+// group whose amount median lands between the two prices — neither keeps 80%
+// within ±20%, and both subscriptions vanished. A merchant that fails the
+// whole-group evaluation is therefore split into AMOUNT CLUSTERS (ascending,
+// a new cluster whenever the next amount is more than 20% above the running
+// cluster's median) and each cluster is judged exactly like a merchant of its
+// own: recency slice, amount gate, price step, cadence band, staleness.
+//
+// The variable-spend guard survives the split: EVERY cluster with 3+ charges
+// must be a subscription, and those clusters must hold 80% of the merchant's
+// charges — a grocery store's amounts scatter into many clusters, some big
+// enough to judge and irregular, so it still lists nothing. One or two stray
+// purchases beside real subscriptions (an app bought once) don't hide them.
+//
+// KEYS: the cluster whose first charge is oldest — the incumbent, the one the
+// merchant was already detected as before a second subscription started —
+// keeps the plain key, so a rec:ignore entry or a seeded bill's recurring_key
+// stays attached to the subscription it was made for. The others are
+// `${key} #2`, `#3`… in first-charge order, counted among detected clusters
+// before any staleness drop (a cancelled incumbent still holds its key while
+// its charges are in the window). normalizeMerchant strips '#' and digits, so
+// a suffixed key can never collide with a real merchant's key.
+// A price step at one price level is tried on the whole merchant FIRST (in
+// evaluateGroup), so a hike is never misread here as a second subscription.
+function clusterHits(key, all) {
+  const byAmount = [...all].sort((a, b) => a.amount - b.amount);
+  const clusterOf = new Map();
+  let index = 0;
+  let amounts = [];
+  for (const t of byAmount) {
+    if (amounts.length && t.amount > 1.2 * median(amounts)) {
+      index++;
+      amounts = [];
+    }
+    amounts.push(t.amount);
+    clusterOf.set(t, index);
+  }
+  if (index === 0) return []; // one cluster IS the whole merchant, which already failed
+  const found = [];
+  let covered = 0;
+  for (let c = 0; c <= index; c++) {
+    const rows = all.filter(t => clusterOf.get(t) === c); // still date-sorted
+    if (rows.length < 3) continue;
+    const hit = evaluateGroup(rows);
+    if (!hit) return [];
+    found.push({ c, first: dayNumber(rows[0].transaction_date), hit });
+    covered += rows.length;
+  }
+  if (!found.length || covered < 0.8 * all.length) return [];
+  found.sort((a, b) => a.first - b.first || a.c - b.c);
+  return found.map((f, i) => ({ key: i === 0 ? key : `${key} #${i + 1}`, hit: f.hit }));
+}
+
 // The item for one detected group, or null when it has lapsed (with a clock).
 function buildItem(key, hit, todayDay) {
   const { spec, kept, days, gaps, medGap, medAmount, current } = hit;
@@ -333,8 +393,10 @@ function buildItem(key, hit, todayDay) {
 // The Recurring tab's mute list: a HOUSEHOLD pref (muting a charge should mute
 // it on both phones — Mason's ruling), stored as ONE settings row keyed
 // 'rec:ignore' whose value is a JSON array of the items' group keys (the
-// normalizeMerchant output detectRecurring emits as `key` — stable across
-// re-detection, unlike list order or amounts). Tolerant parse, the
+// normalizeMerchant output detectRecurring emits as `key`, plus a ' #2'-style
+// suffix on the extra subscriptions of a merchant split by amount — see
+// clusterHits; stable across re-detection, unlike list order or amounts; the
+// incumbent subscription keeps the plain key). Tolerant parse, the
 // parseRestoreSet spirit: garbage in the row must never take the tab down.
 export function parseIgnoreList(raw) {
   if (raw == null || String(raw).trim() === '') return [];
