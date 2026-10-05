@@ -417,14 +417,17 @@ function usePullRefresh({blocked,loading,onTrigger}){
     // clear it. Touch can't strand it (touchEnd zeroes progress), but the
     // wheel path needs this timer: once the stream has been idle for one
     // wheelIdleMs window — the same clock pullRefresh.js uses to decide a
-    // burst is over — the abandoned pull retracts.
+    // burst is over — the abandoned pull retracts. WHEEL ONLY: a finger held
+    // still mid-pull sends no touchmove, so arming this for touch hid the
+    // indicator 250ms into a held pull — past threshold, it read as cancelled
+    // and then refreshed on release anyway.
     let idle=null;
     const clearIdle=()=>{if(idle){clearTimeout(idle);idle=null;}};
-    const fire=r=>{
+    const fire=(r,wheel=false)=>{
       clearIdle();
       setProgress(r.progress);
       if(r.shouldTrigger){setBusy(true);latest.current.onTrigger();return;}
-      if(r.progress>0)idle=setTimeout(()=>{idle=null;setProgress(0);},PULL_DEFAULTS.wheelIdleMs);
+      if(wheel&&r.progress>0)idle=setTimeout(()=>{idle=null;setProgress(0);},PULL_DEFAULTS.wheelIdleMs);
     };
     // Only single-touch gestures count — a second finger ends the pull.
     const onTouchStart=e=>{
@@ -441,7 +444,8 @@ function usePullRefresh({blocked,loading,onTrigger}){
       let deltaY=e.deltaY;
       if(e.deltaMode===1)deltaY*=16;                       // lines -> px
       else if(e.deltaMode===2)deltaY*=window.innerHeight;  // pages -> px
-      fire(m.current.wheel({deltaY,...env()}));
+      // ctrlKey = browser zoom / trackpad pinch; the machine treats it as inert.
+      fire(m.current.wheel({deltaY,ctrlKey:e.ctrlKey,...env()}),true);
     };
     window.addEventListener("touchstart",onTouchStart,{passive:true});
     window.addEventListener("touchmove",onTouchMove,{passive:true});

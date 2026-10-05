@@ -121,7 +121,18 @@ export function createPullRefresh(opts = {}) {
       return { progress: 0, shouldTrigger: false };
     },
 
-    wheel({ deltaY, scrollY, now, blocked }) {
+    wheel({ deltaY, scrollY, now, blocked, ctrlKey = false }) {
+      // Ctrl+wheel is the browser's ZOOM gesture, and Chrome/Firefox deliver
+      // a trackpad pinch as wheel events with ctrlKey set — zooming in at the
+      // top of a tab is a negative deltaY at scrollY 0, exactly a pull's
+      // shape, and two notches of it fired a bank refresh nobody asked for.
+      // Inert, and it drops any partial pull so the accumulator never holds
+      // more than the (now zeroed) indicator shows. It doesn't touch the
+      // burst clock or `quiet`: a zoom is not part of anyone's pull.
+      if (ctrlKey) {
+        acc = 0;
+        return { progress: 0, shouldTrigger: false };
+      }
       // A "burst" is a run of wheel events with no gap over wheelIdleMs. We
       // decide burstArmed ONLY at the instant a burst starts, from the
       // blocked/scrollY reading at THAT instant — never re-armed mid-burst.

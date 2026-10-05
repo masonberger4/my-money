@@ -122,6 +122,33 @@ test('usePullRefresh listens passively and never blocks native scrolling', () =>
   }
 });
 
+// --- The idle retract is wheel-only; zoom is never a pull ---------------------
+// A held finger sends no touchmove, so a retract timer armed for touch hid the
+// indicator 250ms into a held pull (touchEnd is what clears touch). And
+// ctrl+wheel is the browser's zoom / Chrome's trackpad pinch: the hook must
+// hand ctrlKey to the machine, which treats it as inert (test/pullRefresh).
+test('usePullRefresh arms the idle retract for wheel only and passes ctrlKey', () => {
+  const dash = read(DASH);
+  const start = dash.indexOf('function usePullRefresh(');
+  const end = dash.indexOf('function PullRefresh(');
+  assert.ok(start > 0 && end > start,
+    'usePullRefresh/PullRefresh moved — update this test\'s anchor strings');
+  const slice = stripComments(dash.slice(start, end));
+  assert.match(slice, /if\(\s*wheel\s*&&\s*r\.progress\s*>\s*0\s*\)\s*idle\s*=\s*setTimeout/,
+    'the idle retract must be gated on the wheel flag — touch is cleared by touchEnd, and a held pull must keep its indicator');
+  assert.doesNotMatch(slice, /if\(\s*r\.progress\s*>\s*0\s*\)\s*idle\s*=/,
+    'an ungated idle retract fires for touch too');
+  const onWheel = slice.slice(slice.indexOf('const onWheel='), slice.indexOf('window.addEventListener("touchstart"'));
+  assert.match(onWheel, /m\.current\.wheel\(\{[^}]*ctrlKey:\s*e\.ctrlKey[^}]*\}\)\s*,\s*true\)/,
+    'onWheel must pass ctrlKey to the machine and flag the call as wheel input');
+  for (const h of ['onTouchStart', 'onTouchMove', 'onTouchEnd', 'onTouchCancel']) {
+    const at = slice.indexOf(`const ${h}=`);
+    assert.ok(at > 0, `${h} moved — update this test`);
+    const body = slice.slice(at, slice.indexOf('\n    const ', at + 1) > 0 ? slice.indexOf('\n    const ', at + 1) : undefined);
+    assert.doesNotMatch(body, /,\s*true\)/, `${h} must not flag its fire() call as wheel input`);
+  }
+});
+
 // --- Shared household login: sign-out stays a confirmed, labelled row -------
 // An icon-only sign-out on a shared login is a mis-tap hazard; the confirm()
 // is the safety net that catches the mis-tap before it actually signs out.

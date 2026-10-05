@@ -122,6 +122,32 @@ test("wheel: a positive deltaY (scroll down) mid-burst resets the accumulator", 
   assert.ok(Math.abs(r.progress - 50 / 120) < 1e-9);
 });
 
+// Ctrl+wheel is the browser's zoom (and Chrome/Firefox's trackpad pinch
+// arrives as ctrlKey wheel events): two zoom-in notches at the top of a tab
+// have exactly a pull's shape and used to fire a bank refresh.
+test("wheel: ctrl+wheel (zoom / pinch) never pulls, and drops a partial pull", () => {
+  const pr = createPullRefresh();
+  const c = clock();
+  for (let i = 0; i < 4; i++) {
+    const r = pr.wheel({ deltaY: -100, scrollY: 0, now: c.tick(16), blocked: false, ctrlKey: true });
+    assert.deepEqual(r, { progress: 0, shouldTrigger: false });
+  }
+  // A real pull after the zoom (a new burst) still works from zero.
+  c.tick(300);
+  const p1 = pr.wheel({ deltaY: -100, scrollY: 0, now: c.now(), blocked: false });
+  assert.ok(Math.abs(p1.progress - 100 / 120) < 1e-9);
+  // A zoom notch mid-pull zeroes it: the next plain notch starts over
+  // instead of firing off the 100px the indicator no longer shows.
+  assert.deepEqual(
+    pr.wheel({ deltaY: -100, scrollY: 0, now: c.tick(16), blocked: false, ctrlKey: true }),
+    { progress: 0, shouldTrigger: false });
+  const p2 = pr.wheel({ deltaY: -100, scrollY: 0, now: c.tick(16), blocked: false });
+  assert.ok(Math.abs(p2.progress - 100 / 120) < 1e-9);
+  assert.equal(p2.shouldTrigger, false);
+  assert.deepEqual(pr.wheel({ deltaY: -100, scrollY: 0, now: c.tick(16), blocked: false }),
+    { progress: 0, shouldTrigger: true });
+});
+
 // The CONFIRMED fling-to-top bug: a trackpad fling that starts mid-page and
 // carries the page up to scrollY 0 is ONE continuous burst (gaps well under
 // wheelIdleMs throughout). Arming is decided only at the burst's first
