@@ -4947,7 +4947,12 @@ export default function Dashboard({ refreshTick = 0 }) {
                 if(Math.abs(dx)>Math.abs(dy)&&Math.abs(dx)>30){e.preventDefault();cycleCard(dx<0?1:-1);}
               }:undefined}>
               <div style={{fontSize:11,color:"var(--muted)",fontWeight:500,marginBottom:5}}>{c.label}</div>
-              {loading?<Sk w="70%" h={22}/>:<div style={{fontSize:20,fontWeight:600,letterSpacing:"-.02em",marginBottom:3}}>{c.val??"—"}</div>}
+              {/* nowrap: fmt's "−" (U+2212) is a line-break opportunity before
+                  "$", so a negative card balance at 390px still split as "−"
+                  over "$2,148" even in whole dollars. A sign never leaves its
+                  number; a long figure runs into the card's padding instead,
+                  as a long unsigned one ("$12,345" has no break) already did. */}
+              {loading?<Sk w="70%" h={22}/>:<div style={{fontSize:20,fontWeight:600,letterSpacing:"-.02em",marginBottom:3,whiteSpace:"nowrap"}}>{c.val??"—"}</div>}
               <div style={{fontSize:11,color:c.clr||"var(--muted)",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{loading?<Sk w="80%" h={10}/>:c.sub}</div>
               {c.cycle&&(
                 <div style={{display:"flex",gap:4,marginTop:6,alignItems:"center"}}>

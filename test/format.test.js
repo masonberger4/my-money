@@ -107,6 +107,18 @@ test('ONE copy: Dashboard and CsvImport import the formatters instead of redefin
   assert.match(csv, /import \{[^}]*\bfmtX\b[^}]*\} from "\.\.\/format\.js"/);
 });
 
+// The "−" is U+2212, which Unicode line breaking treats as a break
+// opportunity before the "$" — so a negative figure in a narrow box can split
+// as "−" over "$2,148". The Home KPI tiles are a third of a 390px screen, and
+// the Card balance tile did exactly that (measured: a 48px two-line value
+// against the 24px of its neighbours). Whole dollars alone didn't stop it.
+test('REGRESSION: the Home KPI value never wraps its minus sign away from the number', () => {
+  const dash = readFileSync(join(root, 'src/components/Dashboard.jsx'), 'utf8');
+  const m = dash.match(/<div style=\{\{([^}]*)\}\}>\{c\.val\?\?"—"\}<\/div>/);
+  assert.ok(m, 'fixture assumption: the KPI tile renders its value as {c.val??"—"}');
+  assert.match(m[1], /whiteSpace:"nowrap"/, 'the KPI value must not wrap');
+});
+
 test('REGRESSION: a rounding leftover never renders as −$0 or +$0', () => {
   // A credit-card refund that fully nets a purchase leaves spendingGroups
   // with a float residue, not zero: 10.10 + 20.20 − 30.30 = −3.55e-15. The
