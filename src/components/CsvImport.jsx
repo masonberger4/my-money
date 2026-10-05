@@ -7,7 +7,7 @@ import { FEED_OVERLAP_DAYS, FEED_REACH_DAYS } from "../coverage.js";
 import { getSetting, setSetting } from "../db.js";
 import { runSync, pullWasClean } from "../sync.js";
 import { chipStyle, markColor, readableInk } from "../paletteContrast.js";
-import { readToken, subscribeTheme } from "../theme.js";
+import { useThemeToken } from "../theme.js";
 import PdfTemplateEditor from "./PdfTemplateEditor.jsx";
 import ErrorBoundary from "./ErrorBoundary.jsx";
 
@@ -62,22 +62,6 @@ function money(n) {
 }
 
 const ROLE_LABELS = { date: "Date", description: "Description", debit: "Debit", credit: "Credit", amount: "Amount (signed)" };
-
-// Read a theme surface at RUNTIME from src/ui.css — never hardcode a token
-// value here — and re-read it whenever the theme is applied, so these colours
-// follow a FORCED theme (the header toggle) exactly as they follow the OS one.
-// "" is the deliberate fallback: paletteContrast reads an unparseable surface as
-// "no surface to reason about" and hands the colour back untouched, i.e. exactly
-// today's rendering, rather than throwing during render.
-function useSurface(token) {
-  const [value, setValue] = useState(() => readToken(token, ""));
-  useEffect(() => {
-    const read = () => setValue(readToken(token, ""));
-    read();
-    return subscribeTheme(read);
-  }, [token]);
-  return value;
-}
 
 // The good/money-in green and the comparison-bucket hues are DATA — a status
 // palette, not theme tokens: the four buckets have to stay tellable apart from
@@ -205,7 +189,7 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
   const fileRef = useRef(null);
   // The modal panel is --card, so that is the surface the preview amounts and
   // the audit chips are actually read against.
-  const cardSurface = useSurface("--card");
+  const cardSurface = useThemeToken("--card");
 
   // The parent's list plus the account this modal created, until the parent's
   // reload brings it in — the adopted target must resolve to a manual account
@@ -1762,7 +1746,7 @@ function ReconRow({ left, sub, amount, amountNote }) {
 function ReconSection({ title, hint, color, count, children }) {
   // Hook before the early return — the section header paints --bg, so the dot
   // is corrected against --bg, not against the card behind it.
-  const bgSurface = useSurface("--bg");
+  const bgSurface = useThemeToken("--bg");
   if (!count) return null;
   return (
     <div style={{ marginBottom: 12, border: "1px solid var(--border)", borderRadius: 10, overflow: "hidden" }}>
@@ -1785,8 +1769,8 @@ function Reconciliation({ recon, loading, sectionLabel, step = 3 }) {
   // runtime rather than the #888780 literal it used to hardcode — that literal
   // was light mode's --muted value verbatim, so it stayed a light-mode grey on a
   // dark card. As a token it adapts, and still reads as the neutral of the four.
-  const cardSurface = useSurface("--card");
-  const neutralHue = useSurface("--muted");
+  const cardSurface = useThemeToken("--card");
+  const neutralHue = useThemeToken("--muted");
   if (loading) {
     return <div style={{ marginBottom: 10 }}><div style={sectionLabel}>Comparing against the feed…</div>
       <div style={{ fontSize: 12, color: "var(--muted)" }}>Reconciling the CSV against what's already synced — nothing will be imported.</div></div>;
