@@ -2665,6 +2665,11 @@ export default function Dashboard({ refreshTick = 0 }) {
         getEntities().catch(()=>undefined),
       ]);
       if(seq!==loadSeq.current)return false;
+      // The load that WINS owns the spinner (both paths): fetchData raises it,
+      // but a newer reload — the startup pull's follow-up, a post-write
+      // reload — supersedes fetchData's own, and a clear gated on THAT one
+      // winning left the tiles skeletons and Refresh disabled for good.
+      setLoading(false);
       setOverview(ov);setSpending(sp);setTransactions(tx);
       setAccounts(ac.accounts||[]);
       // A transient entity-read failure keeps the previous list (the envelope
@@ -2693,11 +2698,23 @@ export default function Dashboard({ refreshTick = 0 }) {
       setLastUpd(new Date());
     }catch(err){
       if(seq!==loadSeq.current)return false;
+      setLoading(false);
       console.error(err);
       setError("Couldn't load data from local cache.");
     }
     return true;
   },[]);
+
+  // Reload whatever month is on screen NOW. Every reload that runs after an
+  // await (a write, a forced re-sync, the pull's follow-up) goes through here:
+  // the render-closure year/month is the month that WAS on screen, and a
+  // reload of it mints the newest loadSeq and wins — painting the old month's
+  // totals and rows under the new month's header. monthRef is committed by an
+  // effect, which has flushed before any awaited callback resumes.
+  const reloadViewed=useCallback(()=>{
+    const[cy,cm]=monthRef.current.split("-").map(Number);
+    return reloadData(cy,cm);
+  },[reloadData]);
 
   const fetchData=useCallback(async(y,m,{sync=false}={})=>{
     setLoading(true);
@@ -2713,10 +2730,10 @@ export default function Dashboard({ refreshTick = 0 }) {
       setError("Bank sync failed. Showing cached data.");
       return null;
     }):null;
-    const live=await reloadData(y,m);
-    // Don't clear the spinner on behalf of a load that has been superseded —
-    // the newer one is still running.
-    if(live!==false)setLoading(false);
+    // No setLoading(false) here: the reload that wins loadSeq clears it
+    // (inside reloadData) — this one may be superseded, and the newer one
+    // must not be left relying on a clear that never comes.
+    await reloadData(y,m);
     if(!syncP)return;
     const res=await syncP;
     // A failed pull painted its error above; a throttled pull (server ran
@@ -2727,17 +2744,16 @@ export default function Dashboard({ refreshTick = 0 }) {
     // and skipping the follow-up there made a throttled Refresh serve the
     // warm memo read from before the invalidation — stale exactly when the
     // user asked for fresh. The follow-up reloads whatever month is on
-    // screen NOW (monthRef, not this call's y/m): the user can navigate
+    // screen NOW (reloadViewed, not this call's y/m): the user can navigate
     // while the pull runs, and a stale-month reload would mint the newest
     // loadSeq and win.
     const allThrottled=!res||(res.results||[]).every(r=>r?.skipped==="throttled");
     if(allThrottled&&sync!=="refresh")return;
-    const[cy,cm]=monthRef.current.split("-").map(Number);
-    await reloadData(cy,cm);
+    await reloadViewed();
     // The pull may have written rows onto whatever account is open behind the
     // month view; its list is the one thing reloadData does not cover.
     setAcctTxEpoch(e=>e+1);
-  },[reloadData]);
+  },[reloadData,reloadViewed]);
 
   // The ONE refresh: the gear menu's Refresh row and the pull-to-refresh gesture
   // both call this, so the two can never drift apart on what "refresh" means
@@ -2983,7 +2999,7 @@ export default function Dashboard({ refreshTick = 0 }) {
       setAddDebt(false);
       setDebtSnaps([]);
       setDebtData(null); setDebtEpoch(e=>e+1); // supersede any load in flight
-      reloadData(year,month);
+      reloadViewed();
     }catch(err){
       console.error("manual debt add failed",err);
       window.alert(`Couldn't add that debt: ${friendlyError(err)}`);
@@ -3392,7 +3408,7 @@ export default function Dashboard({ refreshTick = 0 }) {
       setLearnedNote(n>0
         ? `Remembered — ${subject} is ${getName(learnPrompt.category)}, and ${n} past transaction${n!==1?"s":""} updated.`
         : `Remembered — ${subject} is ${getName(learnPrompt.category)}. No past transactions needed changing; future ones will use it.`);
-      await reloadData(year,month);
+      await reloadViewed();
       await refetchOpenLists();
       // The taught-rules list has a new row — refresh it too, or the screen
       // opened right after teaching is missing the rule just created.
@@ -3465,7 +3481,7 @@ export default function Dashboard({ refreshTick = 0 }) {
       rollback();
       window.alert(`Couldn't save that change: ${friendlyError(err)}`);
     }
-    reloadData(year,month);
+    reloadViewed();
   }
 
   // Manual transaction quick-add save. If no manual account exists yet, create
@@ -3492,7 +3508,7 @@ export default function Dashboard({ refreshTick = 0 }) {
           :prev);
       }
       setQuickAdd(false);
-      await reloadData(year,month); // canonical totals + ordering
+      await reloadViewed(); // canonical totals + ordering
     }catch(err){
       console.error("manual transaction add failed",err);
       window.alert(`Couldn't add that transaction: ${friendlyError(err)}`);
@@ -3539,13 +3555,13 @@ export default function Dashboard({ refreshTick = 0 }) {
     // spending state are both stale now, re-sync or not.
     if(prevType!==fields.type){invalidateEnvelopeSpending();}
     if(!crossed||!fed){
-      if(prevType!==fields.type)reloadData(year,month);
+      if(prevType!==fields.type)reloadViewed();
       return;
     }
     setRetyping(true);
     try{
       await runSync({force:true});
-      await reloadData(year,month);
+      await reloadViewed();
     }catch(err){
       console.error("re-sync after type change failed",err);
     }finally{
@@ -3563,7 +3579,7 @@ export default function Dashboard({ refreshTick = 0 }) {
     setTogglingHide(true);
     try{
       await saveAccount(selAcct.id,{hidden:!selAcct.hidden});
-      await reloadData(year,month);
+      await reloadViewed();
     }finally{
       setTogglingHide(false);
     }
@@ -3606,7 +3622,7 @@ export default function Dashboard({ refreshTick = 0 }) {
       // A manual removal just wrote a restore record — the Accounts tab's
       // Restore strip reads it, so re-check rather than waiting for a remount.
       bumpRestore();
-      await reloadData(year,month);
+      await reloadViewed();
     }catch(err){
       console.error("unlink failed",err);
       // Prefer the human message the sanitized 500 body carries (the Ask tab
@@ -3670,7 +3686,7 @@ export default function Dashboard({ refreshTick = 0 }) {
       const res=await restoreImportedInstitution(manualInstId);
       invalidateEnvelopeSpending();
       bumpRestore();
-      await reloadData(year,month);
+      await reloadViewed();
       // Say what actually came back. A record whose accounts were unhidden by
       // hand in the meantime restores 0 — reporting "restored" then would be
       // a claim the screen contradicts.
@@ -8256,7 +8272,7 @@ export default function Dashboard({ refreshTick = 0 }) {
           <CsvImport
             accounts={accounts}
             onClose={()=>setImporting(false)}
-            onImported={()=>reloadData(year,month)}
+            onImported={()=>reloadViewed()}
           />
         </Suspense>
       )}
@@ -8271,7 +8287,7 @@ export default function Dashboard({ refreshTick = 0 }) {
               // them), but permanent delete and disconnect mutate server-side
               // WITHOUT a sync — invalidate here so all four outcomes refetch.
               invalidateEnvelopeSpending();
-              reloadData(year,month);
+              reloadViewed();
             }}
           />
         </Suspense>
