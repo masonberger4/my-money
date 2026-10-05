@@ -78,12 +78,37 @@ export function rankByList(names = [], list = []) {
     .map((x) => x.n);
 }
 
-// The "+ Add category" guard. Case-insensitive against the user's own names AND
-// against the mechanism internals — a user-made "Return" would collide with the
-// mechanism one, which stored rows may still carry.
-export function isDuplicateCategoryName(name, existing = []) {
-  const n = String(name || '').trim().toLowerCase();
+// The "+ Add category" AND rename guard. Case-insensitive against the user's
+// own names AND against the mechanism internals — a user-made "Return" would
+// collide with the mechanism one, which stored rows may still carry.
+//
+// opts (all optional; the two-argument form is unchanged):
+//   aliases — `dash:names` ({raw: display}). A live category's DISPLAY name is
+//             taken too: a new "Dining" beside Food-renamed-"Dining" renders
+//             two identical rows with spending, budgets and envelopes split
+//             across two raw keys. Only aliases of LIVE names (existing ∪
+//             inUse) count — a retired category's leftover alias shows nowhere.
+//   inUse   — names real data still carries (userCategoryList's inUse). A CASE
+//             VARIANT of one collides; the EXACT name does not, because adding
+//             it re-registers that same raw key (the retire-and-re-add path).
+//   self    — the raw name being RENAMED: its own raw name and alias don't
+//             count against it.
+export function isDuplicateCategoryName(name, existing = [], { aliases = {}, inUse = [], self = null } = {}) {
+  const raw = String(name || '').trim();
+  const n = raw.toLowerCase();
   if (!n) return false;
+  const norm = (v) => String(v ?? '').trim();
+  const me = self == null ? null : norm(self);
   if (MECHANISM_CATEGORIES.some((m) => m.toLowerCase() === n)) return true;
-  return existing.some((e) => String(e || '').trim().toLowerCase() === n);
+  const names = (existing || []).map(norm).filter((e) => e && e !== me);
+  if (names.some((e) => e.toLowerCase() === n)) return true;
+  const used = (inUse || []).map(norm).filter((u) => u && u !== me);
+  if (used.some((u) => u !== raw && u.toLowerCase() === n)) return true;
+  const live = new Set([...names, ...used]);
+  for (const [k, v] of Object.entries(aliases && typeof aliases === 'object' ? aliases : {})) {
+    const key = norm(k);
+    if (key === me || !live.has(key)) continue;
+    if (norm(v) && norm(v).toLowerCase() === n) return true;
+  }
+  return false;
 }

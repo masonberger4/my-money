@@ -76,6 +76,44 @@ test('duplicate guard is case-insensitive and also blocks the mechanism names', 
   assert.equal(isDuplicateCategoryName('   ', ['Pets']), false);
 });
 
+// --- 2026-10 audit: uniqueness covers DISPLAY names too ----------------------
+// The guard checked only raw registry names: a new "Dining" beside Food-renamed-
+// "Dining" passed, and the one list then rendered ['Dining','Dining'] with
+// spending, budgets and envelopes split across two raw keys. Renames had no
+// guard at all.
+test('an existing category\'s display alias blocks an add', () => {
+  assert.equal(isDuplicateCategoryName('dining', ['Food'], { aliases: { Food: 'Dining' } }), true);
+  assert.equal(isDuplicateCategoryName('Dining', ['Food'], { aliases: { Food: '' } }), false, 'a cleared alias takes nothing');
+  assert.equal(isDuplicateCategoryName('Dining', ['Food'], { aliases: { Gone: 'Dining' } }), false,
+    'a retired category\'s leftover alias shows nowhere, so it blocks nothing');
+  assert.equal(isDuplicateCategoryName('Dining', [], { aliases: { Old: 'Dining' }, inUse: ['Old'] }), true,
+    'but an alias of a name rows still carry is on screen');
+});
+
+test('a case variant of a row-only name blocks; the exact name re-registers', () => {
+  assert.equal(isDuplicateCategoryName('dining', [], { inUse: ['Dining'] }), true);
+  assert.equal(isDuplicateCategoryName('Dining', [], { inUse: ['Dining'] }), false,
+    'the exact name re-adds the same raw key — the retire-and-re-add path');
+  assert.equal(isDuplicateCategoryName(' Dining ', [], { inUse: ['Dining'] }), false);
+});
+
+test('a rename may keep or re-case its own name, never another category\'s raw or display name', () => {
+  assert.equal(isDuplicateCategoryName('food', ['Food', 'Pets'], { self: 'Food' }), false);
+  assert.equal(isDuplicateCategoryName('Meals', ['Food'], { aliases: { Food: 'Meals' }, self: 'Food' }), false,
+    'its own current alias is not a collision');
+  assert.equal(isDuplicateCategoryName('Dining', ['Food', 'Eats'], { aliases: { Eats: 'Dining' }, self: 'Food' }), true);
+  assert.equal(isDuplicateCategoryName('groceries', ['Food', 'Groceries'], { self: 'Food' }), true);
+  assert.equal(isDuplicateCategoryName('Uncategorized', ['Food'], { self: 'Food' }), true, 'never a mechanism name');
+});
+
+test('the add sheet and saveName both run the full guard', () => {
+  const dash = readFileSync(new URL('../src/components/Dashboard.jsx', import.meta.url), 'utf8');
+  assert.match(dash, /isDuplicateCategoryName\(newName,customCatNames,\{aliases:customNames,inUse:userCats\}\)/);
+  const save = dash.slice(dash.indexOf('async function saveName(cat,alias){'), dash.indexOf('async function addCustomCat('));
+  assert.match(save, /isDuplicateCategoryName\(alias,\[\.\.\.customCatNames,\.\.\.userCats\],\{aliases:customNames,self:cat\}\)/);
+  assert.ok(save.indexOf('window.alert(') < save.indexOf('updateCategoryAlias('), 'a refused rename never writes');
+});
+
 // --- rankByList: the Plan tab's row order ----------------------------------
 
 test('REGRESSION: a Plan row keeps its place when it gets its first dollar', () => {

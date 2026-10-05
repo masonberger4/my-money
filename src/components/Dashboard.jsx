@@ -693,7 +693,7 @@ function EditName({name,onSave}) {
         border:"1px solid var(--border)",borderRadius:4,padding:"1px 6px",width:"100%",outline:"none"}}/>
   );
   return (
-    <span onDoubleClick={()=>setEd(true)} title="Double-click to rename"
+    <span onDoubleClick={()=>{setVal(name);setEd(true);}} title="Double-click to rename"
       style={{display:"flex",alignItems:"center",gap:4,cursor:"text",flex:1,minWidth:0}}>
       <span style={{fontSize:13,fontWeight:500,color:"var(--text)",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{name}</span>
     </span>
@@ -2494,6 +2494,16 @@ export default function Dashboard({ refreshTick = 0 }) {
     }
   }
   async function saveName(cat,alias){
+    // A rename is a display alias, so it must not read as another category:
+    // two identical rows would split spending, budgets and envelopes across
+    // two raw keys. Clearing ("") and re-casing the category's OWN raw name
+    // are always fine. userCats carries the in-use names, which a rename
+    // (unlike an add, which would re-register them) must not take.
+    if(alias&&alias.toLowerCase()!==cat.toLowerCase()
+      &&isDuplicateCategoryName(alias,[...customCatNames,...userCats],{aliases:customNames,self:cat})){
+      window.alert(`A category named "${alias}" already exists.`);
+      return;
+    }
     const prev=customNames;
     setCustomNames({...prev,[cat]:alias});
     try{setCustomNames(await updateCategoryAlias(cat,alias));}
@@ -8526,8 +8536,11 @@ export default function Dashboard({ refreshTick = 0 }) {
       {addingCat&&(()=>{
         // One guard, shared with the tests: case-insensitive against the user's
         // own names AND the three mechanism internals (a hand-made "Return"
-        // would collide with the mechanism label stored rows may carry).
-        const dup=isDuplicateCategoryName(newName,customCatNames);
+        // would collide with the mechanism label stored rows may carry), plus
+        // the display aliases and case variants of names rows still carry.
+        // The exact name of a retired-but-in-use category stays addable — it
+        // re-registers the same raw key.
+        const dup=isDuplicateCategoryName(newName,customCatNames,{aliases:customNames,inUse:userCats});
         const canAdd=!!newName.trim()&&!dup;
         // A brand-new category has no children, so every top-level category is
         // an eligible parent.
