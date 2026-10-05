@@ -24,15 +24,25 @@ async function request(method, url, body) {
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
   if (!res.ok) {
+    // Read the body ONCE: a body counts as consumed even when res.json()
+    // fails to parse it, so the old json-then-text fallback threw "Body is
+    // unusable" on any non-JSON error page (a Vercel 504, a proxy) before
+    // err.status was set — the alert showed that raw TypeError and the
+    // "(HTTP 504)" hint was lost. Every api/ route answers JSON, so non-JSON
+    // only ever comes from the platform: `detail` is then undefined, never the
+    // raw text (describeError would show a whole HTML page), and the first
+    // 500 chars ride on err.body for the console.
+    const text = await res.text().catch(() => '');
     let detail;
     try {
-      detail = await res.json();
+      detail = text ? JSON.parse(text) : undefined;
     } catch {
-      detail = await res.text();
+      detail = undefined;
     }
     const err = new Error(`${method} ${url} → ${res.status}`);
     err.status = res.status;
     err.detail = detail;
+    err.body = text.slice(0, 500);
     throw err;
   }
   return res.json();
