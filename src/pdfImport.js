@@ -32,14 +32,28 @@ const MONTHS = {
 // deliberately strict: a false positive invents a transaction.
 // ---------------------------------------------------------------------------
 
-// "May 23" | "May 23, 2026" | "5/23/2026" | "2026-05-23" | "23 May"
+// "May 23" | "May 23, 2026" | "5/23/2026" | "2026-05-23" | "23 May" | "05/23"
 const MONTH_NAME_RE = new RegExp(`^(${Object.keys(MONTHS).join('|')})\\.?\\s+(\\d{1,2})(?:\\s*,?\\s*(\\d{4}))?$`, 'i');
 const DAY_MONTH_RE = new RegExp(`^(\\d{1,2})\\s+(${Object.keys(MONTHS).join('|')})\\.?(?:\\s*,?\\s*(\\d{4}))?$`, 'i');
+// Year-less numeric month/day — how most US card statements print the
+// transaction date ("07/18"). Strict on purpose: a WHOLE cell, slash only, both
+// parts 1-2 digits, month first (M/D, never a D/M guess). The year comes from
+// the statement period like the month-name forms; with no period it stays
+// unparsed rather than guessed. The CSV parser does NOT accept this shape — a
+// CSV has no statement period to infer a year from.
+const MD_RE = /^(\d{1,2})\/(\d{1,2})$/;
+function matchMonthDay(v) {
+  const m = v.match(MD_RE);
+  if (!m) return null;
+  const month = Number(m[1]);
+  const day = Number(m[2]);
+  return month >= 1 && month <= 12 && day >= 1 && day <= 31 ? { month, day } : null;
+}
 
 export function looksLikeDate(s) {
   const v = String(s ?? '').trim();
   if (!v) return false;
-  if (MONTH_NAME_RE.test(v) || DAY_MONTH_RE.test(v)) return true;
+  if (MONTH_NAME_RE.test(v) || DAY_MONTH_RE.test(v) || matchMonthDay(v)) return true;
   return parseNumericDate(v) !== null;
 }
 
@@ -71,10 +85,11 @@ export function normalizeMoneyText(s) {
 }
 
 // ---------------------------------------------------------------------------
-// Dates. Month-name dates ("May 23") carry no year, so the year is inferred
-// from the dates that DO have one elsewhere in the document (statement period,
-// due date…). Resolved to ISO here so csvImport's parseDate just passes it
-// through — the shipped CSV path is left untouched.
+// Dates. Month-name dates ("May 23") and year-less numeric ones ("05/23")
+// carry no year, so the year is inferred from the dates that DO have one
+// elsewhere in the document (statement period, due date…). Resolved to ISO
+// here so csvImport's parseDate just passes it through — the shipped CSV path
+// is left untouched.
 // ---------------------------------------------------------------------------
 
 function isoFrom(y, m, d) {
@@ -269,6 +284,8 @@ export function parseFlexibleDate(s, ctx) {
     if (m[3]) return isoFrom(Number(m[3]), mo, day);
     return inferYear(mo, day, ctx);
   }
+  const md = matchMonthDay(v);
+  if (md) return inferYear(md.month, md.day, ctx);
   return parseNumericDate(v);
 }
 
@@ -360,7 +377,11 @@ export function findHeaderLines(lines) {
     if (!/\bdate\b/i.test(t)) continue;
     const moneyish = /\bamount\b|\bdebit\b|\bcredit\b|\bcharges?\b|\bpayments?\b|\bdeposits?\b|\bwithdrawals?\b/i.test(t);
     if (!moneyish) continue;
-    if (lines[i].runs.some(r => looksLikeMoney(r.str) || looksLikeDate(r.str))) continue;
+    // A run right after "Page" is a page number, not a value: "1/3" is a
+    // year-less date SHAPE, and a header carrying "Page 1/3" must still count.
+    const runs = lines[i].runs;
+    const isPageNo = k => k > 0 && /\bpage$/i.test(String(runs[k - 1].str).trim());
+    if (runs.some((r, k) => looksLikeMoney(r.str) || (looksLikeDate(r.str) && !isPageNo(k)))) continue;
     out.push(i);
   }
   return out;

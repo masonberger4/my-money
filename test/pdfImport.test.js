@@ -43,6 +43,7 @@ import {
 import { TRANSFER_CATEGORY, FALLBACK_CATEGORY } from '../src/categoryMap.js';
 import {
   run,
+  runRight,
   page,
   textLine,
   CARD,
@@ -228,6 +229,84 @@ test('parseFlexibleDate resolves every supported form, using the window only whe
   assert.equal(parseFlexibleDate('Feb 30', ctx), null, 'an impossible day never resolves');
   assert.equal(parseFlexibleDate('TOTAL', ctx), null);
   assert.equal(parseFlexibleDate('May 23', null), null, 'month-name date with no window cannot resolve');
+});
+
+// --- 2026-10 import audit (F41): year-less numeric M/D dates ---------------
+// Most US card statements print the transaction date as "07/18". Year
+// inference only ran for month-name dates, so every such row failed the date
+// test — 0 rows even with a hand-built template. The CSV parser stays strict
+// (a CSV has no statement period to infer a year from); only the PDF path,
+// which does, accepts the year-less form.
+test('looksLikeDate accepts a whole-cell year-less M/D and rejects near-misses', () => {
+  for (const v of ['07/18', '7/1', '12/31']) assert.equal(looksLikeDate(v), true, v);
+  for (const v of ['13/40', '0/5', '7/0', '1/2/3/4', '07/18/', '07-18', '07/18 PAYMENT', 'Page 1/3']) {
+    assert.equal(looksLikeDate(v), false, v);
+  }
+});
+
+test('parseFlexibleDate infers the year of a numeric M/D from the window, and never guesses without one', () => {
+  const ctx = { min: '2026-06-02', max: '2026-09-30', years: [2026] };
+  assert.equal(parseFlexibleDate('07/18', ctx), '2026-07-18');
+  assert.equal(parseFlexibleDate('7/1', ctx), '2026-07-01');
+  assert.equal(parseFlexibleDate('07/18', null), null, 'no statement period → no year → no date');
+  assert.equal(parseFlexibleDate('2/30', ctx), null, 'an impossible day never resolves');
+  assert.equal(parseDate('07/18'), null, 'the CSV parser stays strict M/D/Y');
+});
+
+test('a numeric M/D resolves across the Dec→Jan wrap from the statement period', () => {
+  const pg = page(1, textLine(40, [['Statement Period: Dec 17, 2025 - Jan 16, 2026', 40]]));
+  const ctx = resolveYearWindow([pg]);
+  assert.equal(parseFlexibleDate('12/20', ctx), '2025-12-20');
+  assert.equal(parseFlexibleDate('01/05', ctx), '2026-01-05');
+});
+
+// A card statement whose dates print as MM/DD, its period as MM/DD/YY.
+function mdCardPage({ footer = true } = {}) {
+  const rows = [['07/18', 'STARBUCKS STORE 123 SEATTLE WA', '5.45'], ['07/20', 'PAYMENT THANK YOU', '-500.00'], ['08/02', 'AMAZON MKTPL', '23.10']];
+  const runs = [
+    ...textLine(60, [['Opening/Closing Date 07/17/26 - 08/16/26', 40]]),
+    run('Date', 40, 200), run('Merchant Name or Transaction Description', 120, 200), runRight('$ Amount', 560, 200),
+  ];
+  rows.forEach(([d, desc, amt], i) => runs.push(run(d, 40, 220 + i * 16), run(desc, 120, 220 + i * 16), runRight(amt, 560, 220 + i * 16)));
+  // A page-number footer whose "1/3" is now a date SHAPE: it carries no money,
+  // so it must never become a row.
+  if (footer) runs.push(run('Page', 40, 760), run('1/3', 70, 760));
+  return page(1, runs);
+}
+
+test('autoDetectTemplate + applyTemplate read a year-less MM/DD card statement', () => {
+  const pg = mdCardPage();
+  const t = autoDetectTemplate([pg]);
+  assert.ok(t, 'the MM/DD rows now count as the table body');
+  assert.deepEqual(t.roles, ['date', 'description', 'amount']);
+  const applied = applyTemplate([pg], t);
+  assert.deepEqual(applied.grid.map(r => [r[0], r[1], r[4]]), [
+    ['2026-07-18', 'STARBUCKS STORE 123 SEATTLE WA', '5.45'],
+    ['2026-07-20', 'PAYMENT THANK YOU', '-500.00'],
+    ['2026-08-02', 'AMAZON MKTPL', '23.10'],
+  ]);
+  const { rows } = buildRows(applied.grid, applied.buildOpts);
+  assert.deepEqual(rowTotals(rows), { out: 28.55, in: 500 });
+});
+
+test('REGRESSION: a page number printed on the header line does not disqualify the header', () => {
+  // "1/3" became a date shape, and findHeaderLines rejects a header carrying
+  // any date run — so the run right after "Page" is exempt.
+  const lines = groupIntoLines([
+    run('Date', 40, 200), run('Description', 120, 200), run('Amount', 480, 200),
+    run('Page', 540, 200), run('1/3', 565, 200),
+  ]);
+  assert.deepEqual(findHeaderLines(lines), [0]);
+});
+
+test('REGRESSION: the card layout keeps its POSTED-date default (the dedup hash depends on it)', () => {
+  const t = autoDetectTemplate([cardStatementPage([
+    ['May 26', 'May 27', 'RIVER GROCERY 1467', '45.00'],
+    ['May 30', 'May 31', 'ACME COFFEE 0042', '6.50'],
+    ['Jun 20', 'Jun 21', 'CAPITAL ONE MOBILE PYMT', '-141.66'],
+  ])]);
+  assert.equal(t.dateColumn, 'date2');
+  assert.deepEqual(t.roles, ['date', 'date2', 'description', 'amount']);
 });
 
 // ---------------------------------------------------------------------------
