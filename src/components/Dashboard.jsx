@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { getOverview, getSpending, getBiggestMovers, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES, ACCOUNT_SUBTYPES, setCategoryRule, applyCategoryRuleToHistory, listCategoryRules, countCategoryRuleMatches, deleteCategoryRule, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, getActualIncome, resolveBudgetIncome, invalidateEnvelopeSpending, isEnvelopeSchemaMissing, targetNeed, readyToAssign, envelopePace, updateEnvPace as persistEnvPace, updateRecIgnore, getStartupSettings, monthKey, getEntities, createEntity, updateEntity, getTaxYearTransactions, getMileage, addMileage, deleteMileage, getReceiptTxIds, getDebts, getBalanceSnapshots, getNetWorthSeries, addManualTransaction, createManualAccount, updateManualBalance, getDataCoverage, getFeedCoverageGaps, FEED_GAP_SCAN_CAP, getReconciliation, getRestoreRecord, signOut, autoFillMonth, setTargetOverride, effectiveTarget, getExpectedTransactions, addExpected, dismissExpected, matchExpectedManually, getSavedChats, saveChatToApp, deleteSavedChat, addRegistryEntry, updateRegistryParent, removeRegistryEntry, updateCategoryColor, updateCategoryAlias } from "../dataAdapter.js";
 import { FLOW_LABELS } from "../reconciliation.js";
 import { clampSeries } from "../netWorth.js";
@@ -30,11 +30,15 @@ import { TX_TYPES, txTypeLabel, allowedUserTypes } from "../txType.js";
 import { breakdownSegments, incomeVsSpendingInsight, incomeSections } from "../reflect.js";
 import { createSheetHistory } from "../sheetHistory.js";
 import { runSync } from "../sync.js";
+import lazyWithReload from "../lazyWithReload.js";
+import LazyModal from "./LazyModal.jsx";
 // Lazy: both are modals rendered only on user action, and CsvImport reaches the
 // whole statement-import stack — no reason for either in the initial bundle.
-// A failed chunk load throws during render; App's ErrorBoundary is the net.
-const CsvImport = lazy(() => import("./CsvImport.jsx"));
-const SimpleFinConnect = lazy(() => import("./SimpleFinConnect.jsx"));
+// A failed chunk load (a stale chunk after a deploy) reloads the app ONCE
+// (lazyWithReload); a second failure lands in the modal's own LazyModal
+// boundary, never App's — that one would take the whole Dashboard with it.
+const CsvImport = lazyWithReload(() => import("./CsvImport.jsx"));
+const SimpleFinConnect = lazyWithReload(() => import("./SimpleFinConnect.jsx"));
 import ReceiptSection from "./ReceiptSection.jsx";
 import { getSetting, setSetting } from "../db.js";
 import { ASSISTANT_MODELS, EFFORT_LEVELS, DEFAULT_MODEL, DEFAULT_EFFORT, estimateCostRange, formatCents } from "../assistantModels.js";
@@ -8252,18 +8256,18 @@ export default function Dashboard({ refreshTick = 0 }) {
 
       {/* CSV import (standalone) */}
       {importing&&(
-        <Suspense fallback={null}>
+        <LazyModal label="import modal failed" onClose={()=>setImporting(false)}>
           <CsvImport
             accounts={accounts}
             onClose={()=>setImporting(false)}
             onImported={()=>reloadData(year,month)}
           />
-        </Suspense>
+        </LazyModal>
       )}
 
       {/* SimpleFIN connect */}
       {connectingSfin&&(
-        <Suspense fallback={null}>
+        <LazyModal label="SimpleFIN modal failed" onClose={()=>setConnectingSfin(false)}>
           <SimpleFinConnect
             onClose={()=>setConnectingSfin(false)}
             onConnected={()=>{
@@ -8274,7 +8278,7 @@ export default function Dashboard({ refreshTick = 0 }) {
               reloadData(year,month);
             }}
           />
-        </Suspense>
+        </LazyModal>
       )}
 
       {/* Manual transaction quick-add */}

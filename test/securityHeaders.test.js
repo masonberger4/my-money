@@ -115,6 +115,24 @@ test('vercel.json carries ONLY known top-level keys', () => {
 test('adding headers did not disturb the SPA rewrite or build config', () => {
   assert.equal(config.outputDirectory, 'dist');
   assert.deepEqual(config.rewrites, [
-    { source: '/((?!api/).*)', destination: '/index.html' },
+    { source: '/((?!api/|assets/).*)', destination: '/index.html' },
   ]);
+});
+
+test('the SPA rewrite never answers a missing /assets/* chunk with index.html', () => {
+  // F45: Vercel serves real files first and applies rewrites only on a miss.
+  // A phone on the previous build asks for that build's chunk, which the new
+  // deployment no longer has; matching assets/ here returned index.html with
+  // a 200 — a module MIME failure in the page, and sw.js's cacheFirst stored
+  // that HTML under the .js URL because the response was `ok`. Excluded, the
+  // miss is a 404 that nothing caches.
+  const [{ source }] = config.rewrites;
+  // Vercel's path-to-regexp: a leading '/', then the custom group verbatim.
+  const re = new RegExp(`^/${source.slice(1)}$`);
+  for (const p of ['/', '/settings', '/budget/2026-10', '/sw.js']) {
+    assert.ok(re.test(p), `${p} must still fall back to index.html`);
+  }
+  for (const p of ['/assets/index-abc123.js', '/assets/CsvImport-D3adB33f.js', '/api/sync']) {
+    assert.ok(!re.test(p), `${p} must NOT be rewritten to index.html`);
+  }
 });
