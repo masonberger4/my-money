@@ -422,6 +422,56 @@ test('a disabled institution is a tombstone: its accounts and transactions are n
   });
 });
 
+test('REGRESSION: a bank removed MID-pull keeps its tombstone — the bookkeeping update is conditional', () => {
+  const fake = makeFakeSupabase({
+    simplefin_access: seedAccess({ last_pulled_at: daysAgoIso(10) }),
+    institutions: [
+      { id: 'inst-1', household_id: HH, simplefin_org_id: ORG_KEY, status: 'active', name: 'BECU' },
+    ],
+    accounts: [
+      {
+        id: 'acct-1',
+        household_id: HH,
+        institution_id: 'inst-1',
+        plaid_account_id: 'sfin:A1',
+        name: 'Everyday Checking',
+        type: 'depository',
+        subtype: 'checking',
+        hidden: false,
+        current_balance: 1500,
+      },
+    ],
+  });
+  const wire = {
+    errors: [],
+    accounts: [wireAcct('A1', 'Everyday Checking', '1500.00', [wireTx('t1', '-10.00', 'ZZZ')])],
+  };
+  // Remove-bank (api/unlink-institution.js) lands on the other phone while
+  // this pull is in flight: AFTER resolveOrgInstitutions read the bank as
+  // active, BEFORE the bookkeeping. The transactions upsert sits inside that
+  // window, so the tombstone is written the moment sync first touches it.
+  let removed = false;
+  const racingClient = {
+    from: table => {
+      if (table === 'transactions' && !removed) {
+        removed = true;
+        fake.rows('institutions')[0].status = 'disabled';
+      }
+      return fake.client.from(table);
+    },
+  };
+  return withFetchStub([{ body: wire }], async () => {
+    const res = await pull({ client: racingClient }, accessRow({ last_pulled_at: daysAgoIso(10) }));
+    assert.ok(removed, 'fixture sanity: the removal landed mid-pull');
+    assert.equal(res.institutions, 1, 'fixture sanity: resolve saw the bank as active');
+    const inst = fake.rows('institutions')[0];
+    assert.equal(inst.status, 'disabled', 'the tombstone survives the pull');
+    assert.equal(inst.last_successful_pull_at, undefined, 'and a removed bank is not stamped as freshly pulled');
+    const bookkeeping = fake.writes.find(w => w.table === 'institutions' && w.op === 'update');
+    assert.equal(bookkeeping.matched, 0, 'the guard is in the UPDATE itself, not a stale read');
+  });
+});
+
 // --- watermark application: advance / hold / reset ---------------------------
 
 // Seed for the watermark tests: A1 already exists, so the pull is a plain

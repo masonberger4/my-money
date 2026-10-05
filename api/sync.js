@@ -654,6 +654,13 @@ export async function pullOneAccessUrl(supabase, householdId, accessRow, { force
     Boolean
   );
   if (instIds.length) {
+    // CONDITIONAL on not being disabled. instIds was resolved at the top of
+    // the pull; a Remove-bank that lands since then (the other phone, or the
+    // auto-sync on load still running) sets status='disabled' as its
+    // tombstone, and an unguarded status:'active' here would silently undo
+    // it — Restore vanishes, and after a permanent delete the next pull
+    // re-creates the accounts. One atomic UPDATE … WHERE status <> 'disabled'
+    // closes that window; status is NOT NULL, so no row escapes the guard.
     const { error } = await supabase
       .from('institutions')
       .update({
@@ -661,7 +668,8 @@ export async function pullOneAccessUrl(supabase, householdId, accessRow, { force
         status: 'active',
         last_error: null,
       })
-      .in('id', instIds);
+      .in('id', instIds)
+      .neq('status', 'disabled');
     if (error) throw error;
   }
 
