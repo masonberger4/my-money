@@ -306,6 +306,17 @@ Conventions / Gotchas. An entry here is a pointer, not a home for rules.
   rejected: the 2026-10-05 decision-journal entry; rules: the Key-files rows and
   Gotchas they name.
 
+- **Data layer, server and pure-core audit fixes — audit PR B (2026-10-05)** —
+  the second of the three: update-first rule writes and paged, totally ordered
+  reads past PostgREST's max-rows; the sync watermark cleared before a new
+  bank's insert and tombstone-guarded bookkeeping; account typing from the
+  account name; the cross-origin Authorization strip; the assistant's surfaced
+  cut-off and a list-price fix; reconciliation's date-edit line and rounded
+  figures; recurring price steps and multi-subscription merchants. Item list:
+  the plan doc's "Improvement backlog (2026-10-05 audit)"; decided and
+  rejected: the "Audit PR B" decision-journal entry; rules: the Key-files rows,
+  Architecture, Conventions and Gotchas they name.
+
 ## Pending branches
 
 None in code, and **no migration is outstanding**: every file in
@@ -556,7 +567,8 @@ which would have mis-read all 348 of that card's rows the moment it was
 unhidden (the three failure modes are in the account-type Convention; the
 "counted them all as cash spending" phrasing that stood here was pre-unification
 and wrong). `inferAccountType` now also matches product names
-(venture/quicksilver/freedom/sapphire/…), card-only issuers, and falls back to
+(venture/quicksilver/freedom/sapphire/…), card-only issuers (live in production
+only since 2026-10-05 — see the `api/_lib/simplefin.js` key row), and falls back to
 `credit` on a negative balance; the deposit rules still run first so
 "Platinum Savings" and "Preferred Checking" stay deposits. **Always eyeball the
 type on a new SimpleFIN account** — the sync logs a warning when it guessed.

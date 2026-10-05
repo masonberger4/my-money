@@ -4,7 +4,7 @@
 // now delegates to after its two queries.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { formatSpendingContext } from '../api/_lib/spendingContext.js';
+import { formatSpendingContext, fetchContextTxs, CONTEXT_TX_CAP } from '../api/_lib/spendingContext.js';
 
 const ACCOUNTS = [
   { id: 'a-chk', name: 'Everyday Checking', nickname: null, mask: '1234', type: 'depository', subtype: 'checking', current_balance: 2500.5, hidden: false, institutions: { name: 'Synth CU' } },
@@ -438,4 +438,54 @@ test('monthly sums are emitted in sorted-key order (order-independent above the 
   const a = formatSpendingContext(clone(ACCOUNTS), clone(TXS));
   const b = formatSpendingContext(clone(ACCOUNTS), clone(TXS).reverse());
   assert.equal(head(a), head(b));
+});
+
+// --- The window's row read (fetchContextTxs) ---------------------------------
+// PostgREST clamps every read at max-rows (1000), so the old `.limit(1500)`
+// returned 1000 — the OLDEST days of the newest-first window went missing and
+// their months under-counted. The cap is reached by paging.
+
+// A transactions table of `total` rows that honours .range like PostgREST,
+// clamped at max-rows.
+function rangedTxClient(total, calls) {
+  return {
+    from(table) {
+      const q = { table, orders: [], range: null, limit: null };
+      const b = {
+        select() { return b; },
+        eq() { return b; },
+        in() { return b; },
+        gte() { return b; },
+        order(c, o) { q.orders.push([c, o]); return b; },
+        range(f, t) { q.range = [f, t]; return b; },
+        limit(n) { q.limit = n; return b; },
+        then(resolve, reject) {
+          calls.push(q);
+          const [f, t] = q.range ?? [0, (q.limit ?? total) - 1];
+          const n = Math.max(0, Math.min(t + 1, total) - f);
+          const data = Array.from({ length: Math.min(n, 1000) }, (_, i) => ({ id: f + i }));
+          return Promise.resolve({ data, error: null }).then(resolve, reject);
+        },
+      };
+      return b;
+    },
+  };
+}
+
+test('the assistant window reaches its 1500-row cap by paging past max-rows', async () => {
+  const calls = [];
+  const txs = await fetchContextTxs(rangedTxClient(1700, calls), 'hh', ['a1'], '2026-07-01');
+  assert.equal(CONTEXT_TX_CAP, 1500);
+  assert.equal(txs.length, 1500);
+  assert.equal(new Set(txs.map(t => t.id)).size, 1500, 'no row repeated across the page boundary');
+  assert.deepEqual(calls.map(c => c.range), [[0, 999], [1000, 1499]], 'the last page lands exactly on the cap');
+  assert.deepEqual(calls[0].orders.map(o => o[0]), ['effective_date', 'id'], 'newest first, id tiebreak');
+});
+
+test('the window read stops on a short page, and skips the query with no visible accounts', async () => {
+  const calls = [];
+  assert.equal((await fetchContextTxs(rangedTxClient(40, calls), 'hh', ['a1'], '2026-07-01')).length, 40);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(await fetchContextTxs(rangedTxClient(40, calls), 'hh', [], '2026-07-01'), []);
+  assert.equal(calls.length, 1);
 });

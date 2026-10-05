@@ -354,8 +354,17 @@
   any-amount shape, still read everywhere) OR an array of `{amount, category}`;
   no loader had to be rewritten. The rule table's PK could not hold a nullable
   column, so it is TWO partial unique indexes — which is also why
-  `setCategoryRule` is a slot-scoped delete-then-insert rather than an upsert
-  (ON CONFLICT cannot infer a partial index). Migration
+  `setCategoryRule` is a slot-scoped UPDATE-then-INSERT rather than an upsert
+  (ON CONFLICT cannot infer a partial index): it updates the exact
+  (merchant_key, amount) slot and inserts only when no row came back; a 23505
+  on that insert is the other phone teaching the same slot in the same moment,
+  so it re-runs the update once (last writer wins). **Never delete first**
+  (it was a delete-then-insert until 2026-10-05): the insert is a POST, which
+  `makeRetryingFetch` never re-sends, so a delete whose insert died on the wire
+  left the merchant with NO rule — every new row imported Uncategorized while
+  the household believed the old rule held. An update leaves the slot old or
+  new, never empty. Pinned by the REGRESSION tests in
+  `test/categoryRules.test.js`. Migration
   `20260805000002_category_rule_amounts.sql`, **inverted deploy order — paste
   AFTER the deploy**, since it drops the PK the old build's upsert names.
   **Known limit, pinned by a REGRESSION test in `test/txClassify.test.js`:** the
@@ -405,8 +414,11 @@
   reads stay on `date` by design: `getFeedCoverageStart` (the CSV/feed overlap
   boundary), `getAccountTransactionsInRange` (reconciliation against a
   statement's own dates), the coverage-gap probes, and every dedup id that
-  hashes the date, and `getActualIncome`'s earliest-depository-row coverage
-  probe (a "how far back does the ledger reach" question). A trigger
+  hashes the date, `getActualIncome`'s earliest-depository-row coverage
+  probe (a "how far back does the ledger reach" question), and
+  `getReconciliation`'s re-dated read (rows POSTED inside the panel's span but
+  COUNTED outside it — the balances moved on the bank's date; it feeds the
+  `dateMoved` line, the `src/reconciliation.js` key row). A trigger
   rewriting `date` in place was rejected — it would have moved those
   boundaries invisibly. Pinned in `test/txDate.test.js`.
   Accepted trade, deliberate: the internal-transfer pairing window
@@ -416,6 +428,10 @@
   then count) and a re-dated bill shifts its apparent cadence — the row now
   lives where the household put it, and the sheet's "Posted" line shows the
   bank date to move it back. Pinned (the crossing case) in `test/txDate.test.js`.
+  The balance-reconciliation panel is NOT such a trade (2026-10-05): its month
+  rows stay effective-date reads, so it washes what Overview washes, and the
+  bank-vs-effective shift is NAMED as its own line rather than left as
+  Unexplained in two months.
 - `api/` 500 handlers return a GENERIC string + a stable code — never raw
   error bodies (no error leakage; `test/apiErrorSanitize.test.js`).
 - Account labels: `nickname || "name ··mask"`; badge color from `ACCOUNT_COLORS`
@@ -547,6 +563,19 @@ Categories agree on spending by construction.
   PER-INSTANCE — the $25/mo console spend cap (email alert at $10) REPLACES a
   durable limiter; don't build one. The ALERT is the load-bearing half: a
   silent cap just reads as "the Ask tab stopped working".
+  **A `max_tokens` stop is SURFACED, never passed off as a complete answer**
+  (2026-10-05): adaptive-thinking tokens bill as output AND count against the
+  model's `maxTokens`, so a hard question at high effort can spend the whole
+  budget thinking — the text then stops mid-sentence (which read as finished)
+  or never starts (which fell through to "try rephrasing", blaming the
+  question for a budget problem). `shapeAssistantReply` (`api/assistant.js`)
+  keeps any partial text, appends a cut-off note to `reply` and sets
+  `truncated`, and says it ran out of room when no text came back; "lower
+  effort" is offered only to a model that has an effort setting. The note
+  rides inside `reply`, so the chat panel renders it with no change. Raising
+  `maxTokens` for the thinking models is OPEN for Mason (the plan doc's
+  2026-10-05 ruling list): complete answers at a higher worst-case cost per
+  question, and a longer non-streaming request.
 
 ### Category nesting (one level — decided 2026-08-05, don't relitigate)
 - **A transaction stores ONE label and it is the LEAF.** A gas purchase is

@@ -48,8 +48,6 @@ export {
   isEnvelopeSchemaMissing,
   getBudgetIncome,
   setBudgetIncome,
-  getEnvPace,
-  setEnvPace,
   updateEnvPace,
   setAssigned,
   setTargetOverride,
@@ -60,8 +58,6 @@ export {
   fundTargets,
 } from './adapters/envelopeIO.js';
 export {
-  getRecIgnore,
-  setRecIgnore,
   updateRecIgnore,
   getSavedChats,
   saveChatToApp,
@@ -257,7 +253,7 @@ async function fetchRawBetween(start, end, columns) {
 // navigation, which reuses warm entries (Mason, 2026-08-04). Reuse is safe
 // because callers never see the memo's rows: they get per-row shallow COPIES —
 // pipelines below mutate rows (top-level fields only), and shared rows would
-// leak getCashFlow's `_internal` marks into the purchase-based model.
+// leak getCashFlow's `_internal` marks into the spending model.
 const rangeMemo = createRangeMemo((start, end) => fetchRawBetween(start, end));
 
 // The ONE paged-loop discipline (exported for tests). Every whole-table /
@@ -429,8 +425,12 @@ export async function updateTransaction(id, fields) {
   // The 4-type override; null = back to automatic (the user_category shape).
   if ('user_type' in fields) allowed.user_type = fields.user_type;
   // The date override; null = back to the bank's date. Only `user_date` is
-  // written — the trigger (20260908000001) moves `date` to match, so the
-  // effective date has ONE writer and a sync re-pull can't undo the edit.
+  // written. `date` stays the BANK's (sync keeps restating it — no trigger
+  // rewrites it; that design was rejected), and the STORED generated column
+  // `effective_date = coalesce(user_date, date)` (20260908000001) is the ONE
+  // month-bucketing verdict: read months through txDateCol()/
+  // withEffectiveDate(), never plain `date`. A re-pull can't undo the edit
+  // because every feed writer omits user_date.
   if ('user_date' in fields) allowed.user_date = fields.user_date;
   if ('entity_id' in fields) allowed.entity_id = fields.entity_id;
   if ('is_capital' in fields) allowed.is_capital = fields.is_capital;
@@ -676,32 +676,60 @@ let rulesHaveAmount = true;
 // production callers pass nothing.
 export async function getCategoryRules({ client = supabase } = {}) {
   if (!hasCategoryRules) return {};
-  const read = cols => client.from('category_rules').select(cols);
-  let { data, error } = await read(
-    rulesHaveAmount ? 'merchant_key, category, amount' : 'merchant_key, category'
-  );
-  if (error && rulesHaveAmount && isMissingColumnError(error, 'amount')) {
-    rulesHaveAmount = false;
-    ({ data, error } = await read('merchant_key, category'));
-  }
-  if (error) {
-    if (isMissingTableError(error)) {
-      hasCategoryRules = false;
-      return {};
-    }
-    throw error;
-  }
+  // null = the table is missing; {} is load-bearing for the classify callers.
+  const rows = await readRuleRows(client, 'merchant_key, category');
   const rules = {};
-  for (const r of data || []) {
-    // PostgREST hands numerics back as strings often enough that coercing here
-    // is the only place it needs handling — the matcher compares numbers.
-    const amount = r.amount == null || r.amount === '' ? null : Number(r.amount);
-    (rules[r.merchant_key] ||= []).push({
-      amount: Number.isFinite(amount) ? amount : null,
-      category: r.category,
-    });
+  for (const r of rows || []) {
+    (rules[r.merchant_key] ||= []).push({ amount: r.amount, category: r.category });
   }
   return rules;
+}
+
+// The ONE category_rules row read, shared by getCategoryRules (the classify
+// bag) and listCategoryRules (the Taught-rules screen) so their degrades can't
+// drift apart. PAGED: PostgREST clamps any single read at max-rows (1000), and
+// past that the old unpaged read silently dropped an ARBITRARY subset of rules
+// — those merchants imported Uncategorized. ORDERED by merchant_key, then
+// amount nulls first while the column exists: merchant_key alone ties once
+// amount-scoped rules exist, and the two partial unique indexes make the pair
+// a TOTAL order (an OFFSET page boundary inside a tie can drop or repeat a
+// row). Degrades, checked in this order and name-checked so a column problem
+// can never read as "the feature isn't installed": a missing amount COLUMN
+// redoes the page without it (and without its order, which fails the same
+// way); a missing TABLE returns null. 416/PGRST103 on an exact page multiple
+// is end-of-data. Rows come back with `amount` coerced to a number or null.
+async function readRuleRows(client, columns) {
+  const rows = [];
+  const page = 1000;
+  for (let from = 0; ; from += page) {
+    let q = client
+      .from('category_rules')
+      .select(rulesHaveAmount ? `${columns}, amount` : columns)
+      .order('merchant_key', { ascending: true });
+    if (rulesHaveAmount) q = q.order('amount', { ascending: true, nullsFirst: true });
+    const { data, error } = await q.range(from, from + page - 1);
+    if (error) {
+      if (isRangeExhaustedError(error)) break;
+      if (rulesHaveAmount && isMissingColumnError(error, 'amount')) {
+        rulesHaveAmount = false;
+        from -= page; // redo this page with the narrower select
+        continue;
+      }
+      if (isMissingTableError(error)) {
+        hasCategoryRules = false;
+        return null;
+      }
+      throw error;
+    }
+    for (const r of data || []) {
+      // PostgREST hands numerics back as strings often enough that coercing
+      // here is the only place it needs handling — the matcher compares numbers.
+      const amount = r.amount == null || r.amount === '' ? null : Number(r.amount);
+      rows.push({ ...r, amount: Number.isFinite(amount) ? amount : null });
+    }
+    if (!data || data.length < page) break;
+  }
+  return rows;
 }
 
 // Teach a merchant. household_id fills in from its column default — never send
@@ -714,35 +742,48 @@ export async function getCategoryRules({ client = supabase } = {}) {
 // unique indexes (`... where amount is null` / `... where amount is not null`,
 // migration 20260805000002), and ON CONFLICT cannot infer a partial index —
 // PostgREST would answer "no unique or exclusion constraint matching the ON
-// CONFLICT specification". So the write deletes the exact
-// (merchant_key, amount) slot and inserts. Teaching a merchant is a rare,
-// deliberate user action, not a hot path, so two round trips are fine — and
-// the delete is slot-scoped, so it can never take out the sibling rule for the
-// same merchant at a different amount.
+// CONFLICT specification". So the write is a slot-scoped UPDATE-then-INSERT:
+// update the exact (merchant_key, amount) slot, and insert only when no row
+// came back. NEVER a delete first — the insert is a POST, which the retrying
+// fetch deliberately never re-sends, so a delete-then-insert whose insert died
+// on the wire left the merchant with NO rule (every new row Uncategorized
+// while the user believed the old rule held). An update leaves the slot
+// either old or new, never empty. A 23505 on the insert is another phone
+// teaching the same slot in the same moment: its row exists now, so re-run
+// the update once (last writer wins, as before) instead of telling this
+// phone "Couldn't save". Slot-scoped either way, so it can never touch the
+// sibling rule for the same merchant at a different amount.
 export async function setCategoryRule(descriptor, category, amount = null, { client = supabase } = {}) {
   const key = merchantKey(descriptor);
   if (!key) throw new Error('Cannot learn a rule from an empty description');
   const amt = amount == null || amount === '' ? null : Number(amount);
   const scoped = amt != null && Number.isFinite(amt);
+  const updatedAt = new Date().toISOString();
 
-  const clearSlot = async () => {
-    const del = client.from('category_rules').delete().eq('merchant_key', key);
-    if (!rulesHaveAmount) return del; // pre-migration: one rule per merchant
-    return scoped ? del.eq('amount', amt) : del.is('amount', null);
-  };
-  let { error: delErr } = await clearSlot();
+  // Pre-migration (no amount column): one rule per merchant, no slot filter.
+  const slot = q => (!rulesHaveAmount ? q : scoped ? q.eq('amount', amt) : q.is('amount', null));
+  const updateSlot = () =>
+    slot(client.from('category_rules').update({ category, updated_at: updatedAt }).eq('merchant_key', key))
+      .select('merchant_key');
+  let { data, error } = await updateSlot();
   // Pre-migration there is no amount column: degrade to the old
   // one-rule-per-merchant behaviour rather than failing the teach outright.
-  if (delErr && rulesHaveAmount && isMissingColumnError(delErr, 'amount')) {
+  if (error && rulesHaveAmount && isMissingColumnError(error, 'amount')) {
     rulesHaveAmount = false;
-    ({ error: delErr } = await clearSlot());
+    ({ data, error } = await updateSlot());
   }
-  if (delErr) throw delErr;
-
-  const row = { merchant_key: key, category, updated_at: new Date().toISOString() };
-  if (scoped && rulesHaveAmount) row.amount = amt;
-  const { error } = await client.from('category_rules').insert(row);
   if (error) throw error;
+  if ((data || []).length) return key;
+
+  const row = { merchant_key: key, category, updated_at: updatedAt };
+  if (scoped && rulesHaveAmount) row.amount = amt;
+  const { error: insErr } = await client.from('category_rules').insert(row);
+  if (insErr) {
+    if (insErr.code !== '23505') throw insErr;
+    const retry = await updateSlot();
+    if (retry.error) throw retry.error;
+    if (!(retry.data || []).length) throw insErr;
+  }
   return key;
 }
 
@@ -769,42 +810,8 @@ export async function deleteCategoryRule(merchantKeyValue, amount = null, { clie
 // sentinel; the entry link keys on it and doesn't render at all pre-migration).
 export async function listCategoryRules({ client = supabase } = {}) {
   if (!hasCategoryRules) return null;
-  const rows = [];
-  const page = 500;
-  for (let from = 0; ; from += page) {
-    const { data, error } = await client
-      .from('category_rules')
-      .select(rulesHaveAmount
-        ? 'merchant_key, category, amount, source, updated_at'
-        : 'merchant_key, category, source, updated_at')
-      // Ordered paging: an unordered result set can drop or repeat rows across
-      // the boundary (the Session A guard class).
-      .order('merchant_key', { ascending: true })
-      .range(from, from + page - 1);
-    if (error) {
-      // 416 on an exact-page-multiple result set is end-of-data, not failure.
-      if (isRangeExhaustedError(error)) break;
-      // Pre-migration the amount column isn't there yet: retry this same page
-      // without it. Checked BEFORE the missing-table test and name-checked, so
-      // a column problem can never read as "the feature isn't installed".
-      if (rulesHaveAmount && isMissingColumnError(error, 'amount')) {
-        rulesHaveAmount = false;
-        from -= page; // redo this page with the narrower select
-        continue;
-      }
-      if (isMissingTableError(error)) {
-        hasCategoryRules = false;
-        return null;
-      }
-      throw error;
-    }
-    rows.push(...(data || []).map(r => ({
-      ...r,
-      amount: r.amount == null || r.amount === '' ? null : Number(r.amount),
-    })));
-    if (!data || data.length < page) break;
-  }
-  return rows;
+  // Paged + totally ordered, with both degrades — see readRuleRows.
+  return readRuleRows(client, 'merchant_key, category, source, updated_at');
 }
 
 // "How many transactions does this rule match at all?" — the on-demand count
@@ -1496,11 +1503,16 @@ export async function getExistingTxIds(accountId) {
   const sources = new Set();
   if (!accountId) return { ids, sources };
   let selectCols = transactionsHaveSource ? 'plaid_tx_id, source' : 'plaid_tx_id';
+  // Ordered on plaid_tx_id — unique per account (the upsert conflict target),
+  // so a TOTAL order: OFFSET paging an unordered set can drop or repeat a row
+  // at a page boundary, and a dropped id shows a stored row as "new" (or
+  // hides the 'pdf'/'csv' source the mixed-format warning keys on).
   const rows = await pagedRows(async (from, to) => {
     let { data, error } = await supabase
       .from('transactions')
       .select(selectCols)
       .eq('account_id', accountId)
+      .order('plaid_tx_id', { ascending: true })
       .range(from, to);
     if (error && selectCols !== 'plaid_tx_id' && isMissingColumnError(error, 'source')) {
       transactionsHaveSource = false;
@@ -1509,6 +1521,7 @@ export async function getExistingTxIds(accountId) {
         .from('transactions')
         .select(selectCols)
         .eq('account_id', accountId)
+        .order('plaid_tx_id', { ascending: true })
         .range(from, to));
     }
     return { data, error };
@@ -1568,6 +1581,10 @@ export async function getAccountTransactionsInRange(accountId, start, end) {
       .gte('date', start)
       .lte('date', end)
       .order('date', { ascending: true })
+      // Tiebreak: date alone is not a total order, so a page boundary inside
+      // a run of same-dated rows could drop or repeat one and skew Compare's
+      // matched/csvOnly/mismatch counts. plaid_tx_id is unique per account.
+      .order('plaid_tx_id', { ascending: true })
       .range(from, to)
   );
   return rows.map(r => ({ ...r, amount: Number(r.amount) }));
@@ -1585,25 +1602,31 @@ export async function importCsvTransactions(accountId, rows, source = 'csv') {
 
   const batchSize = 500;
   let written = 0;
-  for (let i = 0; i < rows.length; i += batchSize) {
-    const slice = rows.slice(i, i + batchSize).map(r => ({ ...r, account_id: accountId }));
+  try {
+    for (let i = 0; i < rows.length; i += batchSize) {
+      const slice = rows.slice(i, i + batchSize).map(r => ({ ...r, account_id: accountId }));
 
-    const attempt = async withSource => {
-      const payload = withSource ? slice.map(r => ({ ...r, source })) : slice;
-      return supabase
-        .from('transactions')
-        .upsert(payload, { onConflict: 'account_id,plaid_tx_id' });
-    };
+      const attempt = async withSource => {
+        const payload = withSource ? slice.map(r => ({ ...r, source })) : slice;
+        return supabase
+          .from('transactions')
+          .upsert(payload, { onConflict: 'account_id,plaid_tx_id' });
+      };
 
-    let { error } = await attempt(transactionsHaveSource);
-    if (error && transactionsHaveSource && isMissingColumnError(error, 'source')) {
-      transactionsHaveSource = false;
-      ({ error } = await attempt(false));
+      let { error } = await attempt(transactionsHaveSource);
+      if (error && transactionsHaveSource && isMissingColumnError(error, 'source')) {
+        transactionsHaveSource = false;
+        ({ error } = await attempt(false));
+      }
+      if (error) throw error;
+      written += slice.length;
     }
-    if (error) throw error;
-    written += slice.length;
+  } finally {
+    // New rows exist — every memoised read is stale. From a finally (the sync
+    // hook's discipline): a batch that throws mid-loop leaves the earlier
+    // batches COMMITTED, and an upsert whose answer was lost may have landed.
+    invalidateEnvelopeSpending();
   }
-  invalidateEnvelopeSpending(); // new rows exist — every memoised read is stale
   return written;
 }
 
@@ -1873,8 +1896,12 @@ export async function getFeedCoverageGaps(accounts) {
 // residual would send someone hunting a duplicate that does not exist.
 // Degrades cleanly pre-migration too: getBalanceSnapshots returns [] when the
 // table is not installed, which surfaces as months with no balance coverage
-// rather than an error.
-export async function getReconciliation({ maxMonths = 12 } = {}) {
+// rather than an error. `now` and the reads are injectable for tests (the
+// getExpectedTransactions pattern); the app calls it bare.
+export async function getReconciliation(
+  { maxMonths = 12, now = new Date() } = {},
+  { client = supabase, fetchMonth = getMonthTransactions, fetchSnapshots = getBalanceSnapshots } = {}
+) {
   // Same KEYS as the success path, so the panel never has to guard a field's
   // existence — only `ok`. The month objects carry `flows` (the gross view) and
   // the top level carries `nearMiss`; both ride the spread below, so the only
@@ -1886,7 +1913,7 @@ export async function getReconciliation({ maxMonths = 12 } = {}) {
     nearMiss: { pairs: [], total: 0 },
   };
   try {
-    const { data, error } = await supabase.from('accounts').select('id, type, hidden');
+    const { data, error } = await client.from('accounts').select('id, type, hidden');
     if (error) throw error;
     // Hidden accounts are out on BOTH sides — their rows are already dropped at
     // the query level, so excluding their balances here is what keeps the two
@@ -1898,9 +1925,8 @@ export async function getReconciliation({ maxMonths = 12 } = {}) {
     // window: snapshots are written on balance CHANGE only, so an account that
     // has not moved inside a window has no rows in it — and here that absence
     // would read as "unknown" and null out every month's balance comparison.
-    const snapshots = await getBalanceSnapshots(scope.map(a => a.id), null);
+    const snapshots = await fetchSnapshots(scope.map(a => a.id), null);
 
-    const now = new Date();
     const curY = now.getFullYear();
     const curM = now.getMonth() + 1;
     // Start at the month the balance history begins, so every month that CAN
@@ -1929,12 +1955,42 @@ export async function getReconciliation({ maxMonths = 12 } = {}) {
       months.map(async ({ year, month }) => ({
         month: `${year}-${pad2(month)}`,
         label: monthLabel(year, month),
-        rows: await getMonthTransactions(year, month),
+        rows: await fetchMonth(year, month),
       }))
     );
 
+    // Re-dated rows POSTED inside the span but COUNTED outside it (user_date):
+    // no month read above returns them, yet their balance move is in a
+    // fetched month, and without them each one reads as Unexplained there.
+    // A BANK-date read on purpose (`date`, never txDateCol) — the one thing
+    // it asks is "what did the bank move in these months". Rows moved INTO
+    // the span need nothing extra: the month reads carry their bank_date.
+    // Pre-migration there is no user_date and nothing can have moved. No
+    // inner catch: a failed read must fail the panel (ok:false) like every
+    // other read here, never render the fake residual it exists to remove.
+    let movedOut = [];
+    if (transactionsHaveUserDate) {
+      const spanStart = monthBounds(months[0].year, months[0].month).start;
+      const spanEnd = monthBounds(curY, curM).end;
+      const redated = await pagedRows((from, to) =>
+        client
+          .from('transactions')
+          .select('id, account_id, date, amount, user_date, effective_date, accounts!inner(hidden)')
+          .eq('accounts.hidden', false)
+          .not('user_date', 'is', null)
+          .gte('date', spanStart)
+          .lte('date', spanEnd)
+          .order('date', { ascending: false })
+          .order('id', { ascending: false })
+          .range(from, to)
+      );
+      movedOut = withEffectiveDate(
+        redated.filter(r => r.effective_date && (r.effective_date < spanStart || r.effective_date > spanEnd))
+      );
+    }
+
     const today = localIsoDate(now);
-    const built = buildReconciliation({ monthsRows, snapshots, accounts: visible, today });
+    const built = buildReconciliation({ monthsRows, snapshots, accounts: visible, today, movedOut });
     return { ok: true, ...built, scopeCount: scope.length };
   } catch {
     return empty;

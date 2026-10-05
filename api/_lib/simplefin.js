@@ -362,13 +362,31 @@ export async function decodeSetupToken(raw, { lookup } = {}) {
 // including hop 0: callers validated the initial URL when it was decoded or
 // split, but re-checking immediately before the request narrows the
 // resolve-then-fetch window that comment describes.
+//
+// Following by hand also loses a second thing fetch does on its own: the
+// Fetch standard DROPS the Authorization header when a redirect crosses
+// origins, and this loop used to re-send it on every hop — so a Bridge 302 to
+// a CDN or any other host handed that host the Basic credential that reads
+// every linked bank. Restored here: once a hop leaves the original origin the
+// header is stripped, and stays stripped for every later hop (as in fetch). A
+// same-origin move keeps it, so a Bridge path change still authenticates; a
+// cross-origin target then answers 403, which surfaces as auth_failed rather
+// than a silent leak.
 const MAX_REDIRECTS = 3;
+
+function withoutAuthorization(init) {
+  const headers = Object.fromEntries(
+    Object.entries(init?.headers || {}).filter(([k]) => k.toLowerCase() !== 'authorization')
+  );
+  return { ...init, headers };
+}
 
 async function fetchNoOpenRedirect(url, init, signal, lookup) {
   let current = url;
+  let hopInit = init;
   await assertPublicHost(current, lookup);
   for (let hop = 0; ; hop++) {
-    const res = await fetch(current, { ...init, redirect: 'manual', signal });
+    const res = await fetch(current, { ...hopInit, redirect: 'manual', signal });
     if (res.status < 300 || res.status > 399) return res;
 
     const location = res.headers.get('location');
@@ -394,6 +412,7 @@ async function fetchNoOpenRedirect(url, init, signal, lookup) {
         `SimpleFIN redirected the claim (HTTP ${res.status}). Generate a fresh setup token.`
       );
     }
+    if (new URL(next).origin !== new URL(current).origin) hopInit = withoutAuthorization(hopInit);
     current = next;
   }
 }
@@ -920,12 +939,23 @@ const TYPE_RULES = [
 // — they both offer checking, so their name alone proves nothing.
 const CARD_ONLY_ISSUER_RE = /\b(american express|amex|discover|barclaycard|barclays|synchrony|comenity|credit one|first premier|bread financial)\b/i;
 
+// `org` is the NORMALIZED org (normalizeAccount's { key, label, domain, url }),
+// which is what api/sync.js passes — it has no `name`. Reading `org.name` here
+// once left the card-only-issuer rule dead in production while unit tests
+// handing a raw `{ name }` kept it looking alive.
+//
+// The TYPE_RULES see the ACCOUNT NAME ONLY. Institution names are full of rule
+// words — "… Savings and Loan", "… Credit Union", "… Savings Bank" — and the
+// loan and savings rules run first, so mixing the org into the haystack would
+// type "Everyday Checking" at a Savings & Loan as a loan and a share account
+// at a credit union as a card. The org name is a FALLBACK signal, consulted
+// only when the account name says nothing.
 export function inferAccountType(name, org, balance) {
-  const haystack = `${String(name || '')} ${String(org?.name || '')}`;
+  const accountName = String(name || '');
   for (const [re, out] of TYPE_RULES) {
-    if (re.test(haystack)) return { ...out, inferred: true };
+    if (re.test(accountName)) return { ...out, inferred: true };
   }
-  if (CARD_ONLY_ISSUER_RE.test(String(org?.name || ''))) {
+  if (CARD_ONLY_ISSUER_RE.test(String(org?.label || ''))) {
     return { type: 'credit', subtype: 'credit card', inferred: true };
   }
   // Last resort before the fallback: SimpleFIN reports a debt balance as

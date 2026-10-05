@@ -1,8 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { pagedRows, isMissingColumnError } from '../src/dataAdapter.js';
+import { join } from 'node:path';
+import { pagedRows, isMissingColumnError, getMileage } from '../src/dataAdapter.js';
 import { isRangeExhaustedError } from '../src/ruleHistory.js';
 
 // ---- pagedRows: the ONE paged-loop discipline -------------------------------
@@ -71,6 +72,136 @@ test('source scan: no unguarded paged loop remains in dataAdapter.js', () => {
     const body = src.slice(h.index, h.index + 1200);
     assert.match(body, /isRangeExhaustedError/, `unguarded paged loop:\n${body.slice(0, 300)}`);
   }
+});
+
+test('source scan: every paged read in dataAdapter.js is TOTALLY ordered', () => {
+  // OFFSET paging over an unordered — or ties-ordered — result set lets
+  // Postgres return rows in a different order per request, so a page
+  // boundary can drop or repeat rows (stored rows shown as "new" in the
+  // import preview, a Compare count off by one, a taught rule listed twice
+  // and another hidden). Every chain that ends in .range( must order, and an
+  // order on ONE column must be on a unique one; anything else needs a
+  // tiebreak .order( after it.
+  const src = readFileSync(fileURLToPath(new URL('../src/dataAdapter.js', import.meta.url)), 'utf8');
+  const UNIQUE = new Set(["'id'", "'plaid_tx_id'"]);
+  const def = src.indexOf('export async function pagedRows(');
+  const defEnd = src.indexOf('\n}\n', def);
+  const starts = [
+    ...[...src.matchAll(/for \(let from = 0; ; from \+= page\)/g)].map(m => m.index),
+    ...[...src.matchAll(/\bpagedRows\(/g)].map(m => m.index),
+  ].filter(i => i < def || i > defEnd); // the generic loop itself orders nothing
+  assert.ok(starts.length >= 8, `scan regressed: found ${starts.length} paged reads`);
+  for (const start of starts) {
+    const body = src.slice(start, src.indexOf('\n}\n', start));
+    const chains = body.split('.range(').slice(0, -1);
+    assert.ok(chains.length, `paged read without a .range(:\n${body.slice(0, 300)}`);
+    for (const chain of chains) {
+      const orders = [...chain.matchAll(/\.order\(([^,)]+)/g)].map(m => m[1].trim());
+      assert.ok(orders.length, `unordered paged read:\n${chain.slice(-400)}`);
+      if (orders.length === 1) {
+        assert.ok(UNIQUE.has(orders[0]), `paged read ordered only by non-unique ${orders[0]}:\n${chain.slice(-400)}`);
+      }
+    }
+  }
+});
+
+// ---- PostgREST's max-rows cap ------------------------------------------------
+// Every read is clamped at max-rows (1000) server-side, whatever .limit() asks
+// for — so a .limit(1500) silently returns 1000. Past the cap, page.
+
+const root = fileURLToPath(new URL('..', import.meta.url));
+function sourceFiles(dir) {
+  const out = [];
+  for (const e of readdirSync(join(root, dir), { withFileTypes: true })) {
+    const rel = `${dir}/${e.name}`;
+    if (e.isDirectory()) out.push(...sourceFiles(rel));
+    else if (/\.(js|jsx|mjs)$/.test(e.name)) out.push(rel);
+  }
+  return out;
+}
+
+test('source scan: no .limit() above PostgREST max-rows anywhere in src/ or api/', () => {
+  const files = [...sourceFiles('src'), ...sourceFiles('api')];
+  assert.ok(files.length > 20, `scan regressed: ${files.length} files`);
+  for (const f of files) {
+    const src = readFileSync(join(root, f), 'utf8');
+    for (const m of src.matchAll(/\.limit\(\s*(\d+)\s*\)/g)) {
+      assert.ok(Number(m[1]) <= 1000, `${f}: .limit(${m[1]}) is clamped to 1000 by PostgREST — page it`);
+    }
+  }
+});
+
+test('source scan: every .range( chain in src/ and api/ is TOTALLY ordered', () => {
+  // The dataAdapter.js scan above finds paged reads by their loop shape; this
+  // one reads every PostgREST chain that ends in .range( anywhere in src/ or
+  // api/, back to its .from(, so a paged read outside the façade (taxIO's
+  // getMileage, api/sync.js's loadCategoryRules, api/_lib/spendingContext.js)
+  // or one written in a new loop shape can't skip the order. Same rule: at
+  // least one .order(, and a lone order must be on a unique column.
+  const UNIQUE = new Set(["'id'", "'plaid_tx_id'"]);
+  let chains = 0;
+  const outside = new Set();
+  for (const f of [...sourceFiles('src'), ...sourceFiles('api')]) {
+    const src = readFileSync(join(root, f), 'utf8');
+    for (const m of src.matchAll(/\.range\(/g)) {
+      const from = src.lastIndexOf('.from(', m.index);
+      assert.ok(from >= 0, `${f}: .range( with no .from( before it`);
+      const chain = src.slice(from, m.index);
+      chains++;
+      if (f !== 'src/dataAdapter.js') outside.add(f);
+      const orders = [...chain.matchAll(/\.order\(([^,)]+)/g)].map(o => o[1].trim());
+      assert.ok(orders.length, `${f}: unordered paged read:\n${chain.slice(0, 400)}`);
+      if (orders.length === 1) {
+        assert.ok(UNIQUE.has(orders[0]), `${f}: paged read ordered only by non-unique ${orders[0]}:\n${chain.slice(0, 400)}`);
+      }
+    }
+  }
+  assert.ok(chains >= 15, `scan regressed: found ${chains} .range( chains`);
+  for (const f of ['src/adapters/taxIO.js', 'api/sync.js', 'api/_lib/spendingContext.js']) {
+    assert.ok(outside.has(f), `scan regressed: no .range( chain found in ${f}`);
+  }
+});
+
+test('source scan: every category_rules READ pages, on both sides of the wire', () => {
+  let reads = 0;
+  for (const f of ['src/dataAdapter.js', 'api/sync.js']) {
+    const src = readFileSync(join(root, f), 'utf8');
+    for (const m of src.matchAll(/from\('category_rules'\)\s*\.select\(/g)) {
+      reads++;
+      const chain = src.slice(m.index, m.index + 600);
+      assert.match(chain, /\.range\(/, `${f}: unpaged category_rules read:\n${chain.slice(0, 300)}`);
+    }
+  }
+  assert.ok(reads >= 2, `scan regressed: found ${reads} category_rules reads`);
+});
+
+test('getMileage pages past max-rows in a total order', async () => {
+  const calls = [];
+  const client = {
+    from() {
+      const q = { orders: [], range: null };
+      const b = {
+        select() { return b; },
+        gte() { return b; },
+        lte() { return b; },
+        order(c, o) { q.orders.push([c, o]); return b; },
+        range(f, t) { q.range = [f, t]; return b; },
+        limit(n) { q.range = [0, n - 1]; return b; },
+        then(resolve, reject) {
+          calls.push(q);
+          const [f, t] = q.range;
+          const n = Math.max(0, Math.min(t + 1, 1200) - f);
+          const data = Array.from({ length: Math.min(n, 1000) }, (_, i) => ({ id: f + i }));
+          return Promise.resolve({ data, error: null }).then(resolve, reject);
+        },
+      };
+      return b;
+    },
+  };
+  const { mileage } = await getMileage(2026, { client });
+  assert.equal(mileage.length, 1200);
+  assert.deepEqual(calls.map(c => c.range), [[0, 999], [1000, 1999]]);
+  assert.deepEqual(calls[0].orders, [['on_date', { ascending: false }], ['id', { ascending: false }]]);
 });
 
 // ---- isMissingColumnError: the name check -----------------------------------

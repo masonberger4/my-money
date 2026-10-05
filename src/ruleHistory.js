@@ -26,7 +26,7 @@ export function ilikeCandidatePattern(key) {
   return `%${firstToken.replace(/([\\%_])/g, '\\$1')}%`;
 }
 
-// Cent-precision slot identity, the setCategoryRule delete-then-insert rule:
+// Cent-precision slot identity, the setCategoryRule slot-scoped write rule:
 // two null amounts are the same any-amount slot; two numbers are the same
 // slot when they agree at cent precision.
 function sameSlot(a, b) {
@@ -37,7 +37,7 @@ function sameSlot(a, b) {
 
 // The household's rules bag AS IT WILL BE once `key → category` (at `amount`,
 // null = any) is saved: the taught slot replaces its own previous occupant
-// (mirroring setCategoryRule's slot-scoped delete-then-insert) and every
+// (mirroring setCategoryRule's slot-scoped update-then-insert) and every
 // other rule survives untouched. Built so the history apply can re-match rows
 // against the SAME precedence write-time classification uses — an existing
 // amount-scoped or longer-key rule must keep its rows (see applyRuleToHistory).

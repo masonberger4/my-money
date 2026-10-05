@@ -69,4 +69,25 @@
     connection is broken. The throttle stamp is written as a NULL-safe
     CONDITIONAL update, guarding the two-device race — keep it conditional.
     One pull an hour (SimpleFIN refreshes ~daily).
+    Two more pull-level rules (2026-10-05), both pinned in
+    `test/syncOrchestration.test.js`. **The watermark is CLEARED to NULL before
+    a pull inserts a first-sight bank's accounts**: that bank's history
+    backfill is keyed on the accounts THIS call inserted, so once they exist
+    nothing triggers it again — a throw or a killed invocation after the insert
+    used to leave the old watermark, the next pull capped the newcomer at the
+    30-day overlap, and the rest of its window was lost for good. NULL makes the
+    next pull a full-window one (idempotent upserts, just a bigger response); a
+    clean finish re-advances it, and a pull that adds a bank AND carries a real
+    error leaves it NULL rather than at the old value. While that real error
+    persists (on that bank or any other on the same access URL), every pull
+    stays full-window until a clean one; `last_attempt_at` still throttles
+    them. A database missing that column would throttle on the NULL watermark,
+    i.e. not at all, but the column ships in the table's own create migration.
+    **The end-of-pull
+    `institutions` bookkeeping is a CONDITIONAL update too**
+    (`.neq('status','disabled')`): a Remove-bank can land between the pull's
+    start and its bookkeeping (the other phone, or the auto-sync still
+    running), and an unguarded `status: 'active'` silently undid the tombstone
+    — Restore vanished, and after a permanent delete the next pull re-created
+    the accounts. One atomic UPDATE closes it; keep it conditional.
 

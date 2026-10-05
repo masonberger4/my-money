@@ -8,6 +8,7 @@
 // when the migration hasn't been pasted yet (previews share the prod
 // database); the flags only ever flip true→false.
 import { supabase } from '../supabaseClient.js';
+import { isRangeExhaustedError } from '../ruleHistory.js';
 import { isMissingTableError } from './shared.js';
 
 let hasEntities = true;
@@ -55,23 +56,36 @@ export async function updateEntity(id, fields) {
 
 // --- Mileage log (hand-entered; valued by src/taxReport.js) ------------------
 
-export async function getMileage(year) {
+// Paged, never `.limit(n)`: PostgREST clamps any single read at max-rows
+// (1000), so the old 2000-row limit could only ever return 1000 drives — and
+// silently drop the year's EARLIEST ones (newest first). id is the tiebreak
+// that makes on_date's ties a total order across page boundaries.
+// `opts.client` is a test seam only (the envelopeIO recording-fake pattern).
+export async function getMileage(year, { client = supabase } = {}) {
   if (!hasMileage) return { mileage: [] };
-  const { data, error } = await supabase
-    .from('mileage_log')
-    .select('id, entity_id, on_date, miles, purpose')
-    .gte('on_date', `${year}-01-01`)
-    .lte('on_date', `${year}-12-31`)
-    .order('on_date', { ascending: false })
-    .limit(2000);
-  if (error) {
-    if (isMissingTableError(error)) {
-      hasMileage = false;
-      return { mileage: [] };
+  const mileage = [];
+  const page = 1000;
+  for (let from = 0; ; from += page) {
+    const { data, error } = await client
+      .from('mileage_log')
+      .select('id, entity_id, on_date, miles, purpose')
+      .gte('on_date', `${year}-01-01`)
+      .lte('on_date', `${year}-12-31`)
+      .order('on_date', { ascending: false })
+      .order('id', { ascending: false })
+      .range(from, from + page - 1);
+    if (error) {
+      if (isRangeExhaustedError(error)) break; // 416 = end-of-data (exact page multiple)
+      if (isMissingTableError(error)) {
+        hasMileage = false;
+        return { mileage: [] };
+      }
+      throw error;
     }
-    throw error;
+    mileage.push(...(data || []));
+    if (!data || data.length < page) break;
   }
-  return { mileage: data };
+  return { mileage };
 }
 
 export async function addMileage({ on_date, miles, purpose, entity_id }) {

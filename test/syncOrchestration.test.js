@@ -422,6 +422,56 @@ test('a disabled institution is a tombstone: its accounts and transactions are n
   });
 });
 
+test('REGRESSION: a bank removed MID-pull keeps its tombstone — the bookkeeping update is conditional', () => {
+  const fake = makeFakeSupabase({
+    simplefin_access: seedAccess({ last_pulled_at: daysAgoIso(10) }),
+    institutions: [
+      { id: 'inst-1', household_id: HH, simplefin_org_id: ORG_KEY, status: 'active', name: 'BECU' },
+    ],
+    accounts: [
+      {
+        id: 'acct-1',
+        household_id: HH,
+        institution_id: 'inst-1',
+        plaid_account_id: 'sfin:A1',
+        name: 'Everyday Checking',
+        type: 'depository',
+        subtype: 'checking',
+        hidden: false,
+        current_balance: 1500,
+      },
+    ],
+  });
+  const wire = {
+    errors: [],
+    accounts: [wireAcct('A1', 'Everyday Checking', '1500.00', [wireTx('t1', '-10.00', 'ZZZ')])],
+  };
+  // Remove-bank (api/unlink-institution.js) lands on the other phone while
+  // this pull is in flight: AFTER resolveOrgInstitutions read the bank as
+  // active, BEFORE the bookkeeping. The transactions upsert sits inside that
+  // window, so the tombstone is written the moment sync first touches it.
+  let removed = false;
+  const racingClient = {
+    from: table => {
+      if (table === 'transactions' && !removed) {
+        removed = true;
+        fake.rows('institutions')[0].status = 'disabled';
+      }
+      return fake.client.from(table);
+    },
+  };
+  return withFetchStub([{ body: wire }], async () => {
+    const res = await pull({ client: racingClient }, accessRow({ last_pulled_at: daysAgoIso(10) }));
+    assert.ok(removed, 'fixture sanity: the removal landed mid-pull');
+    assert.equal(res.institutions, 1, 'fixture sanity: resolve saw the bank as active');
+    const inst = fake.rows('institutions')[0];
+    assert.equal(inst.status, 'disabled', 'the tombstone survives the pull');
+    assert.equal(inst.last_successful_pull_at, undefined, 'and a removed bank is not stamped as freshly pulled');
+    const bookkeeping = fake.writes.find(w => w.table === 'institutions' && w.op === 'update');
+    assert.equal(bookkeeping.matched, 0, 'the guard is in the UPDATE itself, not a stale read');
+  });
+});
+
 // --- watermark application: advance / hold / reset ---------------------------
 
 // Seed for the watermark tests: A1 already exists, so the pull is a plain
@@ -610,6 +660,57 @@ test('a FAILED backfill resets the watermark to null — the only way the newcom
       assert.ok(sf.last_attempt_at, 'last_attempt_at still throttles, so the reset cannot loop');
     }
   );
+});
+
+test('REGRESSION: a pull that throws AFTER inserting a new account leaves the watermark null, so the next pull still reaches its history', async () => {
+  // A Bridge that honours start-date: t3 (60 days old) is served only to a
+  // request reaching back that far — the overlap-capped incremental pull
+  // (watermark − 30 days) never sees it.
+  const t3 = wireTx('t3', '-15.00', 'ZZZ OLD', { posted: epochDaysAgo(60) });
+  const bridge = url => {
+    const start = Number(new URL(url).searchParams.get('start-date'));
+    const a2 = [wireTx('t2', '-5.00', 'ZZZ TWO'), t3].filter(t => t.posted >= start);
+    const scoped = new URL(url).searchParams.getAll('account');
+    const accounts = [
+      wireAcct('A1', 'Everyday Checking', '100.00', [wireTx('t1', '-10.00', 'ZZZ ONE')]),
+      wireAcct('A2', 'Holiday Savings', '20.00', a2),
+    ].filter(a => !scoped.length || scoped.includes(a.id));
+    return { body: { errors: [], accounts } };
+  };
+
+  // Pull 1: every transactions upsert answers PGRST204 naming `pulled_at` —
+  // not `source`, so sync neither retries it nor flips a sticky degrade flag,
+  // and the pull throws with the newcomer A2 already inserted.
+  const fake1 = makeFakeSupabase(backfillSeed(), { missingColumns: { transactions: ['pulled_at'] } });
+  await withFetchStub(bridge, async calls => {
+    await assert.rejects(() => pull(fake1, accessRow({ last_pulled_at: daysAgoIso(10) })), { code: 'PGRST204' });
+    assert.equal(calls.length, 2, 'main pull + the scoped backfill, whose rows never landed');
+    assert.ok(fake1.rows('accounts').some(a => a.plaid_account_id === 'sfin:A2'), 'A2 was inserted before the throw');
+    assert.equal(fake1.rows('transactions').length, 0);
+    const sf = fake1.rows('simplefin_access')[0];
+    assert.equal(sf.last_pulled_at, null, 'the watermark was cleared before the insert, so the throw cannot strand A2');
+    const preNull = fake1.writes.findIndex(w => w.table === 'simplefin_access' && w.patch && 'last_pulled_at' in w.patch);
+    const acctInsert = fake1.writes.findIndex(w => w.table === 'accounts' && w.op === 'upsert');
+    assert.ok(preNull >= 0 && preNull < acctInsert, 'the reset lands BEFORE the accounts insert');
+  });
+
+  // Pull 2, the fault gone: A2 now exists, so no backfill fires — the NULL
+  // watermark alone makes this a full-window pull that reaches t3.
+  const fake2 = makeFakeSupabase(Object.fromEntries(fake1.tables));
+  await withFetchStub(bridge, async calls => {
+    const sf = fake2.rows('simplefin_access')[0];
+    const res = await pull(fake2, accessRow({ last_pulled_at: sf.last_pulled_at }), { force: true });
+    assert.equal(res.accounts_created, 0);
+    assert.equal(calls.length, 1, 'no backfill — A2 no longer looks new');
+    const startSec = Number(new URL(calls[0].url).searchParams.get('start-date'));
+    assert.ok(
+      Math.abs(startSec * 1000 - (Date.now() - MAX_LOOKBACK_DAYS * DAY_MS)) < DAY_MS,
+      'a full-window request, not watermark − 30 days'
+    );
+    const a2 = fake2.rows('accounts').find(a => a.plaid_account_id === 'sfin:A2');
+    assert.ok(fake2.rows('transactions').some(t => t.plaid_tx_id === 'sfin:t3' && t.account_id === a2.id), 'the 60-day-old row arrives');
+    assert.ok(fake2.rows('simplefin_access')[0].last_pulled_at, 'and the clean pull re-advances the watermark');
+  });
 });
 
 // --- degrade paths -----------------------------------------------------------
