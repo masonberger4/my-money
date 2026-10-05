@@ -920,12 +920,23 @@ const TYPE_RULES = [
 // — they both offer checking, so their name alone proves nothing.
 const CARD_ONLY_ISSUER_RE = /\b(american express|amex|discover|barclaycard|barclays|synchrony|comenity|credit one|first premier|bread financial)\b/i;
 
+// `org` is the NORMALIZED org (normalizeAccount's { key, label, domain, url }),
+// which is what api/sync.js passes — it has no `name`. Reading `org.name` here
+// once left the card-only-issuer rule dead in production while unit tests
+// handing a raw `{ name }` kept it looking alive.
+//
+// The TYPE_RULES see the ACCOUNT NAME ONLY. Institution names are full of rule
+// words — "… Savings and Loan", "… Credit Union", "… Savings Bank" — and the
+// loan and savings rules run first, so mixing the org into the haystack would
+// type "Everyday Checking" at a Savings & Loan as a loan and a share account
+// at a credit union as a card. The org name is a FALLBACK signal, consulted
+// only when the account name says nothing.
 export function inferAccountType(name, org, balance) {
-  const haystack = `${String(name || '')} ${String(org?.name || '')}`;
+  const accountName = String(name || '');
   for (const [re, out] of TYPE_RULES) {
-    if (re.test(haystack)) return { ...out, inferred: true };
+    if (re.test(accountName)) return { ...out, inferred: true };
   }
-  if (CARD_ONLY_ISSUER_RE.test(String(org?.name || ''))) {
+  if (CARD_ONLY_ISSUER_RE.test(String(org?.label || ''))) {
     return { type: 'credit', subtype: 'credit card', inferred: true };
   }
   // Last resort before the fallback: SimpleFIN reports a debt balance as

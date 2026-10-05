@@ -17,9 +17,16 @@ const secs = (y, m, d) => Math.floor(Date.UTC(y, m - 1, d, 12) / 1000);
 
 // --- inferAccountType --------------------------------------------------------
 
+// The org exactly as api/sync.js passes it: NORMALIZED by normalizeAccount
+// ({ key, label, domain, url } — no `name`). Built through the real normalizer
+// so these tests cannot drift from production again: the card-only-issuer
+// test used to hand a raw `{ name }`, which kept a rule that production never
+// reached looking alive.
+const orgOf = name => normalizeAccount({ id: 'x', name: 'n', org: { name } }).org;
+
 test('card PRODUCT names with no card-ish word resolve credit (the Venture X shape)', () => {
   for (const name of ['Venture X', 'Quicksilver', 'Freedom Unlimited', 'Sapphire Reserve']) {
-    const r = inferAccountType(name, { name: 'Big National Bank' }, null);
+    const r = inferAccountType(name, orgOf('Big National Bank'), null);
     assert.equal(r.type, 'credit', name);
     assert.equal(r.subtype, 'credit card');
   }
@@ -30,29 +37,58 @@ test('REGRESSION: deposit rules run FIRST — "Platinum Savings" / "Preferred Ch
   // deposit words must claim these accounts before the card rules see them.
   // A reorder silently turns a savings account into a card — and with it,
   // every outflow's spending treatment.
-  const savings = inferAccountType('Platinum Savings', { name: 'Big National Bank' }, null);
+  const savings = inferAccountType('Platinum Savings', orgOf('Big National Bank'), null);
   assert.deepEqual([savings.type, savings.subtype], ['depository', 'savings']);
-  const checking = inferAccountType('Preferred Checking', { name: 'Big National Bank' }, null);
+  const checking = inferAccountType('Preferred Checking', orgOf('Big National Bank'), null);
   assert.deepEqual([checking.type, checking.subtype], ['depository', 'checking']);
 });
 
-test('a card-only issuer in the org name resolves credit when the name says nothing', () => {
-  const r = inferAccountType('MyStore Account', { name: 'Synchrony Bank' }, null);
+test('a card-only issuer in the org name resolves credit when the name says nothing (production org shape)', () => {
+  const r = inferAccountType('MyStore Account', orgOf('Synchrony Bank'), null);
   assert.equal(r.type, 'credit');
+  assert.equal(r.subtype, 'credit card');
   // …but a full-service bank's name proves nothing: unrecognisable + no
   // balance signal falls through to the uncertain checking default.
-  const r2 = inferAccountType('MyStore Account', { name: 'Chase' }, null);
+  const r2 = inferAccountType('MyStore Account', orgOf('Chase'), null);
   assert.equal(r2.type, 'depository');
+  assert.equal(r2.uncertain, true);
+  // The account name outranks the issuer: a card-heavy issuer's savings
+  // product is still savings.
+  const r3 = inferAccountType('High Yield Savings', orgOf('Synchrony Bank'), null);
+  assert.deepEqual([r3.type, r3.subtype], ['depository', 'savings']);
+});
+
+test('REGRESSION: the institution name never feeds the name rules — "Savings and Loan" / "Credit Union" / "Savings Bank" are not account types', () => {
+  // The loan and savings rules run first and the card rule matches a bare
+  // "credit", so an org name in the haystack would override even an explicit
+  // "Checking" in the account name.
+  const cases = [
+    ['Everyday Checking', 'First Federal Savings and Loan', ['depository', 'checking']],
+    ['Visa Signature', 'Peoples Savings Bank', ['credit', 'credit card']],
+    ['Share Draft', 'Lakeside Federal Credit Union', ['depository', 'checking']],
+  ];
+  for (const [name, org, want] of cases) {
+    const r = inferAccountType(name, orgOf(org), null);
+    assert.deepEqual([r.type, r.subtype], want, `${name} @ ${org}`);
+  }
+  // Unrecognisable names fall to the uncertain default — never to the type
+  // the institution's own name happens to spell.
+  const share = inferAccountType('Membership Share', orgOf('Lakeside Federal Credit Union'), 250);
+  assert.notEqual(share.type, 'credit', 'a CU share account is not a card');
+  assert.equal(share.uncertain, true);
+  const sl = inferAccountType('Acct 0042', orgOf('Home Savings & Loan'), 900);
+  assert.notEqual(sl.type, 'loan', 'an account at a Savings & Loan is not a loan');
+  assert.equal(sl.uncertain, true);
 });
 
 test('negative-balance fallback: an unrecognisable account with a negative balance is a card, flagged uncertain', () => {
-  const r = inferAccountType('Acct 4471', { name: 'Some CU' }, -523.12);
+  const r = inferAccountType('Acct 4471', orgOf('Some CU'), -523.12);
   assert.equal(r.type, 'credit');
   assert.equal(r.uncertain, true, 'the sync logs uncertain guesses for eyeballing');
 });
 
 test('nothing matched → depository/checking, flagged uncertain (visible, so a wrong guess is noticed)', () => {
-  const r = inferAccountType('Acct 4471', { name: 'Some CU' }, 100.0);
+  const r = inferAccountType('Acct 4471', orgOf('Some CU'), 100.0);
   assert.deepEqual([r.type, r.subtype], ['depository', 'checking']);
   assert.equal(r.uncertain, true);
   assert.equal(r.inferred, true);
