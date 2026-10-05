@@ -191,6 +191,19 @@ export function resolveTemplateForTarget({ saved = null, auto = null, current = 
   return { template: current, source: current ? 'edited' : null, offerSaved: null };
 }
 
+// The account list the import modal classifies its target against: the
+// parent's `accounts` plus an account THIS modal just created, until the
+// parent's reload brings it in (then the parent's copy wins). The modal
+// ADOPTS the account it creates (target moves off "new" onto it) so a retry
+// after a failed write, a later file, or "Open alone" after a batch imports
+// into that account instead of minting a same-named twin — and the target
+// can only resolve if the new row is in the list it is looked up in.
+export function withCreatedAccount(accounts, created) {
+  const list = Array.isArray(accounts) ? accounts : [];
+  if (!created || created.id == null) return list;
+  return list.some(a => a && a.id === created.id) ? list : [...list, created];
+}
+
 // Which of an account's existing row-sources CONFLICT with the format being
 // imported. The rule is csv-vs-pdf and only that (a bank words the same
 // transaction differently in the two formats, so their dedup hashes differ and

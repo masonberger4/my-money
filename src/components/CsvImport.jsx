@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { analyzeCsv, toInsertRow, parseCsv, reconcileCsv, csvDateRange, buildRows, importPlan, planFileBatch, fileKindOf, hasSingleAmountColumn, conflictingSources, resolveTemplateForTarget } from "../csvImport.js";
+import { analyzeCsv, toInsertRow, parseCsv, reconcileCsv, csvDateRange, buildRows, importPlan, planFileBatch, fileKindOf, hasSingleAmountColumn, conflictingSources, resolveTemplateForTarget, withCreatedAccount } from "../csvImport.js";
 import { applyTemplate, autoDetectTemplate, defaultTemplate, rowTotals, TEMPLATE_VERSION } from "../pdfImport.js";
 import { createManualAccount, importCsvTransactions, getExistingTxIds, getAccountTransactionsInRange, isManualAccount, isSimpleFinAccount, getCategoryRules, getFeedCoverageStart } from "../dataAdapter.js";
 import { FEED_OVERLAP_DAYS, FEED_REACH_DAYS } from "../coverage.js";
@@ -121,6 +121,24 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
   const [forceManual, setForceManual] = useState(false);
   const [amountSign, setAmountSign] = useState("in_positive");
   const [target, setTarget] = useState("new"); // "new" | accountId
+  // The account this modal created for target "new", ADOPTED as the target
+  // (see withCreatedAccount) so nothing later can mint a same-named twin.
+  const [createdAcct, setCreatedAcct] = useState(null);
+  // True while an account this modal created has not been reported to the
+  // parent (its rows failed, or a batch wrote nothing). Reported on CLOSE, not
+  // at the failure: in the first-run EmptyState that refresh swaps this modal
+  // for the Dashboard, throwing away the adopted target a retry needs — and a
+  // fresh modal defaults to "new" again, which is the twin all over.
+  const unreportedAcctRef = useRef(false);
+  const onImportedRef = useRef(onImported);
+  useEffect(() => { onImportedRef.current = onImported; }, [onImported]);
+  useEffect(() => () => {
+    if (unreportedAcctRef.current) { unreportedAcctRef.current = false; onImportedRef.current?.(); }
+  }, []);
+  const reportImported = () => {
+    unreportedAcctRef.current = false;
+    if (onImported) onImported();
+  };
   const [newName, setNewName] = useState("");
   const [newSubtype, setNewSubtype] = useState("checking");
   const [existingIds, setExistingIds] = useState(new Set());
@@ -185,18 +203,22 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
   // the audit chips are actually read against.
   const cardSurface = useSurface("--card");
 
-  const manual = accounts.filter(isManualAccount);
-  const simplefin = accounts.filter(isSimpleFinAccount);
+  // The parent's list plus the account this modal created, until the parent's
+  // reload brings it in — the adopted target must resolve to a manual account
+  // and to an option of the controlled <select> below.
+  const allAccounts = withCreatedAccount(accounts, createdAcct);
+  const manual = allAccounts.filter(isManualAccount);
+  const simplefin = allAccounts.filter(isSimpleFinAccount);
   // Neither manual nor SimpleFIN. Normally empty now that Plaid is gone, but
   // reachable from a hand-edited row or a half-applied migration. Its dedup
   // namespace is unknown, so it can only ever be COMPARED against, never
   // imported into.
-  const other = accounts.filter(a => !isManualAccount(a) && !isSimpleFinAccount(a));
+  const other = allAccounts.filter(a => !isManualAccount(a) && !isSimpleFinAccount(a));
   // Every account fed by something other than this importer — i.e. anything a
   // statement could ALREADY be covered by. Deliberately "not manual" rather
   // than "is SimpleFIN", so a feed we don't recognise still triggers the
   // duplicate-account warning below; erring toward warning is the safe side.
-  const fedAccounts = accounts.filter(a => !isManualAccount(a));
+  const fedAccounts = allAccounts.filter(a => !isManualAccount(a));
 
   // Target classification, stated POSITIVELY. The old code derived
   // `targetIsManual = !targetIsPlaid`, which quietly became true for every
@@ -204,7 +226,7 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
   // derivation that survives only as long as the thing it negates exists.
   // `targetIsUnknown` is the fail-closed branch that used to be provided
   // accidentally by `plaid` catching everything unrecognised.
-  const targetAcct = target !== "new" ? accounts.find(a => a.id === target) : null;
+  const targetAcct = target !== "new" ? allAccounts.find(a => a.id === target) : null;
   const targetIsExisting = !!targetAcct;
   const targetIsSimpleFin = !!targetAcct && isSimpleFinAccount(targetAcct);
   const targetIsManual = !!targetAcct && isManualAccount(targetAcct);
@@ -723,6 +745,13 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
         const acct = await createManualAccount({ name: newName.trim(), subtype: newSubtype });
         accountId = acct.id;
         accountName = acct.name;
+        // ADOPT it before anything else can fail: with target left on "new"
+        // and the name still filled in, Import again (or "Open alone") created
+        // a second same-named account. The rest of THIS run keeps the local
+        // accountId — the state update isn't visible inside this closure.
+        setCreatedAcct(acct);
+        setTarget(acct.id);
+        unreportedAcctRef.current = true;
       }
       const payload = newRows.map(toInsertRow);
       if (overlapFrom && payload.some(r => r.date >= overlapFrom)) {
@@ -739,7 +768,7 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
         }
       }
       setResult({ written, dupCount, skipped: skipped.length, accountName, savedTemplate: fileKind === "pdf" });
-      if (onImported) onImported();
+      reportImported();
     } catch (e) {
       console.error("csv import failed", e);
       setError(e.message || "Import failed.");
@@ -848,9 +877,14 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
         throw new Error("internal: no feed boundary — refusing to import into a fed account");
       }
       if (target === "new") {
-        // One new account for the whole batch, created before the first file.
+        // One new account for the whole batch, created before the first file,
+        // and ADOPTED as the target — "Open alone" on a failed file afterwards
+        // must import into THIS account, not mint a same-named twin.
         const acct = await createManualAccount({ name: newName.trim(), subtype: newSubtype });
         accountId = acct.id;
+        setCreatedAcct(acct);
+        setTarget(acct.id);
+        unreportedAcctRef.current = true;
       }
     } catch (e) {
       console.error("batch setup failed", e);
@@ -1020,13 +1054,14 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
     }
     if (batchAbortRef.current) {
       // Unmounted mid-run: no UI left to show a summary, but rows already
-      // landed — refresh the Dashboard so they appear.
-      if (totals.written > 0 && onImported) onImported();
+      // landed — refresh the Dashboard so they appear. (An account created
+      // with nothing written is reported by the unmount effect.)
+      if (totals.written > 0) reportImported();
       return;
     }
     setBatchSummary({ ...totals, files: queue.length });
     setBatchRunning(false);
-    if (totals.written > 0 && onImported) onImported();
+    if (totals.written > 0) reportImported();
   }
 
   const panelStyle = {

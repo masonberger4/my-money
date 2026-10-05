@@ -534,7 +534,12 @@ export async function getNetWorthSeries() {
 }
 export async function updateManualBalance() {}
 export async function addManualTransaction() {}
-export async function createManualAccount() { return { id: 'am1' }; }
+// A manual-shaped row, like the real insert returns: the import modal ADOPTS
+// the account it creates and classifies it locally until the parent reloads,
+// so a bare { id } would read as an unknown (compare-only) account.
+export async function createManualAccount({ name = 'Imported', subtype = 'checking' } = {}) {
+  return { id: 'am1', name, subtype, nickname: null, plaid_account_id: 'manual:am1', is_manual: true, type: 'depository', hidden: false };
+}
 export async function getFeedCoverageStart() { return null; }
 export async function getDataCoverage() { return { accounts: [], months: [] }; }
 // The removed-imported marker. Null = nothing removed, which is the harness's

@@ -19,6 +19,7 @@ import {
   resolveTemplateForTarget,
   parseDate,
   buildRows,
+  withCreatedAccount,
 } from '../src/csvImport.js';
 import { TRANSFER_CATEGORY, FALLBACK_CATEGORY } from '../src/categoryMap.js';
 import { pullWasClean } from '../src/sync.js';
@@ -682,4 +683,47 @@ test('REGRESSION: a detected CSV that builds 0 rows offers "Map columns by hand"
   const onFile = src.slice(src.indexOf('async function onFile'), src.indexOf('async function loadSingleFile'));
   assert.match(onFile, /setForceManual\(false\)/);
   assert.doesNotMatch(src, /setSetting\([^)]*csv/i, 'no per-account CSV column memory');
+});
+
+// --- 2026-10 import audit (F42): an account created for "new" is ADOPTED ----
+// confirm() and runBatch() created the account into a local variable and left
+// `target` on "new" with the name still filled in. A retry after a failed
+// write, or "Open alone" after a batch, then minted a SECOND same-named
+// account (createManualAccount has no name dedup) and imported against an
+// empty id set — the month split across twins, boundary-day rows in both.
+test('withCreatedAccount appends a created account the parent list does not hold yet', () => {
+  const a = [{ id: 'a1' }, { id: 'a2' }];
+  const created = { id: 'n1', name: 'Chase Card', plaid_account_id: 'manual:x' };
+  assert.deepEqual(withCreatedAccount(a, created).map(x => x.id), ['a1', 'a2', 'n1']);
+  assert.deepEqual(a.map(x => x.id), ['a1', 'a2'], 'never mutates the prop');
+});
+
+test('withCreatedAccount does not duplicate once the parent has reloaded it, and is a no-op for null', () => {
+  const a = [{ id: 'a1' }, { id: 'n1', name: 'Chase Card (reloaded)' }];
+  assert.equal(withCreatedAccount(a, { id: 'n1', name: 'Chase Card' }), a, 'the parent copy wins, same array');
+  assert.equal(withCreatedAccount(a, null), a);
+  assert.deepEqual(withCreatedAccount(null, null), []);
+  assert.deepEqual(withCreatedAccount(undefined, { id: 'n1' }).map(x => x.id), ['n1']);
+});
+
+test('REGRESSION: every createManualAccount in the import modal adopts the account it creates', () => {
+  const src = read('src/components/CsvImport.jsx');
+  const calls = [...src.matchAll(/await createManualAccount\(/g)];
+  assert.equal(calls.length, 2, 'confirm() and runBatch() — update this pin if a third site appears');
+  for (const m of calls) {
+    const after = src.slice(m.index, m.index + 700);
+    assert.match(after, /setCreatedAcct\(acct\)/, 'the created row must be merged locally until the parent reloads');
+    assert.match(after, /setTarget\(acct\.id\)/, 'target must move off "new" or a retry mints a twin');
+    assert.match(after, /unreportedAcctRef\.current = true/, 'a created account must reach the parent even if no row lands');
+  }
+  // ...reported on CLOSE, not at the failure: in the first-run EmptyState the
+  // parent's refresh swaps this modal for the Dashboard, discarding the
+  // adopted target a retry needs.
+  assert.match(src, /useEffect\(\(\) => \(\) => \{\s*if \(unreportedAcctRef\.current\) \{[^}]*onImportedRef\.current\?\.\(\)/);
+  // Classification reads the MERGED list: the raw prop has no row for the new
+  // id until reloadData lands, which would make targetAcct null (targetIsManual
+  // false) and leave the controlled <select> pointing at no option.
+  assert.match(src, /const allAccounts = withCreatedAccount\(accounts, createdAcct\)/);
+  assert.doesNotMatch(src, /\baccounts\.find\(a => a\.id === target\)/);
+  assert.doesNotMatch(src, /\baccounts\.filter\(/);
 });
