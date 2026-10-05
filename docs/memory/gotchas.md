@@ -137,7 +137,17 @@
   re-resolves per hop incl. hop 0. It stays a BLOCKLIST because a self-hosted
   SimpleFIN server is legitimate, and a resolve-then-fetch TOCTOU rebinding window
   is knowingly accepted (connect-time IP pinning is impractical in serverless) —
-  the threat model is a phished setup token, not a remote attacker.
+  the threat model is a phished setup token, not a remote attacker. Following
+  redirects BY HAND also loses the other thing fetch does on its own: the Fetch
+  standard drops the `Authorization` header when a redirect crosses origins,
+  and the manual loop re-sent the access URL's Basic credential — which reads
+  every linked bank — to whatever host a 302 named. Since 2026-10-05
+  `fetchNoOpenRedirect` strips it once a hop leaves the current origin (a
+  different port counts) and keeps it stripped for every later hop; a
+  same-origin move keeps it, so a Bridge path change still authenticates, and
+  a cross-origin target answers 403 → `auth_failed` instead of receiving the
+  credential. Don't "simplify" the loop back to re-sending the original `init`
+  (`test/simplefinToken.test.js`).
 - A missing-COLUMN error names its table too ("column simplefin_access.
   last_attempt_at does not exist"), so the graceful-degrade checks for a missing
   table and a missing column must be **separate** tests (`isMissingTableError` /
@@ -150,6 +160,35 @@
   array, which is why the SimpleFIN account write splits into a bulk insert for
   new accounts and per-row updates for existing ones — restating type/subtype/
   hidden in a uniform payload is precisely what must not be overwritten.
+- **PostgREST clamps EVERY read at max-rows (1000), whatever `.limit()` asks —
+  and says nothing.** A read capped at 1500 returns 1000 rows and no error. It
+  bit three ways before 2026-10-05: the assistant's 90-day window (read newest
+  first) silently lost its OLDEST days, the mileage log could never list more
+  than 1000 drives, and the classifier's unpaged `category_rules` read past
+  ~1000 taught rules dropped an ARBITRARY subset, so those merchants imported
+  Uncategorized while the rules screen still listed them. Anything that can
+  pass 1000 rows pages with `.range` (`pagedRows`, or an inline loop with the
+  416/PGRST103 end-of-range guard `isRangeExhaustedError`), and every paged
+  read is TOTALLY ordered — OFFSET paging over ties can drop or repeat a row
+  at a page boundary, and a dropped stored id makes a re-import show a stored
+  row as new. Order on a unique column or add a tiebreak (date then
+  `plaid_tx_id`; `on_date` then `id`; `category_rules` by `merchant_key` then
+  amount nulls first, the pair its two partial unique indexes make unique —
+  `readRuleRows`, mirrored by api/sync.js's `loadCategoryRules`).
+  `test/pagedGuards.test.js` source-scans all of it, so a new read that skips
+  the rule goes red there.
+- **A unit test that hands a function an input shape production never builds
+  can keep a dead rule looking alive.** `inferAccountType`'s card-only-issuer
+  rule read `org.name`, but api/sync.js passes the NORMALIZED org, which has a
+  `label` and no `name` — so the rule never fired in production while every
+  test, handing it a raw `{ name }`, passed (found 2026-10-05). The same blind
+  spot cut the other way: the audit finding "a Savings and Loan's checking
+  account types as a loan" could not happen in production, only because the
+  field was undefined, and the obvious fix (read the label in the shared
+  haystack) would have made it real. Drive a rule through its real producer —
+  the REGRESSION in `test/simplefinNormalize.test.js` runs
+  `normalizeAccountSet` → `inferAccountType` over both wire versions — or at
+  least build the fixture with it.
 - Vercel `VITE_*` vars are baked at BUILD time — changing them needs a redeploy
   (check Production AND Preview). Missing client config renders the
   ConfigErrorScreen (App.jsx), not white. **Supabase key naming** (renamed
@@ -226,7 +265,8 @@
   (Chrome says "Failed to fetch"); on iOS it is usually the PWA resuming from the
   background or the phone hopping cells, sending the first request on an HTTP/2
   socket the OS already closed — that request is lost and the next one succeeds.
-  supabase-js re-sends only GET/HEAD/OPTIONS itself, so reads self-heal and only a
+  supabase-js re-sends only GET/HEAD/OPTIONS itself (a plain fetch, like
+  apiClient's, gets no such budget — the netRetry row), so reads self-heal and only a
   WRITE ever surfaced it (the category pick alerted "Couldn't save that change:
   TypeError: Load failed"). Fixed 2026-09-08 by `makeRetryingFetch` — the
   `src/netRetry.js` key row has the scope rules. The shape to recognise while
