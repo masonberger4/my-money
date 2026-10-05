@@ -65,6 +65,30 @@ test('every allowlisted model carries the fields the server reads', () => {
   }
 });
 
+test('list prices are pinned as documentation (USD per million tokens, input/output)', () => {
+  // A failure here means a price moved or a model changed: re-verify against
+  // Anthropic's current pricing table before updating these numbers. They
+  // feed the "~X–Y¢/question" chip and nothing else, but a stale price
+  // quietly steers the household toward the wrong model.
+  const prices = Object.fromEntries(
+    Object.entries(ASSISTANT_MODELS).map(([id, m]) => [id, [m.inPerM, m.outPerM]])
+  );
+  assert.deepEqual(prices, {
+    'claude-haiku-4-5': [1, 5],
+    'claude-sonnet-5': [2, 10],
+    'claude-opus-4-8': [5, 25],
+  });
+});
+
+test('estimateCostRange: exact values for one model × effort (the formula, pinned)', () => {
+  // low  = cached context (0.1×) + a short answer
+  // high = context written to cache (1.25×) + the effort's output budget
+  const r = estimateCostRange('claude-sonnet-5', 'medium');
+  const close = (a, b) => Math.abs(a - b) < 1e-12;
+  assert.ok(close(r.low, (9000 * 2 * 0.1 + 400 * 10) / 1e6), `low ${r.low}`);
+  assert.ok(close(r.high, (9000 * 2 * 1.25 + 2500 * 10) / 1e6), `high ${r.high}`); // 0.0475
+});
+
 test('formatCents renders sub-dime amounts with a decimal and larger ones whole', () => {
   assert.equal(formatCents(0.004), '0.4¢');
   assert.equal(formatCents(0.16), '16¢');
