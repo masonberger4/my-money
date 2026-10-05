@@ -425,8 +425,12 @@ export async function updateTransaction(id, fields) {
   // The 4-type override; null = back to automatic (the user_category shape).
   if ('user_type' in fields) allowed.user_type = fields.user_type;
   // The date override; null = back to the bank's date. Only `user_date` is
-  // written — the trigger (20260908000001) moves `date` to match, so the
-  // effective date has ONE writer and a sync re-pull can't undo the edit.
+  // written. `date` stays the BANK's (sync keeps restating it — no trigger
+  // rewrites it; that design was rejected), and the STORED generated column
+  // `effective_date = coalesce(user_date, date)` (20260908000001) is the ONE
+  // month-bucketing verdict: read months through txDateCol()/
+  // withEffectiveDate(), never plain `date`. A re-pull can't undo the edit
+  // because every feed writer omits user_date.
   if ('user_date' in fields) allowed.user_date = fields.user_date;
   if ('entity_id' in fields) allowed.entity_id = fields.entity_id;
   if ('is_capital' in fields) allowed.is_capital = fields.is_capital;
