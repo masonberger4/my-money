@@ -15,6 +15,7 @@ import { aggregateCoverage, feedCoverageGaps, FEED_REACH_DAYS } from './coverage
 import { netWorthSeries, clampSeries } from './netWorth.js';
 import { buildReconciliation, reconciliationScope } from './reconciliation.js';
 import { localIsoDate, localTodayIso } from './format.js';
+import { summarizeDebts } from './debtPayoff.js';
 import {
   pad2,
   monthBounds,
@@ -549,16 +550,13 @@ export async function getDebts() {
       next_payment_due_date: a.next_payment_due_date ?? null,
       interest_rate: a.interest_rate ?? null,
       original_balance: a.original_balance ?? null,
-      // One normalized rate for payoff math — stored as PERCENT; divide by 100
-      // for monthly amortization (src/debtPayoff.js does).
-      debtRate: a.apr ?? a.interest_rate ?? null,
     }));
-  const totalDebt = debts.reduce((s, a) => s + (Number(a.current_balance) || 0), 0);
-  const totalMinimums = debts.reduce((s, a) => s + (Number(a.minimum_payment) || 0), 0);
+  // debtRate (one normalized PERCENT rate) + the two totals come from the
+  // shared summarizeDebts, the same derivation the Debt view's edits use.
   // hasDebtColumns tells the Debt view whether the liability columns exist yet
   // (false pre-migration → it hides the APR/min editors instead of offering
   // edits that can't be written).
-  return { debts, totalDebt, totalMinimums, hasDebtColumns: accountsHaveDebtColumns };
+  return { ...summarizeDebts(debts), hasDebtColumns: accountsHaveDebtColumns };
 }
 
 // Balance history for the debt-over-time chart. Returns an ARRAY of

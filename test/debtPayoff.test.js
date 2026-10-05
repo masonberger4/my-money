@@ -20,7 +20,7 @@ import {
   simulatePayoff,
   payoffWhatIf,
   addMonths,
-  debtFreeMonth, payoffProgress, utilization } from '../src/debtPayoff.js';
+  debtFreeMonth, payoffProgress, utilization, summarizeDebts } from '../src/debtPayoff.js';
 
 const debt = (over = {}) => ({
   id: over.id ?? 'd1',
@@ -326,4 +326,41 @@ test('the payoff projection lines resolve each debt\'s label through acctLabel b
   assert.match(dash, /const incById=new Map\(included\.map\(d=>\[d\.id,d\]\)\);/);
   assert.match(dash, /\{acctLabel\(incById\.get\(d\.id\)\)\|\|d\.name\|\|"\?"\} clears /);
   assert.doesNotMatch(dash, /\{d\.name\|\|"\?"\} clears /, 'the raw bank name is only a fallback');
+});
+
+// --- 2026-10 audit: one derivation for the debt cache's derived fields -------
+// getDebts, saveDebt and patchBal (plus the smoke mock) each carried their own
+// copy of the debtRate / totalDebt / totalMinimums formulas — identical today,
+// one edit away from a headline that jumps between a load and an edit.
+test('summarizeDebts: debtRate is apr ?? interest_rate (null when neither), totals in the stored sign', () => {
+  const input = [
+    debt({ id: 'a', apr: 22.9, interest_rate: 5, current_balance: 1000, minimum_payment: 35 }),
+    debt({ id: 'b', apr: null, interest_rate: 4.5, current_balance: '6500.25', minimum_payment: '250' }),
+    debt({ id: 'c', apr: 0, interest_rate: 9, current_balance: -75, minimum_payment: null }),
+    debt({ id: 'd', current_balance: null, minimum_payment: undefined }),
+  ];
+  const s = summarizeDebts(input);
+  assert.deepEqual(s.debts.map(d => d.debtRate), [22.9, 4.5, 0, null], 'apr wins, even a typed 0');
+  assert.equal(s.totalDebt, 1000 + 6500.25 - 75, 'numeric strings coerce; a card in credit nets');
+  assert.equal(s.totalMinimums, 285, 'rows without a minimum count 0');
+  assert.equal('debtRate' in input[0], false, 'the input rows are not mutated');
+  assert.deepEqual(Object.keys(s), ['debts', 'totalDebt', 'totalMinimums']);
+});
+
+test('summarizeDebts: empty or missing input gives zero totals', () => {
+  assert.deepEqual(summarizeDebts([]), { debts: [], totalDebt: 0, totalMinimums: 0 });
+  assert.deepEqual(summarizeDebts(null), { debts: [], totalDebt: 0, totalMinimums: 0 });
+});
+
+test('getDebts, saveDebt, patchBal and the smoke mock all derive through summarizeDebts', () => {
+  const adapter = readFileSync(join(root, 'src/dataAdapter.js'), 'utf8');
+  const getDebts = adapter.slice(adapter.indexOf('export async function getDebts('), adapter.indexOf('export async function getBalanceSnapshots('));
+  assert.match(getDebts, /\.\.\.summarizeDebts\(debts\)/);
+  assert.doesNotMatch(getDebts, /debtRate:|\.reduce\(/, 'no inline copy of the derivation');
+  const dash = readFileSync(join(root, 'src/components/Dashboard.jsx'), 'utf8');
+  assert.match(dash, /function saveDebt\(id,fields\)\{[\s\S]{0,120}summarizeDebts\(prev\.debts\.map\(a=>a\.id===id\?\{\.\.\.a,\.\.\.fields\}:a\)\)/);
+  assert.match(dash, /const patchBal=\(bal,at\)=>\{\s*setDebtData\(prev=>prev&&\{\.\.\.prev,\.\.\.summarizeDebts\(/);
+  assert.doesNotMatch(dash, /debtRate=|totalDebt:debts\.reduce|totalMinimums:debts\.reduce/);
+  const mock = readFileSync(join(root, 'test/smoke/mocks/dataAdapter.js'), 'utf8');
+  assert.match(mock, /\.\.\.summarizeDebts\(debts\), hasDebtColumns: true/);
 });

@@ -5,6 +5,7 @@ import { toTxShape, spendingGroups, biggestMovers } from '../../../src/spending.
 import { markInternalTransfers, cashIncome } from '../../../src/cashFlow.js';
 import { setRegistryParent } from '../../../src/categoryTree.js';
 import { setEmapEntryIn, setDmapEntryIn } from '../../../src/taxReport.js';
+import { summarizeDebts } from '../../../src/debtPayoff.js';
 // The aliased settings store — the registry updaters below read-merge-write
 // the same rows Dashboard's mount reads hit, so the adopt-merged-value path
 // renders honestly.
@@ -519,13 +520,7 @@ export async function getDebts() {
     apr: 24.99, minimum_payment: a.id === 'a3' ? 80 : 40, credit_limit: a.id === 'a3' ? 15000 : 5000,
     statement_balance: null, next_payment_due_date: '2026-08-20', interest_rate: null, original_balance: null,
   })).concat([{ ...MANUAL_DEBT }]);
-  for (const d of debts) d.debtRate = d.apr ?? d.interest_rate ?? null;
-  return {
-    debts,
-    totalDebt: debts.reduce((s, a) => s + (Number(a.current_balance) || 0), 0),
-    totalMinimums: debts.reduce((s, a) => s + (Number(a.minimum_payment) || 0), 0),
-    hasDebtColumns: true,
-  };
+  return { ...summarizeDebts(debts), hasDebtColumns: true };
 }
 export async function getBalanceSnapshots(accountIds = []) {
   const days = ['2026-07-28', '2026-07-30', '2026-08-01', '2026-08-02', '2026-08-03'];

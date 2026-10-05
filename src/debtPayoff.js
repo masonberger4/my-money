@@ -33,6 +33,23 @@ export function debtMonthlyRate(debt) {
   return Number.isFinite(n) && n > 0 ? n / 100 / 12 : 0;
 }
 
+// The Debt view's derived cache fields, in ONE place: getDebts (the load),
+// Dashboard's saveDebt (an APR/minimum edit) and patchBal (a manual balance
+// edit) all rebuild from this, so the headline can't jump between a load
+// and an edit because one copy of the formula changed. Returns
+// { debts (each with debtRate = apr ?? interest_rate, PERCENT), totalDebt
+// (Σ current_balance, STORED sign — positive = owed), totalMinimums
+// (Σ minimum_payment over rows that have one) }. Numeric strings coerce;
+// junk counts as 0.
+export function summarizeDebts(debts) {
+  const list = (Array.isArray(debts) ? debts : []).map(a => ({ ...a, debtRate: a.apr ?? a.interest_rate ?? null }));
+  return {
+    debts: list,
+    totalDebt: list.reduce((s, a) => s + (Number(a.current_balance) || 0), 0),
+    totalMinimums: list.reduce((s, a) => s + (Number(a.minimum_payment) || 0), 0),
+  };
+}
+
 // Mortgages dominate a snowball/avalanche and make "debt-free date"
 // meaningless — the Debt view excludes them from the payoff projection by
 // default (still listed as debts). Matched on subtype or name.

@@ -7,7 +7,7 @@ import { clampSeries, debtTotalSeries, sparklinePoints } from "../netWorth.js";
 import { planAutoFill, envelopeBar, assignUnchanged, targetUnchanged, monthsUntil, pickedMonthKey } from "../envelopes.js";
 import { buildSearchFilters, searchIsActive, sanitizeDateInput, dateCommit, EDIT_YEAR_FLOOR } from "../searchFilters.js";
 import { expectedByCategory, expectedStatus, isMissedExpected, seedFromRecurring, projectFutureCycles, homeBillsWindow } from "../expectedTx.js";
-import { payoffWhatIf, debtFreeMonth, isMortgage, amortizationSchedule, addMonths, MAX_MONTHS, payoffProgress, utilization } from "../debtPayoff.js";
+import { payoffWhatIf, debtFreeMonth, isMortgage, amortizationSchedule, addMonths, MAX_MONTHS, payoffProgress, utilization, summarizeDebts } from "../debtPayoff.js";
 import { SCHEDULE_E_LINES, RENTS_KEY, DEFAULT_SCHEDULE_E_MAP, scheduleEReport, entityMonthly, entityLedger, personalDeductionReport, DEDUCTION_BUCKETS, DEFAULT_DEDUCTION_MAP, mileageDeduction, scheduleECsv, parseTaxMaps, setEmapEntryIn, setDmapEntryIn, savedOutsideYear, mileageFootnote } from "../taxReport.js";
 import { merchantKey, matchLearnedRule, isKeyPrefix } from "../txClassify.js";
 import { trimChatMsgs, buildSavedChat } from "../savedChats.js";
@@ -3033,32 +3033,22 @@ export default function Dashboard({ refreshTick = 0 }) {
         }catch(err){console.error("net worth load failed",err);}
         if(seq===debtSeq.current){setDebtSnaps(snaps);setNwSeries(series);setDebtData(d);}
       })
-      .catch(err=>{console.error("debt load failed",err);if(seq===debtSeq.current)setDebtData({debts:[],totalDebt:0,totalMinimums:0,hasDebtColumns:false});})
+      .catch(err=>{console.error("debt load failed",err);if(seq===debtSeq.current)setDebtData({...summarizeDebts([]),hasDebtColumns:false});})
       .finally(()=>{if(seq===debtSeq.current)setDebtLoading(false);});
   },[tab,debtData,debtEpoch]);
 
   // Optimistic save for a hand-entered liability field (apr / minimum_payment /
   // credit_limit / next_payment_due_date). Patches the debt cache — including
-  // the derived debtRate and the two totals, the same recompute-every-derived-
-  // field rule as saveTx — then writes; the accounts row is the client's own
+  // the derived debtRate and the two totals (summarizeDebts, the same
+  // derivation getDebts uses), the recompute-every-derived-field rule as
+  // saveTx — then writes; the accounts row is the client's own
   // (RLS-scoped) so updateAccount writes it directly.
   // Rollback + alert on failure (the updateManualBalance pattern three
   // functions down): a dropped APR/minimum silently mis-amortizes the payoff
   // plan while the screen shows the typed value.
   function saveDebt(id,fields){
     const prevDebt=debtData;
-    setDebtData(prev=>{
-      if(!prev)return prev;
-      const debts=prev.debts.map(a=>{
-        if(a.id!==id)return a;
-        const next={...a,...fields};
-        next.debtRate=next.apr??next.interest_rate??null;
-        return next;
-      });
-      return {...prev,debts,
-        totalDebt:debts.reduce((s,a)=>s+(Number(a.current_balance)||0),0),
-        totalMinimums:debts.reduce((s,a)=>s+(Number(a.minimum_payment)||0),0)};
-    });
+    setDebtData(prev=>prev&&{...prev,...summarizeDebts(prev.debts.map(a=>a.id===id?{...a,...fields}:a))});
     updateAccount(id,fields).catch(err=>{
       console.error("debt field save failed",err);
       setDebtData(prevDebt);
@@ -3084,11 +3074,7 @@ export default function Dashboard({ refreshTick = 0 }) {
     // prevent (the patchAllTxLists "recompute every derived field" rule,
     // review catch). The rollback restores the old stamp with the old balance.
     const patchBal=(bal,at)=>{
-      setDebtData(prev=>{
-        if(!prev)return prev;
-        const debts=prev.debts.map(d=>d.id===a.id?{...d,current_balance:bal,last_balance_at:at}:d);
-        return {...prev,debts,totalDebt:debts.reduce((s,d)=>s+(Number(d.current_balance)||0),0)};
-      });
+      setDebtData(prev=>prev&&{...prev,...summarizeDebts(prev.debts.map(d=>d.id===a.id?{...d,current_balance:bal,last_balance_at:at}:d))});
       setAccounts(prev=>prev.map(x=>x.id===a.id?{...x,current_balance:bal,last_balance_at:at}:x));
       setOverview(prev=>prev?{...prev,accounts:prev.accounts.map(x=>x.id===a.id?{...x,balance:{current:bal},last_balance_at:at}:x)}:prev);
     };
