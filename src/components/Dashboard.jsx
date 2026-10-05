@@ -31,7 +31,7 @@ import { breakdownSegments, incomeVsSpendingInsight, incomeSections } from "../r
 import { createSheetHistory } from "../sheetHistory.js";
 import { runSync } from "../sync.js";
 import lazyWithReload from "../lazyWithReload.js";
-import LazyModal from "./LazyModal.jsx";
+import { LazyModal } from "./ErrorBoundary.jsx";
 // Lazy: both are modals rendered only on user action, and CsvImport reaches the
 // whole statement-import stack — no reason for either in the initial bundle.
 // A failed chunk load (a stale chunk after a deploy) reloads the app ONCE

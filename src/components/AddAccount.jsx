@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import lazyWithReload from '../lazyWithReload.js';
-import LazyModal from './LazyModal.jsx';
+import { LazyModal } from './ErrorBoundary.jsx';
 
 // Lazy for the same reason Dashboard lazies it — a static import here would
 // pull the modal back into the main bundle and defeat the split. Same stale-
