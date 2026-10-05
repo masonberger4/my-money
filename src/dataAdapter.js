@@ -1986,6 +1986,25 @@ function addDaysISO(iso, days) {
   return `${dt.getUTCFullYear()}-${pad2(dt.getUTCMonth() + 1)}-${pad2(dt.getUTCDate())}`;
 }
 
+// The pending rows of `fields`' series, for the roll-forward dup gate: keyed
+// on recurring_key when the row has one, else description + cadence (a
+// hand-typed row's recurring_key is null).
+async function pendingInSeries(client, fields) {
+  let q = client
+    .from('expected_transactions')
+    .select(EXPECTED_COLUMNS)
+    .eq('status', 'pending');
+  q = fields.recurring_key != null
+    ? q.eq('recurring_key', fields.recurring_key)
+    : q.is('recurring_key', null).eq('description', fields.description).eq('cadence', fields.cadence);
+  const { data, error } = await q;
+  if (error) throw error;
+  return data || [];
+}
+
+const isSeriesDuplicate = (fields, rows) =>
+  fields.recurring_key != null ? isDuplicateExpected(fields, rows) : isDuplicateRollForward(fields, rows);
+
 // Insert the NEXT cycle's pending row after a match/dismiss. Dup-gated so two
 // devices matching the same cycle can't double the Upcoming card: on
 // recurring_key when the row has one (isDuplicateExpected), and on
@@ -2006,25 +2025,7 @@ async function rollForwardExpected(client, row) {
     due_date,
     cadence: row.cadence,
   };
-  if (fields.recurring_key != null) {
-    const { data, error } = await client
-      .from('expected_transactions')
-      .select(EXPECTED_COLUMNS)
-      .eq('status', 'pending')
-      .eq('recurring_key', fields.recurring_key);
-    if (error) throw error;
-    if (isDuplicateExpected(fields, data || [])) return null;
-  } else {
-    const { data, error } = await client
-      .from('expected_transactions')
-      .select(EXPECTED_COLUMNS)
-      .eq('status', 'pending')
-      .is('recurring_key', null)
-      .eq('description', fields.description)
-      .eq('cadence', fields.cadence);
-    if (error) throw error;
-    if (isDuplicateRollForward(fields, data || [])) return null;
-  }
+  if (isSeriesDuplicate(fields, await pendingInSeries(client, fields))) return null;
   const { data, error } = await client
     .from('expected_transactions')
     .insert(fields)
@@ -2034,9 +2035,61 @@ async function rollForwardExpected(client, row) {
   return data;
 }
 
+// Resolve ONE pending expectation — auto-match, Mark paid, or Skip/Stop — and
+// roll its series forward. Two PostgREST calls can't share a transaction, so
+// the ORDER is the safety:
+//  1. The next cycle is inserted FIRST (dup-gated, so a retry never twins).
+//     A failed insert throws before anything changed: the row stays pending
+//     and re-matches on the next visit. The old flip-first order persisted
+//     'matched' and then lost the insert (a POST, never re-sent) — and a
+//     matched row is never rolled again, so the bill silently dropped out of
+//     Upcoming, Expected and the "missed?" alarm for good.
+//  2. The status flip is GUARDED on status='pending' and returns its rows. A
+//     failed flip leaves row + successor; the next pass re-matches the row
+//     and the dup gate absorbs its roll-forward. 0 rows back means another
+//     device resolved the row first (the unguarded flip overwrote the other
+//     phone's Stop and resurrected the bill): withdraw the successor THIS
+//     call minted, unless the winner MATCHED the row and ours is its only
+//     successor (the winner may have deduped against ours).
+// Accepted residual hole until a database function exists (a migration): a
+// Skip on the other phone that deduped against our just-minted successor in
+// the same sub-second window reads as a Stop here and loses its successor.
+// Returns { changed, next } — `next` is this call's surviving successor.
+async function commitExpected(client, row, patch, { roll = true } = {}) {
+  const next = roll ? await rollForwardExpected(client, row) : null;
+  const { data, error } = await client
+    .from('expected_transactions')
+    .update({ ...patch, updated_at: new Date().toISOString() })
+    .eq('id', row.id)
+    .eq('status', 'pending')
+    .select('id');
+  if (error) throw error;
+  if ((data || []).length) return { changed: true, next };
+  if (!next) return { changed: false, next: null };
+  const { data: now, error: readErr } = await client
+    .from('expected_transactions')
+    .select('status')
+    .eq('id', row.id);
+  if (readErr) throw readErr;
+  if (now?.[0]?.status === 'matched') {
+    // Keep ours unless the winner minted its own (two passes both cleared
+    // the dup gate): then ours is the twin.
+    const others = (await pendingInSeries(client, next)).filter(r => r.id !== next.id);
+    if (!isSeriesDuplicate(next, others)) return { changed: false, next };
+  }
+  const { error: delErr } = await client
+    .from('expected_transactions')
+    .delete()
+    .eq('id', next.id)
+    .eq('status', 'pending');
+  if (delErr) throw delErr;
+  return { changed: false, next: null };
+}
+
 // The main read: every pending row plus this month's matched ones, with the
-// auto-match pass run and PERSISTED first (status='matched' + matched_tx_id,
-// then the roll-forward pending row for the next cycle). Matching is the pure
+// auto-match pass run and PERSISTED first (per match, commitExpected: the
+// roll-forward pending row for the next cycle, then the guarded
+// status='matched' + matched_tx_id flip). Matching is the pure
 // matchExpected (greedy nearest-date, deterministic); the transaction window
 // rides getTransactionsBetween, so it shares the reload's range memo and the
 // full pipeline (hidden accounts excluded, marks applied — irrelevant here,
@@ -2125,28 +2178,24 @@ export async function getExpectedTransactions(
     const matches = matchExpected(pending, txRows);
     if (matches.length) {
       const byId = new Map(pending.map(r => [r.id, r]));
-      const updatedAt = new Date().toISOString();
+      const resolved = new Set();
+      const minted = [];
       for (const m of matches) {
         const row = byId.get(m.expectationId);
         if (!row) continue;
-        const { error } = await client
-          .from('expected_transactions')
-          .update({ status: 'matched', matched_tx_id: m.txId, updated_at: updatedAt })
-          .eq('id', m.expectationId);
-        if (error) throw error;
-        row.status = 'matched';
-        row.matched_tx_id = m.txId;
+        const { changed, next } = await commitExpected(client, row, { status: 'matched', matched_tx_id: m.txId });
+        // No longer pending either way: matched here, or resolved by another
+        // device first (dropped from both lists for this render — the next
+        // read shows what that device did).
+        resolved.add(row.id);
+        if (next) minted.push(next);
+        if (changed) {
+          row.status = 'matched';
+          row.matched_tx_id = m.txId;
+          if (inMonth(row)) matched.push(row);
+        }
       }
-      // Roll each freshly matched row forward, then re-split the lists.
-      const stillPending = pending.filter(r => r.status === 'pending');
-      for (const m of matches) {
-        const row = byId.get(m.expectationId);
-        if (!row) continue;
-        const next = await rollForwardExpected(client, row);
-        if (next) stillPending.push(next);
-        if (inMonth(row)) matched.push(row);
-      }
-      pending = stillPending;
+      pending = [...pending.filter(r => !resolved.has(r.id)), ...minted];
     }
   }
 
@@ -2205,7 +2254,10 @@ export async function addExpected(fields, { client = supabase } = {}) {
 // Dismiss one cycle ("not this time"). Rolls the next cycle forward unless
 // { stop: true } — stopping is the user saying the bill itself is gone.
 // NEVER called automatically: a stale unmatched expectation renders "missed?"
-// and waits for a human (the unmatched bill is the alarm).
+// and waits for a human (the unmatched bill is the alarm). Same write order
+// and pending guard as the auto-match (commitExpected); a row another device
+// already resolved is left alone — { changed: false }, and the caller's
+// re-read shows what that device did.
 export async function dismissExpected(id, { stop = false } = {}, { client = supabase } = {}) {
   const { data: row, error: readErr } = await client
     .from('expected_transactions')
@@ -2213,18 +2265,13 @@ export async function dismissExpected(id, { stop = false } = {}, { client = supa
     .eq('id', id)
     .single();
   if (readErr) throw readErr;
-  const { error } = await client
-    .from('expected_transactions')
-    .update({ status: 'dismissed', updated_at: new Date().toISOString() })
-    .eq('id', id);
-  if (error) throw error;
-  if (stop) return { next: null };
-  const next = await rollForwardExpected(client, row);
-  return { next };
+  if (row.status !== 'pending') return { changed: false, next: null };
+  return commitExpected(client, row, { status: 'dismissed' }, { roll: !stop });
 }
 
 // The "Mark paid" picker: the user points an expectation at a real
-// transaction the auto-match missed. Rolls forward like an auto-match.
+// transaction the auto-match missed. Rolls forward like an auto-match, with
+// the same write order and pending guard (commitExpected).
 export async function matchExpectedManually(id, txId, { client = supabase } = {}) {
   const { data: row, error: readErr } = await client
     .from('expected_transactions')
@@ -2232,11 +2279,6 @@ export async function matchExpectedManually(id, txId, { client = supabase } = {}
     .eq('id', id)
     .single();
   if (readErr) throw readErr;
-  const { error } = await client
-    .from('expected_transactions')
-    .update({ status: 'matched', matched_tx_id: txId, updated_at: new Date().toISOString() })
-    .eq('id', id);
-  if (error) throw error;
-  const next = await rollForwardExpected(client, row);
-  return { next };
+  if (row.status !== 'pending') return { changed: false, next: null };
+  return commitExpected(client, row, { status: 'matched', matched_tx_id: txId });
 }

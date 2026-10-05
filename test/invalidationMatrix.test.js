@@ -401,3 +401,21 @@ test('learnMerchant: only a failed RULE write says "Couldn\'t save that rule"; a
   assert.equal(body.split("Couldn't save that rule").length - 1, 1, 'no second "Couldn\'t save" for a saved rule');
   assert.match(body.slice(apply, fin), /past transactions couldn't be updated/);
 });
+
+// --- Expected-bill writes: a failure re-reads AND says so ---------------------
+// dismissExpected / matchExpectedManually insert the next cycle BEFORE the
+// status flip, so a failure can leave real half-committed state (a successor
+// beside a still-pending row) — the catch must bump the epoch to show it, and
+// alert through friendlyError like every other write (it used to be
+// console-only, so a dead tap looked like nothing happened).
+for (const fn of ['doDismissExpected', 'doMarkPaid']) {
+  test(`${fn}'s catch re-reads the expected lists and alerts through friendlyError`, () => {
+    const code = stripComments(dashboard);
+    const start = code.indexOf(`async function ${fn}(`);
+    assert.notEqual(start, -1, `fixture assumption: ${fn} exists`);
+    const body = code.slice(start, code.indexOf('finally{', start));
+    const catchBody = body.slice(body.indexOf('catch('));
+    assert.ok(catchBody.includes('invalidateExpected()'), `${fn} must re-read after a failed write`);
+    assert.match(catchBody, /window\.alert\(`Couldn't [^`]*\$\{friendlyError\(err\)\}`\)/, `${fn} must alert through friendlyError`);
+  });
+}
