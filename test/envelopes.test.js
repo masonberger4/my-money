@@ -15,6 +15,7 @@ import {
   envelopeBar,
   targetNeed,
   effectiveTarget,
+  monthlyAsk,
   planAutoFill,
   readyToAssign,
   planMove,
@@ -628,7 +629,7 @@ test('REGRESSION: carry math never reads overrides — the walk is byte-identica
   for (const view of [{ year: 2026, month: 2 }, { year: 2026, month: 3 }]) {
     const without = walkEnvelopes({ assignments: plain, spending, settings, ...view });
     const withOv = walkEnvelopes({ assignments: withOverrides, spending, settings, ...view });
-    // totals.target differs by design (it sums effectiveTarget) — compare the
+    // totals.target differs by design (it sums monthlyAsk) — compare the
     // carry-bearing numbers and every row field except targetOverride.
     assert.deepEqual(strip(withOv).categories, strip(without).categories);
     assert.equal(withOv.totals.available, without.totals.available);
@@ -662,6 +663,99 @@ test('totals.target sums the effective target, not the raw category target', () 
     month: 6,
   });
   assert.equal(zeroed.totals.target, 0);
+});
+
+test('REGRESSION: totals.target adds a by-date target\'s share for THIS month, not its whole goal', () => {
+  // Groceries $600/mo plus a $6,000 vacation fund due Sep 2027, viewed Oct
+  // 2026 with nothing carried: the Plan headline read "of $6,600 targeted"
+  // while the Categories strip said $600 — every month looked ~10x under
+  // target after adding one sinking fund. This month asks 600 + 6000/12.
+  const result = walkEnvelopes({
+    assignments: [],
+    spending: [],
+    settings: [
+      { category: 'Groceries', target: 600 },
+      { category: 'Vacation', target: 6000, targetKind: 'by_date', targetDate: '2027-09-01' },
+    ],
+    year: 2026,
+    month: 10,
+  });
+  assert.equal(result.totals.target, 1100);
+  assert.ok(row(result, 'Vacation'), 'the fund is still a budget row');
+});
+
+test('totals.target: a by-date fund carried past its goal adds 0, never a negative', () => {
+  const result = walkEnvelopes({
+    assignments: [a('Vacation', '2026-09', 7000)],
+    spending: [],
+    settings: [
+      { category: 'Groceries', target: 600 },
+      { category: 'Vacation', target: 6000, targetKind: 'by_date', targetDate: '2027-09-01' },
+    ],
+    year: 2026,
+    month: 10,
+  });
+  assert.equal(row(result, 'Vacation').rolledOver, 7000);
+  assert.equal(result.totals.target, 600);
+});
+
+test('totals.target: a by-date target past its date adds what is still missing (targetNeed\'s rule)', () => {
+  // Pins today's past-date behaviour (monthsUntil clamps to 1) — it does not
+  // decide what a by-date target should do after its date passes.
+  const result = walkEnvelopes({
+    assignments: [a('Vacation', '2026-06', 250)],
+    spending: [],
+    settings: [{ category: 'Vacation', target: 1000, targetKind: 'by_date', targetDate: '2026-01-01' }],
+    year: 2026,
+    month: 7,
+  });
+  assert.equal(row(result, 'Vacation').rolledOver, 250);
+  assert.equal(result.totals.target, 750);
+});
+
+test('totals.target: an override on a by-date row adds the override', () => {
+  const result = walkEnvelopes({
+    assignments: [{ category: 'Vacation', month: '2026-10', assigned: 0, targetOverride: 300 }],
+    spending: [],
+    settings: [{ category: 'Vacation', target: 6000, targetKind: 'by_date', targetDate: '2027-09-01' }],
+    year: 2026,
+    month: 10,
+  });
+  assert.equal(result.totals.target, 300);
+});
+
+test('monthlyAsk: what this month asks for before anything is assigned', () => {
+  const at = { year: 2026, month: 7 };
+  assert.equal(monthlyAsk({ target: 400, targetKind: 'monthly', rolledOver: 0, assigned: 150 }, at), 400,
+    'a monthly target asks for itself, whatever is assigned');
+  const byDate = { target: 2400, targetKind: 'by_date', targetDate: '2027-06-01' };
+  assert.equal(monthlyAsk({ ...byDate, rolledOver: 0 }, at), 200, '2400 over 12 months');
+  assert.equal(monthlyAsk({ ...byDate, rolledOver: 1200 }, { year: 2027, month: 1 }), 200, 'carry counts');
+  assert.equal(monthlyAsk({ ...byDate, rolledOver: 2400 }, at), 0, 'fully funded');
+  assert.equal(monthlyAsk({ ...byDate, rolledOver: 3000 }, at), 0, 'over-funded floors at 0');
+  assert.equal(monthlyAsk({ target: 1000, targetKind: 'by_date', targetDate: '2026-01-01', rolledOver: 250 }, at), 750,
+    'past its date: the whole remainder');
+  assert.equal(monthlyAsk({ target: 500, targetKind: 'by_date', targetDate: null, rolledOver: 0 }, at), 500);
+  assert.equal(monthlyAsk({ ...byDate, rolledOver: 0, targetOverride: 250 }, at), 250, 'an override wins');
+  assert.equal(monthlyAsk({ target: 400, targetOverride: 0 }, at), 0, 'override 0 asks nothing');
+  assert.equal(monthlyAsk({ target: null, targetOverride: 150 }, at), 150);
+  assert.equal(monthlyAsk({ target: null, rolledOver: 0 }, at), null, 'no target');
+  assert.equal(monthlyAsk(null, at), null);
+});
+
+test('targetNeed is monthlyAsk minus assigned — except a by-date surplus still offsets a pull-out', () => {
+  const at = { year: 2026, month: 7 };
+  const rows = [
+    { target: 400, targetKind: 'monthly', rolledOver: 0, assigned: 150 },
+    { target: 2400, targetKind: 'by_date', targetDate: '2027-06-01', rolledOver: 600, assigned: 50 },
+    { target: 2400, targetKind: 'by_date', targetDate: '2027-06-01', rolledOver: 0, assigned: 0, targetOverride: 90 },
+    { target: 1000, targetKind: 'by_date', targetDate: '2026-01-01', rolledOver: 250, assigned: 0 },
+  ];
+  for (const r of rows) assert.equal(targetNeed(r, at), Math.max(0, cents(monthlyAsk(r, at) - r.assigned)));
+  // Carried 1200 against a 1000 goal due this month, then 300 pulled out: the
+  // envelope holds 900, so it needs 100 — the floored ask would say 300.
+  const over = { target: 1000, targetKind: 'by_date', targetDate: '2026-07-01', rolledOver: 1200, assigned: -300 };
+  assert.equal(targetNeed(over, at), 100);
 });
 
 test('rows without overrides carry targetOverride null (shape is stable)', () => {

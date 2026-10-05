@@ -112,11 +112,34 @@ export function effectiveTarget(row) {
   return row.targetOverride ?? row.target ?? null;
 }
 
-// What this month still needs for the category to hit its target. A monthly
-// target wants topping up to the target every month. A by-date target spreads
-// what's still missing (counting money already carried in, not what's been
-// spent out) over the months left, then asks only for THIS month's share — so
-// funding it twice in one month is a no-op rather than a double payment.
+// A by-date target spreads what's still missing (counting money already
+// carried in, not what's been spent out) over the months left, counting this
+// one. Past its date monthsUntil clamps to 1, so the share is the whole gap.
+// Negative once the carry has overshot the goal.
+function byDateShare(row, year, month) {
+  return (row.target - row.rolledOver) / monthsUntil(row.targetDate, year, month);
+}
+
+// What THIS month asks for, before anything is assigned: the per-month
+// targetOverride when non-null (always monthly semantics — the user typed this
+// month's number), else a by-date target's share for this month (never below
+// 0), else the monthly target; null with no target at all. The month's
+// headline target (walkEnvelopes' totals.target) sums this, so a $6,000 sinking
+// fund due in a year adds its $500 share, not $6,000 — a by-date amount is a
+// multi-month total, which is also why the Categories strip leaves it out.
+export function monthlyAsk(row, { year, month }) {
+  if (!row) return null;
+  if (row.targetOverride != null) return Number(row.targetOverride);
+  if (row.target == null) return null;
+  if (row.targetKind === 'by_date') return Math.max(0, byDateShare(row, year, month));
+  return row.target;
+}
+
+// What this month still needs for the category to hit its target: the month's
+// ask (monthlyAsk) minus what is already assigned. A monthly target wants
+// topping up to the target every month; a by-date target asks only for THIS
+// month's share — so funding it twice in one month is a no-op rather than a
+// double payment.
 //
 // Resolution order: (1) a per-month targetOverride, when non-null — and an
 // override always uses monthly-top-up semantics for that month, even on a
@@ -124,19 +147,17 @@ export function effectiveTarget(row) {
 // remaining months would ask for a fraction of what they asked for). An
 // override of 0 asks for nothing. (2) the category target, per its kind.
 // (3) no target → 0. By-date carry math is untouched by overrides.
+//
+// The one place it reads the by-date share UNfloored: a fund carried past its
+// goal still has that surplus to offset money pulled out this month (target
+// 1000, carried 1200, assigned −300 → it needs 100, not 300).
 export function targetNeed(row, { year, month }) {
   if (!row) return 0;
-  if (row.targetOverride != null) {
-    const left = Number(row.targetOverride) - row.assigned;
-    return left > 0 ? cents(left) : 0;
-  }
-  if (row.target == null) return 0;
-  if (row.targetKind === 'by_date') {
-    const share = (row.target - row.rolledOver) / monthsUntil(row.targetDate, year, month);
-    const need = share - row.assigned;
-    return need > 0 ? cents(need) : 0;
-  }
-  const left = row.target - row.assigned;
+  const ask = row.targetOverride == null && row.target != null && row.targetKind === 'by_date'
+    ? byDateShare(row, year, month)
+    : monthlyAsk(row, { year, month });
+  if (ask == null) return 0;
+  const left = ask - row.assigned;
   return left > 0 ? cents(left) : 0;
 }
 
@@ -338,9 +359,10 @@ export function walkEnvelopes({ assignments = [], spending = [], settings = [], 
         rolledOver: cents(acc.rolledOver + r.rolledOver),
         spent: cents(acc.spent + r.spent),
         available: cents(acc.available + r.available),
-        // The month's headline target is what THIS month actually asks for,
-        // so an override replaces the category target in the sum.
-        target: cents(acc.target + (effectiveTarget(r) || 0)),
+        // The month's headline target is what THIS month actually asks for
+        // (monthlyAsk): an override replaces the category target, and a
+        // by-date target adds only this month's share, never its whole goal.
+        target: cents(acc.target + (monthlyAsk(r, { year, month }) || 0)),
       }),
       { assigned: 0, rolledOver: 0, spent: 0, available: 0, target: 0 }
     );
