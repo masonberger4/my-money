@@ -3951,14 +3951,28 @@ export default function Dashboard({ refreshTick = 0 }) {
   // which still renders it under the same rules (SimpleFIN-fed rows only,
   // never through displayBalance — see the normalizeAvailableBalance key row).
   // Don't reinstate it here without a second line to put it on.
-  // Donut slices are non-text marks on the card -> 3:1.
+  // ONE arrangement of the month's categories for the Home donut, its legend
+  // and Reflect's Spending Breakdown: breakdownSegments' top 6 POSITIVE groups
+  // plus an "All Others" bucket, each a share of the true positive total. The
+  // ring used to draw the top 7 renormalised among themselves beside a legend
+  // of the top 6 that could include negatives — an unlabeled 7th wedge,
+  // overstated shares, and legend rows with no wedge.
   // POSITIVE slices only. A pie has no way to draw a negative wedge — a
   // negative sweep runs backwards and overlaps its neighbours — so a refunded
-  // category is simply absent from the ring rather than corrupting it. The
-  // Categories tab beside it still lists the category with its real negative
-  // total, which is where that money is accounted for.
-  const donutData=cats.filter(c=>c.amount>0).slice(0,7)
-    .map(c=>({label:getName(c.label),value:c.amount,color:markOn(getColor(c.label),surf.card)}));
+  // category is simply absent from the ring and its legend rather than
+  // corrupting them. The Categories tab still lists the category with its real
+  // negative total, which is where that money is accounted for.
+  const homeBd=breakdownSegments(cats,{max:6});
+  // Data marks go through markOn even for the track grey: --light-track
+  // (#E4E2DC) is a 1.30:1 hairline on the white card — invisible as a bar fill
+  // or wedge — while markOn lifts it to the 3:1 mark floor and leaves the
+  // already-passing dark value untouched (the verified sweep finding; the token
+  // itself must stay a hairline — it is also the rail surface behind every
+  // progress bar). Slices are non-text marks on the card -> 3:1.
+  const trackMark=markOn(surf.track,surf.card);
+  const segColor=s=>s.others?trackMark:markOn(getColor(s.label),surf.card);
+  const segName=s=>s.others?"All Others":getName(s.label);
+  const donutData=homeBd.segments.map(s=>({label:segName(s),value:s.amount,color:segColor(s)}));
 
   // The viewed month's transactions indexed by effective category — what the
   // drill-in sheet lists. Built from the rows already on hand (getTransactions
@@ -4901,20 +4915,14 @@ export default function Dashboard({ refreshTick = 0 }) {
           // load (cats = the month's spendingGroups; cashFlow lazy-loads for
           // this screen too — the trends effect's gate). src/reflect.js does
           // the arranging; the shared model did the measuring.
-          const bd=breakdownSegments(cats,{max:6});
+          const bd=homeBd;
           const insight=incomeVsSpendingInsight(cashFlow?.periods);
           // Only offer the drill-in when there is something behind the number
           // (openDrill's rule) — a null onClick makes DrillNum plain text, so
           // a still-loading card never invites a tap into an empty sheet.
           const openIncomeDrill=incomeReport.count?()=>setIncomeDrill("all"):null;
-          // Data marks go through markOn even for the track grey: --light-track
-          // (#E4E2DC) is a 1.30:1 hairline on the white card — invisible as a
-          // bar fill — while markOn lifts it to the 3:1 mark floor and leaves
-          // the already-passing dark value untouched (the verified sweep
-          // finding; the token itself must stay a hairline — it is also the
-          // rail surface behind every progress bar).
-          const trackMark=markOn(surf.track,surf.card);
-          const segColor=s=>s.others?trackMark:markOn(getColor(s.label),surf.card);
+          // trackMark / segColor: the component-level pair the Home donut
+          // shares (see homeBd).
           const linkCard={display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,
             textAlign:"left",cursor:"pointer",font:"inherit",color:"var(--text)",width:"100%"};
           return (
@@ -4947,7 +4955,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                 <div key={s.label} style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
                   <span style={{width:8,height:8,borderRadius:"50%",flexShrink:0,background:segColor(s)}}/>
                   <span style={{flex:1,fontSize:13,minWidth:0,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
-                    {s.others?"All Others":getName(s.label)}
+                    {segName(s)}
                   </span>
                   <span style={{fontSize:13,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",color:"var(--muted)",flexShrink:0}}>{fmtX(s.amount)}</span>
                 </div>
@@ -5075,12 +5083,13 @@ export default function Dashboard({ refreshTick = 0 }) {
                 {loading?<Sk w={130} h={130} r={65}/>:<Donut data={donutData} size={130}/>}
                 <div style={{flex:1}}>
                   <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",marginBottom:8,textTransform:"uppercase",letterSpacing:".05em"}}>Top categories</div>
+                  {/* The legend IS the ring's slices (homeBd), so every wedge is named. */}
                   {loading?[1,2,3,4].map(i=><div key={i} style={{marginBottom:8}}><Sk h={12}/></div>):
-                    cats.slice(0,6).map((c,i)=>(
+                    homeBd.segments.map((s,i)=>(
                       <div key={i} style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
-                        <div style={{width:8,height:8,borderRadius:"50%",background:markOn(getColor(c.label),surf.card),flexShrink:0}}/>
-                        <span style={{fontSize:12,color:"var(--text)",flex:1,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{getName(c.label)}</span>
-                        <span style={{fontSize:12,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",color:"var(--muted)",flexShrink:0}}>{fmt(c.amount)}</span>
+                        <div style={{width:8,height:8,borderRadius:"50%",background:segColor(s),flexShrink:0}}/>
+                        <span style={{fontSize:12,color:"var(--text)",flex:1,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{segName(s)}</span>
+                        <span style={{fontSize:12,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",color:"var(--muted)",flexShrink:0}}>{fmt(s.amount)}</span>
                       </div>
                     ))}
                 </div>
