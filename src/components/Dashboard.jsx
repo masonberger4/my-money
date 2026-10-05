@@ -2081,45 +2081,63 @@ export default function Dashboard({ refreshTick = 0 }) {
   // expand (it reads a month of rows per month shown), and no error state
   // because getReconciliation never throws — an ok:false renders one muted
   // line. BOTH panels are EPOCH-driven (the expEpoch shape): an invalidating
-  // reloadData bumps reconEpoch/covEpoch, an open panel refetches at once and
-  // a closed one on its next expand (a collapse/expand alone is not a
-  // refetch), and a failed read RETURNS its epoch so re-expanding retries.
-  // Fetched once per launch, the panel's own "try Refresh" did nothing, a
-  // coverage error blocked every retry, and a pair the user fixed as told
-  // stayed listed.
+  // reloadData bumps reconEpoch/covEpoch, a panel ON SCREEN refetches at once
+  // and any other on its next showing (a collapse/expand or a tab switch alone
+  // is not a refetch), and a failed read RETURNS its epoch so re-showing
+  // retries. Fetched once per launch, the panel's own "try Refresh" did
+  // nothing, a coverage error blocked every retry, and a pair the user fixed
+  // as told stayed listed.
+  // "On screen" = expanded AND the account list showing — the render's own
+  // tab==="accounts"&&!selAcct (selAcct is derived further down, so the same
+  // test is spelled from its inputs). Gated on `open` alone, every post-write
+  // reload re-ran the 12-month reconciliation and the whole-table coverage
+  // scan in the background while the user fixed the listed pairs on the
+  // Spending tab — both reads again for every edit. And a
+  // refetch never blanks a good answer: it stays on screen DIMMED (its
+  // *For epoch is behind) until the new one lands, so an edit made with a
+  // panel open doesn't collapse it to skeletons, and a panel re-shown after
+  // an invalidation can't present the old answer as current. Only a failed
+  // read is cleared, so its retry shows the skeleton.
+  const acctListShown=tab==="accounts"&&!(selAcctId&&accounts.some(a=>a.id===selAcctId));
   const [reconOpen,setReconOpen]=useState(false);
-  const [reconData,setReconData]=useState(null);   // null = not fetched / refetching
+  const [reconData,setReconData]=useState(null);   // null = never answered (or a failure being retried)
+  const [reconFor,setReconFor]=useState(-1);       // the epoch reconData answers
   const [reconEpoch,setReconEpoch]=useState(0);
   const reconSeq=useRef(0);
-  const reconLoaded=useRef(-1);   // the epoch reconData was fetched for
+  const reconLoaded=useRef(-1);   // the epoch last fetched for (-1 after a failure)
   const openRecon=()=>setReconOpen(o=>!o);
+  const reconShown=reconOpen&&acctListShown;
   useEffect(()=>{
-    if(!reconOpen||reconLoaded.current===reconEpoch)return;
+    if(!reconShown||reconLoaded.current===reconEpoch)return;
     reconLoaded.current=reconEpoch;
-    const s=++reconSeq.current;
-    setReconData(null);
+    const s=++reconSeq.current,ep=reconEpoch;
+    setReconData(d=>d?.ok?d:null);
     getReconciliation().catch(()=>({ok:false})).then(d=>{
       if(s!==reconSeq.current)return;
-      setReconData(d);
+      setReconData(d);setReconFor(ep);
       if(!d?.ok)reconLoaded.current=-1;
     });
-  },[reconOpen,reconEpoch]);
+  },[reconShown,reconEpoch]);
+  const reconStale=reconData!==null&&reconFor!==reconEpoch;
   const [covOpen,setCovOpen]=useState(false);
-  const [covData,setCovData]=useState(null);   // null = not fetched; object keyed by account_id
+  const [covData,setCovData]=useState(null);   // null = never answered; object keyed by account_id
+  const [covFor,setCovFor]=useState(-1);       // the epoch covData answers
   const [covErr,setCovErr]=useState(null);
   const [covEpoch,setCovEpoch]=useState(0);
   const covSeq=useRef(0);
   const covLoaded=useRef(-1);
   const openCoverage=()=>setCovOpen(o=>!o);
+  const covShown=covOpen&&acctListShown;
   useEffect(()=>{
-    if(!covOpen||covLoaded.current===covEpoch)return;
+    if(!covShown||covLoaded.current===covEpoch)return;
     covLoaded.current=covEpoch;
-    const s=++covSeq.current;
-    setCovData(null);setCovErr(null);
+    const s=++covSeq.current,ep=covEpoch;
+    setCovErr(null);
     getDataCoverage()
-      .then(d=>{if(s===covSeq.current)setCovData(d);})
+      .then(d=>{if(s===covSeq.current){setCovData(d);setCovFor(ep);}})
       .catch(e=>{if(s===covSeq.current){setCovErr(e?.message||"failed to load");covLoaded.current=-1;}});
-  },[covOpen,covEpoch]);
+  },[covShown,covEpoch]);
+  const covStale=covData!==null&&covFor!==covEpoch;
   // --- Feed-reach shortfall (Accounts tab, read-only) ---
   // Which fed accounts have history SimpleFIN could never fetch. Not a
   // troubleshooting toy like the coverage panel above and not an error: it is
@@ -6253,7 +6271,7 @@ export default function Dashboard({ refreshTick = 0 }) {
               <span style={{fontSize:12,color:"var(--muted)"}}>{covOpen?"▾":"▸"}</span>
             </div>
             {covOpen&&(
-              <div style={{marginTop:10}}>
+              <div style={{marginTop:10,opacity:covStale&&!covErr?.55:1}} aria-busy={covStale&&!covErr?true:undefined}>
                 {covErr&&<div style={{fontSize:12,color:"var(--danger)"}}>Couldn't load coverage: {covErr}</div>}
                 {!covErr&&covData===null&&<div style={{marginBottom:8}}><Sk h={32}/><div style={{height:8}}/><Sk h={32}/></div>}
                 {!covErr&&covData!==null&&[...accounts].sort((a,b)=>(a.hidden?1:0)-(b.hidden?1:0)).map(a=>{
@@ -6311,7 +6329,7 @@ export default function Dashboard({ refreshTick = 0 }) {
               <span style={{fontSize:12,color:"var(--muted)"}}>{reconOpen?"▾":"▸"}</span>
             </div>
             {reconOpen&&(
-              <div style={{marginTop:10}}>
+              <div style={{marginTop:10,opacity:reconStale?.55:1}} aria-busy={reconStale?true:undefined}>
                 {reconData===null&&<div style={{marginBottom:8}}><Sk h={64}/><div style={{height:8}}/><Sk h={64}/></div>}
                 {reconData&&!reconData.ok&&(
                   <div style={{fontSize:12,color:"var(--muted)"}}>Couldn't load this right now — try Refresh.</div>

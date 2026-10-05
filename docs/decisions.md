@@ -575,6 +575,12 @@ what PR A DECIDED, as opposed to fixed.
   Recurring, Debt, Tax, Trends cash flow and the Accounts-tab panels depend
   on no viewed month. Extends the 2026-08-04 month-navigation caching ruling;
   every other reload still drops them.
+- **The Accounts-tab panels refetch only while on screen, and never blank a
+  good answer.** Expanded AND the account list showing; a refetch keeps the
+  previous answer up, dimmed, until the new one lands. Rejected: bumping
+  their epochs only on pulls, Refresh, foreground returns and imports —
+  setting a listed near-miss pair to Transfer is a plain row edit, so the
+  pair would stay listed, which is the F19 failure again.
 - **`refreshing` spans the bank pull.** The pull chip, its gate and the
   gear's Refresh stay busy until the pull a refresh started (and its
   follow-up) settles. This amends the 2026-09-08 gear-menu entry's

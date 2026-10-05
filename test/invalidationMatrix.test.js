@@ -282,8 +282,8 @@ test('only plain month navigation skips the drop: the effect invalidates on star
 // fetched only while null (and getReconciliation's ok:false is non-null, so a
 // failure stuck), covErr blocked every retry, and nothing ever reset either —
 // yet the copy says "try Refresh" and tells the user to fix the listed pairs.
-// Now an invalidating reload bumps an epoch per panel; an open panel refetches
-// at once, a closed one on its next expand, and a failed read retries.
+// Now an invalidating reload bumps an epoch per panel; a panel on screen
+// refetches at once, any other on its next showing, and a failed read retries.
 
 test('an invalidating reload bumps both panel epochs', () => {
   const code = stripComments(dashboard);
@@ -297,11 +297,11 @@ test('an invalidating reload bumps both panel epochs', () => {
   }
 });
 
-test('each panel fetches from an effect keyed on [open, epoch], seq-guarded, and a failure can retry', () => {
+test('each panel fetches from an effect keyed on [shown, epoch], seq-guarded, and a failure can retry', () => {
   const code = stripComments(dashboard);
   for (const [open, epoch, seq, loaded, fetcher] of [
-    ['reconOpen', 'reconEpoch', 'reconSeq', 'reconLoaded', 'getReconciliation()'],
-    ['covOpen', 'covEpoch', 'covSeq', 'covLoaded', 'getDataCoverage()'],
+    ['reconShown', 'reconEpoch', 'reconSeq', 'reconLoaded', 'getReconciliation()'],
+    ['covShown', 'covEpoch', 'covSeq', 'covLoaded', 'getDataCoverage()'],
   ]) {
     const deps = `},[${open},${epoch}]);`;
     const end = code.indexOf(deps);
@@ -310,13 +310,58 @@ test('each panel fetches from an effect keyed on [open, epoch], seq-guarded, and
     assert.ok(body.includes(fetcher), `fixture assumption: the [${open},${epoch}] effect fetches ${fetcher}`);
     assert.match(body, new RegExp(`if\\(!${open}\\|\\|${loaded}\\.current===${epoch}\\)return;`),
       'fetch only while open, once per epoch (a collapse/expand alone is not a refetch)');
-    assert.match(body, new RegExp(`const s=\\+\\+${seq}\\.current;`), 'each fetch mints a sequence');
+    assert.match(body, new RegExp(`const s=\\+\\+${seq}\\.current[,;]`), 'each fetch mints a sequence');
     assert.match(body, new RegExp(`s===${seq}\\.current|s!==${seq}\\.current`), 'and a stale response is dropped');
     assert.match(body, new RegExp(`${loaded}\\.current=-1`),
       'a failed read RETURNS the epoch (the expected-tx rule), so re-expanding retries');
   }
   assert.ok(!/covData===null&&!covErr/.test(code),
     'gating the coverage fetch on !covErr is what made one transient error permanent until relaunch');
+});
+
+// Reviewer repair (F19): gated on `open` alone, every post-write reload re-ran
+// the 12-month reconciliation and the whole-table coverage scan in the
+// background while the user fixed the listed pairs on the Spending tab (the
+// panels' open state outlives a tab switch), and each
+// refetch set the data to null — an edit made with a panel on screen
+// collapsed it to skeletons. Now a panel fetches only while it is ON SCREEN,
+// and a refetch keeps a good answer up, dimmed, until the new one lands.
+test('the panels fetch only while on screen, with the render\'s own visibility test', () => {
+  const code = stripComments(dashboard);
+  const shown = code.match(/const acctListShown=([^;]+);/);
+  assert.ok(shown, 'fixture assumption: one acctListShown names when the account list (and both panels) render');
+  assert.equal(shown[1], 'tab==="accounts"&&!(selAcctId&&accounts.some(a=>a.id===selAcctId))',
+    'the same test as the render\'s tab==="accounts"&&!selAcct, spelled from selAcct\'s inputs');
+  assert.ok(code.includes('const selAcct=useMemo(()=>(selAcctId?accounts.find(a=>a.id===selAcctId)||null:null)'),
+    'fixture assumption: selAcct is still derived from selAcctId + accounts — re-check acctListShown if it moves');
+  assert.ok(code.includes('const reconShown=reconOpen&&acctListShown;'));
+  assert.ok(code.includes('const covShown=covOpen&&acctListShown;'));
+  assert.ok(code.split('{tab==="accounts"&&!selAcct&&(').length - 1 >= 2,
+    'fixture assumption: both panels render under tab==="accounts"&&!selAcct');
+});
+
+test('a panel refetch keeps a good answer on screen, dimmed, and clears only a failure', () => {
+  const code = stripComments(dashboard);
+  for (const [epoch, data, setFor, stale] of [
+    ['reconEpoch', 'reconData', 'setReconFor', 'reconStale'],
+    ['covEpoch', 'covData', 'setCovFor', 'covStale'],
+  ]) {
+    const deps = epoch === 'reconEpoch' ? '},[reconShown,reconEpoch]);' : '},[covShown,covEpoch]);';
+    const end = code.indexOf(deps);
+    const body = code.slice(code.lastIndexOf('useEffect(()=>{', end), end);
+    const set = `set${data[0].toUpperCase()}${data.slice(1)}`;
+    assert.ok(!body.includes(`${set}(null)`), `a refetch must not blank ${data} — it is what collapsed an open panel on every edit`);
+    assert.match(body, new RegExp(`const s=\\+\\+\\w+\\.current,ep=${epoch};`), 'the fetch remembers the epoch it answers');
+    assert.ok(body.includes(`${setFor}(ep)`), `${data} lands with the epoch it answers`);
+    const forVar = setFor.slice(3, 4).toLowerCase() + setFor.slice(4);
+    assert.ok(code.includes(`const ${stale}=${data}!==null&&${forVar}!==${epoch};`),
+      `${stale}: an answer from an older epoch is stale`);
+    assert.match(code, new RegExp(`opacity:${stale}[^}]*\\.55`), `a stale ${data} renders dimmed, never as current`);
+  }
+  const recon = code.slice(code.lastIndexOf('useEffect(()=>{', code.indexOf('},[reconShown,reconEpoch]);')),
+    code.indexOf('},[reconShown,reconEpoch]);'));
+  assert.ok(recon.includes('setReconData(d=>d?.ok?d:null);'),
+    'a failed reconciliation answer is cleared on retry (skeleton); a good one stays up');
 });
 
 // --- 2026-10 audit: teaching on a flaky connection ---------------------------
