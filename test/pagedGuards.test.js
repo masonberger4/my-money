@@ -131,6 +131,37 @@ test('source scan: no .limit() above PostgREST max-rows anywhere in src/ or api/
   }
 });
 
+test('source scan: every .range( chain in src/ and api/ is TOTALLY ordered', () => {
+  // The dataAdapter.js scan above finds paged reads by their loop shape; this
+  // one reads every PostgREST chain that ends in .range( anywhere in src/ or
+  // api/, back to its .from(, so a paged read outside the façade (taxIO's
+  // getMileage, api/sync.js's loadCategoryRules, api/_lib/spendingContext.js)
+  // or one written in a new loop shape can't skip the order. Same rule: at
+  // least one .order(, and a lone order must be on a unique column.
+  const UNIQUE = new Set(["'id'", "'plaid_tx_id'"]);
+  let chains = 0;
+  const outside = new Set();
+  for (const f of [...sourceFiles('src'), ...sourceFiles('api')]) {
+    const src = readFileSync(join(root, f), 'utf8');
+    for (const m of src.matchAll(/\.range\(/g)) {
+      const from = src.lastIndexOf('.from(', m.index);
+      assert.ok(from >= 0, `${f}: .range( with no .from( before it`);
+      const chain = src.slice(from, m.index);
+      chains++;
+      if (f !== 'src/dataAdapter.js') outside.add(f);
+      const orders = [...chain.matchAll(/\.order\(([^,)]+)/g)].map(o => o[1].trim());
+      assert.ok(orders.length, `${f}: unordered paged read:\n${chain.slice(0, 400)}`);
+      if (orders.length === 1) {
+        assert.ok(UNIQUE.has(orders[0]), `${f}: paged read ordered only by non-unique ${orders[0]}:\n${chain.slice(0, 400)}`);
+      }
+    }
+  }
+  assert.ok(chains >= 15, `scan regressed: found ${chains} .range( chains`);
+  for (const f of ['src/adapters/taxIO.js', 'api/sync.js', 'api/_lib/spendingContext.js']) {
+    assert.ok(outside.has(f), `scan regressed: no .range( chain found in ${f}`);
+  }
+});
+
 test('source scan: every category_rules READ pages, on both sides of the wire', () => {
   let reads = 0;
   for (const f of ['src/dataAdapter.js', 'api/sync.js']) {
