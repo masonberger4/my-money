@@ -54,13 +54,11 @@ test('index.html keeps pinch-zoom: no maximum-scale, no user-scalable=no', () =>
   assert.doesNotMatch(meta[1], /user-scalable\s*=\s*(no|0)/);
 });
 
-// The rule sets EXACTLY 16px, so a control sized above that inline would be
-// shrunk on a phone. None is today; one that should be needs its own rule.
-test('no form control is sized above 16px inline (the coarse rule would shrink it)', () => {
+// Every form-control opening tag in src/components, with its file and line.
+function controlTags() {
   const dir = join(root, 'src/components');
   const files = readdirSync(dir).filter(f => f.endsWith('.jsx')).map(f => join('src/components', f));
-  const offenders = [];
-  let seen = 0;
+  const tags = [];
   for (const f of files) {
     const s = read(f);
     for (const m of s.matchAll(/<(input|select|textarea)\b/g)) {
@@ -73,12 +71,33 @@ test('no form control is sized above 16px inline (the coarse rule would shrink i
         else if (c === '}') depth--;
         else if (c === '>' && depth === 0 && s[i - 1] !== '=') break;
       }
-      seen++;
-      for (const fs of s.slice(m.index, i).matchAll(/fontSize:\s*(\d+)/g)) {
-        if (Number(fs[1]) > 16) offenders.push(`${f}:${s.slice(0, m.index).split('\n').length} fontSize ${fs[1]}`);
-      }
+      tags.push({ kind: m[1], tag: s.slice(m.index, i), where: `${f}:${s.slice(0, m.index).split('\n').length}` });
     }
   }
-  assert.ok(seen >= 40, `expected the app's form controls to be scanned (found ${seen})`);
+  return tags;
+}
+
+// The rule sets EXACTLY 16px, so a control sized above that inline would be
+// shrunk on a phone. None is today; one that should be needs its own rule.
+test('no form control is sized above 16px inline (the coarse rule would shrink it)', () => {
+  const tags = controlTags();
+  const offenders = [];
+  for (const { tag, where } of tags) {
+    for (const fs of tag.matchAll(/fontSize:\s*(\d+)/g)) {
+      if (Number(fs[1]) > 16) offenders.push(`${where} fontSize ${fs[1]}`);
+    }
+  }
+  assert.ok(tags.length >= 40, `expected the app's form controls to be scanned (found ${tags.length})`);
   assert.deepEqual(offenders, []);
+});
+
+// An auto-width select is as wide as its longest option, and the 16px rule
+// widens that by a third on a phone: the import modal's sign select ("Positive
+// numbers are money IN (deposits)") ran past the right edge of its card at
+// 390px. maxWidth caps it at the container; the browser clips the label inside
+// the control instead of the page clipping the control.
+test('an auto-width select is capped at its container (the coarse rule widens it)', () => {
+  const autos = controlTags().filter(t => t.kind === 'select' && /width:\s*"auto"/.test(t.tag));
+  assert.ok(autos.length >= 2, `expected the import modal's auto-width selects to be scanned (found ${autos.length})`);
+  assert.deepEqual(autos.filter(t => !/maxWidth:\s*"100%"/.test(t.tag)).map(t => t.where), []);
 });

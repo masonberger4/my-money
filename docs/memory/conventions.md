@@ -59,7 +59,10 @@
   (the Debt tab's 56px APR field cut "24.99" off); em keeps desktop unchanged
   and widens with the text. A flex:1 input beside a button also needs
   `minWidth:0`, or its intrinsic width at 16px pushes the button out of the
-  row (the Ask tab's Send did).
+  row (the Ask tab's Send did). An auto-width `<select>` carries
+  `maxWidth:"100%"`: it is as wide as its longest option, so 16px widens it
+  too, and the import modal's sign select ran past its card at 390px
+  (`test/coarseInputs.test.js` pins the cap).
 - `ACCOUNT_COLORS` / `DEFAULT_COLORS` (Dashboard.jsx) are **data, not theme** —
   user-overridable colors persisted in `settings`. Never tokenize them and
   **never change their stored hex values**. Same for the `#1D9E75`/`#D85A30`

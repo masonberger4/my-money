@@ -1399,7 +1399,7 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                         This file has one Amount column, so only you can say which way it points.
                         <div style={{ marginTop: 6 }}>
                           <select value={amountSign} onChange={e => setAmountSign(e.target.value)}
-                            style={{ ...selStyle, width: "auto", fontSize: 12 }}>
+                            style={{ ...selStyle, width: "auto", maxWidth: "100%", fontSize: 12 }}>
                             <option value="in_positive">Positive numbers are money IN (deposits)</option>
                             <option value="out_positive">Positive numbers are money OUT (spending)</option>
                           </select>
@@ -1561,7 +1561,7 @@ export default function CsvImport({ accounts = [], onClose, onImported }) {
                       wrong-signed rows can never be deduped away later.
                       <div style={{ marginTop: 6 }}>
                         <select value={amountSign} onChange={e => setAmountSign(e.target.value)}
-                          style={{ ...selStyle, width: "auto", fontSize: 12 }}>
+                          style={{ ...selStyle, width: "auto", maxWidth: "100%", fontSize: 12 }}>
                           <option value="in_positive">Positive numbers are money IN (deposits)</option>
                           <option value="out_positive">Positive numbers are money OUT (spending)</option>
                         </select>
@@ -1676,12 +1676,12 @@ function ManualMapper({ fileText, onApply, amountSign, setAmountSign, selStyle, 
           <input type="number" min={0} value={headerIndex} onChange={e => setHeaderIndex(Math.max(0, +e.target.value || 0))}
             style={{ ...selStyle, width: 60, marginLeft: 6, display: "inline-block", padding: "4px 6px" }} />
         </label>
-        <select value={mode} onChange={e => setMode(e.target.value)} style={{ ...selStyle, width: "auto" }}>
+        <select value={mode} onChange={e => setMode(e.target.value)} style={{ ...selStyle, width: "auto", maxWidth: "100%" }}>
           <option value="debitcredit">Separate Debit / Credit</option>
           <option value="amount">Single signed Amount</option>
         </select>
         {mode === "amount" && (
-          <select value={amountSign} onChange={e => setAmountSign(e.target.value)} style={{ ...selStyle, width: "auto" }}>
+          <select value={amountSign} onChange={e => setAmountSign(e.target.value)} style={{ ...selStyle, width: "auto", maxWidth: "100%" }}>
             <option value="in_positive">+ = money in</option>
             <option value="out_positive">+ = money out</option>
           </select>

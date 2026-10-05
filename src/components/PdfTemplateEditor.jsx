@@ -259,18 +259,18 @@ export default function PdfTemplateEditor({ pages, template, onChange, rowCount 
 
       {/* Amount interpretation. */}
       <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 10, alignItems: "center" }}>
-        <select value={template.amountMode} onChange={e => set({ amountMode: e.target.value })} style={{ ...sel, width: "auto" }}>
+        <select value={template.amountMode} onChange={e => set({ amountMode: e.target.value })} style={{ ...sel, width: "auto", maxWidth: "100%" }}>
           <option value="signed">One Amount column</option>
           <option value="debitcredit">Separate Debit / Credit</option>
         </select>
         {template.amountMode === "signed" && (
-          <select value={template.amountSign} onChange={e => set({ amountSign: e.target.value })} style={{ ...sel, width: "auto" }}>
+          <select value={template.amountSign} onChange={e => set({ amountSign: e.target.value })} style={{ ...sel, width: "auto", maxWidth: "100%" }}>
             <option value="out_positive">+ = money out (charges)</option>
             <option value="in_positive">+ = money in (deposits)</option>
           </select>
         )}
         {roles.includes("date2") && (
-          <select value={template.dateColumn || "date"} onChange={e => set({ dateColumn: e.target.value })} style={{ ...sel, width: "auto" }}>
+          <select value={template.dateColumn || "date"} onChange={e => set({ dateColumn: e.target.value })} style={{ ...sel, width: "auto", maxWidth: "100%" }}>
             <option value="date">Use Date</option>
             <option value="date2">Use Date 2</option>
           </select>
