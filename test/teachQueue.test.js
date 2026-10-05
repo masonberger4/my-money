@@ -14,6 +14,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 import { teachQueueGroups, nonSpendLabel, categorizedShare } from '../src/teachQueue.js';
+import { merchantKey, teachDescriptor } from '../src/txClassify.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const read = (p) => readFileSync(join(root, p), 'utf8');
@@ -293,4 +294,21 @@ test('categorizedShare: degenerate shapes clamp to [0,1] and the label is honore
   assert.equal(categorizedShare(groups, 'Uncategorized'), 1);
   // Junk rows are skipped, non-numeric amounts read as 0.
   assert.equal(categorizedShare([null, { label: 'Groceries', amount: '25' }, { label: 'Uncategorized' }], 'Uncategorized'), 1);
+});
+
+// --- 2026-10 audit: an all-digit payee must not drop out of the queue ---------
+test('a "76" row groups under its description\'s key instead of being dropped', () => {
+  const keyOf = (t) => merchantKey(teachDescriptor(t));
+  const rows = [
+    row(undefined, 61.2, true, '2026-08-04', { merchant_name: '76', description: '76 - 0254 FUEL SEATTLE WA' }),
+    row(undefined, 48.0, true, '2026-08-18', { merchant_name: '76', description: '76 - 0254 FUEL SEATTLE WA' }),
+  ];
+  const { spending } = teachQueueGroups(rows, keyOf);
+  assert.deepEqual(spending.map((g) => g.key), ['FUEL SEATTLE WA']);
+  assert.equal(spending[0].spendCount, 2);
+  assert.equal(teachQueueGroups(rows, (t) => merchantKey(t.merchant_name)).spending.length, 0,
+    'the old key (merchant_name alone) dropped both rows');
+  const dash = read('src/components/Dashboard.jsx');
+  assert.match(dash, /const txDescriptor=useCallback\(t=>t\?teachDescriptor\(t\):"",\[\]\);/,
+    'Dashboard\'s one descriptor (offer, queue, RulesSheet count) goes through teachDescriptor');
 });

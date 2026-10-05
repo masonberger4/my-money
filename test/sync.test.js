@@ -357,3 +357,45 @@ test('a null hook is fine — syncs run un-notified (sync.js standalone)', () =>
       assert.deepEqual(r.failures, []);
     })
   ));
+
+// --- foregroundSyncDue: the hour gate on a foreground-return pull ------------
+// Dashboard's fetchData effect asks this on every refreshTick bump (App.jsx's
+// visibility/focus return). A PWA opened at 8am and foregrounded at 6pm must
+// pull the day's charges and re-check feed health without a manual Refresh;
+// a quick app switch must not fire a pull every time. The SERVER throttle
+// (one pull an hour per access URL) still governs — this only decides
+// whether to ask.
+import { foregroundSyncDue, FOREGROUND_SYNC_GAP_MS } from '../src/sync.js';
+
+test('foregroundSyncDue: the gap is one hour', () => {
+  assert.equal(FOREGROUND_SYNC_GAP_MS, 60 * 60 * 1000);
+});
+
+test('foregroundSyncDue: 59 minutes since the last pull is not due, 61 is', () => {
+  const t0 = Date.UTC(2026, 9, 5, 8, 0, 0);
+  assert.equal(foregroundSyncDue(t0, t0 + 59 * 60_000), false);
+  assert.equal(foregroundSyncDue(t0, t0 + 61 * 60_000), true);
+});
+
+test('foregroundSyncDue: exactly the gap is not yet due (strictly more than an hour)', () => {
+  const t0 = Date.UTC(2026, 9, 5, 8, 0, 0);
+  assert.equal(foregroundSyncDue(t0, t0 + FOREGROUND_SYNC_GAP_MS), false);
+});
+
+test('foregroundSyncDue: no pull recorded yet (0 / null / undefined) is due', () => {
+  const now = Date.UTC(2026, 9, 5, 18, 0, 0);
+  assert.equal(foregroundSyncDue(0, now), true);
+  assert.equal(foregroundSyncDue(null, now), true);
+  assert.equal(foregroundSyncDue(undefined, now), true);
+});
+
+test('foregroundSyncDue: a clock that moved backwards is not due', () => {
+  const t0 = Date.UTC(2026, 9, 5, 8, 0, 0);
+  assert.equal(foregroundSyncDue(t0, t0 - 5 * 60_000), false);
+});
+
+test('foregroundSyncDue: a custom gap is honored', () => {
+  const t0 = Date.UTC(2026, 9, 5, 8, 0, 0);
+  assert.equal(foregroundSyncDue(t0, t0 + 11 * 60_000, 10 * 60_000), true);
+  assert.equal(foregroundSyncDue(t0, t0 + 9 * 60_000, 10 * 60_000), false);
+});

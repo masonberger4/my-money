@@ -86,9 +86,12 @@ test('REGRESSION: the as-of label renders the LOCAL date, not the UTC calendar d
   // shortDate(d.toISOString().slice(0,10)) took the UTC day and re-read it as
   // a local one, so a balance typed at 5:30pm PDT (stored 00:30Z the NEXT
   // day) rendered "as of" tomorrow — a date that hasn't happened where the
-  // reader is standing. Dashboard formats the Date's own local parts instead.
+  // reader is standing. Dashboard formats the Date's own local parts instead,
+  // through the shared formatter that now lives in src/format.js.
   const dash = readFileSync(join(root, 'src/components/Dashboard.jsx'), 'utf8');
-  assert.ok(dash.includes('function localShortDate(d)'), 'the local-instant formatter must exist');
+  const format = readFileSync(join(root, 'src/format.js'), 'utf8');
+  assert.ok(format.includes('export function localShortDate(d)'), 'the local-instant formatter must exist');
+  assert.match(dash, /import \{[^}]*\blocalShortDate\b[^}]*\} from "\.\.\/format\.js"/, 'Dashboard reads the shared one');
   assert.doesNotMatch(
     dash,
     /shortDate\(\s*asOf\.date\.toISOString\(\)/,

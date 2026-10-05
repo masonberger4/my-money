@@ -86,12 +86,15 @@ test('theme.js exports useThemeToken and no component redefines a private copy',
 });
 
 // --- Pull-to-refresh must be blocked while a sheet is open or already busy --
-test('<PullRefresh> is gated on anySheetOpen||loading', () => {
+// "Busy" includes the bank pull a refresh started (`refreshing`), not just the
+// cache read in front of it: gating on `loading` alone let the chip settle and
+// a second pull arm while SimpleFIN was still pulling (F72).
+test('<PullRefresh> is gated on anySheetOpen||loading||refreshing', () => {
   const dash = read(DASH);
   const line = dash.split('\n').find(l => l.includes('<PullRefresh'));
   assert.ok(line, 'the <PullRefresh render line moved — update this test\'s anchor string');
-  assert.ok(line.includes('blocked={anySheetOpen||loading}'),
-    'sheets scroll internally (the gesture would fight that scroll) and a refresh already in flight must not be stacked by a second pull');
+  assert.ok(line.includes('blocked={anySheetOpen||loading||refreshing}'),
+    'sheets scroll internally (the gesture would fight that scroll) and a refresh already in flight — its bank pull included — must not be stacked by a second pull');
 });
 
 // --- The gesture must be additive on top of native scrolling ----------------
@@ -133,6 +136,33 @@ test('usePullRefresh listens passively and never blocks native scrolling', () =>
       `${name} must be bound with addEventListener or the gesture can't hear it`);
     assert.match(slice, new RegExp(`removeEventListener\\("${name}"`),
       `${name} must be unbound in the cleanup or a window listener outlives the component`);
+  }
+});
+
+// --- The idle retract is wheel-only; zoom is never a pull ---------------------
+// A held finger sends no touchmove, so a retract timer armed for touch hid the
+// indicator 250ms into a held pull (touchEnd is what clears touch). And
+// ctrl+wheel is the browser's zoom / Chrome's trackpad pinch: the hook must
+// hand ctrlKey to the machine, which treats it as inert (test/pullRefresh).
+test('usePullRefresh arms the idle retract for wheel only and passes ctrlKey', () => {
+  const dash = read(DASH);
+  const start = dash.indexOf('function usePullRefresh(');
+  const end = dash.indexOf('function PullRefresh(');
+  assert.ok(start > 0 && end > start,
+    'usePullRefresh/PullRefresh moved — update this test\'s anchor strings');
+  const slice = stripComments(dash.slice(start, end));
+  assert.match(slice, /if\(\s*wheel\s*&&\s*r\.progress\s*>\s*0\s*\)\s*idle\s*=\s*setTimeout/,
+    'the idle retract must be gated on the wheel flag — touch is cleared by touchEnd, and a held pull must keep its indicator');
+  assert.doesNotMatch(slice, /if\(\s*r\.progress\s*>\s*0\s*\)\s*idle\s*=/,
+    'an ungated idle retract fires for touch too');
+  const onWheel = slice.slice(slice.indexOf('const onWheel='), slice.indexOf('window.addEventListener("touchstart"'));
+  assert.match(onWheel, /m\.current\.wheel\(\{[^}]*ctrlKey:\s*e\.ctrlKey[^}]*\}\)\s*,\s*true\)/,
+    'onWheel must pass ctrlKey to the machine and flag the call as wheel input');
+  for (const h of ['onTouchStart', 'onTouchMove', 'onTouchEnd', 'onTouchCancel']) {
+    const at = slice.indexOf(`const ${h}=`);
+    assert.ok(at > 0, `${h} moved — update this test`);
+    const body = slice.slice(at, slice.indexOf('\n    const ', at + 1) > 0 ? slice.indexOf('\n    const ', at + 1) : undefined);
+    assert.doesNotMatch(body, /,\s*true\)/, `${h} must not flag its fire() call as wheel input`);
   }
 });
 

@@ -161,7 +161,11 @@
   `sb_secret_…` value in any `VITE_*` var; it would be baked into the public
   bundle.
 - The empty-institution count-query error must NOT fall back to the "connect
-  your first account" screen (see App.jsx count handling).
+  your first account" screen (see App.jsx count handling). **The code still
+  does on a COLD start** (`setCount(prev => prev ?? 0)` turns the initial null
+  into 0) — a known open item (2026-10-05 audit, F47), not a precedent: the
+  screen that replaces it is Mason's call, listed in the plan doc's 2026-10-05
+  ruling list.
 - **A too-strict CSP edit in `vercel.json` breaks production SILENTLY.** Those
   headers are served by Vercel and by nothing else — `npm run build`, `npm
   test` and the mock harness never see them, so a dropped directive or a
@@ -288,7 +292,12 @@
   (`src/spending.js`, tested) and returns a rollback that the failure path
   applies before alerting — look for the helper, not scattered patch sites;
   QuickAddSheet's insert routes through it too. The invariant above is
-  unchanged.
+  unchanged. Order is a derived field too: `acctTxs` and `searchRes` are
+  POSITIONAL (`groupByDay` keeps the caller's order) and never refetched, so a
+  `user_date` patch also re-sorts every list through `resortByEffectiveDate`
+  (`src/txList.js` — stable and date-only, because the reads have no id
+  tiebreak and one would reshuffle unmoved same-day rows); before 2026-10-05 a
+  re-dated row stayed put under an out-of-order day header.
 - A bank words the same transaction differently in its CSV and its PDF, so the
   dedup hash differs: importing both formats into ONE manual account
   double-inserts. `transactions.source` records `'csv'|'pdf'` and the importer
@@ -315,7 +324,21 @@
   snapshot. And the MONTH-TAGGING lesson (origin: Trends movers): async
   per-month view state must carry its month (`{y,m,list}`) so a transient
   failure after a month switch cannot render the old month's data under the
-  new month's labels — the auto-fill preview guard applies the same rule.
+  new month's labels — the auto-fill preview guard applies the same rule, and
+  so does the Budget tab's typed `income` (read through `incomeForMonth`).
+  **Two more shapes of the same race (2026-10-05).** (1) The load that WINS
+  `loadSeq` owns `loading`: reloadData clears it right after each
+  `seq!==loadSeq.current` guard it survives, success and catch paths alike,
+  and fetchData only raises it. A clear gated on fetchData's OWN reload
+  winning stranded the flag whenever a newer reload superseded it — the
+  startup pull's follow-up, any post-write reload — so Home stayed skeletons
+  and Refresh stayed disabled with no error anywhere. A superseded load must
+  never be the only clearer. (2) A reload that runs AFTER an await must read
+  the month on screen NOW — `reloadViewed()`, off `monthRef` — never the
+  render closure's `reloadData(year,month)`: that reloads the month that WAS
+  on screen and, minting the newest sequence, beats the tap that moved away,
+  painting the old month under the new header. Both are pinned in
+  `test/loadPipeline.test.js`.
 - **A ref set ONLY in an effect's cleanup is latched `true` forever under
   StrictMode.** React 18 dev (`<React.StrictMode>`, `src/main.jsx`) runs a
   mount effect **setup → cleanup → setup on the SAME fiber**, and `useRef`
@@ -342,7 +365,32 @@
   "0002-06-15", "0020-06-15", "0202-06-15", "2026-06-15". Committing on `change`
   therefore writes garbage years (and, with an optimistic patch, the later blur
   sees no change and never corrects them). Commit date inputs on **blur**, with
-  a sanity floor on the year.
+  a sanity floor on the year. Blur alone is not enough either: Chrome's year
+  segment keeps accepting digits, so "20261-09-15" is a complete value that
+  moved a transaction out of every month view. Every date EDIT input commits
+  through `dateCommit` (`src/searchFilters.js`): garbage REVERTS the field
+  without writing, only an emptied field clears, and the full-shape check
+  rejects 5- and 6-digit years — a revert, never a save of garbage and never a
+  silent clear (placed-in-service used to delete its stored date on a
+  half-typed year). `<input type="month">` has the mirror problem: desktop
+  Safari and Firefox render it as a bare text box, so validate with
+  `pickedMonthKey` and show a YYYY-MM placeholder.
+- **A hidden `<input type="color">` opened with `.click()` is never focused, so
+  it never blurs** — and React's `onChange` on a colour input is the `input`
+  event, firing per drag step. `Swatch` committed on blur (the 2026-09-08 fix
+  for per-drag writes) and so never saved on the laptop at any of its sites;
+  nothing failed loudly, the colour just snapped back. Listen for the NATIVE
+  `change` event (picker close) with blur as a fallback; pinned in
+  `test/inlineEditors.test.js`.
+- **An SVG arc whose start and end points coincide is DROPPED, not drawn as a
+  circle** — the spec says to omit it, and a 0–360° sweep's endpoints
+  coincide once parsed. The Home donut showed an empty ring beside a populated
+  legend whenever ONE category had spending (day one, all-Uncategorized, early
+  in any month), and its `!total` placeholder never fired. A whole-turn slice
+  must be drawn another way (`donutSlices` returns a ring that `Donut` strokes
+  as a circle); any new arc-drawing code needs the same guard. No local test
+  renders SVG — `test/donut.test.js` pins the geometry, the smoke screenshot
+  shows the ring.
 - One Claude session per line of work, branched from current main — two sessions
   off different bases once regressed production (the "iphone-app" incident).
 - If pushes stop deploying and GitHub API calls 503, check githubstatus.com

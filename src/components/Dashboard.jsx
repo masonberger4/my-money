@@ -1,15 +1,15 @@
 import { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from "react";
-import { getOverview, getSpending, getBiggestMovers, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, ACCOUNT_TYPES, ACCOUNT_SUBTYPES, setCategoryRule, applyCategoryRuleToHistory, listCategoryRules, countCategoryRuleMatches, deleteCategoryRule, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, getActualIncome, resolveBudgetIncome, invalidateEnvelopeSpending, isEnvelopeSchemaMissing, targetNeed, readyToAssign, envelopePace, updateEnvPace as persistEnvPace, updateRecIgnore, getStartupSettings, monthKey, getEntities, createEntity, updateEntity, getTaxYearTransactions, getMileage, addMileage, deleteMileage, getReceiptTxIds, getDebts, getBalanceSnapshots, getNetWorthSeries, addManualTransaction, createManualAccount, updateManualBalance, getDataCoverage, getFeedCoverageGaps, FEED_GAP_SCAN_CAP, getReconciliation, getRestoreRecord, signOut, autoFillMonth, setTargetOverride, effectiveTarget, getExpectedTransactions, addExpected, dismissExpected, matchExpectedManually, getSavedChats, saveChatToApp, deleteSavedChat, addRegistryEntry, updateRegistryParent, removeRegistryEntry, updateCategoryColor, updateCategoryAlias } from "../dataAdapter.js";
+import { getOverview, getSpending, getBiggestMovers, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, quickAddTargets, ACCOUNT_TYPES, ACCOUNT_SUBTYPES, setCategoryRule, applyCategoryRuleToHistory, listCategoryRules, countCategoryRuleMatches, deleteCategoryRule, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, getActualIncome, resolveBudgetIncome, invalidateEnvelopeSpending, isEnvelopeSchemaMissing, targetNeed, readyToAssign, envelopePace, updateEnvPace as persistEnvPace, updateRecIgnore, getStartupSettings, monthKey, getEntities, createEntity, updateEntity, getTaxYearTransactions, getMileage, addMileage, deleteMileage, getReceiptTxIds, getDebts, getBalanceSnapshots, getNetWorthSeries, addManualTransaction, createManualAccount, updateManualBalance, getDataCoverage, getFeedCoverageGaps, FEED_GAP_SCAN_CAP, getReconciliation, getRestoreRecord, signOut, autoFillMonth, setTargetOverride, effectiveTarget, getExpectedTransactions, addExpected, dismissExpected, matchExpectedManually, getSavedChats, saveChatToApp, deleteSavedChat, addRegistryEntry, updateRegistryParent, removeRegistryEntry, updateCategoryColor, updateCategoryAlias, setTaxMapEntry, setDeductionMapEntry } from "../dataAdapter.js";
 import { FLOW_LABELS } from "../reconciliation.js";
-import { clampSeries } from "../netWorth.js";
+import { clampSeries, debtTotalSeries, sparklinePoints } from "../netWorth.js";
 // Pure cores imported directly (never Supabase — the mock-harness alias rule
 // only covers dataAdapter/sync/db/apiClient; pure modules are safe).
-import { planAutoFill, envelopeBar } from "../envelopes.js";
-import { buildSearchFilters, searchIsActive } from "../searchFilters.js";
-import { expectedByCategory, expectedStatus, isMissedExpected, seedFromRecurring, projectFutureCycles } from "../expectedTx.js";
-import { payoffWhatIf, debtFreeMonth, isMortgage, amortizationSchedule, addMonths, MAX_MONTHS, payoffProgress, utilization } from "../debtPayoff.js";
-import { SCHEDULE_E_LINES, RENTS_KEY, DEFAULT_SCHEDULE_E_MAP, scheduleEReport, entityMonthly, entityLedger, personalDeductionReport, DEDUCTION_BUCKETS, DEFAULT_DEDUCTION_MAP, mileageDeduction, scheduleECsv } from "../taxReport.js";
-import { merchantKey, matchLearnedRule, isKeyPrefix } from "../txClassify.js";
+import { planAutoFill, envelopeBar, assignUnchanged, targetUnchanged, monthsUntil, pickedMonthKey } from "../envelopes.js";
+import { buildSearchFilters, searchIsActive, sanitizeDateInput, dateCommit, EDIT_YEAR_FLOOR } from "../searchFilters.js";
+import { expectedByCategory, expectedStatus, isMissedExpected, seedFromRecurring, projectFutureCycles, homeBillsWindow } from "../expectedTx.js";
+import { payoffWhatIf, debtFreeMonth, isMortgage, amortizationSchedule, addMonths, MAX_MONTHS, payoffProgress, utilization, summarizeDebts } from "../debtPayoff.js";
+import { SCHEDULE_E_LINES, RENTS_KEY, DEFAULT_SCHEDULE_E_MAP, scheduleEReport, entityMonthly, entityLedger, personalDeductionReport, DEDUCTION_BUCKETS, DEFAULT_DEDUCTION_MAP, mileageDeduction, scheduleECsv, parseTaxMaps, setEmapEntryIn, setDmapEntryIn, savedOutsideYear, mileageFootnote } from "../taxReport.js";
+import { merchantKey, matchLearnedRule, isKeyPrefix, teachDescriptor } from "../txClassify.js";
 import { trimChatMsgs, buildSavedChat } from "../savedChats.js";
 import { patchTxShape } from "../spending.js";
 import { friendlyError } from "../netRetry.js";
@@ -17,19 +17,22 @@ import { detectRecurring } from "../recurring.js";
 import { unlinkInstitution, restoreImportedInstitution, askAssistant, getSimpleFinStatus } from "../apiClient.js";
 import { restorableIds } from "../unlinkRestore.js";
 import { UNCATEGORIZED, isBudgetableCategory } from "../categoryMap.js";
-import { userCategoryList, missingCategories, isDuplicateCategoryName } from "../categoryList.js";
+import { userCategoryList, missingCategories, isDuplicateCategoryName, rankByList } from "../categoryList.js";
 import { parentIndex, parentOf, hasChildren, eligibleParents, canSetParent,
   setRegistryParent, groupCategories, groupMembers, rollupFields,
-  orderGroups, earliestMemberRank } from "../categoryTree.js";
+  orderGroups, earliestMemberRank, barScale } from "../categoryTree.js";
 import { teachQueueGroups, nonSpendLabel, categorizedShare } from "../teachQueue.js";
 import { displayBalance, isDebtAccount as isDebtType, balanceAsOf, BALANCE_STALE_DAYS } from "../accountBalance.js";
 import { unhideConfirmMessage } from "../unhideConfirm.js";
 import { NAV_ITEMS, REFLECT_TABS, navForTab, pageTitle } from "../nav.js";
-import { groupByDay, longDate } from "../txList.js";
+import { groupByDay, longDate, liveAcctFilter, emptyListMessage, matchCountLabel, resortByEffectiveDate } from "../txList.js";
 import { TX_TYPES, txTypeLabel, allowedUserTypes } from "../txType.js";
 import { breakdownSegments, incomeVsSpendingInsight, incomeSections } from "../reflect.js";
+import { periodYM, localTodayIso, localIsoDate, addLocalDays, ordinalSuffix, monthLabel, shortDate, localShortDate, fmt, fmtX, fmtAuto, signed, monthYear, numericish } from "../format.js";
 import { createSheetHistory } from "../sheetHistory.js";
-import { runSync } from "../sync.js";
+import { donutSlices, donutGeometry } from "../donut.js";
+import { runSync, foregroundSyncDue } from "../sync.js";
+import { refreshTickPlan, pullFollowUp, createSyncHold, feedHealthVerdict } from "../loadPipeline.js";
 // Lazy: both are modals rendered only on user action, and CsvImport reaches the
 // whole statement-import stack — no reason for either in the initial bundle.
 // A failed chunk load throws during render; App's ErrorBoundary is the net.
@@ -162,60 +165,6 @@ function useSurfaces(resolved){
   return surf;
 }
 
-// A period's start ('YYYY-MM-DD') as { y, m } read from the STRING. `new
-// Date('2026-08-01').getMonth()` is UTC midnight rendered locally, so in any
-// western timezone it is July: the Trends bars highlighted the wrong month and
-// every tap jumped one month early. Same reasoning as spending.js's dayOfMonth
-// and shortDate below — never parse a date-only string through Date().
-function periodYM(start) {
-  const s = String(start || '');
-  return { y: Number(s.slice(0, 4)), m: Number(s.slice(5, 7)) };
-}
-
-// TODAY on the WALL CLOCK, never toISOString(): that is UTC, so from ~5pm
-// Pacific onward it is already tomorrow — a quick-added cash entry landed on
-// tomorrow's date (next MONTH on the 31st), fell outside the viewed month, and
-// read as "it didn't save". CsvImport keeps its own UTC `todayIso`
-// deliberately, for feed-boundary math; this is the human-facing one.
-function localTodayIso() {
-  const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-}
-
-// "8th", "21st" — the movers card says WHICH day the comparison month was cut
-// at, so a sliced comparison is never mistaken for a whole-month one.
-function ordinalSuffix(n) {
-  const d = Number(n);
-  if (d % 100 >= 11 && d % 100 <= 13) return "th";
-  return { 1: "st", 2: "nd", 3: "rd" }[d % 10] || "th";
-}
-
-function monthLabel(y, m) { return new Date(y,m-1,1).toLocaleString("default",{month:"long",year:"numeric"}); }
-function shortDate(iso) { const [y,m,d]=iso.split("-").map(Number); return new Date(y,m-1,d).toLocaleDateString("default",{month:"short",day:"numeric"}); }
-// A Date INSTANT rendered in the reader's own timezone. Deliberately not
-// shortDate(d.toISOString().slice(0,10)): that takes the UTC calendar day and
-// re-reads it as a local one, so a balance typed at 5:30pm PDT (stored
-// 00:30Z the next day) rendered as "as of" TOMORROW — a date that has not
-// happened yet where the reader is standing. shortDate stays as it is: its
-// callers pass stored 'YYYY-MM-DD' dates, which have no time and no zone.
-function localShortDate(d) { return d.toLocaleDateString("default",{month:"short",day:"numeric"}); }
-// Negatives render as −$1,234.56, not $-1,234.56 (matches money() in
-// CsvImport.jsx). Debts now always display negative, and money-in transactions
-// already did, so this is the common case rather than an edge one.
-function fmt(n) {
-  const v = Number(n);
-  const s = "$"+Math.abs(v).toLocaleString("en-US",{maximumFractionDigits:0});
-  return v < 0 ? "−"+s : s;
-}
-function fmtX(n) {
-  const v = Number(n);
-  const s = "$"+Math.abs(v).toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2});
-  return v < 0 ? "−"+s : s;
-}
-// "$1,234" for whole dollars, "$1,234.56" when there are cents to show.
-function fmtAuto(n) { return Math.round(Number(n)*100)%100===0?fmt(n):fmtX(n); }
-function signed(n) { return `${n>0?"+":""}${fmtAuto(n)}`; }
-
 // Hand a generated CSV to the user. In the installed iOS PWA, blob-URL anchor
 // downloads are unreliable — the share sheet (→ Save to Files / AirDrop / a
 // mail draft to the CPA) is the path that actually works there, so try it
@@ -269,25 +218,10 @@ function chatTranscript(msgs){
   const head=`# Spending assistant chat — ${new Date().toLocaleString()}\n`;
   return head+msgs.map(m=>`\n**${m.role==="user"?"You":"Assistant"}:**\n${m.content}\n`).join("");
 }
-// "Jun 2027" from a 'YYYY-MM-DD' target date.
-function monthYear(dateStr) {
-  const [y,m]=String(dateStr||"").slice(0,7).split("-").map(Number);
-  if(!y||!m) return "";
-  return new Date(y,m-1,1).toLocaleString("default",{month:"short",year:"numeric"});
-}
 const MONO={color:"var(--text)",fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums"};
 // The semantic money pair (under / over). Always rendered through inkOn/markOn
 // against the actual surface so both themes keep contrast.
 const OK_MONEY="#1D9E75",OVER_MONEY="#D85A30";
-// Keeps a money input to digits with at most one leading "-" and one ".", so
-// a fat-fingered "1-2" or "1.2.3" can never reach the adapter. Negatives are
-// allowed only where pulling money back out is meaningful (an assignment) —
-// never for a target, an income figure or the size of a move.
-function numericish(s,{negative=true}={}) {
-  const neg=negative&&s.trim().startsWith("-");
-  const [whole,...rest]=s.replace(/[^0-9.]/g,"").split(".");
-  return (neg?"-":"")+(rest.length?`${whole}.${rest.join("")}`:whole);
-}
 
 // Inline editor for a hand-entered liability figure (APR, minimum payment,
 // credit limit) on a Debt card. Uncontrolled: commits the parsed number on
@@ -416,14 +350,17 @@ function usePullRefresh({blocked,loading,onTrigger}){
     // clear it. Touch can't strand it (touchEnd zeroes progress), but the
     // wheel path needs this timer: once the stream has been idle for one
     // wheelIdleMs window — the same clock pullRefresh.js uses to decide a
-    // burst is over — the abandoned pull retracts.
+    // burst is over — the abandoned pull retracts. WHEEL ONLY: a finger held
+    // still mid-pull sends no touchmove, so arming this for touch hid the
+    // indicator 250ms into a held pull — past threshold, it read as cancelled
+    // and then refreshed on release anyway.
     let idle=null;
     const clearIdle=()=>{if(idle){clearTimeout(idle);idle=null;}};
-    const fire=r=>{
+    const fire=(r,wheel=false)=>{
       clearIdle();
       setProgress(r.progress);
       if(r.shouldTrigger){setBusy(true);latest.current.onTrigger();return;}
-      if(r.progress>0)idle=setTimeout(()=>{idle=null;setProgress(0);},PULL_DEFAULTS.wheelIdleMs);
+      if(wheel&&r.progress>0)idle=setTimeout(()=>{idle=null;setProgress(0);},PULL_DEFAULTS.wheelIdleMs);
     };
     // Only single-touch gestures count — a second finger ends the pull.
     const onTouchStart=e=>{
@@ -440,7 +377,8 @@ function usePullRefresh({blocked,loading,onTrigger}){
       let deltaY=e.deltaY;
       if(e.deltaMode===1)deltaY*=16;                       // lines -> px
       else if(e.deltaMode===2)deltaY*=window.innerHeight;  // pages -> px
-      fire(m.current.wheel({deltaY,...env()}));
+      // ctrlKey = browser zoom / trackpad pinch; the machine treats it as inert.
+      fire(m.current.wheel({deltaY,ctrlKey:e.ctrlKey,...env()}),true);
     };
     window.addEventListener("touchstart",onTouchStart,{passive:true});
     window.addEventListener("touchmove",onTouchMove,{passive:true});
@@ -635,18 +573,13 @@ function GearMenu({tab,themePref,themeResolved,onTheme,loading,lastUpd,onRefresh
   );
 }
 
+// Geometry lives in src/donut.js (testable without a DOM). A lone category
+// comes back as a 'ring', not an arc: SVG drops an arc whose endpoints
+// coincide, so a single 0-360° slice used to render as an empty ring.
 function Donut({data,size=130}) {
-  const total = data.reduce((s,d)=>s+d.value,0);
-  if (!total) return <div style={{width:size,height:size,borderRadius:"50%",background:"var(--border)"}} />;
-  let off=0;
-  const cx=size/2,cy=size/2,r=size*.38,ir=size*.24;
-  const slices = data.map(d=>{const p=d.value/total,s=off;off+=p*360;return{...d,s,e:off};});
-  function arc(s,e,or,ir){
-    const sa=(s-90)*Math.PI/180,ea=(e-90)*Math.PI/180,lg=e-s>180?1:0;
-    const x1=cx+or*Math.cos(sa),y1=cy+or*Math.sin(sa),x2=cx+or*Math.cos(ea),y2=cy+or*Math.sin(ea);
-    const x3=cx+ir*Math.cos(ea),y3=cy+ir*Math.sin(ea),x4=cx+ir*Math.cos(sa),y4=cy+ir*Math.sin(sa);
-    return `M${x1},${y1} A${or},${or} 0 ${lg},1 ${x2},${y2} L${x3},${y3} A${ir},${ir} 0 ${lg},0 ${x4},${y4} Z`;
-  }
+  const slices=donutSlices(data,size);
+  if (!slices.length) return <div style={{width:size,height:size,borderRadius:"50%",background:"var(--border)"}} />;
+  const {cx,cy,ir}=donutGeometry(size);
   return (
     <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
       {/* No opacity here: the slice colour is already contrast-corrected against
@@ -655,32 +588,59 @@ function Donut({data,size=130}) {
           The card-coloured stroke separates ADJACENT slices, which contrast
           correction cannot: the palette legitimately maps several categories to
           one colour (Groceries / Dining out / Pets are all #1D9E75), so
-          neighbours can be a literal 1:1 and would otherwise read as one wedge. */}
-      {slices.map((s,i)=><path key={i} d={arc(s.s,s.e,r,ir)} fill={s.color} stroke="var(--card)" strokeWidth="1.5"/>)}
+          neighbours can be a literal 1:1 and would otherwise read as one wedge.
+          A lone ring has no neighbour, so it carries no separator. */}
+      {slices.map((s,i)=>s.kind==="ring"
+        ?<circle key={i} cx={s.cx} cy={s.cy} r={s.r} fill="none" stroke={s.color} strokeWidth={s.width}/>
+        :<path key={i} d={s.d} fill={s.color} stroke="var(--card)" strokeWidth="1.5"/>)}
       <circle cx={cx} cy={cy} r={ir-2} fill="var(--card)"/>
     </svg>
   );
 }
 
 // Commits when the picker CLOSES, not on every step of it. A native colour
-// input fires `change` continuously while the user drags, and each one was a
-// database write plus (before the account page derived its account) a refetch
-// of that account's whole transaction list — a burst of UPDATEs and a flashing
-// list for one colour choice. The live value is previewed locally so the
-// swatch still tracks the drag; `onChange` fires once, on blur/close, and only
-// if the colour actually changed. Accepted, not overlooked: there is no
-// flush-on-unmount, so a pick abandoned by the component disappearing mid-drag
-// is dropped. Native colour pickers are modal on both targets here (iOS Safari
-// and desktop), so nothing can unmount underneath one — machinery for that
-// would be guarding a path the platform does not offer.
+// input fires `input` continuously while the user drags (React's onChange
+// follows `input`), and each one used to be a database write plus (before the
+// account page derived its account) a refetch of that account's whole
+// transaction list — a burst of UPDATEs and a flashing list for one colour
+// choice. The live value is previewed locally so the swatch still tracks the
+// drag; `onChange` fires once, when the picker closes, and only if the colour
+// actually changed. "Closes" is the NATIVE `change` event, bound directly on
+// the input: React exposes no listener for it on a colour input, and the
+// blur-only commit this replaced never fired on the laptop — the picker opens
+// through a programmatic click() on a pointer-events:none input, which is
+// never focused, so it never blurs (the swatch showed the new colour, nothing
+// was written, and a reload brought the old one back). Blur stays as a
+// fallback for a platform whose picker does take focus; whichever of the two
+// arrives first commits and the second finds nothing pending. Accepted, not
+// overlooked: there is no flush-on-unmount, so a pick abandoned by the
+// component disappearing mid-drag is dropped. Native colour pickers are modal
+// on both targets here (iOS Safari and desktop), so nothing can unmount
+// underneath one — machinery for that would be guarding a path the platform
+// does not offer.
 function Swatch({color,onChange}) {
   const ref=useRef();
   const [live,setLive]=useState(null);
   const shown=live??color;
-  const commit=()=>{
+  // The native listener is bound once, so it reads props and the pending
+  // pick through refs — never a stale closure.
+  const latest=useRef(null); latest.current={color,onChange};
+  const pick=useRef(null);
+  const commit=v=>{
+    pick.current=null;
     setLive(null);
-    if(live&&live!==color)onChange(live);
+    if(v&&v!==latest.current.color)latest.current.onChange(v);
   };
+  useEffect(()=>{
+    const el=ref.current;
+    if(!el)return;
+    // `pick` is set by every `input` before the close; el.value covers a
+    // browser that fires `change` alone. After a blur commit, the parent's
+    // optimistic colour already equals el.value, so this can't write twice.
+    const h=()=>commit(pick.current??el.value);
+    el.addEventListener("change",h);
+    return ()=>el.removeEventListener("change",h);
+  },[]);
   // The fill is the STORED colour, shown truthfully — this is the colour picker,
   // so it must never be contrast-adjusted. The outline is --muted (>=3:1 on the
   // card in both themes) rather than the --border hairline, which disappears
@@ -691,7 +651,8 @@ function Swatch({color,onChange}) {
         outline:"1.5px solid var(--muted)",transition:"transform .1s",position:"relative"}}
       onMouseEnter={e=>e.currentTarget.style.transform="scale(1.3)"}
       onMouseLeave={e=>e.currentTarget.style.transform="scale(1)"}>
-      <input ref={ref} type="color" value={shown} onChange={e=>setLive(e.target.value)} onBlur={commit}
+      <input ref={ref} type="color" value={shown} onChange={e=>{pick.current=e.target.value;setLive(e.target.value);}}
+        onBlur={()=>commit(pick.current)}
         style={{position:"absolute",opacity:0,width:1,height:1,pointerEvents:"none"}}/>
     </div>
   );
@@ -725,14 +686,14 @@ function EditName({name,onSave}) {
     onSave(next);
   };
   if(ed) return (
-    <input ref={ref} value={val} onChange={e=>setVal(e.target.value)}
+    <input ref={ref} value={val} onChange={e=>setVal(e.target.value)} data-mm-esc-local=""
       onBlur={commit}
       onKeyDown={e=>{if(e.key==="Enter"){commit();}if(e.key==="Escape"){e.stopPropagation();setEd(false);setVal(name);}}}
       style={{font:"inherit",fontSize:13,fontWeight:500,color:"var(--text)",background:"var(--bg)",
         border:"1px solid var(--border)",borderRadius:4,padding:"1px 6px",width:"100%",outline:"none"}}/>
   );
   return (
-    <span onDoubleClick={()=>setEd(true)} title="Double-click to rename"
+    <span onDoubleClick={()=>{setVal(name);setEd(true);}} title="Double-click to rename"
       style={{display:"flex",alignItems:"center",gap:4,cursor:"text",flex:1,minWidth:0}}>
       <span style={{fontSize:13,fontWeight:500,color:"var(--text)",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{name}</span>
     </span>
@@ -749,9 +710,14 @@ function BudgetEdit({limit,onSave}) {
   const ref=useRef();
   useEffect(()=>{setVal(limit!=null?String(limit):"");},[limit]);
   useEffect(()=>{if(ed)ref.current?.select();},[ed]);
-  function commit(){setEd(false);const t=val.trim();onSave(t===""?null:t);}
+  // A look-and-tap-away must not write — see targetUnchanged (envelopes.js).
+  function commit(){
+    setEd(false);const t=val.trim();
+    if(targetUnchanged(t,limit)){setVal(limit!=null?String(limit):"");return;}
+    onSave(t===""?null:t);
+  }
   if(ed) return (
-    <input ref={ref} value={val} inputMode="decimal" placeholder="$/mo"
+    <input ref={ref} value={val} inputMode="decimal" placeholder="$/mo" data-mm-esc-local=""
       onChange={e=>setVal(numericish(e.target.value,{negative:false}))}
       onBlur={commit}
       onKeyDown={e=>{if(e.key==="Enter")commit();if(e.key==="Escape"){e.stopPropagation();setEd(false);setVal(limit!=null?String(limit):"");}}}
@@ -776,9 +742,14 @@ function AssignEdit({value,onSave}) {
   const ref=useRef();
   useEffect(()=>{setVal(value?String(value):"");},[value]);
   useEffect(()=>{if(ed)ref.current?.select();},[ed]);
-  function commit(){setEd(false);const t=val.trim();onSave(t===""?null:t);}
+  // A look-and-tap-away must not write — see assignUnchanged (envelopes.js).
+  function commit(){
+    setEd(false);const t=val.trim();
+    if(assignUnchanged(t,value)){setVal(value?String(value):"");return;}
+    onSave(t===""?null:t);
+  }
   if(ed) return (
-    <input ref={ref} value={val} inputMode="decimal" placeholder="$"
+    <input ref={ref} value={val} inputMode="decimal" placeholder="$" data-mm-esc-local=""
       onChange={e=>setVal(numericish(e.target.value))}
       onBlur={commit}
       onKeyDown={e=>{if(e.key==="Enter")commit();if(e.key==="Escape"){e.stopPropagation();setEd(false);setVal(value?String(value):"");}}}
@@ -816,7 +787,7 @@ function IncomeEdit({value,isDefault,onSave}) {
   function commit(scope){setEd(false);const t=val.trim();onSave(t===""?null:t,scope);}
   if(ed) return (
     <span style={{display:"inline-flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
-      <input ref={ref} value={val} inputMode="decimal" placeholder="$"
+      <input ref={ref} value={val} inputMode="decimal" placeholder="$" data-mm-esc-local=""
         onChange={e=>setVal(numericish(e.target.value,{negative:false}))}
         onKeyDown={e=>{if(e.key==="Enter")commit("month");if(e.key==="Escape"){e.stopPropagation();setEd(false);setVal(value!=null?String(value):"");}}}
         style={{font:"inherit",fontSize:16,width:96,color:"var(--text)",background:"var(--card)",
@@ -855,11 +826,14 @@ function TargetSheet({name,row,busy,year,month,onSave,onClose}) {
   const [ym,setYm]=useState(row?.targetDate?String(row.targetDate).slice(0,7):"");
   const mName=new Date(year,month-1,1).toLocaleString("default",{month:"long"});
   const n=Number(amount);
+  // null unless `ym` is a real 'YYYY-MM' (the month input is a bare text box
+  // on desktop Safari/Firefox — see pickedMonthKey).
+  const ymKey=pickedMonthKey(ym);
   // Month scope allows 0 — "ask nothing this month" is a real override,
   // distinct from clearing it.
   const valid=scope==="month"
     ?amount.trim()!==""&&Number.isFinite(n)&&n>=0
-    :Number.isFinite(n)&&n>0&&(kind==="monthly"||/^\d{4}-\d{2}$/.test(ym));
+    :Number.isFinite(n)&&n>0&&(kind==="monthly"||!!ymKey);
   const pickScope=s=>{
     if(s===scope)return;
     setScope(s);
@@ -868,8 +842,8 @@ function TargetSheet({name,row,busy,year,month,onSave,onClose}) {
       ?(row?.targetOverride!=null?String(row.targetOverride):row?.target!=null?String(row.target):"")
       :(row?.target!=null?String(row.target):""));
   };
-  // Mirrors targetNeed()'s by-date arithmetic so the sheet can't promise a
-  // number the funder won't produce.
+  // Uses targetNeed()'s own monthsUntil so the sheet can't promise a number
+  // the funder won't produce.
   const preview=(()=>{
     if(!valid) return null;
     if(scope==="month"){
@@ -879,11 +853,10 @@ function TargetSheet({name,row,busy,year,month,onSave,onClose}) {
     if(kind==="monthly") return `Tops this category up to ${fmtAuto(n)} every month.`;
     // Months left count from the month BEING VIEWED, exactly as targetNeed
     // will — when budgeting ahead, "today" would overstate the runway.
-    const [ty,tm]=ym.split("-").map(Number);
-    const left=Math.max(1,(ty-year)*12+(tm-month)+1);
+    const left=monthsUntil(ymKey,year,month);
     const have=row?.rolledOver||0;
     const per=Math.max(0,(n-have)/left);
-    return `${fmtAuto(n)} by ${monthYear(`${ym}-01`)} — about ${fmtAuto(per)} a month for ${left} month${left===1?"":"s"}${have>0?`, on top of the ${fmtAuto(have)} already in it`:""}.`;
+    return `${fmtAuto(n)} by ${monthYear(`${ymKey}-01`)} — about ${fmtAuto(per)} a month for ${left} month${left===1?"":"s"}${have>0?`, on top of the ${fmtAuto(have)} already in it`:""}.`;
   })();
   return (
     <div className="overlay" onClick={onClose}>
@@ -921,13 +894,15 @@ function TargetSheet({name,row,busy,year,month,onSave,onClose}) {
 
         {scope==="all"&&kind==="by_date"&&(<>
           <div style={{fontSize:12,color:"var(--muted)",marginBottom:6}}>Needed by</div>
-          <input type="month" value={ym} onChange={e=>setYm(e.target.value)}
+          <input type="month" value={ym} onChange={e=>setYm(e.target.value)} placeholder="YYYY-MM"
             style={{width:"100%",padding:"9px 12px",borderRadius:8,border:"1px solid var(--border)",background:"var(--input-bg)",
               color:"var(--text)",fontSize:14,fontFamily:"inherit",outline:"none",marginBottom:14}}/>
         </>)}
 
         <div style={{fontSize:11,color:"var(--muted)",background:"var(--input-bg)",borderRadius:8,padding:"8px 12px",marginBottom:16,minHeight:16}}>
-          {preview||"Set an amount to see how this will be funded."}
+          {preview||(scope==="all"&&kind==="by_date"&&Number.isFinite(n)&&n>0
+            ?"Pick the month it's needed by (YYYY-MM)."
+            :"Set an amount to see how this will be funded.")}
         </div>
 
         <div style={{display:"flex",gap:8}}>
@@ -943,7 +918,7 @@ function TargetSheet({name,row,busy,year,month,onSave,onClose}) {
           <button disabled={!valid||busy}
             onClick={()=>onSave(scope==="month"
               ?{scope:"month",amount}
-              :{scope:"all",amount,kind,date:kind==="by_date"?`${ym}-01`:null})}
+              :{scope:"all",amount,kind,date:kind==="by_date"?`${ymKey}-01`:null})}
             style={{flex:1,padding:"8px 0",borderRadius:8,border:"none",background:"var(--accent)",color:"var(--accent-text)",
               fontFamily:"inherit",fontSize:14,fontWeight:500,cursor:valid&&!busy?"pointer":"default",opacity:valid&&!busy?1:.5}}>
             Save
@@ -978,8 +953,9 @@ function QuickAddSheet({manualAccounts,allCats,getName,getColor,acctLabel,acctCo
   const [dateRaw,setDateRaw]=useState(today);
   const [description,setDescription]=useState("");
   const [category,setCategory]=useState(null);
-  // Default target: the sole manual account, else none (created on save).
-  const [acctId,setAcctId]=useState(manualAccounts.length===1?manualAccounts[0].id:(manualAccounts[0]?.id||""));
+  // Default target: the first offered account (quickAddTargets puts
+  // depository first), else none — an "Imported" account is created on save.
+  const [acctId,setAcctId]=useState(manualAccounts[0]?.id||"");
   const n=Number(amount);
   const valid=Number.isFinite(n)&&n>0&&!!description.trim()&&/^\d{4}-\d{2}-\d{2}$/.test(date);
   const commitDate=()=>{
@@ -1507,12 +1483,14 @@ function CategoryPickerSheet({cats,catIndex,current,envRowByCat,hasAmounts,getNa
 // momentarily holds an empty report while the refetch runs. Rendering "No
 // income measured yet" in that window would read as "your edit just deleted
 // all your income". Empty-and-loading is a skeleton; empty-and-settled is the
-// real answer.
-function IncomeSheet({report,when,busy,surf,acctById,acctLabel,acctColor,onPick,onClose}) {
+// real answer; empty because the read FAILED (`failed`) is an error line —
+// never the empty answer, and never a skeleton that spins forever.
+function IncomeSheet({report,when,busy,failed,surf,acctById,acctLabel,acctColor,onPick,onClose}) {
   useEscClose(onClose);
   // Money in — green, contrast-corrected for the card it sits on.
   const green=inkOn(OK_MONEY,surf.card);
   const pending=busy&&report.sections.length===0;
+  const broken=!pending&&!!failed&&report.sections.length===0;
   return (
     <div className="overlay" onClick={onClose}>
       <div className="modal" role="dialog" aria-modal="true" onClick={e=>e.stopPropagation()}
@@ -1525,7 +1503,7 @@ function IncomeSheet({report,when,busy,surf,acctById,acctLabel,acctColor,onPick,
               hold flow content — the same validity rule that stopped the card
               outside from being one big button. */}
           <div style={{fontSize:16,fontWeight:600,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",color:green,flexShrink:0}}>
-            {pending?<Sk w={90} h={16}/>:fmtAuto(report.total)}
+            {pending?<Sk w={90} h={16}/>:broken?null:fmtAuto(report.total)}
           </div>
         </div>
         <div style={{fontSize:12,color:"var(--muted)",marginBottom:10}}>
@@ -1535,7 +1513,7 @@ function IncomeSheet({report,when,busy,surf,acctById,acctLabel,acctColor,onPick,
               the reader to divide by six. Suppressed for a ONE-month sheet
               (opened from a Trends bar), where the rate and the total are the
               same figure and printing both twice reads as a mistake. */}
-          {pending?"Recalculating…":<>{when} · {report.count} transaction{report.count!==1?"s":""}
+          {pending?"Recalculating…":broken?"Couldn't load this right now — try Refresh.":<>{when} · {report.count} transaction{report.count!==1?"s":""}
             {report.sections.length>1&&<> · {fmt(report.average)}/mo</>}</>}
         </div>
         <div style={{fontSize:10,color:"var(--muted)",lineHeight:1.5,marginBottom:14}}>
@@ -1545,7 +1523,7 @@ function IncomeSheet({report,when,busy,surf,acctById,acctLabel,acctColor,onPick,
           you say otherwise, and income you sent back subtracts.
         </div>
 
-        {pending?<Sk h={90}/>:report.sections.length===0?(
+        {pending?<Sk h={90}/>:broken?null:report.sections.length===0?(
           <div style={{textAlign:"center",padding:"24px 0",color:"var(--muted)",fontSize:13}}>
             No income measured yet.
           </div>
@@ -1632,6 +1610,43 @@ function IncomeSheet({report,when,busy,surf,acctById,acctLabel,acctColor,onPick,
 // busy flag — has to key on the PAIR or the rows collide and one row's count
 // paints under another's label.
 function ruleId(r){ return `${r.merchant_key}|${r.amount==null?"":r.amount}`; }
+
+// The forget-a-rule confirm, rendered INLINE under its own row (RulesSheet):
+// rendered once after the list, it opened ~1,800px below a rule near the top
+// of a long list — the ✕ looked dead, and a second ✕ silently retargeted the
+// hidden panel. It also scrolls itself into view on mount, since under a row
+// near the bottom of the 82vh sheet it would otherwise open below the fold.
+// The copy is unchanged.
+function ForgetRuleConfirm({rule,onCancel,onConfirm}) {
+  const ref=useRef(null);
+  useEffect(()=>{ref.current?.scrollIntoView?.({block:"nearest"});},[]);
+  return (
+    <div ref={ref} style={{marginTop:10,padding:12,borderRadius:10,background:"var(--bg)",fontSize:12,lineHeight:1.55}}>
+      <div style={{fontWeight:600,marginBottom:6}}>
+        Forget “{rule.merchant_key}{rule.amount!=null?` for ${fmtX(rule.amount)}`:""}”?
+      </div>
+      {/* Naming the scope matters most when both exist: forgetting the
+          $1,800.00 rule leaves the merchant-wide one running, and the
+          user needs to know which one is about to go. */}
+      {rule.amount!=null&&(
+        <div style={{color:"var(--muted)",marginBottom:6}}>
+          Only the {fmtX(rule.amount)} rule. Any rule for other {rule.merchant_key} transactions stays.
+        </div>
+      )}
+      <div style={{color:"var(--muted)"}}>
+        Future transactions from this merchant go back to the app's own guess until you teach it
+        again — which may be a different category, not necessarily uncategorized.{" "}
+        <strong style={{color:"var(--text)"}}>Transactions already categorized keep their
+        category</strong> — this only changes what happens next time.
+      </div>
+      <div style={{display:"flex",gap:8,marginTop:10}}>
+        <button className="ibtn" onClick={onCancel} style={{minHeight:36,padding:"0 12px"}}>Cancel</button>
+        <button className="ibtn" onClick={onConfirm}
+          style={{minHeight:36,padding:"0 12px",color:"var(--danger)",fontWeight:600}}>Forget it</button>
+      </div>
+    </div>
+  );
+}
 
 function RulesSheet({rules,monthRows,monthLabel,txDescriptor,surf,getName,getColor,onDelete,onClose}) {
   useEscClose(onClose);
@@ -1733,36 +1748,14 @@ function RulesSheet({rules,monthRows,monthLabel,txDescriptor,surf,getName,getCol
                     style={{fontSize:11,minHeight:32,padding:"0 6px",color:"var(--muted)"}}>Count all…</button>
                 )}
               </div>
+              {/* Inline under THIS row — see ForgetRuleConfirm. */}
+              {deleting&&ruleId(deleting)===rid&&(
+                <ForgetRuleConfirm rule={deleting} onCancel={()=>setDeleting(null)}
+                  onConfirm={()=>{const d=deleting;setDeleting(null);onDelete(d);}}/>
+              )}
             </div>
           );
         })}
-
-        {deleting&&(
-          <div style={{marginTop:14,padding:12,borderRadius:10,background:"var(--bg)",fontSize:12,lineHeight:1.55}}>
-            <div style={{fontWeight:600,marginBottom:6}}>
-              Forget “{deleting.merchant_key}{deleting.amount!=null?` for ${fmtX(deleting.amount)}`:""}”?
-            </div>
-            {/* Naming the scope matters most when both exist: forgetting the
-                $1,800.00 rule leaves the merchant-wide one running, and the
-                user needs to know which one is about to go. */}
-            {deleting.amount!=null&&(
-              <div style={{color:"var(--muted)",marginBottom:6}}>
-                Only the {fmtX(deleting.amount)} rule. Any rule for other {deleting.merchant_key} transactions stays.
-              </div>
-            )}
-            <div style={{color:"var(--muted)"}}>
-              Future transactions from this merchant go back to the app's own guess until you teach it
-              again — which may be a different category, not necessarily uncategorized.{" "}
-              <strong style={{color:"var(--text)"}}>Transactions already categorized keep their
-              category</strong> — this only changes what happens next time.
-            </div>
-            <div style={{display:"flex",gap:8,marginTop:10}}>
-              <button className="ibtn" onClick={()=>setDeleting(null)} style={{minHeight:36,padding:"0 12px"}}>Cancel</button>
-              <button className="ibtn" onClick={()=>{const d=deleting;setDeleting(null);onDelete(d);}}
-                style={{minHeight:36,padding:"0 12px",color:"var(--danger)",fontWeight:600}}>Forget it</button>
-            </div>
-          </div>
-        )}
 
         <div style={{display:"flex",justifyContent:"flex-end",marginTop:14}}>
           <button className="ibtn" onClick={onClose} style={{minHeight:36,padding:"0 14px"}}>Done</button>
@@ -1910,12 +1903,27 @@ function Pill({label,color,surface}) {
   </span>;
 }
 
+// The ONE copy of the failed-pull banner: fetchData's runSync catch paints it,
+// and an explicit Refresh re-asserts it after its follow-up reload (whose
+// first act is setError(null)) — two sites that must never drift apart.
+const SYNC_FAILED_MSG="Bank sync failed. Showing cached data.";
+
 export default function Dashboard({ refreshTick = 0 }) {
   const now = new Date();
   const [year,setYear]=useState(now.getFullYear());
   const [month,setMonth]=useState(now.getMonth()+1);
   const [tab,setTab]=useState("overview");
   const [loading,setLoading]=useState(true);
+  // A bank pull fetchData started is still running — a counted hold
+  // (createSyncHold), because the startup pull and a Refresh can overlap. The
+  // pull chip, its gate and the gear's Refresh ride loading||refreshing, so
+  // they last until the pull (and its follow-up reload) settles instead of
+  // stopping after the cache read in front of it — capped at SYNC_HOLD_CAP_MS
+  // per hold, so a pull that never settles can't disable them for the
+  // session. The page skeletons stay on `loading` alone — the screen is
+  // painted while the sync runs.
+  const [refreshing,setRefreshing]=useState(false);
+  const [holdRefreshing]=useState(()=>createSyncHold(setRefreshing));
   const [lastUpd,setLastUpd]=useState(null);
   const [error,setError]=useState(null);
   const [overview,setOverview]=useState(null);
@@ -1952,6 +1960,10 @@ export default function Dashboard({ refreshTick = 0 }) {
   const [movers,setMovers]=useState(null);
   const [trendsEpoch,setTrendsEpoch]=useState(0);
   const [trendsLoading,setTrendsLoading]=useState(false);
+  // The cash-flow read FAILED (not "no income yet"): Reflect and IncomeSheet
+  // show an error line instead of the empty answer or an endless skeleton.
+  // Cleared when a cash-flow fetch starts; set only by that fetch's catch.
+  const [trendsErr,setTrendsErr]=useState(false);
   const trendsSeq=useRef(0);
   // The ONLY way to drop the Trends cache: clears both halves, bumps the seq
   // HERE (not just via the effect — when another tab is active the effect
@@ -1959,7 +1971,7 @@ export default function Dashboard({ refreshTick = 0 }) {
   // otherwise still pass the seq check and cache a pre-invalidation
   // snapshot), and bumps the epoch so the effect re-runs even when the
   // values were already null.
-  const invalidateTrends=useCallback(()=>{trendsSeq.current++;setCashFlow(null);setMovers(null);setTrendsEpoch(e=>e+1);},[]);
+  const invalidateTrends=useCallback(()=>{trendsSeq.current++;setCashFlow(null);setMovers(null);setTrendsErr(false);setTrendsEpoch(e=>e+1);},[]);
   const [accounts,setAccounts]=useState([]);
   const [budgets,setBudgets]=useState({});
   // By-date sinking funds, kept OUT of `budgets`: their amount is a
@@ -1967,6 +1979,12 @@ export default function Dashboard({ refreshTick = 0 }) {
   const [byDate,setByDate]=useState({});
   // --- Envelope budgeting (Budget tab) ---
   const [envelopes,setEnvelopes]=useState(null);
+  // The TYPED income ({income,isDefault,monthlyDefault} from getBudgetIncome),
+  // MONTH-TAGGED ({...,y,m}) like actualInc below and for the same reason: a
+  // transient read failure keeps the previous state, and an envelope write
+  // settling after a month tap makes the reload skip it — untagged, the old
+  // month's figure fed Ready to Assign under the new header. Read ONLY
+  // through incomeForMonth.
   const [income,setIncome]=useState(null);
   // Measured income for the viewed month (the hybrid income rule). MONTH-TAGGED
   // ({y,m,amount,coverageStart}) — the movers month-tagging lesson: a transient
@@ -2016,9 +2034,13 @@ export default function Dashboard({ refreshTick = 0 }) {
   // every rename/colour/hide replaced the object and re-ran the effect below,
   // refetching all 500 rows and flashing skeletons under the user's hands.
   const [selAcctId,setSelAcctId]=useState(null);
-  // Bumped only when NEW ROWS may have arrived — a completed sync, or the
-  // explicit Refresh. The account page's list is not month-scoped, so a plain
-  // month tap must not refetch its 500 rows; but a pull that just wrote
+  // The COMMITTED selAcctId, for async writers that resume after awaits
+  // (refetchOpenLists) — mirrored in the account-list effect below.
+  const selAcctIdRef=useRef(null);
+  // Bumped only when NEW ROWS may have arrived — a completed sync, the
+  // explicit Refresh, or a foreground return (refreshTick — how the other
+  // phone's writes arrive). The account page's list is not month-scoped, so a
+  // plain month tap must not refetch its 500 rows; but a pull that just wrote
   // transactions must reach it, or the open page keeps showing yesterday while
   // the tile behind it moves on.
   const [acctTxEpoch,setAcctTxEpoch]=useState(0);
@@ -2056,25 +2078,66 @@ export default function Dashboard({ refreshTick = 0 }) {
   // --- Reconciliation panel (Mason, 2026-08-28: "does the spending and income
   // totals for each month match the total amount of money in the observable
   // accounts?"). Same shape as the coverage panel above: collapsed, fetched on
-  // first expand only (it reads a month of rows per month shown), and no error
-  // state because getReconciliation never throws — an ok:false renders one
-  // muted line. Staleness across later edits is accepted, exactly like covData.
+  // expand (it reads a month of rows per month shown), and no error state
+  // because getReconciliation never throws — an ok:false renders one muted
+  // line. BOTH panels are EPOCH-driven (the expEpoch shape): an invalidating
+  // reloadData bumps reconEpoch/covEpoch, a panel ON SCREEN refetches at once
+  // and any other on its next showing (a collapse/expand or a tab switch alone
+  // is not a refetch), and a failed read RETURNS its epoch so re-showing
+  // retries. Fetched once per launch, the panel's own "try Refresh" did
+  // nothing, a coverage error blocked every retry, and a pair the user fixed
+  // as told stayed listed.
+  // "On screen" = expanded AND the account list showing — the render's own
+  // tab==="accounts"&&!selAcct (selAcct is derived further down, so the same
+  // test is spelled from its inputs). Gated on `open` alone, every post-write
+  // reload re-ran the 12-month reconciliation and the whole-table coverage
+  // scan in the background while the user fixed the listed pairs on the
+  // Spending tab — both reads again for every edit. And a
+  // refetch never blanks a good answer: it stays on screen DIMMED (its
+  // *For epoch is behind) until the new one lands, so an edit made with a
+  // panel open doesn't collapse it to skeletons, and a panel re-shown after
+  // an invalidation can't present the old answer as current. Only a failed
+  // read is cleared, so its retry shows the skeleton.
+  const acctListShown=tab==="accounts"&&!(selAcctId&&accounts.some(a=>a.id===selAcctId));
   const [reconOpen,setReconOpen]=useState(false);
-  const [reconData,setReconData]=useState(null);   // null = not fetched
-  const openRecon=async()=>{
-    const next=!reconOpen; setReconOpen(next);
-    if(next&&reconData===null) setReconData(await getReconciliation());
-  };
+  const [reconData,setReconData]=useState(null);   // null = never answered (or a failure being retried)
+  const [reconFor,setReconFor]=useState(-1);       // the epoch reconData answers
+  const [reconEpoch,setReconEpoch]=useState(0);
+  const reconSeq=useRef(0);
+  const reconLoaded=useRef(-1);   // the epoch last fetched for (-1 after a failure)
+  const openRecon=()=>setReconOpen(o=>!o);
+  const reconShown=reconOpen&&acctListShown;
+  useEffect(()=>{
+    if(!reconShown||reconLoaded.current===reconEpoch)return;
+    reconLoaded.current=reconEpoch;
+    const s=++reconSeq.current,ep=reconEpoch;
+    setReconData(d=>d?.ok?d:null);
+    getReconciliation().catch(()=>({ok:false})).then(d=>{
+      if(s!==reconSeq.current)return;
+      setReconData(d);setReconFor(ep);
+      if(!d?.ok)reconLoaded.current=-1;
+    });
+  },[reconShown,reconEpoch]);
+  const reconStale=reconData!==null&&reconFor!==reconEpoch;
   const [covOpen,setCovOpen]=useState(false);
-  const [covData,setCovData]=useState(null);   // null = not fetched; object keyed by account_id
+  const [covData,setCovData]=useState(null);   // null = never answered; object keyed by account_id
+  const [covFor,setCovFor]=useState(-1);       // the epoch covData answers
   const [covErr,setCovErr]=useState(null);
-  const openCoverage=async()=>{
-    const next=!covOpen; setCovOpen(next);
-    if(next&&covData===null&&!covErr){
-      try{ setCovData(await getDataCoverage()); }
-      catch(e){ setCovErr(e?.message||"failed to load"); }
-    }
-  };
+  const [covEpoch,setCovEpoch]=useState(0);
+  const covSeq=useRef(0);
+  const covLoaded=useRef(-1);
+  const openCoverage=()=>setCovOpen(o=>!o);
+  const covShown=covOpen&&acctListShown;
+  useEffect(()=>{
+    if(!covShown||covLoaded.current===covEpoch)return;
+    covLoaded.current=covEpoch;
+    const s=++covSeq.current,ep=covEpoch;
+    setCovErr(null);
+    getDataCoverage()
+      .then(d=>{if(s===covSeq.current){setCovData(d);setCovFor(ep);}})
+      .catch(e=>{if(s===covSeq.current){setCovErr(e?.message||"failed to load");covLoaded.current=-1;}});
+  },[covShown,covEpoch]);
+  const covStale=covData!==null&&covFor!==covEpoch;
   // --- Feed-reach shortfall (Accounts tab, read-only) ---
   // Which fed accounts have history SimpleFIN could never fetch. Not a
   // troubleshooting toy like the coverage panel above and not an error: it is
@@ -2159,6 +2222,10 @@ export default function Dashboard({ refreshTick = 0 }) {
   const [addingEntity,setAddingEntity]=useState(false);
   const [newEntityName,setNewEntityName]=useState("");
   const [mileForm,setMileForm]=useState(null);  // {on_date,miles,purpose,entity_id}
+  // The year a just-saved drive landed in when that is NOT the year on screen
+  // (the form defaults to today while the viewed year may be last year's) —
+  // the list only shows the viewed year, so without this the drive vanished.
+  const [mileNote,setMileNote]=useState(null);
   const [customColors,setCustomColors]=useState({});
   const [customNames,setCustomNames]=useState({});
   const [customCats,setCustomCats]=useState([]);
@@ -2273,9 +2340,13 @@ export default function Dashboard({ refreshTick = 0 }) {
   // value so the initial load doesn't double-invalidate (the first fetch has
   // no warm cache to drop).
   const lastRefreshTick=useRef(refreshTick);
+  // When this device last STARTED a pull through fetchData (startup, Refresh,
+  // or the hour-gated foreground pull) — the foregroundSyncDue clock.
+  const lastSyncAt=useRef(0);
   // {last_pulled_at,last_error} when the SimpleFIN feed looks unhealthy —
-  // checked ONCE per mount, after the initial sync (never a status fetch on
-  // every dashboard load; that was the LinkAccount antipattern).
+  // checked after the startup sync and after each hour-gated foreground pull
+  // (never a status fetch on every dashboard load or app switch; that was the
+  // LinkAccount antipattern). A healthy or not-connected re-check clears it.
   const [feedHealth,setFeedHealth]=useState(null);
 
   // Theme. useTheme owns the persistence (localStorage, NOT the shared
@@ -2419,7 +2490,7 @@ export default function Dashboard({ refreshTick = 0 }) {
   // writes in dataAdapter (the updateRecIgnore discipline): the merge runs
   // against the STORED row, so the mount read degrading to []/{} above can
   // never let a rebuilt-from-state value wipe the other phone's categories on
-  // the first edit. Optimistic with rollback + alert (the saveTaxMaps shape) —
+  // the first edit. Optimistic with rollback + alert (shared with saveTaxMapEdit) —
   // the old swallowed catch{} lost a just-created category while its taught
   // rules persisted. Success adopts the merged stored value, which may carry
   // entries the other phone added since mount.
@@ -2441,6 +2512,16 @@ export default function Dashboard({ refreshTick = 0 }) {
     }
   }
   async function saveName(cat,alias){
+    // A rename is a display alias, so it must not read as another category:
+    // two identical rows would split spending, budgets and envelopes across
+    // two raw keys. Clearing ("") and re-casing the category's OWN raw name
+    // are always fine. userCats carries the in-use names, which a rename
+    // (unlike an add, which would re-register them) must not take.
+    if(alias&&alias.toLowerCase()!==cat.toLowerCase()
+      &&isDuplicateCategoryName(alias,[...customCatNames,...userCats],{aliases:customNames,self:cat})){
+      window.alert(`A category named "${alias}" already exists.`);
+      return;
+    }
     const prev=customNames;
     setCustomNames({...prev,[cat]:alias});
     try{setCustomNames(await updateCategoryAlias(cat,alias));}
@@ -2513,33 +2594,40 @@ export default function Dashboard({ refreshTick = 0 }) {
   function saveAsstEffort(e){setAsstEffort(e);setSetting("asst:effort",e).catch(()=>{});}
 
   // --- Rental & tax handlers ---
-  // Optimistic with rollback + alert: a dropped mapping edit would leave the
-  // worksheet on screen disagreeing with what the other phone (and the next
-  // Tax-tab load) reads back.
-  async function saveTaxMaps(next){
+  // tax:maps edits are serialized read-merge-writes in settingsIO (the
+  // dash:* discipline): each applies ONE entry to the STORED row, so a failed
+  // Tax-tab read (state degraded to "no mappings") or a phone holding an older
+  // read can never wipe the stored mappings with a whole map rebuilt from this
+  // render. Optimistic with rollback + alert; success adopts the merged stored
+  // value, which carries the other phone's mappings too. taxMapsWrites tells
+  // the Tax-tab load not to adopt a read that may predate an edit (pending
+  // count + a generation bumped at every edit's start and settle).
+  const taxMapsWrites=useRef({pending:0,gen:0});
+  async function saveTaxMapEdit(mutate,write){
     const prev=taxMaps;
-    setTaxMaps(next);
-    try{await setSetting("tax:maps",JSON.stringify(next));}
+    const w=taxMapsWrites.current;
+    w.pending++;w.gen++;
+    // Functional: a second edit in the same render must patch over the
+    // first's optimistic entry, not over this render's closure value.
+    setTaxMaps(cur=>mutate(cur));
+    try{setTaxMaps(await write());}
     catch(err){
       console.error("saving tax maps failed",err);
       setTaxMaps(prev);
       window.alert(`Couldn't save that tax mapping: ${friendlyError(err)}`);
-    }
+    }finally{w.pending--;w.gen++;}
   }
   // A fresh entity's Schedule E mapping starts from the conservative defaults;
   // the FIRST edit copies them into the stored map and edits that. Never merge
   // the defaults over a stored map — that would resurrect a default the user
-  // explicitly un-mapped, making "Not mapped" a silent no-op for those rows.
+  // explicitly un-mapped, making "Not mapped" a silent no-op for those rows
+  // (setEmapEntryIn in taxReport.js; null DELETES the key).
   const emapFor=useCallback(id=>taxMaps?.emap?.[id]??DEFAULT_SCHEDULE_E_MAP,[taxMaps]);
   function setEmapEntry(entityId,category,value){
-    const next={...emapFor(entityId)};
-    if(value==null)delete next[category];else next[category]=value;
-    saveTaxMaps({...(taxMaps||{dmap:{...DEFAULT_DEDUCTION_MAP}}),emap:{...(taxMaps?.emap||{}),[entityId]:next}});
+    saveTaxMapEdit(m=>setEmapEntryIn(m,entityId,category,value),()=>setTaxMapEntry(entityId,category,value));
   }
   function setDmapEntry(category,bucket){
-    const next={...(taxMaps?.dmap||{...DEFAULT_DEDUCTION_MAP})};
-    if(bucket==null)delete next[category];else next[category]=bucket;
-    saveTaxMaps({...(taxMaps||{}),emap:taxMaps?.emap||{},dmap:next});
+    saveTaxMapEdit(m=>setDmapEntryIn(m,category,bucket),()=>setDeductionMapEntry(category,bucket));
   }
   async function handleAddEntity(){
     const name=newEntityName.trim();
@@ -2583,11 +2671,17 @@ export default function Dashboard({ refreshTick = 0 }) {
   async function handleAddMileage(){
     if(!mileForm)return;
     const miles=Number(mileForm.miles);
-    if(!mileForm.on_date||!Number.isFinite(miles)||miles<=0)return;
+    // The input commits per keystroke, so a mid-typed year ("0002-…", or a
+    // 5-digit "20261-…" on desktop) must not be savable.
+    const onDate=sanitizeDateInput(mileForm.on_date,EDIT_YEAR_FLOOR);
+    if(!onDate||!Number.isFinite(miles)||miles<=0)return;
     try{
-      const row=await addMileage({on_date:mileForm.on_date,miles,purpose:mileForm.purpose,entity_id:mileForm.entity_id||null});
-      // Only list it if it belongs to the year on screen.
-      if(row.on_date.slice(0,4)===String(taxYear))setMileage(prev=>[row,...prev].sort((a,b)=>a.on_date<b.on_date?1:-1));
+      const row=await addMileage({on_date:onDate,miles,purpose:mileForm.purpose,entity_id:mileForm.entity_id||null});
+      // Only list it if it belongs to the year on screen; otherwise SAY where
+      // it went (savedOutsideYear) instead of letting it silently vanish.
+      const elsewhere=savedOutsideYear(row.on_date,taxYear);
+      if(elsewhere==null)setMileage(prev=>[row,...prev].sort((a,b)=>a.on_date<b.on_date?1:-1));
+      setMileNote(elsewhere);
       setMileForm(null);
     }catch(err){
       console.error("adding mileage failed",err);
@@ -2620,9 +2714,14 @@ export default function Dashboard({ refreshTick = 0 }) {
   function nextMonth(){if(!canNext)return;if(month===12){setYear(y=>y+1);setMonth(1);}else setMonth(m=>m+1);}
   function goCurrentMonth(){setYear(now.getFullYear());setMonth(now.getMonth()+1);}
 
-  const reloadData=useCallback(async(y,m)=>{
+  const reloadData=useCallback(async(y,m,{invalidate=true}={})=>{
     setError(null);
-    const cur=y===now.getFullYear()&&m===now.getMonth()+1;
+    // A FRESH date, never the render-time `now`: this callback is []-dep, so
+    // `now` here would be the mount's date forever — a tab left open across a
+    // month end would fetch no overview for the new month and compare the
+    // old one against itself (Wave A #12).
+    const d=new Date();
+    const cur=y===d.getFullYear()&&m===d.getMonth()+1;
     // Two month taps in quick succession leave two loads in flight, and nothing
     // guarantees they resolve in order. Without this, the slower one wins and
     // paints its month's envelopes under the other month's header — and the
@@ -2665,14 +2764,17 @@ export default function Dashboard({ refreshTick = 0 }) {
         getEntities().catch(()=>undefined),
       ]);
       if(seq!==loadSeq.current)return false;
+      // The load that WINS owns the spinner (both paths): fetchData raises it,
+      // but a newer reload — the startup pull's follow-up, a post-write
+      // reload — supersedes fetchData's own, and a clear gated on THAT one
+      // winning left the tiles skeletons and Refresh disabled for good.
+      setLoading(false);
       setOverview(ov);setSpending(sp);setTransactions(tx);
       setAccounts(ac.accounts||[]);
       // A transient entity-read failure keeps the previous list (the envelope
       // pattern): folding it into [] would blank the entity chips and every
       // property worksheet until the next successful reload.
       if(ents!==undefined)setEntities(ents.entities||[]);
-      invalidateTax(); // recompute lazily on next Tax-tab visit
-      invalidateTrends(); // Trends (cash flow + movers) refetches on next tab visit
       // A completed envelope write may have painted fresher rows while this
       // reload was in flight — don't overwrite them (or the freshly saved
       // budgets/targets) with a pre-write snapshot.
@@ -2680,26 +2782,51 @@ export default function Dashboard({ refreshTick = 0 }) {
         setBudgets(bu.budgets||{});
         setByDate(bu.byDate||{});
         if(en!==undefined)setEnvelopes(en);
-        if(inc!==undefined)setIncome(inc);
+        if(inc!==undefined)setIncome({...inc,y,m});
       }
       // Outside the eseq guard: envelope writes never move transactions, so a
       // write completing mid-reload can't have made this snapshot stale.
       if(ai!==undefined)setActualInc({y,m,amount:ai.amount,coverageStart:ai.coverageStart});
-      // Clear AND bump: the clear is what makes the next visit refetch, the
-      // bump is what supersedes a load already in flight (a null set over a
-      // null is a no-op React bails on — the recorded gotcha).
-      setRecurring(null); setRecEpoch(e=>e+1);
-      setDebtData(null);  setDebtEpoch(e=>e+1);
+      // The lazy TAB caches depend on no viewed month (Recurring anchors on
+      // today, Debt reads accounts + snapshots, Tax has its own taxYear,
+      // cash flow anchors on the current month), so plain month navigation
+      // (invalidate:false) keeps them — extending the 2026-08-04 month-nav
+      // caching ruling. Every other reload drops them: startup, a foreground
+      // return, Refresh, a pull's follow-up and each post-write reload.
+      // Recurring/Debt clear AND bump: the clear is what makes the next visit
+      // refetch, the bump is what supersedes a load already in flight (a null
+      // set over a null is a no-op React bails on — the recorded gotcha).
+      if(invalidate){
+        invalidateTax(); // recompute lazily on next Tax-tab visit
+        invalidateTrends(); // Trends (cash flow + movers) refetches on next tab visit
+        setRecurring(null); setRecEpoch(e=>e+1);
+        setDebtData(null);  setDebtEpoch(e=>e+1);
+        setReconEpoch(e=>e+1); setCovEpoch(e=>e+1); // the Accounts-tab panels
+      }
       setLastUpd(new Date());
     }catch(err){
       if(seq!==loadSeq.current)return false;
+      setLoading(false);
       console.error(err);
-      setError("Couldn't load data from local cache.");
+      // There is no local cache any more (Dexie is gone) — say what failed,
+      // through the app's one error-to-text mapping (netRetry.js).
+      setError(`Couldn't load your data — ${friendlyError(err)}`);
     }
     return true;
   },[]);
 
-  const fetchData=useCallback(async(y,m,{sync=false}={})=>{
+  // Reload whatever month is on screen NOW. Every reload that runs after an
+  // await (a write, a forced re-sync, the pull's follow-up) goes through here:
+  // the render-closure year/month is the month that WAS on screen, and a
+  // reload of it mints the newest loadSeq and wins — painting the old month's
+  // totals and rows under the new month's header. monthRef is committed by an
+  // effect, which has flushed before any awaited callback resumes.
+  const reloadViewed=useCallback(()=>{
+    const[cy,cm]=monthRef.current.split("-").map(Number);
+    return reloadData(cy,cm);
+  },[reloadData]);
+
+  const fetchData=useCallback(async(y,m,{sync=false,invalidate=true}={})=>{
     setLoading(true);
     // First paint never waits for the feed: painting DB state immediately is
     // already what happens on every sync failure and every other-device sync,
@@ -2707,37 +2834,51 @@ export default function Dashboard({ refreshTick = 0 }) {
     // the whole Bridge pull) bought nothing. The sync runs concurrently and
     // ONE follow-up reload chains off its promise HERE — never a second
     // setSyncCompletionHook: that slot is single and dataAdapter already
-    // holds it (cache invalidation).
-    const syncP=sync?runSync().catch(err=>{
-      console.error("sync failed",err);
-      setError("Bank sync failed. Showing cached data.");
-      return null;
-    }):null;
-    const live=await reloadData(y,m);
-    // Don't clear the spinner on behalf of a load that has been superseded —
-    // the newer one is still running.
-    if(live!==false)setLoading(false);
-    if(!syncP)return;
-    const res=await syncP;
-    // A failed pull painted its error above; a throttled pull (server ran
-    // within the hour) wrote nothing — vacuously, so did an empty results
-    // array (no access URL). Only a real pull earns the follow-up reload —
-    // EXCEPT on the explicit Refresh button (sync:"refresh"): its contract is
-    // a genuinely fresh read (the completion hook just dropped the caches),
-    // and skipping the follow-up there made a throttled Refresh serve the
-    // warm memo read from before the invalidation — stale exactly when the
-    // user asked for fresh. The follow-up reloads whatever month is on
-    // screen NOW (monthRef, not this call's y/m): the user can navigate
-    // while the pull runs, and a stale-month reload would mint the newest
-    // loadSeq and win.
-    const allThrottled=!res||(res.results||[]).every(r=>r?.skipped==="throttled");
-    if(allThrottled&&sync!=="refresh")return;
-    const[cy,cm]=monthRef.current.split("-").map(Number);
-    await reloadData(cy,cm);
-    // The pull may have written rows onto whatever account is open behind the
-    // month view; its list is the one thing reloadData does not cover.
-    setAcctTxEpoch(e=>e+1);
-  },[reloadData]);
+    // holds it (cache invalidation). sync:"foreground" is the hour-gated pull
+    // on a foreground return (the fetchData effect): nobody asked for it, so
+    // its failure only logs — no banner over numbers the user didn't refresh.
+    // Every pull holds `refreshing` until it settles (the finally below) or
+    // the hold's cap lets go first.
+    if(sync)lastSyncAt.current=Date.now();
+    const release=sync?holdRefreshing():null;
+    try{
+      const syncP=sync?runSync().catch(err=>{
+        console.error("sync failed",err);
+        if(sync!=="foreground")setError(SYNC_FAILED_MSG);
+        return null;
+      }):null;
+      // No setLoading(false) here: the reload that wins loadSeq clears it
+      // (inside reloadData) — this one may be superseded, and the newer one
+      // must not be left relying on a clear that never comes. `invalidate` is
+      // false only for plain month navigation (the effect below).
+      await reloadData(y,m,{invalidate});
+      if(!syncP)return;
+      const res=await syncP;
+      // pullFollowUp (src/loadPipeline.js) decides — and documents — which
+      // settles earn the follow-up reload (a real pull, or ANY explicit
+      // Refresh), the banner re-assert and the auto-match re-run. The
+      // follow-up reloads whatever month is on screen NOW (reloadViewed, not
+      // this call's y/m): the user can navigate while the pull runs, and a
+      // stale-month reload would mint the newest loadSeq and win.
+      const next=pullFollowUp(sync,res);
+      if(next.reload){
+        const live=await reloadViewed();
+        // A failed Refresh's banner was cleared by that reload's first act,
+        // in the same tick it was painted — re-assert it, unless the reload
+        // was superseded or failed with its own (more urgent) load error.
+        if(next.reassertError&&live!==false)setError(e=>e??SYNC_FAILED_MSG);
+        // The pull may have written rows onto whatever account is open behind
+        // the month view — an epoch surface reloadData does not cover.
+        setAcctTxEpoch(e=>e+1);
+      }
+      // Bills the pull brought in can match expectations (and a foreground
+      // return deferred its pass to this settle). The setter, not
+      // invalidateExpected: that callback is declared below (TDZ).
+      if(next.bumpExpected)setExpEpoch(e=>e+1);
+    }finally{
+      release?.();
+    }
+  },[reloadData,reloadViewed]);
 
   // The ONE refresh: the gear menu's Refresh row and the pull-to-refresh gesture
   // both call this, so the two can never drift apart on what "refresh" means
@@ -2764,30 +2905,46 @@ export default function Dashboard({ refreshTick = 0 }) {
     // rows while the un-memoised balance reads freshen — the two halves of the
     // screen disagree until a manual Refresh. Ref-compared so a re-run caused
     // by year/month/ready (plain month navigation) still reuses the caches.
-    if(refreshTick!==lastRefreshTick.current){
+    const tick=refreshTick!==lastRefreshTick.current;
+    // refreshTickPlan (src/loadPipeline.js): a foreground return more than an
+    // hour after this device last pulled also PULLS — quietly ("foreground":
+    // a failure logs, never a banner), or the day's charges wait for a manual
+    // Refresh; the server throttle still decides whether SimpleFIN is asked.
+    // Plain month navigation is the one re-run that keeps the lazy tab caches.
+    const {sync,invalidate,bumpExpectedNow}=refreshTickPlan({syncFirst,tick,
+      due:foregroundSyncDue(lastSyncAt.current,Date.now())});
+    if(tick){
       lastRefreshTick.current=refreshTick;
       invalidateEnvelopeSpending();
+      // The same rows reach the open account page's list, an epoch surface
+      // reloadData can't.
+      setAcctTxEpoch(e=>e+1);
     }
-    fetchData(year,month,{sync:syncFirst}).then(()=>{
-      if(!syncFirst)return;
+    // And the expected-bill auto-match pass — now, or (when this return
+    // pulls) once that pull settles: fetchData bumps it then, so one return
+    // runs ONE pass, against the pulled rows.
+    if(bumpExpectedNow)setExpEpoch(e=>e+1);
+    fetchData(year,month,{sync,invalidate}).then(()=>{
+      if(!sync)return;
       // The sync response can't answer "is the feed stale?" — a clean pull
-      // carries no last_pulled_at — so ask /api/simplefin-status once, in the
-      // same flow, after the sync has had its chance to freshen the watermark.
-      getSimpleFinStatus().then(s=>{
-        if(!s?.connected)return;
-        const stale=s.last_pulled_at&&Date.now()-new Date(s.last_pulled_at).getTime()>3*86_400_000;
-        if(s.last_error||stale)setFeedHealth({last_pulled_at:s.last_pulled_at,last_error:s.last_error||null});
-      }).catch(err=>console.error("feed status check failed",err));
+      // carries no last_pulled_at — so ask /api/simplefin-status in the same
+      // flow, after the sync has had its chance to freshen the watermark:
+      // at startup and after each hour-gated foreground pull, so a feed that
+      // breaks mid-day raises the banner and a recovered (or disconnected)
+      // one clears it — feedHealthVerdict (src/loadPipeline.js) decides.
+      getSimpleFinStatus().then(s=>setFeedHealth(feedHealthVerdict(s,Date.now())))
+        .catch(err=>console.error("feed status check failed",err));
     });
   },[year,month,ready,refreshTick,fetchData]);
 
   // Trends is lazy like recurring/debt/tax: the 6-month cash-flow window and
   // the movers month-pair fetch only while the tab is open, cached until
-  // invalidateTrends() bumps the epoch (write/sync/import/reload — never a
-  // bare null sentinel; the epoch mints a fresh sequence so an in-flight
-  // response can't paint a pre-invalidation snapshot). cashFlow anchors on
-  // the CURRENT month (getCashFlow ignores the viewed month) so it survives
-  // month navigation; movers are month-tagged and refetch when the viewed
+  // invalidateTrends() bumps the epoch (write/sync/import/an invalidating
+  // reload — never a bare null sentinel; the epoch mints a fresh sequence so
+  // an in-flight response can't paint a pre-invalidation snapshot). cashFlow
+  // anchors on the CURRENT month (getCashFlow ignores the viewed month) so it
+  // survives month navigation (reloadData's invalidate:false keeps it);
+  // movers are month-tagged and refetch when the viewed
   // pair changes. A movers-only failure keeps the skeleton (mlist null) and
   // retries on the next state change/tab visit; a cash-flow failure leaves
   // cashFlow null, retried on the next tab visit.
@@ -2802,6 +2959,7 @@ export default function Dashboard({ refreshTick = 0 }) {
     if(!needCf&&!needMv)return;
     const seq=++trendsSeq.current;
     setTrendsLoading(true);
+    if(needCf)setTrendsErr(false);
     Promise.all([
       needCf?getCashFlow({num_periods:6}):Promise.resolve(null),
       needMv?getBiggestMovers({year,month}).catch(()=>undefined):Promise.resolve(undefined),
@@ -2811,13 +2969,15 @@ export default function Dashboard({ refreshTick = 0 }) {
         if(cf)setCashFlow(cf);
         if(mv!==undefined)setMovers({y:year,m:month,list:mv.movers||[],toDate:mv.toDate??null});
       })
-      .catch(err=>{if(seq===trendsSeq.current)console.error(err);})
+      // Only getCashFlow can reject (movers already degrade to undefined).
+      .catch(err=>{if(seq===trendsSeq.current){console.error(err);setTrendsErr(true);}})
       .finally(()=>{if(seq===trendsSeq.current)setTrendsLoading(false);});
   },[tab,year,month,cashFlow,movers,trendsEpoch]);
 
   // Recurring detection is lazy: fetched + computed the first time the tab
   // opens (a ~40-month query — CANDIDATE_WINDOW_MONTHS, sized for annual),
-  // cached until the next data reload.
+  // cached until the next INVALIDATING reload (a write, a pull, Refresh, a
+  // foreground return) — plain month navigation keeps it.
   useEffect(()=>{
     // The in-flight flag (recLoading) is NOT in this guard: gating on it
     // suppresses exactly the superseding load a sequence guard exists for,
@@ -2830,8 +2990,7 @@ export default function Dashboard({ refreshTick = 0 }) {
     // Clock for dueStatus: the real wall-clock day, computed local (not the
     // viewed month), because "is this subscription overdue?" is a question
     // about today, not about whatever month the dashboard is scrolled to.
-    const d=new Date();
-    const today=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+    const today=localTodayIso();
     getRecurringCandidates()
       .then(res=>{if(seq===recSeq.current)setRecurring(detectRecurring(res.transactions,today));})
       .catch(err=>{console.error(err);if(seq===recSeq.current)setRecurring([]);})
@@ -2841,17 +3000,20 @@ export default function Dashboard({ refreshTick = 0 }) {
   // Expected transactions load lazily on the tabs that render them.
   // getExpectedTransactions is NOT a pure read — it runs the auto-match pass
   // (persisting matches + roll-forwards) — so it fetches once per epoch,
-  // tracked in a ref; invalidateExpected bumps the epoch after a write
-  // commits (never a null sentinel — the setState(null) gotcha, and here
-  // null already means "migration not installed").
+  // tracked in a ref. The epoch moves when a match may have become possible:
+  // invalidateExpected after a write commits, a real pull's follow-up reload,
+  // and a foreground return — ONE pass per return, after its pull settles
+  // when it pulls (refreshTickPlan/pullFollowUp), never a pre-pull pass plus
+  // a post-pull one. Once per session raced the startup pull and left an
+  // overnight bill "due" all day. Never a null sentinel (the setState(null)
+  // gotcha, and here null already means "migration not installed").
   useEffect(()=>{
     if(!ready)return;
     if(tab!=="budget"&&tab!=="recurring"&&tab!=="overview")return;
     if(expLoadedEpoch.current===expEpoch)return;
     expLoadedEpoch.current=expEpoch;
     const seq=++expSeq.current;
-    const d=new Date();
-    const today=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+    const today=localTodayIso();
     getExpectedTransactions({today})
       .then(res=>{if(expSeq.current===seq)setExpected(res);})
       // Transient failure: keep whatever is on screen (undefined hides the
@@ -2878,6 +3040,10 @@ export default function Dashboard({ refreshTick = 0 }) {
     setDebtLoading(true);
     getDebts()
       .then(async d=>{
+        // Read into locals and commit all three under ONE debtSeq check: set
+        // outside it, a load superseded mid-flight (addManualDebt's epoch
+        // bump) could overwrite the newer load's snapshots or series.
+        let snaps=[],series=[];
         try{
           // FULL history, clamped after the fold — never a windowed FETCH.
           // Snapshots are written on balance CHANGE only, so an account that
@@ -2887,40 +3053,30 @@ export default function Dashboard({ refreshTick = 0 }) {
           // above still counts it, and the line reads as a paydown that never
           // happened. getNetWorthSeries already documents and avoids exactly
           // this; the Debt tab was the copy that didn't.
-          setDebtSnaps(await getBalanceSnapshots(d.debts.map(a=>a.id),null));
-        }catch(err){console.error("balance snapshots load failed",err);setDebtSnaps([]);}
+          snaps=await getBalanceSnapshots(d.debts.map(a=>a.id),null);
+        }catch(err){console.error("balance snapshots load failed",err);}
         try{
-          const since=new Date(Date.now()-365*86400000).toISOString().slice(0,10);
-          setNwSeries(await getNetWorthSeries(since));
-        }catch(err){console.error("net worth load failed",err);setNwSeries([]);}
-        if(seq===debtSeq.current)setDebtData(d);
+          const since=addLocalDays(-365);
+          series=await getNetWorthSeries(since);
+        }catch(err){console.error("net worth load failed",err);}
+        if(seq===debtSeq.current){setDebtSnaps(snaps);setNwSeries(series);setDebtData(d);}
       })
-      .catch(err=>{console.error("debt load failed",err);if(seq===debtSeq.current)setDebtData({debts:[],totalDebt:0,totalMinimums:0,hasDebtColumns:false});})
+      .catch(err=>{console.error("debt load failed",err);if(seq===debtSeq.current)setDebtData({...summarizeDebts([]),hasDebtColumns:false});})
       .finally(()=>{if(seq===debtSeq.current)setDebtLoading(false);});
   },[tab,debtData,debtEpoch]);
 
   // Optimistic save for a hand-entered liability field (apr / minimum_payment /
   // credit_limit / next_payment_due_date). Patches the debt cache — including
-  // the derived debtRate and the two totals, the same recompute-every-derived-
-  // field rule as saveTx — then writes; the accounts row is the client's own
+  // the derived debtRate and the two totals (summarizeDebts, the same
+  // derivation getDebts uses), the recompute-every-derived-field rule as
+  // saveTx — then writes; the accounts row is the client's own
   // (RLS-scoped) so updateAccount writes it directly.
   // Rollback + alert on failure (the updateManualBalance pattern three
   // functions down): a dropped APR/minimum silently mis-amortizes the payoff
   // plan while the screen shows the typed value.
   function saveDebt(id,fields){
     const prevDebt=debtData;
-    setDebtData(prev=>{
-      if(!prev)return prev;
-      const debts=prev.debts.map(a=>{
-        if(a.id!==id)return a;
-        const next={...a,...fields};
-        next.debtRate=next.apr??next.interest_rate??null;
-        return next;
-      });
-      return {...prev,debts,
-        totalDebt:debts.reduce((s,a)=>s+(Number(a.current_balance)||0),0),
-        totalMinimums:debts.reduce((s,a)=>s+(Number(a.minimum_payment)||0),0)};
-    });
+    setDebtData(prev=>prev&&{...prev,...summarizeDebts(prev.debts.map(a=>a.id===id?{...a,...fields}:a))});
     updateAccount(id,fields).catch(err=>{
       console.error("debt field save failed",err);
       setDebtData(prevDebt);
@@ -2946,18 +3102,14 @@ export default function Dashboard({ refreshTick = 0 }) {
     // prevent (the patchAllTxLists "recompute every derived field" rule,
     // review catch). The rollback restores the old stamp with the old balance.
     const patchBal=(bal,at)=>{
-      setDebtData(prev=>{
-        if(!prev)return prev;
-        const debts=prev.debts.map(d=>d.id===a.id?{...d,current_balance:bal,last_balance_at:at}:d);
-        return {...prev,debts,totalDebt:debts.reduce((s,d)=>s+(Number(d.current_balance)||0),0)};
-      });
+      setDebtData(prev=>prev&&{...prev,...summarizeDebts(prev.debts.map(d=>d.id===a.id?{...d,current_balance:bal,last_balance_at:at}:d))});
       setAccounts(prev=>prev.map(x=>x.id===a.id?{...x,current_balance:bal,last_balance_at:at}:x));
       setOverview(prev=>prev?{...prev,accounts:prev.accounts.map(x=>x.id===a.id?{...x,balance:{current:bal},last_balance_at:at}:x)}:prev);
     };
     patchBal(v,new Date().toISOString());
     updateManualBalance(a,v).then(async()=>{
       // History refresh, best-effort: the write appended a snapshot row.
-      const since=new Date(Date.now()-365*86400000).toISOString().slice(0,10);
+      const since=addLocalDays(-365);
       try{setNwSeries(await getNetWorthSeries(since));}
       catch(err){console.error("net worth refresh failed",err);}
       try{
@@ -2983,7 +3135,7 @@ export default function Dashboard({ refreshTick = 0 }) {
       setAddDebt(false);
       setDebtSnaps([]);
       setDebtData(null); setDebtEpoch(e=>e+1); // supersede any load in flight
-      reloadData(year,month);
+      reloadViewed();
     }catch(err){
       console.error("manual debt add failed",err);
       window.alert(`Couldn't add that debt: ${friendlyError(err)}`);
@@ -3003,11 +3155,15 @@ export default function Dashboard({ refreshTick = 0 }) {
   useEffect(()=>{
     if(tab!=="tax"||taxData)return;
     const seq=++taxSeq.current;
+    const mapsGen=taxMapsWrites.current.gen;
     setTaxLoading(true);
     Promise.all([
       getTaxYearTransactions(taxYear),
       getMileage(taxYear).catch(err=>{console.error("mileage load failed",err);return {mileage:[]};}),
-      getSetting("tax:maps").catch(()=>null),
+      // A FAILED read is not "no mappings": keep what's on screen (or show
+      // none) — edits stay safe either way, since the settingsIO chain
+      // re-reads the stored row and aborts on a failed read.
+      getSetting("tax:maps").then(parseTaxMaps,err=>{console.error("tax maps load failed",err);return null;}),
       getReceiptTxIds().catch(err=>{console.error("receipt ids load failed",err);return null;}),
     ])
       .then(([t,m,maps,rids])=>{
@@ -3015,14 +3171,12 @@ export default function Dashboard({ refreshTick = 0 }) {
         setTaxData(t);
         setMileage(m.mileage||[]);
         setReceiptTxIds(rids);
-        setTaxMaps(prev=>{
-          if(prev)return prev; // don't clobber unsaved edits with a stale read
-          let parsed=null;
-          try{parsed=maps?JSON.parse(maps):null;}catch{ /* unparseable saved maps fall back to the defaults below */ }
-          return (parsed&&typeof parsed==="object")
-            ?{emap:parsed.emap||{},dmap:parsed.dmap||{...DEFAULT_DEDUCTION_MAP}}
-            :{emap:{},dmap:{...DEFAULT_DEDUCTION_MAP}};
-        });
+        // Adopt the STORED value on every load (a refetch must pick up the
+        // other phone's mappings) unless an edit started or settled since
+        // this read began — that edit resolves with a fresher merged value.
+        const w=taxMapsWrites.current;
+        const fresh=maps&&w.pending===0&&w.gen===mapsGen;
+        setTaxMaps(prev=>fresh?maps:(prev||parseTaxMaps(null)));
       })
       .catch(err=>{if(seq===taxSeq.current){console.error(err);setTaxData({transactions:[]});}})
       .finally(()=>{if(seq===taxSeq.current)setTaxLoading(false);});
@@ -3074,6 +3228,7 @@ export default function Dashboard({ refreshTick = 0 }) {
   // Keyed on the ID, never the object: an edit to the account's NAME or COLOUR
   // is not a reason to refetch its transactions.
   useEffect(()=>{
+    selAcctIdRef.current=selAcctId;
     if(!selAcctId){setAcctTxs(null);setAcctHasMore(false);return;}
     let cancelled=false;
     setAcctLoading(true);
@@ -3114,8 +3269,8 @@ export default function Dashboard({ refreshTick = 0 }) {
   // Optimistic with rollback + alert (the updateManualBalance pattern). This
   // carries the TYPE editor: a dropped type correction is never restated by
   // sync (type is user-owned after first insert), so a silently failed save
-  // would leave a mistyped card counting purchases as household spending with
-  // the screen showing the corrected type.
+  // would leave a mistyped card miscounting its refunds and balance with the
+  // screen showing the corrected type.
   async function saveAccount(id,fields){
     // ONE optimistic copy. The open account page derives from `accounts`, so
     // patching that list is the whole update and the rollback is the whole
@@ -3174,6 +3329,13 @@ export default function Dashboard({ refreshTick = 0 }) {
       // with [data-mm-topmost] (ReceiptSection.jsx); the marker in the DOM
       // means a topmost overlay owns this press.
       if(document.querySelector("[data-mm-topmost]"))return;
+      // An inline editor (EditName — the sheet's Payee rename) consumes
+      // Escape itself to CANCEL the edit; capture runs before its React
+      // onKeyDown, so without this yield the press closed the whole sheet
+      // instead. Its stopPropagation keeps the press from reaching any
+      // bubble-phase sheet closer; the NEXT press (focus gone) closes the
+      // sheet as before. Only marked editors yield — not every input.
+      if(e.target instanceof Element&&e.target.closest("[data-mm-esc-local]"))return;
       e.stopImmediatePropagation();
       if(addingCat)setAddingCat(false);
       else if(catPickerFor)setCatPickerFor(null);
@@ -3271,8 +3433,10 @@ export default function Dashboard({ refreshTick = 0 }) {
 
   // The string the classifier actually sees at write time — merchant_name is
   // SimpleFIN's `payee`, description its raw descriptor. Must match the write
-  // path or a taught rule wouldn't fire on the next pull.
-  const txDescriptor=useCallback(t=>t?(t.merchant_name||t.description||""):"",[]);
+  // path or a taught rule wouldn't fire on the next pull. teachDescriptor
+  // falls back to the description when the payee keys to nothing (an
+  // all-digit "76"), which otherwise left the row unteachable.
+  const txDescriptor=useCallback(t=>t?teachDescriptor(t):"",[]);
 
   // count is a NUMBER when the preview ran, or null when it couldn't — the two
   // must stay distinguishable. Folding a failure into 0 renders identically to
@@ -3357,52 +3521,76 @@ export default function Dashboard({ refreshTick = 0 }) {
   // A rule rewrites OTHER transactions, so there is no id to patch and the
   // optimistic path can't help: the lists reloadData doesn't cover have to be
   // refetched or the relabelled rows keep their old category on screen — the
-  // "it didn't apply to the others" symptom.
-  const refetchOpenLists=useCallback(async()=>{
+  // "it didn't apply to the others" symptom. Both writes keep the guards their
+  // own effects have, because this runs after several round trips: `sid` is
+  // the searchSeq the CALLER captured before its awaits (a query typed since
+  // bumps it, and this closure's query is the old one), and the account leg
+  // refetches whichever account is open NOW and writes only if it still is —
+  // otherwise A's rows could land under B's header.
+  const refetchOpenLists=useCallback(async(sid=searchSeq.current)=>{
     const q=searchQ.trim();
     const filters=buildSearchFilters(searchFilters);
+    const aid=selAcctIdRef.current;
     await Promise.all([
       searchIsActive(q,filters)
         // First page of the current filtered query — an appended load-more
         // tail is dropped here, but hasMore comes back true so it's one tap
         // away, and the refetched page is at least consistent.
-        ? searchTransactions(q,{filters}).then(setSearchRes).catch(err=>console.error("search refresh failed",err))
+        ? searchTransactions(q,{filters})
+            .then(res=>{if(searchSeq.current===sid)setSearchRes(res);})
+            .catch(err=>console.error("search refresh failed",err))
         : Promise.resolve(),
-      selAcct
-        ? getAccountTransactions(selAcct.id)
-            .then(res=>{setAcctTxs(res.transactions);setAcctHasMore(res.hasMore);})
+      aid
+        ? getAccountTransactions(aid)
+            .then(res=>{if(selAcctIdRef.current===aid){setAcctTxs(res.transactions);setAcctHasMore(res.hasMore);}})
             .catch(err=>console.error("account list refresh failed",err))
         : Promise.resolve(),
     ]);
-  },[searchQ,searchFilters,selAcctId]);
+  },[searchQ,searchFilters]);
 
   async function learnMerchant(){
     if(!learnPrompt)return;
+    const p=learnPrompt;
+    // Before the awaits: this closure's search query is the one current NOW.
+    const sid=searchSeq.current;
     setLearning(true);
+    const amt=p.scope==="amount"?p.amount:null;
+    // The subject has to name the SCOPE — "ZELLE TRANSFER is Rent" would be a
+    // false statement of what was just saved when only the $1,800.00 ones are.
+    const subject=amt===null?p.key:`${p.key} for ${fmtX(amt)}`;
     try{
-      const amt=learnPrompt.scope==="amount"?learnPrompt.amount:null;
-      await setCategoryRule(learnPrompt.descriptor,learnPrompt.category,amt);
-      const n=await applyCategoryRuleToHistory(learnPrompt.descriptor,learnPrompt.category,{amount:amt});
-      setLearnPrompt(null);
-      // Say which of the two things happened. "Remembered" alone reads as
-      // success even when nothing was relabelled. The subject has to name the
-      // SCOPE too — "ZELLE TRANSFER is Rent" would be a false statement of
-      // what was just saved when only the $1,800.00 ones are.
-      const subject=amt===null?learnPrompt.key:`${learnPrompt.key} for ${fmtX(amt)}`;
-      setLearnedNote(n>0
-        ? `Remembered — ${subject} is ${getName(learnPrompt.category)}, and ${n} past transaction${n!==1?"s":""} updated.`
-        : `Remembered — ${subject} is ${getName(learnPrompt.category)}. No past transactions needed changing; future ones will use it.`);
-      await reloadData(year,month);
-      await refetchOpenLists();
-      // The taught-rules list has a new row — refresh it too, or the screen
-      // opened right after teaching is missing the rule just created.
-      invalidateRules();
+      await setCategoryRule(p.descriptor,p.category,amt);
     }catch(err){
       console.error("learning the merchant failed",err);
       setLearnPrompt(null);
       setLearnedNote(null);
+      setLearning(false);
       window.alert(`Couldn't save that rule: ${friendlyError(err)}`);
+      return;
+    }
+    // The rule is SAVED from here on — the next sync will use it whatever
+    // happens below. So the history rewrite gets its own failure message
+    // (never "Couldn't save that rule" for a rule that was saved), and the
+    // taught-rules list + month/open lists refresh no matter what: a partial
+    // rewrite still changed rows, and the list has a new rule either way.
+    try{
+      const n=await applyCategoryRuleToHistory(p.descriptor,p.category,{amount:amt});
+      // Say which of the two things happened. "Remembered" alone reads as
+      // success even when nothing was relabelled.
+      setLearnedNote(n>0
+        ? `Remembered — ${subject} is ${getName(p.category)}, and ${n} past transaction${n!==1?"s":""} updated.`
+        : `Remembered — ${subject} is ${getName(p.category)}. No past transactions needed changing; future ones will use it.`);
+    }catch(err){
+      console.error("applying the taught rule to past transactions failed",err);
+      setLearnedNote(null);
+      window.alert(`Remembered — future ${subject} transactions will be ${getName(p.category)}, but past transactions couldn't be updated: ${friendlyError(err)}. Choose Always again to retry.`);
     }finally{
+      setLearnPrompt(null);
+      invalidateRules();
+      try{
+        await reloadViewed();
+        await refetchOpenLists(sid);
+      }catch(err){console.error("reloading after a teach failed",err);}
       setLearning(false);
     }
   }
@@ -3423,6 +3611,12 @@ export default function Dashboard({ refreshTick = 0 }) {
   // keep asserting a save that didn't land.
   function patchAllTxLists(id,fields){
     const apply=t=>t.id===id?patchTxShape(t,fields):t;
+    // The lists are POSITIONAL (groupByDay keeps their order), so a date edit
+    // must re-sort them too, or the row stays put under its new day header.
+    // The account page and search results are never refetched after an edit,
+    // so for them this IS the fix; the month list is re-sorted as well so it
+    // reads right until reloadData replaces it. The rollback re-sorts again.
+    const order=fields&&"user_date" in fields?resortByEffectiveDate:list=>list;
     // Capture per list — the lists hold distinct row objects, and this runs
     // from an event handler, so the closed-over state is current.
     const before={
@@ -3431,15 +3625,15 @@ export default function Dashboard({ refreshTick = 0 }) {
       search:searchRes?.transactions.find(t=>t.id===id)||null,
       sel:selTx&&selTx.id===id?selTx:null,
     };
-    setTransactions(prev=>prev?{...prev,transactions:prev.transactions.map(apply)}:prev);
-    setAcctTxs(prev=>prev?prev.map(apply):prev);
-    setSearchRes(prev=>prev?{...prev,transactions:prev.transactions.map(apply)}:prev);
+    setTransactions(prev=>prev?{...prev,transactions:order(prev.transactions.map(apply))}:prev);
+    setAcctTxs(prev=>prev?order(prev.map(apply)):prev);
+    setSearchRes(prev=>prev?{...prev,transactions:order(prev.transactions.map(apply))}:prev);
     setSelTx(prev=>prev?apply(prev):prev);
     return()=>{
       const put=row=>t=>t.id===id?row:t;
-      if(before.month)setTransactions(prev=>prev?{...prev,transactions:prev.transactions.map(put(before.month))}:prev);
-      if(before.acct)setAcctTxs(prev=>prev?prev.map(put(before.acct)):prev);
-      if(before.search)setSearchRes(prev=>prev?{...prev,transactions:prev.transactions.map(put(before.search))}:prev);
+      if(before.month)setTransactions(prev=>prev?{...prev,transactions:order(prev.transactions.map(put(before.month)))}:prev);
+      if(before.acct)setAcctTxs(prev=>prev?order(prev.map(put(before.acct))):prev);
+      if(before.search)setSearchRes(prev=>prev?{...prev,transactions:order(prev.transactions.map(put(before.search)))}:prev);
       // Only if the sheet still shows this row — the user may have moved on.
       if(before.sel)setSelTx(prev=>prev&&prev.id===id?before.sel:prev);
     };
@@ -3465,7 +3659,7 @@ export default function Dashboard({ refreshTick = 0 }) {
       rollback();
       window.alert(`Couldn't save that change: ${friendlyError(err)}`);
     }
-    reloadData(year,month);
+    reloadViewed();
   }
 
   // Manual transaction quick-add save. If no manual account exists yet, create
@@ -3492,7 +3686,7 @@ export default function Dashboard({ refreshTick = 0 }) {
           :prev);
       }
       setQuickAdd(false);
-      await reloadData(year,month); // canonical totals + ordering
+      await reloadViewed(); // canonical totals + ordering
     }catch(err){
       console.error("manual transaction add failed",err);
       window.alert(`Couldn't add that transaction: ${friendlyError(err)}`);
@@ -3539,13 +3733,13 @@ export default function Dashboard({ refreshTick = 0 }) {
     // spending state are both stale now, re-sync or not.
     if(prevType!==fields.type){invalidateEnvelopeSpending();}
     if(!crossed||!fed){
-      if(prevType!==fields.type)reloadData(year,month);
+      if(prevType!==fields.type)reloadViewed();
       return;
     }
     setRetyping(true);
     try{
       await runSync({force:true});
-      await reloadData(year,month);
+      await reloadViewed();
     }catch(err){
       console.error("re-sync after type change failed",err);
     }finally{
@@ -3557,13 +3751,14 @@ export default function Dashboard({ refreshTick = 0 }) {
     if(!selAcct)return;
     // Unhide only: surface the guessed TYPE at the moment CLAUDE.md says it
     // must be confirmed — unhiding is the deliberate act that blesses the
-    // guess, and a card mistyped as checking turns every purchase into
-    // household cash spending. Hiding needs no confirm (rows leave totals).
+    // guess, and a card mistyped as checking turns its refunds into income and
+    // its debt into an asset (conventions.md, "Why the type matters"). Hiding
+    // needs no confirm (rows leave totals).
     if(selAcct.hidden&&!window.confirm(unhideConfirmMessage(selAcct)))return;
     setTogglingHide(true);
     try{
       await saveAccount(selAcct.id,{hidden:!selAcct.hidden});
-      await reloadData(year,month);
+      await reloadViewed();
     }finally{
       setTogglingHide(false);
     }
@@ -3606,7 +3801,7 @@ export default function Dashboard({ refreshTick = 0 }) {
       // A manual removal just wrote a restore record — the Accounts tab's
       // Restore strip reads it, so re-check rather than waiting for a remount.
       bumpRestore();
-      await reloadData(year,month);
+      await reloadViewed();
     }catch(err){
       console.error("unlink failed",err);
       // Prefer the human message the sanitized 500 body carries (the Ask tab
@@ -3670,7 +3865,7 @@ export default function Dashboard({ refreshTick = 0 }) {
       const res=await restoreImportedInstitution(manualInstId);
       invalidateEnvelopeSpending();
       bumpRestore();
-      await reloadData(year,month);
+      await reloadViewed();
       // Say what actually came back. A record whose accounts were unhidden by
       // hand in the meantime restores 0 — reporting "restored" then would be
       // a claim the screen contradicts.
@@ -3717,20 +3912,23 @@ export default function Dashboard({ refreshTick = 0 }) {
   // still never DISCARDS a chip filter — that would lose the selection rather
   // than hide it.
   const refineOpen=searchOpen;
-  const refineDirty=!!txAcctFilter||!!txCatFilter;
+  // The account filter only while it names a VISIBLE account — see
+  // liveAcctFilter (txList.js). Everything below reads this, never the raw
+  // state, so a filter stranded on a hidden account reads as unset.
+  const acctFilter=liveAcctFilter(txAcctFilter,accounts);
+  const refineDirty=!!acctFilter||!!txCatFilter;
   const searchTxs=searchRes?.transactions||[];
   // Account first, category second, so the category chips can be derived from
   // the account-filtered rows WITHOUT being narrowed by the category filter —
   // otherwise picking a category leaves exactly one chip on screen and no way
   // back. Accounts narrow the offered categories; categories never narrow the
   // offered accounts.
-  const acctTxsView=txAcctFilter?txs.filter(t=>t.account_id===txAcctFilter):txs;
-  const acctSearchView=txAcctFilter?searchTxs.filter(t=>t.account_id===txAcctFilter):searchTxs;
+  const acctTxsView=acctFilter?txs.filter(t=>t.account_id===acctFilter):txs;
+  const acctSearchView=acctFilter?searchTxs.filter(t=>t.account_id===acctFilter):searchTxs;
   const shownTxs=txCatFilter?acctTxsView.filter(t=>t.category===txCatFilter):acctTxsView;
   const shownSearch=txCatFilter?acctSearchView.filter(t=>t.category===txCatFilter):acctSearchView;
   const listTxs=searchActive?shownSearch:shownTxs;
   const cfPs=cashFlow?.periods||[];
-  const maxCat=cats[0]?.amount||1;
   const maxSpend=Math.max(...cfPs.map(p=>p.spending?.amount||0),1);
   // The Income-vs-spending card scales BOTH rows against the larger of the
   // two, not against maxSpend. Scaled to spending alone, any month whose
@@ -3799,14 +3997,28 @@ export default function Dashboard({ refreshTick = 0 }) {
   // which still renders it under the same rules (SimpleFIN-fed rows only,
   // never through displayBalance — see the normalizeAvailableBalance key row).
   // Don't reinstate it here without a second line to put it on.
-  // Donut slices are non-text marks on the card -> 3:1.
+  // ONE arrangement of the month's categories for the Home donut, its legend
+  // and Reflect's Spending Breakdown: breakdownSegments' top 6 POSITIVE groups
+  // plus an "All Others" bucket, each a share of the true positive total. The
+  // ring used to draw the top 7 renormalised among themselves beside a legend
+  // of the top 6 that could include negatives — an unlabeled 7th wedge,
+  // overstated shares, and legend rows with no wedge.
   // POSITIVE slices only. A pie has no way to draw a negative wedge — a
   // negative sweep runs backwards and overlaps its neighbours — so a refunded
-  // category is simply absent from the ring rather than corrupting it. The
-  // Categories tab beside it still lists the category with its real negative
-  // total, which is where that money is accounted for.
-  const donutData=cats.filter(c=>c.amount>0).slice(0,7)
-    .map(c=>({label:getName(c.label),value:c.amount,color:markOn(getColor(c.label),surf.card)}));
+  // category is simply absent from the ring and its legend rather than
+  // corrupting them. The Categories tab still lists the category with its real
+  // negative total, which is where that money is accounted for.
+  const homeBd=breakdownSegments(cats,{max:6});
+  // Data marks go through markOn even for the track grey: --light-track
+  // (#E4E2DC) is a 1.30:1 hairline on the white card — invisible as a bar fill
+  // or wedge — while markOn lifts it to the 3:1 mark floor and leaves the
+  // already-passing dark value untouched (the verified sweep finding; the token
+  // itself must stay a hairline — it is also the rail surface behind every
+  // progress bar). Slices are non-text marks on the card -> 3:1.
+  const trackMark=markOn(surf.track,surf.card);
+  const segColor=s=>s.others?trackMark:markOn(getColor(s.label),surf.card);
+  const segName=s=>s.others?"All Others":getName(s.label);
+  const donutData=homeBd.segments.map(s=>({label:segName(s),value:s.amount,color:segColor(s)}));
 
   // The viewed month's transactions indexed by effective category — what the
   // drill-in sheet lists. Built from the rows already on hand (getTransactions
@@ -3971,7 +4183,9 @@ export default function Dashboard({ refreshTick = 0 }) {
   // Bars are relative to the largest thing ACTUALLY RENDERED at top level, not
   // to the largest single leaf: a rollup can exceed every leaf, which pegged
   // the biggest group's bar at 100% (or past it) and made the column unreadable.
-  const maxCatBar=Math.max(...catGroups.map(g=>g.children.length?g.roll.amount:(g.own?.amount||0)),0)||maxCat;
+  // Floored at a positive 1 (barScale): a refund-only month must draw empty
+  // bars, never −50/−50 = a full one.
+  const maxCatBar=barScale(catGroups.map(g=>g.children.length?g.roll.amount:(g.own?.amount||0)));
   // ONE row renderer for the Categories tab, used at both levels — a
   // subcategory row is byte-identical to the row it was before it got a parent,
   // just indented. Two renderers would be two chances to drift.
@@ -4204,14 +4418,19 @@ export default function Dashboard({ refreshTick = 0 }) {
   }
 
   const envRowByCat=new Map(envRows.map(r=>[r.category,r]));
-  // Same ordering bug as the Categories tab, different list order: envRows is
-  // the envelope walk followed by the appended empty rows, so a heading parent
-  // that has no budget_months row of its own is an appended emptyEnvRow and its
-  // whole group renders after every real envelope. The Budget list isn't sorted
-  // by magnitude, so a group takes the position of its earliest-placed member
-  // instead — the group sits where its children already sat.
-  const envPos=new Map(envRows.map((r,i)=>[r.category,i]));
-  const envGroups=orderGroups(groupCategories(envRows.map(r=>r.category),catIndex,getName).map(node=>({
+  // The Plan list's ORDER is the one list's (userCats, display-name order),
+  // with the mechanism rows (Uncategorized, transfers — never in userCats)
+  // last — the same order every picker shows. envRows itself stays in walk
+  // order (the walk sorts by raw label, then the appended empty rows) for its
+  // other readers; ranking by it made a category jump from the empty tail to
+  // the top the moment it got its first dollar, setting or spending, so the
+  // next tap landed on a different envelope. The Plan list isn't sorted by
+  // magnitude, so a group takes the position of its earliest-placed member —
+  // the group sits where its children already sat, never dragged to the tail
+  // because a heading parent has no envelope row of its own.
+  const envOrder=rankByList(envRows.map(r=>r.category),userCats);
+  const envPos=new Map(envOrder.map((c,i)=>[c,i]));
+  const envGroups=orderGroups(groupCategories(envOrder,catIndex,getName).map(node=>({
     ...node,
     members:groupMembers(node),
     own:envRowByCat.get(node.name),
@@ -4331,15 +4550,19 @@ export default function Dashboard({ refreshTick = 0 }) {
   // spending ahead of pace?" and "is this month over?" are questions about
   // the present moment, so they use today, not the viewed month
   // (envelopePace returns null unless today falls inside the viewed month).
-  const paceToday=(()=>{const d=new Date();return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;})();
+  const paceToday=localTodayIso();
   // Which income figure this month runs on (the hybrid rule, Mason 2026-08-13):
   // the month in progress budgets on the TYPED figure; a completed month reads
   // ACTUAL measured income. The month tag on actualInc rejects a stale month's
   // measurement; the resolver falls back to manual when there's no usable
   // actual (uncovered history, failed read) rather than blanking RTA.
   const actualForMonth=actualInc&&actualInc.y===year&&actualInc.m===month?actualInc:null;
+  // The typed figure gets the same tag check: a mismatch reads as "not set"
+  // (the existing prompt) until the viewed month's read lands — never as the
+  // previous month's income under this month's header.
+  const incomeForMonth=income&&income.y===year&&income.m===month?income:null;
   const incomeResolved=resolveBudgetIncome({year,month,todayKey:paceToday,
-    manual:income?.income??null,actual:actualForMonth?.amount??null,
+    manual:incomeForMonth?.income??null,actual:actualForMonth?.amount??null,
     coverageStart:actualForMonth?.coverageStart??null});
   const rta=envelopes?readyToAssign(incomeResolved.amount,envelopes.totals):null;
   // --- Expected transactions, DISPLAY-ONLY derivations (the envelopePace
@@ -4404,19 +4627,25 @@ export default function Dashboard({ refreshTick = 0 }) {
         // Newer than any reload still in flight from before the write.
         envSeq.current++;
         if(env!==undefined)setEnvelopes(env);
-        if(inc!==undefined)setIncome(inc);
+        if(inc!==undefined)setIncome({...inc,y:year,m:month});
         if(bud!==undefined){setBudgets(bud.budgets||{});setByDate(bud.byDate||{});}
       }else{
         // The user moved months while the write settled. The write still went
         // to ITS month (the one the number was typed against) — but a reload
         // for the new month may have read budget_months before this write
         // committed, leaving the carry short on screen. Re-read the month now
-        // being viewed; envSeq drops anything older.
+        // being viewed; envSeq drops anything older. Income too: the envSeq
+        // bump makes that in-flight reload skip ITS income commit, which
+        // would otherwise leave the previous month's figure on screen.
         const [cy,cm]=monthRef.current.split("-").map(Number);
-        const fresh=await getEnvelopes({year:cy,month:cm}).catch(()=>undefined);
+        const [fresh,freshInc]=await Promise.all([
+          getEnvelopes({year:cy,month:cm}).catch(()=>undefined),
+          getBudgetIncome({year:cy,month:cm}).catch(()=>undefined),
+        ]);
         if(fresh!==undefined&&monthRef.current===`${cy}-${cm}`){
           envSeq.current++;
           setEnvelopes(fresh);
+          if(freshInc!==undefined)setIncome({...freshInc,y:cy,m:cm});
         }
       }
     }catch(err){
@@ -4476,16 +4705,19 @@ export default function Dashboard({ refreshTick = 0 }) {
     }catch(err){console.error("expect seed failed",err);}
     finally{setExpBusy(false);}
   }
+  // A failure SAYS so (it used to be console-only, so a dead tap looked like
+  // nothing happened) and re-reads: the adapter writes the next cycle before
+  // the status flip, so a half-committed write is real state to show.
   async function doDismissExpected(id,opts){
     setExpBusy(true);
     try{await dismissExpected(id,opts);setExpMatchId(null);setExpDismissId(null);invalidateExpected();}
-    catch(err){console.error("dismiss expected failed",err);}
+    catch(err){console.error("dismiss expected failed",err);invalidateExpected();window.alert(`Couldn't dismiss that bill: ${friendlyError(err)}`);}
     finally{setExpBusy(false);}
   }
   async function doMarkPaid(id,txId){
     setExpBusy(true);
     try{await matchExpectedManually(id,txId);setExpMatchId(null);invalidateExpected();}
-    catch(err){console.error("mark paid failed",err);}
+    catch(err){console.error("mark paid failed",err);invalidateExpected();window.alert(`Couldn't mark that bill paid: ${friendlyError(err)}`);}
     finally{setExpBusy(false);}
   }
   const saveIncome=(val,scope)=>runEnvelopeWrite("the income",()=>setBudgetIncome({year,month},val,{scope}));
@@ -4544,8 +4776,9 @@ export default function Dashboard({ refreshTick = 0 }) {
     <div className="screen" style={{fontFamily:"var(--font-sans)",background:"var(--bg)",
       color:"var(--text)"}}>
       {/* Gated on anySheetOpen because sheets scroll internally, and on
-          loading so a refresh already in flight cannot be stacked. */}
-      <PullRefresh blocked={anySheetOpen||loading} loading={loading} onTrigger={refreshNow}/>
+          loading||refreshing so a refresh already in flight — its bank pull
+          included — cannot be stacked; the chip settles on the same flag. */}
+      <PullRefresh blocked={anySheetOpen||loading||refreshing} loading={loading||refreshing} onTrigger={refreshNow}/>
       {/* 96px bottom padding keeps the fixed bottom nav clear of the last row. */}
       <div style={{maxWidth:720,margin:"0 auto",padding:"24px 16px 96px"}}>
 
@@ -4598,7 +4831,7 @@ export default function Dashboard({ refreshTick = 0 }) {
         )}
         {gearOpen&&(
           <GearMenu tab={tab} themePref={themePref} themeResolved={themeResolved} onTheme={setThemePref}
-            loading={loading} lastUpd={lastUpd} onRefresh={refreshNow} onQuickAdd={()=>setQuickAdd(true)}
+            loading={loading||refreshing} lastUpd={lastUpd} onRefresh={refreshNow} onQuickAdd={()=>setQuickAdd(true)}
             onSignOut={confirmSignOut} onClose={()=>setGearOpen(false)}/>
         )}
 
@@ -4606,9 +4839,9 @@ export default function Dashboard({ refreshTick = 0 }) {
 
         {/* Feed health — amber, not red: the data on screen is fine, it's just
             getting stale. last_error is already sanitized server-side. The ×
-            clears it for this session only (plain state — the status check runs
-            once per mount, so it stays gone until the next app load; a broken
-            feed re-raises it then, which is the point). */}
+            clears it until the next status check (plain state — the check runs
+            at app load and after each hour-gated foreground pull; a feed still
+            broken then re-raises it, which is the point). */}
         {feedHealth&&(
           <div style={{background:"var(--warn-bg)",border:"1px solid var(--warn-border)",borderRadius:10,padding:"12px 16px",fontSize:13,color:"var(--warn)",marginBottom:14,lineHeight:1.5,display:"flex",alignItems:"flex-start",gap:8}}>
             <div style={{flex:1}}>
@@ -4717,7 +4950,12 @@ export default function Dashboard({ refreshTick = 0 }) {
                 if(Math.abs(dx)>Math.abs(dy)&&Math.abs(dx)>30){e.preventDefault();cycleCard(dx<0?1:-1);}
               }:undefined}>
               <div style={{fontSize:11,color:"var(--muted)",fontWeight:500,marginBottom:5}}>{c.label}</div>
-              {loading?<Sk w="70%" h={22}/>:<div style={{fontSize:20,fontWeight:600,letterSpacing:"-.02em",marginBottom:3}}>{c.val??"—"}</div>}
+              {/* nowrap: fmt's "−" (U+2212) is a line-break opportunity before
+                  "$", so a negative card balance at 390px still split as "−"
+                  over "$2,148" even in whole dollars. A sign never leaves its
+                  number; a long figure runs into the card's padding instead,
+                  as a long unsigned one ("$12,345" has no break) already did. */}
+              {loading?<Sk w="70%" h={22}/>:<div style={{fontSize:20,fontWeight:600,letterSpacing:"-.02em",marginBottom:3,whiteSpace:"nowrap"}}>{c.val??"—"}</div>}
               <div style={{fontSize:11,color:c.clr||"var(--muted)",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{loading?<Sk w="80%" h={10}/>:c.sub}</div>
               {c.cycle&&(
                 <div style={{display:"flex",gap:4,marginTop:6,alignItems:"center"}}>
@@ -4738,20 +4976,14 @@ export default function Dashboard({ refreshTick = 0 }) {
           // load (cats = the month's spendingGroups; cashFlow lazy-loads for
           // this screen too — the trends effect's gate). src/reflect.js does
           // the arranging; the shared model did the measuring.
-          const bd=breakdownSegments(cats,{max:6});
+          const bd=homeBd;
           const insight=incomeVsSpendingInsight(cashFlow?.periods);
           // Only offer the drill-in when there is something behind the number
           // (openDrill's rule) — a null onClick makes DrillNum plain text, so
           // a still-loading card never invites a tap into an empty sheet.
           const openIncomeDrill=incomeReport.count?()=>setIncomeDrill("all"):null;
-          // Data marks go through markOn even for the track grey: --light-track
-          // (#E4E2DC) is a 1.30:1 hairline on the white card — invisible as a
-          // bar fill — while markOn lifts it to the 3:1 mark floor and leaves
-          // the already-passing dark value untouched (the verified sweep
-          // finding; the token itself must stay a hairline — it is also the
-          // rail surface behind every progress bar).
-          const trackMark=markOn(surf.track,surf.card);
-          const segColor=s=>s.others?trackMark:markOn(getColor(s.label),surf.card);
+          // trackMark / segColor: the component-level pair the Home donut
+          // shares (see homeBd).
           const linkCard={display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,
             textAlign:"left",cursor:"pointer",font:"inherit",color:"var(--text)",width:"100%"};
           return (
@@ -4784,7 +5016,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                 <div key={s.label} style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
                   <span style={{width:8,height:8,borderRadius:"50%",flexShrink:0,background:segColor(s)}}/>
                   <span style={{flex:1,fontSize:13,minWidth:0,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
-                    {s.others?"All Others":getName(s.label)}
+                    {segName(s)}
                   </span>
                   <span style={{fontSize:13,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",color:"var(--muted)",flexShrink:0}}>{fmtX(s.amount)}</span>
                 </div>
@@ -4828,7 +5060,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                 <div style={{fontSize:20,fontWeight:600,lineHeight:1.35,margin:"4px 0 12px"}}>{insight.sentence}</div>
               ):(
                 <div style={{fontSize:12,color:"var(--muted)",margin:"4px 0 12px"}}>
-                  {trendsLoading?"Measuring…":"Not enough measured income yet."}
+                  {trendsLoading?"Measuring…":trendsErr?"Couldn't load this right now — try Refresh.":"Not enough measured income yet."}
                 </div>
               )}
               {/* The two averages the sentence is a verdict on, and the legend
@@ -4895,16 +5127,22 @@ export default function Dashboard({ refreshTick = 0 }) {
         {tab==="overview"&&(
           <div style={{display:"flex",flexDirection:"column",gap:12}}>
             {/* At most ONE expected-bills line, only when nonzero; hidden
-                entirely pre-migration (expected null) or before load. */}
+                entirely pre-migration (expected null) or before load. Due in
+                the next 7 days and OVERDUE are separate (homeBillsWindow): an
+                old unmatched bill used to pose as "expected in the next 7
+                days" forever. It stays on the line, labelled overdue in the
+                over ink — nothing auto-dismisses. Same clock as the Plan
+                tab's due/overdue labels (paceToday). */}
             {expected&&(()=>{
-              const limit=(()=>{const d=new Date();d.setDate(d.getDate()+7);
-                return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;})();
-              const due=expected.pending.filter(r=>String(r.due_date)<=limit);
-              if(!due.length)return null;
-              const tot=due.reduce((s,r)=>s+(Number(r.amount)||0),0);
+              const {upcoming,overdue}=homeBillsWindow(expected.pending,paceToday);
+              const n=upcoming.rows.length,k=overdue.rows.length;
+              if(!n&&!k)return null;
+              const num={fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums"};
               return (
                 <div className="card" style={{padding:"10px 16px",fontSize:12,color:"var(--muted)"}}>
-                  📅 {due.length} bill{due.length===1?"":"s"} expected in the next 7 days · <span style={{fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",color:"var(--text)"}}>{fmtAuto(tot)}</span>
+                  📅 {n>0&&<>{n} bill{n===1?"":"s"} expected in the next 7 days · <span style={{...num,color:"var(--text)"}}>{fmtAuto(upcoming.total)}</span></>}
+                  {n>0&&k>0&&" · "}
+                  {k>0&&<span style={{color:inkOn(OVER_MONEY,surf.card)}}>{n>0?k:`${k} bill${k===1?"":"s"}`} overdue · <span style={num}>{fmtAuto(overdue.total)}</span></span>}
                 </div>
               );
             })()}
@@ -4913,12 +5151,13 @@ export default function Dashboard({ refreshTick = 0 }) {
                 {loading?<Sk w={130} h={130} r={65}/>:<Donut data={donutData} size={130}/>}
                 <div style={{flex:1}}>
                   <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",marginBottom:8,textTransform:"uppercase",letterSpacing:".05em"}}>Top categories</div>
+                  {/* The legend IS the ring's slices (homeBd), so every wedge is named. */}
                   {loading?[1,2,3,4].map(i=><div key={i} style={{marginBottom:8}}><Sk h={12}/></div>):
-                    cats.slice(0,6).map((c,i)=>(
+                    homeBd.segments.map((s,i)=>(
                       <div key={i} style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
-                        <div style={{width:8,height:8,borderRadius:"50%",background:markOn(getColor(c.label),surf.card),flexShrink:0}}/>
-                        <span style={{fontSize:12,color:"var(--text)",flex:1,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{getName(c.label)}</span>
-                        <span style={{fontSize:12,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",color:"var(--muted)",flexShrink:0}}>{fmt(c.amount)}</span>
+                        <div style={{width:8,height:8,borderRadius:"50%",background:segColor(s),flexShrink:0}}/>
+                        <span style={{fontSize:12,color:"var(--text)",flex:1,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{segName(s)}</span>
+                        <span style={{fontSize:12,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",color:"var(--muted)",flexShrink:0}}>{fmt(s.amount)}</span>
                       </div>
                     ))}
                 </div>
@@ -5213,7 +5452,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                       </span>
                     </span>
                   ):(
-                    <IncomeEdit value={income?.income} isDefault={!!income?.isDefault} onSave={saveIncome}/>
+                    <IncomeEdit value={incomeForMonth?.income} isDefault={!!incomeForMonth?.isDefault} onSave={saveIncome}/>
                   )}
                   <span style={{flex:1}}/>
                   <span style={{color:"var(--muted)"}}>Assigned <strong style={MONO}>{fmtAuto(envelopes.totals.assigned)}</strong></span>
@@ -5563,7 +5802,7 @@ export default function Dashboard({ refreshTick = 0 }) {
               <div style={{display:"flex",alignItems:"center",gap:10}}>
                 <span style={{fontSize:12,color:"var(--muted)"}}>
                   {searchActive
-                    ?(searching?"searching…":`${shownSearch.length} match${shownSearch.length!==1?"es":""}`)
+                    ?(searching?"searching…":matchCountLabel(shownSearch.length,!!searchRes?.hasMore))
                     :`${shownTxs.length} transaction${shownTxs.length!==1?"s":""}`}
                 </span>
                 {/* The refine disclosure — search box, amount/date filters AND
@@ -5610,8 +5849,14 @@ export default function Dashboard({ refreshTick = 0 }) {
                   unmounts on tab change while the search state persists, so a
                   bare autoFocus would pop the iOS keyboard on every return to
                   Spending with a live search. A toggle-tap mount is always
-                  inactive (collapse clears), so opening still focuses. */}
+                  inactive (collapse clears), so opening still focuses.
+                  Return BLURS (the iPhone keyboard's Search key — the query
+                  already applies as typed, so this only dismisses the keyboard
+                  off the results; no search state changes), and autocorrect
+                  stays off so bank shorthand like "AMZN MKTP" isn't rewritten. */}
               <input value={searchQ} onChange={e=>setSearchQ(e.target.value)} placeholder="Search all transactions…"
+                enterKeyHint="search" autoCorrect="off" autoCapitalize="off" spellCheck={false}
+                onKeyDown={e=>{if(e.key==="Enter")e.currentTarget.blur();}}
                 autoFocus={!searchActive}
                 style={{width:"100%",padding:"9px 34px 9px 12px",borderRadius:8,border:"1px solid var(--border)",
                   background:"var(--bg)",color:"var(--text)",fontSize:16,fontFamily:"inherit",outline:"none"}}/>
@@ -5668,7 +5913,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                     tokens (it used to ask for `var(--muted)22`, which is not a
                     colour, so its active tint never painted at all). */}
                 {[{id:null,label:"All accounts",color:null},...accounts.filter(a=>!a.hidden).map(a=>({id:a.id,label:acctLabel(a),color:acctColor(a)}))].map(c=>{
-                  const active=txAcctFilter===c.id;
+                  const active=acctFilter===c.id;
                   const cs=c.color?chipOn(c.color,surf.card):null;
                   return (
                     <button key={c.id||"all"} onClick={()=>setTxAcctFilter(c.id)}
@@ -5731,21 +5976,13 @@ export default function Dashboard({ refreshTick = 0 }) {
             )):listTxs.length===0?(
               <div style={{textAlign:"center",padding:"30px 0",color:"var(--muted)",fontSize:14}}>
                 {/* Always getName — a renamed category must not leak its raw
-                    registry label here. The hasMore case exists so the app never
-                    claims a category has nothing when it only looked at a
-                    truncated page of matches. */}
+                    registry label here. The sentence (incl. the hasMore "try
+                    Load more" case, for either chip) is emptyListMessage. */}
                 {(()=>{
-                  const cn=txCatFilter?getName(txCatFilter):null;
                   const q=searchQ.trim();
                   // Filter-only search has no text query to quote.
-                  const what=q.length>=2?`"${q}"`:"the filters";
-                  if(searchActive&&cn&&searchRes?.hasMore)return `No ${cn} transactions in the first ${searchTxs.length} matches for ${what} — try Load more.`;
-                  if(searchActive&&cn)return `No ${cn} transactions match ${what}.`;
-                  if(searchActive)return `No transactions match ${what}.`;
-                  if(cn&&txAcctFilter)return `No ${cn} transactions for this account this month.`;
-                  if(cn)return `No ${cn} transactions this month.`;
-                  if(txAcctFilter)return "No transactions for this account this month.";
-                  return "No transactions for this period.";
+                  return emptyListMessage({searchActive,cat:txCatFilter?getName(txCatFilter):null,acct:!!acctFilter,
+                    hasMore:!!searchRes?.hasMore,loaded:searchTxs.length,what:q.length>=2?`"${q}"`:"the filters"});
                 })()}
               </div>
             ):(()=>{
@@ -6042,7 +6279,7 @@ export default function Dashboard({ refreshTick = 0 }) {
               <span style={{fontSize:12,color:"var(--muted)"}}>{covOpen?"▾":"▸"}</span>
             </div>
             {covOpen&&(
-              <div style={{marginTop:10}}>
+              <div style={{marginTop:10,opacity:covStale&&!covErr?.55:1}} aria-busy={covStale&&!covErr?true:undefined}>
                 {covErr&&<div style={{fontSize:12,color:"var(--danger)"}}>Couldn't load coverage: {covErr}</div>}
                 {!covErr&&covData===null&&<div style={{marginBottom:8}}><Sk h={32}/><div style={{height:8}}/><Sk h={32}/></div>}
                 {!covErr&&covData!==null&&[...accounts].sort((a,b)=>(a.hidden?1:0)-(b.hidden?1:0)).map(a=>{
@@ -6100,7 +6337,7 @@ export default function Dashboard({ refreshTick = 0 }) {
               <span style={{fontSize:12,color:"var(--muted)"}}>{reconOpen?"▾":"▸"}</span>
             </div>
             {reconOpen&&(
-              <div style={{marginTop:10}}>
+              <div style={{marginTop:10,opacity:reconStale?.55:1}} aria-busy={reconStale?true:undefined}>
                 {reconData===null&&<div style={{marginBottom:8}}><Sk h={64}/><div style={{height:8}}/><Sk h={64}/></div>}
                 {reconData&&!reconData.ok&&(
                   <div style={{fontSize:12,color:"var(--muted)"}}>Couldn't load this right now — try Refresh.</div>
@@ -6295,7 +6532,7 @@ export default function Dashboard({ refreshTick = 0 }) {
         {tab==="accounts"&&selAcct&&(
           <div className="card">
             <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:4}}>
-              <button className="nbtn" onClick={()=>setSelAcctId(null)} title="Back to accounts">‹</button>
+              <button className="nbtn" onClick={()=>setSelAcctId(null)} title="Back to accounts" aria-label="Back to accounts">‹</button>
               <div style={{flex:1,minWidth:0}}>
                 {/* The account's naming controls live HERE since 2026-08-28 —
                     the list's tiles became pure navigation, so the swatch (tap
@@ -6439,8 +6676,9 @@ export default function Dashboard({ refreshTick = 0 }) {
                 <div style={{fontSize:10,color:"var(--muted)",marginTop:8,lineHeight:1.5}}>
                   {retyping
                     ?"Re-syncing so the balance is read the right way round for the new type…"
-                    :<>SimpleFIN doesn't send an account type — this was guessed from the name. Money out of
-                      <em> checking</em> counts as spending in Trends; money out of <em>savings</em> never does.</>}
+                    :<>SimpleFIN doesn't send an account type — this was guessed from the name. Bank, Credit card
+                      or Loan changes the numbers (how refunds and card payments count, and whether the balance is
+                      an asset or a debt); Checking vs Savings is only a label.</>}
                 </div>
               </div>
             )}
@@ -6549,24 +6787,22 @@ export default function Dashboard({ refreshTick = 0 }) {
           const extra=Math.max(0,Number(debtExtra)||0);
           const missingMin=included.filter(d=>!(Number(d.minimum_payment)>0));
           const plan=included.length?payoffWhatIf(included,{strategy:debtStrategy,extraMonthly:extra}):null;
-          const debtSince=new Date(Date.now()-365*86400000).toISOString().slice(0,10);
+          // perDebt carries only the raw bank name (the pure core stays
+          // label-agnostic) — the projection lines resolve the household label
+          // by id, or two cards both named "Visa Signature" read identically.
+          const incById=new Map(included.map(d=>[d.id,d]));
+          const debtSince=addLocalDays(-365);
           const startMonth=`${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,"0")}`;
           const freeMonth=plan?debtFreeMonth(startMonth,plan):null;
           // Total-owed history: carry each account's last-seen snapshot forward
-          // so a day where only one bank reported doesn't read as a paydown.
+          // so a day where only one bank reported doesn't read as a paydown
+          // (debtTotalSeries — netWorthSeries' fold in the STORED sign).
           const series=(()=>{
             if(debtSnaps.length<2)return [];
-            const last={},pts=[];let cur=null;
-            for(const s of debtSnaps){
-              last[s.account_id]=Number(s.balance)||0;
-              const total=Object.values(last).reduce((a,b)=>a+b,0);
-              if(cur&&cur.date===s.captured_on)cur.total=total;
-              else pts.push(cur={date:s.captured_on,total});
-            }
             // The 365-day window is a DISPLAY window applied to the folded
             // points, so the carry across its boundary survives (clampSeries
             // keeps the point before the cutoff for exactly that reason).
-            const shown=clampSeries(pts,debtSince);
+            const shown=clampSeries(debtTotalSeries(debtSnaps,debts.map(d=>d.id)),debtSince);
             return shown.length>=2?shown:[];
           })();
           return (
@@ -6709,12 +6945,13 @@ export default function Dashboard({ refreshTick = 0 }) {
                           )}
                           {/* Commit on BLUR only — a date input emits COMPLETE
                               garbage values while the year is typed (see the
-                              placed_in_service comment). */}
+                              placed_in_service comment). dateCommit: empty
+                              clears, garbage reverts, a valid date saves. */}
                           <label style={{display:"inline-flex",alignItems:"center",gap:4,fontSize:12,color:"var(--muted)"}}>due
                             <input type="date" key={a.id+":due:"+(a.next_payment_due_date||"")} defaultValue={a.next_payment_due_date||""}
-                              onBlur={ev=>{const raw=ev.target.value||null;const v=raw&&raw.slice(0,4)>="1900"?raw:null;
-                                ev.target.value=v||"";
-                                if(v!==(a.next_payment_due_date||null))saveDebt(a.id,{next_payment_due_date:v});}}
+                              onBlur={ev=>{const c=dateCommit(ev.target.value,a.next_payment_due_date);
+                                if(c.action==="revert"){ev.target.value=c.value||"";return;}
+                                if(c.action!=="noop")saveDebt(a.id,{next_payment_due_date:c.value});}}
                               style={{padding:"5px 7px",borderRadius:8,border:"1px solid var(--border)",background:"var(--bg)",
                                 color:"var(--text)",fontSize:12,fontFamily:"inherit",outline:"none"}}/>
                           </label>
@@ -6809,7 +7046,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                       explains why avalanche beats snowball. */}
                   <div style={{fontSize:11,color:"var(--muted)",lineHeight:1.7}}>
                     {plan.perDebt.filter(d=>d.months!=null).map(d=>(
-                      <div key={d.id}>{d.name||"?"} clears {monthYear(addMonths(startMonth,d.months))} · {fmtAuto(d.interest)} interest</div>
+                      <div key={d.id}>{acctLabel(incById.get(d.id))||d.name||"?"} clears {monthYear(addMonths(startMonth,d.months))} · {fmtAuto(d.interest)} interest</div>
                     ))}
                   </div>
                 </>
@@ -6825,11 +7062,8 @@ export default function Dashboard({ refreshTick = 0 }) {
             <div className="card">
               <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em",marginBottom:10}}>Total owed over time</div>
               {(()=>{
-                const max=Math.max(...series.map(p=>p.total),1);
-                const min=Math.min(...series.map(p=>p.total));
-                const span=Math.max(max-min,max*.02,1);
                 const W=300,H=60;
-                const pts=series.map((p,i)=>`${(i/(series.length-1))*W},${H-4-((p.total-min)/span)*(H-8)}`).join(" ");
+                const pts=sparklinePoints(series.map(p=>p.total),W,H);
                 const line=markOn("#7F77DD",surf.card);
                 return (
                   <>
@@ -6861,11 +7095,8 @@ export default function Dashboard({ refreshTick = 0 }) {
                 assets − debts across unhidden accounts · history since {shortDate(nwSeries[0].date)}
               </div>
               {nwSeries.length>=2&&(()=>{
-                const max=Math.max(...nwSeries.map(p=>p.total));
-                const min=Math.min(...nwSeries.map(p=>p.total));
-                const span=Math.max(max-min,Math.abs(max)*.02,1);
                 const W=300,H=60;
-                const pts=nwSeries.map((p,i)=>`${(i/(nwSeries.length-1))*W},${H-4-((p.total-min)/span)*(H-8)}`).join(" ");
+                const pts=sparklinePoints(nwSeries.map(p=>p.total),W,H);
                 const line=markOn("#7F77DD",surf.card);
                 return (
                   <>
@@ -6960,7 +7191,7 @@ export default function Dashboard({ refreshTick = 0 }) {
               <div ref={chatEndRef}/>
             </div>
             <div style={{display:"flex",gap:8}}>
-              <input value={chatInput} onChange={e=>setChatInput(e.target.value)}
+              <input value={chatInput} onChange={e=>setChatInput(e.target.value)} enterKeyHint="send"
                 onKeyDown={e=>{if(e.key==="Enter")sendChat();}}
                 placeholder="Ask about your spending…" disabled={chatBusy}
                 style={{flex:1,padding:"10px 12px",borderRadius:10,border:"1px solid var(--border)",background:"var(--bg)",
@@ -7352,16 +7583,16 @@ export default function Dashboard({ refreshTick = 0 }) {
           const shownEnts=entities.filter(e=>!e.archived_at||txs.some(t=>t.effective_entity_id===e.id));
           const lineOptions=[["","Not mapped"],[RENTS_KEY,"Rents received (income)"],...SCHEDULE_E_LINES.map(l=>[String(l.line),`${l.line} · ${l.label}`])];
           const selStyleSm={fontSize:11,fontFamily:"inherit",color:"var(--text)",background:"var(--bg)",border:"1px solid var(--border)",borderRadius:8,padding:"4px 6px",cursor:"pointer",outline:"none",maxWidth:180};
-          const localToday=`${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,"0")}-${String(now.getDate()).padStart(2,"0")}`;
+          const localToday=localIsoDate(now);
           const amber=inkOn("#C08A2E",surf.card);
           return (
           <div style={{display:"flex",flexDirection:"column",gap:12}}>
             {/* Tax year + framing */}
             <div className="card">
               <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:10}}>
-                <button className="nbtn" onClick={()=>{setTaxYear(y=>y-1);invalidateTax();}}>‹</button>
+                <button className="nbtn" onClick={()=>{setTaxYear(y=>y-1);invalidateTax();}} aria-label="Previous tax year">‹</button>
                 <div style={{fontSize:18,fontWeight:600,minWidth:90,textAlign:"center",color:"var(--text)"}}>{taxYear}</div>
-                <button className="nbtn" disabled={!canNextTax} onClick={()=>{if(canNextTax){setTaxYear(y=>y+1);invalidateTax();}}}>›</button>
+                <button className="nbtn" disabled={!canNextTax} onClick={()=>{if(canNextTax){setTaxYear(y=>y+1);invalidateTax();}}} aria-label="Next tax year">›</button>
               </div>
               <div style={{fontSize:10,color:"var(--muted)",textAlign:"center",marginTop:6,lineHeight:1.5}}>
                 Calendar-year records for your tax preparer — not tax advice. Rental transactions still
@@ -7622,7 +7853,7 @@ export default function Dashboard({ refreshTick = 0 }) {
               <div className="card">
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
                   <div style={{fontSize:11,fontWeight:500,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em"}}>Mileage</div>
-                  {!mileForm&&<button className="ibtn" style={{fontSize:11}} onClick={()=>setMileForm({on_date:localToday,miles:"",purpose:"",entity_id:activeEnts[0]?.id||""})}>＋ Log a drive</button>}
+                  {!mileForm&&<button className="ibtn" style={{fontSize:11}} onClick={()=>{setMileNote(null);setMileForm({on_date:localToday,miles:"",purpose:"",entity_id:activeEnts[0]?.id||""});}}>＋ Log a drive</button>}
                 </div>
                 <div style={{fontSize:13,color:"var(--text)",marginBottom:4}}>
                   <strong style={{fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums"}}>{mileSum.miles.toLocaleString("en-US")}</strong> mi in {taxYear} ·
@@ -7636,6 +7867,15 @@ export default function Dashboard({ refreshTick = 0 }) {
                 {mileSum.unratedMiles>0&&(
                   <div style={{fontSize:10,color:amber,marginBottom:4}}>
                     {mileSum.unratedMiles} mi predate the app's rate table and are valued at $0 — give your preparer the dates.
+                  </div>
+                )}
+                {mileNote!=null&&mileNote!==taxYear&&!mileForm&&(
+                  <div style={{fontSize:11,color:"var(--muted)",marginTop:4}}>
+                    Saved to {mileNote}
+                    {mileNote<=now.getFullYear()&&<>{" — "}
+                      <button onClick={()=>{const y=mileNote;setMileNote(null);setTaxYear(y);invalidateTax();}}
+                        style={{background:"none",border:"none",padding:0,fontSize:11,color:"var(--accent)",cursor:"pointer",fontFamily:"inherit"}}>switch to {mileNote}</button>
+                      {" "}to see it</>}.
                   </div>
                 )}
                 {mileForm&&(
@@ -7659,11 +7899,12 @@ export default function Dashboard({ refreshTick = 0 }) {
                     )}
                     <div style={{display:"flex",gap:8}}>
                       <button className="ibtn" style={{flex:1,justifyContent:"center"}} onClick={()=>setMileForm(null)}>Cancel</button>
-                      <button onClick={handleAddMileage} disabled={!mileForm.on_date||!(Number(mileForm.miles)>0)}
+                      {(()=>{const ok=!!sanitizeDateInput(mileForm.on_date,EDIT_YEAR_FLOOR)&&Number(mileForm.miles)>0;return(
+                      <button onClick={handleAddMileage} disabled={!ok}
                         style={{flex:1,padding:"7px 0",borderRadius:8,border:"none",background:"var(--accent)",color:"var(--accent-text)",fontFamily:"inherit",fontSize:12,fontWeight:600,
-                          cursor:mileForm.on_date&&Number(mileForm.miles)>0?"pointer":"default",opacity:mileForm.on_date&&Number(mileForm.miles)>0?1:.5}}>
+                          cursor:ok?"pointer":"default",opacity:ok?1:.5}}>
                         Save drive
-                      </button>
+                      </button>);})()}
                     </div>
                   </div>
                 )}
@@ -7680,8 +7921,8 @@ export default function Dashboard({ refreshTick = 0 }) {
                   </div>
                 ))}
                 <div style={{fontSize:10,color:"var(--muted)",lineHeight:1.5,marginTop:8}}>
-                  Valued at the IRS standard rate for the drive's date (2026: 72.5¢/mi Jan–Jun, 76¢/mi from
-                  Jul 1). Hand-entered — log rental and other deductible drives only.
+                  Valued at the IRS standard rate for the drive's date ({mileageFootnote(taxYear)}).
+                  Hand-entered — log rental and other deductible drives only.
                 </div>
               </div>
             )}
@@ -7722,7 +7963,7 @@ export default function Dashboard({ refreshTick = 0 }) {
           // sections are newest-first, so the range reads oldest → newest.
           :`${ss[ss.length-1].label} – ${ss[0].label}`;
         return (
-          <IncomeSheet report={report} when={when} busy={trendsLoading||!cashFlow} surf={surf}
+          <IncomeSheet report={report} when={when} busy={trendsLoading||(!cashFlow&&!trendsErr)} failed={trendsErr&&!cashFlow} surf={surf}
             acctById={acctById} acctLabel={acctLabel} acctColor={acctColor}
             onPick={t=>openTx(t)} onClose={()=>setIncomeDrill(null)}/>
         );
@@ -8088,11 +8329,12 @@ export default function Dashboard({ refreshTick = 0 }) {
               </div>
               <input type="date" key={selTx.id+":"+selTx.transaction_date} defaultValue={selTx.transaction_date||""}
                 aria-label="Transaction date"
-                onBlur={ev=>{const raw=ev.target.value||null;const v=raw&&raw.slice(0,4)>="1900"?raw:null;
+                onBlur={ev=>{const c=dateCommit(ev.target.value,selTx.transaction_date);
                   // An empty/abandoned value keeps the current date — a
                   // transaction can't have NO date, unlike placed-in-service.
-                  if(!v){ev.target.value=selTx.transaction_date||"";return;}
-                  if(v===selTx.transaction_date)return;
+                  if(c.action==="clear"||c.action==="revert"){ev.target.value=selTx.transaction_date||"";return;}
+                  if(c.action==="noop")return;
+                  const v=c.value;
                   // Picking the bank's own date again is a reset, not an override.
                   saveTx({user_date:v===selTx.bank_date?null:v});}}
                 style={{padding:"6px 8px",borderRadius:8,border:"1px solid var(--border)",background:"var(--input-bg)",
@@ -8191,12 +8433,14 @@ export default function Dashboard({ refreshTick = 0 }) {
                               ("0002-…", "0020-…", …), so an onChange commit
                               persists garbage intermediate years — and the
                               optimistic patch then makes blur a no-op on the
-                              garbage (review-caught). The year floor rejects
-                              an abandoned partial year the same way. */}
+                              garbage (review-caught). dateCommit REVERTS an
+                              abandoned partial or 5-digit year (it used to
+                              save null, deleting the stored date); only an
+                              emptied field clears. */}
                           <input type="date" key={selTx.id} defaultValue={selTx.placed_in_service||""}
-                            onBlur={ev=>{const raw=ev.target.value||null;const v=raw&&raw.slice(0,4)>="1900"?raw:null;
-                              ev.target.value=v||"";
-                              if(v!==(selTx.placed_in_service||null))saveTx({placed_in_service:v});}}
+                            onBlur={ev=>{const c=dateCommit(ev.target.value,selTx.placed_in_service);
+                              if(c.action==="revert"){ev.target.value=c.value||"";return;}
+                              if(c.action!=="noop")saveTx({placed_in_service:c.value});}}
                             style={{width:"100%",marginTop:3,padding:"6px 8px",borderRadius:8,border:"1px solid var(--border)",
                               background:"var(--bg)",color:"var(--text)",fontSize:12,fontFamily:"inherit",outline:"none"}}/>
                         </label>
@@ -8256,7 +8500,7 @@ export default function Dashboard({ refreshTick = 0 }) {
           <CsvImport
             accounts={accounts}
             onClose={()=>setImporting(false)}
-            onImported={()=>reloadData(year,month)}
+            onImported={()=>reloadViewed()}
           />
         </Suspense>
       )}
@@ -8271,7 +8515,7 @@ export default function Dashboard({ refreshTick = 0 }) {
               // them), but permanent delete and disconnect mutate server-side
               // WITHOUT a sync — invalidate here so all four outcomes refetch.
               invalidateEnvelopeSpending();
-              reloadData(year,month);
+              reloadViewed();
             }}
           />
         </Suspense>
@@ -8279,13 +8523,12 @@ export default function Dashboard({ refreshTick = 0 }) {
 
       {/* Manual transaction quick-add */}
       {quickAdd&&(()=>{
-        // Loan accounts excluded: a loan's own ledger rows never count as
-        // spending (isLoanAccount), so a hand-typed cash purchase parked there
-        // would silently vanish from every total.
-        const manualAccounts=accounts.filter(a=>isManualAccount(a)&&!isSimpleFinAccount(a)&&a.type!=="loan");
+        // Manual, non-SimpleFIN, non-loan, non-hidden, depository first — the
+        // reasons live on quickAddTargets (dataAdapter.js).
+        const manualAccounts=quickAddTargets(accounts);
         // Uncategorized is never an offerable pick (same rule as the detail sheet).
         return (
-          <QuickAddSheet accounts={accounts} manualAccounts={manualAccounts} allCats={userCats}
+          <QuickAddSheet manualAccounts={manualAccounts} allCats={userCats}
             getName={getName} getColor={getColor} acctLabel={acctLabel} acctColor={acctColor}
             busy={quickAddBusy} surf={surf} onSave={addManualTx} onClose={()=>setQuickAdd(false)}/>
         );
@@ -8293,7 +8536,7 @@ export default function Dashboard({ refreshTick = 0 }) {
 
       {/* Funding target (rule 2) */}
       {targetEdit&&(
-        <TargetSheet name={getName(targetEdit)} row={envMap[targetEdit]||{target:budgets[targetEdit]??null}} busy={envBusy} surf={surf} year={year} month={month}
+        <TargetSheet name={getName(targetEdit)} row={envMap[targetEdit]||{target:budgets[targetEdit]??null}} busy={envBusy} year={year} month={month}
           onClose={()=>setTargetEdit(null)}
           onSave={v=>{const c=targetEdit;setTargetEdit(null);saveTarget(c,v);}}/>
       )}
@@ -8320,8 +8563,11 @@ export default function Dashboard({ refreshTick = 0 }) {
       {addingCat&&(()=>{
         // One guard, shared with the tests: case-insensitive against the user's
         // own names AND the three mechanism internals (a hand-made "Return"
-        // would collide with the mechanism label stored rows may carry).
-        const dup=isDuplicateCategoryName(newName,customCatNames);
+        // would collide with the mechanism label stored rows may carry), plus
+        // the display aliases and case variants of names rows still carry.
+        // The exact name of a retired-but-in-use category stays addable — it
+        // re-registers the same raw key.
+        const dup=isDuplicateCategoryName(newName,customCatNames,{aliases:customNames,inUse:userCats});
         const canAdd=!!newName.trim()&&!dup;
         // A brand-new category has no children, so every top-level category is
         // an eligible parent.

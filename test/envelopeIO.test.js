@@ -34,12 +34,15 @@ function fakeClient(script, calls = []) {
         payload: null,
         filters: [],
         columns: null,
+        returning: null,
         onConflict: null,
         single: false,
       };
       const b = {
         select(cols) {
+          // After a write, .select() is PostgREST's return=representation.
           if (q.op === 'select') q.columns = cols;
+          else q.returning = cols;
           return b;
         },
         insert(p) {
@@ -260,10 +263,10 @@ test('getExpectedTransactions auto-matches, persists, and rolls the cycle forwar
   const client = fakeClient(
     [
       { data: [pendingRow], error: null }, // pending read
-      { data: [], error: null }, // this-month matched read
-      { error: null }, // update → matched
+      { data: [], error: null }, // matched read (the claim set)
       { data: [], error: null }, // roll-forward dup-gate read
-      { data: nextRow, error: null }, // roll-forward insert
+      { data: nextRow, error: null }, // roll-forward insert — FIRST
+      { data: [{ id: 'e1' }], error: null }, // guarded flip → matched
     ],
     calls
   );
@@ -275,14 +278,202 @@ test('getExpectedTransactions auto-matches, persists, and rolls the cycle forwar
   const upd = calls.find(c => c.op === 'update');
   assert.equal(upd.payload.status, 'matched');
   assert.equal(upd.payload.matched_tx_id, 't9');
+  assert.deepEqual(upd.filters, [['eq', 'id', 'e1'], ['eq', 'status', 'pending']], 'the flip is guarded on pending');
+  assert.ok(upd.returning, 'the flip returns its rows, so 0-changed is detectable');
 
   const ins = calls.find(c => c.op === 'insert');
   assert.equal(ins.payload.due_date, '2026-09-05');
   assert.equal(ins.payload.recurring_key, 'NETFLIX');
   assert.equal('status' in ins.payload, false); // defaults to pending
+  assert.ok(calls.indexOf(ins) < calls.indexOf(upd), 'the next cycle is inserted BEFORE the flip');
 
   assert.deepEqual(res.pending.map(r => r.id), ['e2']);
   assert.deepEqual(res.matched.map(r => r.id), ['e1']);
+});
+
+// --- the auto-match write order (insert first) and the pending guard --------
+
+const netflix = (over = {}) => ({
+  id: 'e1',
+  recurring_key: 'NETFLIX',
+  description: 'Netflix',
+  category: 'Subscriptions',
+  account_id: null,
+  amount: 15.49,
+  due_date: '2026-08-05',
+  cadence: 'monthly',
+  status: 'pending',
+  matched_tx_id: null,
+  created_at: 'x',
+  ...over,
+});
+const netflixCharge = async () => [
+  { id: 't9', date: '2026-08-04', amount: 15.49, account_id: 'a1', merchant_name: 'NETFLIX.COM', description: 'NETFLIX.COM' },
+];
+// postgrest-js's shape for a request that died on the wire (an insert is a
+// POST, which the retrying fetch never re-sends).
+const loadFailed = { message: 'TypeError: Load failed', details: '', hint: '', code: '' };
+
+test('REGRESSION: a failed roll-forward insert issues no status flip — the bill stays pending, not lost', async () => {
+  const calls = [];
+  const client = fakeClient(
+    [
+      { data: [netflix()], error: null }, // pending read
+      { data: [], error: null }, // matched read
+      { data: [], error: null }, // dup-gate read
+      { data: null, error: loadFailed }, // insert dies on the wire
+    ],
+    calls
+  );
+  await assert.rejects(
+    () => getExpectedTransactions({ today: '2026-08-06' }, { client, fetchTxs: netflixCharge }),
+    e => e === loadFailed
+  );
+  assert.equal(calls.some(c => c.op === 'update'), false, 'never flipped: the next visit re-matches it');
+});
+
+test('a flip that fails after the insert: the next pass finds the successor and inserts no twin', async () => {
+  const e2 = netflix({ id: 'e2', due_date: '2026-09-05' });
+  // Pass 1: insert lands, the flip dies.
+  let calls = [];
+  let client = fakeClient(
+    [
+      { data: [netflix()], error: null },
+      { data: [], error: null },
+      { data: [], error: null },
+      { data: e2, error: null },
+      { data: null, error: loadFailed },
+    ],
+    calls
+  );
+  await assert.rejects(() => getExpectedTransactions({ today: '2026-08-06' }, { client, fetchTxs: netflixCharge }));
+  // Pass 2: e1 is still pending beside its successor; it re-matches and the
+  // dup gate absorbs the roll-forward.
+  calls = [];
+  client = fakeClient(
+    [
+      { data: [netflix(), e2], error: null },
+      { data: [], error: null },
+      { data: [e2], error: null }, // dup-gate read finds the successor
+      { data: [{ id: 'e1' }], error: null }, // guarded flip
+    ],
+    calls
+  );
+  const res = await getExpectedTransactions({ today: '2026-08-06' }, { client, fetchTxs: netflixCharge });
+  assert.equal(calls.some(c => c.op === 'insert'), false, 'no twin');
+  assert.deepEqual(res.pending.map(r => r.id), ['e2']);
+  assert.deepEqual(res.matched.map(r => r.id), ['e1']);
+});
+
+test('REGRESSION: a stale pass after the other phone STOPPED the bill withdraws its own successor', async () => {
+  // Phone B tapped Stop while phone A's pass awaited its transactions. The
+  // unguarded flip set the row back to matched and minted the next cycle:
+  // the cancelled bill came back.
+  const calls = [];
+  const client = fakeClient(
+    [
+      { data: [netflix()], error: null }, // pending read (before B's stop)
+      { data: [], error: null }, // matched read
+      { data: [], error: null }, // dup-gate read
+      { data: netflix({ id: 'e2', due_date: '2026-09-05' }), error: null }, // our successor
+      { data: [], error: null }, // guarded flip: 0 rows — B got there first
+      { data: [{ status: 'dismissed' }], error: null }, // re-read
+      { data: null, error: null }, // delete our successor
+    ],
+    calls
+  );
+  const res = await getExpectedTransactions({ today: '2026-08-06' }, { client, fetchTxs: netflixCharge });
+  const del = calls.find(c => c.op === 'delete');
+  assert.ok(del, 'our successor is withdrawn');
+  assert.deepEqual(del.filters, [['eq', 'id', 'e2'], ['eq', 'status', 'pending']]);
+  assert.deepEqual(res.pending, []);
+  assert.deepEqual(res.matched, []);
+});
+
+test('two overlapping passes both minted a successor: the loser deletes its twin', async () => {
+  const theirs = netflix({ id: 'e3', due_date: '2026-09-05' });
+  const calls = [];
+  const client = fakeClient(
+    [
+      { data: [netflix()], error: null },
+      { data: [], error: null },
+      { data: [], error: null }, // both passed the dup gate…
+      { data: netflix({ id: 'e2', due_date: '2026-09-05' }), error: null },
+      { data: [], error: null }, // …but the other pass flipped first
+      { data: [{ status: 'matched' }], error: null },
+      { data: [netflix({ id: 'e2', due_date: '2026-09-05' }), theirs], error: null }, // series re-read
+      { data: null, error: null },
+    ],
+    calls
+  );
+  const res = await getExpectedTransactions({ today: '2026-08-06' }, { client, fetchTxs: netflixCharge });
+  const del = calls.find(c => c.op === 'delete');
+  assert.deepEqual(del.filters, [['eq', 'id', 'e2'], ['eq', 'status', 'pending']]);
+  assert.deepEqual(res.pending, []);
+});
+
+test('the other device matched it and ours is the only successor: kept, nothing deleted', async () => {
+  // The winner may have deduped against ours — deleting it would end the series.
+  const ours = netflix({ id: 'e2', due_date: '2026-09-05' });
+  const calls = [];
+  const client = fakeClient(
+    [
+      { data: [netflix()], error: null },
+      { data: [], error: null },
+      { data: [], error: null },
+      { data: ours, error: null },
+      { data: [], error: null },
+      { data: [{ status: 'matched' }], error: null },
+      { data: [ours], error: null }, // only ours in the series
+    ],
+    calls
+  );
+  const res = await getExpectedTransactions({ today: '2026-08-06' }, { client, fetchTxs: netflixCharge });
+  assert.equal(calls.some(c => c.op === 'delete'), false);
+  assert.deepEqual(res.pending.map(r => r.id), ['e2']);
+  assert.deepEqual(res.matched, [], "the row we didn't flip drops out of this render");
+});
+
+// A scripted read that honours the due_date range filters the way the
+// database would — so a month-scoped read really can't see last month's row.
+const byDueFilters = rows => q => ({
+  data: rows.filter(r =>
+    q.filters.every(([op, c, v]) =>
+      c !== 'due_date' || (op === 'gte' ? r.due_date >= v : op === 'lte' ? r.due_date <= v : true))),
+  error: null,
+});
+
+test('REGRESSION: a weekly charge claimed by last month\'s row is not re-claimed across the month boundary', async () => {
+  // Sep 29's row matched the Oct 2 charge. On Oct 4 the Oct 6 row is within
+  // the weekly ±4 window of that SAME charge — and a claim set built from
+  // October's matched rows only couldn't see Sep 29's claim, so the series
+  // matched one charge twice and ran a cycle ahead.
+  const base = { recurring_key: 'GYM', description: 'Gym', category: 'Fitness', account_id: null, amount: 15, cadence: 'weekly', created_at: 'x' };
+  const e1 = { ...base, id: 'e1', due_date: '2026-09-29', status: 'matched', matched_tx_id: 't1' };
+  const e2 = { ...base, id: 'e2', due_date: '2026-10-06', status: 'pending', matched_tx_id: null };
+  const calls = [];
+  const client = fakeClient([{ data: [e2], error: null }, byDueFilters([e1])], calls);
+  const fetchTxs = async () => [
+    { id: 't1', date: '2026-10-02', amount: 15, account_id: 'a1', merchant_name: 'GYM', description: 'GYM' },
+  ];
+  const res = await getExpectedTransactions({ today: '2026-10-04' }, { client, fetchTxs });
+
+  assert.equal(calls.length, 2, 'no update and no insert: t1 is already claimed');
+  const gte = calls[1].filters.find(f => f[0] === 'gte' && f[1] === 'due_date');
+  assert.ok(gte && gte[2] <= '2026-08-05', `the claim read reaches back past the window (got ${gte?.[2]})`);
+  assert.equal(calls[1].filters.some(f => f[0] === 'lte'), false, 'no upper bound: a charge can post before its due date');
+  assert.deepEqual(res.pending.map(r => r.id), ['e2']);
+  assert.deepEqual(res.matched, [], "the returned matched list is still this month's only");
+});
+
+test('with nothing pending, the matched read stays month-scoped and no transactions are fetched', async () => {
+  const calls = [];
+  const client = fakeClient([{ data: [], error: null }, { data: [], error: null }], calls);
+  let fetched = false;
+  const res = await getExpectedTransactions({ today: '2026-10-04' }, { client, fetchTxs: async () => { fetched = true; return []; } });
+  assert.deepEqual(calls[1].filters, [['eq', 'status', 'matched'], ['gte', 'due_date', '2026-10-01'], ['lte', 'due_date', '2026-10-31']]);
+  assert.equal(fetched, false);
+  assert.deepEqual(res, { pending: [], matched: [] });
 });
 
 test('addExpected dup-gates the same recurring_key cycle instead of inserting a twin', async () => {
@@ -314,33 +505,67 @@ test('dismissExpected rolls forward; { stop: true } does not', async () => {
     cadence: 'monthly',
     status: 'pending',
   };
-  // Without stop: read, update, dup-gate select (null key gates on
-  // description+cadence, .is('recurring_key', null)), insert.
+  // Without stop: read, dup-gate select (null key gates on
+  // description+cadence, .is('recurring_key', null)), insert, guarded flip.
   let calls = [];
   let client = fakeClient(
     [
       { data: row, error: null },
-      { error: null },
       { data: [], error: null },
       { data: { ...row, id: 'e2', due_date: '2026-09-01' }, error: null },
+      { data: [{ id: 'e1' }], error: null },
     ],
     calls
   );
   const { next } = await dismissExpected('e1', {}, { client });
-  assert.equal(calls[1].payload.status, 'dismissed');
   assert.deepEqual(
-    calls[2].filters,
+    calls[1].filters,
     [['eq', 'status', 'pending'], ['is', 'recurring_key', null], ['eq', 'description', 'Rent'], ['eq', 'cadence', 'monthly']],
     'null-key roll-forward dup-gates on description + cadence'
   );
+  assert.equal(calls[2].op, 'insert');
+  assert.equal(calls[3].payload.status, 'dismissed');
+  assert.deepEqual(calls[3].filters, [['eq', 'id', 'e1'], ['eq', 'status', 'pending']]);
   assert.equal(next.due_date, '2026-09-01');
 
   // With stop: no insert at all.
   calls = [];
-  client = fakeClient([{ data: row, error: null }, { error: null }], calls);
+  client = fakeClient([{ data: row, error: null }, { data: [{ id: 'e1' }], error: null }], calls);
   const stopped = await dismissExpected('e1', { stop: true }, { client });
   assert.equal(stopped.next, null);
+  assert.equal(stopped.changed, true);
   assert.equal(calls.length, 2);
+  assert.deepEqual(calls[1].filters, [['eq', 'id', 'e1'], ['eq', 'status', 'pending']]);
+});
+
+test('dismiss (skip) and Mark paid insert the next cycle FIRST: a failed insert flips nothing', async () => {
+  const row = netflix();
+  for (const run of [
+    client => dismissExpected('e1', {}, { client }),
+    client => matchExpectedManually('e1', 't9', { client }),
+  ]) {
+    const calls = [];
+    const client = fakeClient(
+      [{ data: row, error: null }, { data: [], error: null }, { data: null, error: loadFailed }],
+      calls
+    );
+    await assert.rejects(() => run(client), e => e === loadFailed);
+    assert.equal(calls.some(c => c.op === 'update'), false, 'the row is still pending — nothing lost');
+  }
+});
+
+test('a Stop that loses the race to the other device changes nothing; a resolved row is left alone', async () => {
+  // Guarded flip matched 0 rows (the other phone matched it first).
+  let calls = [];
+  let client = fakeClient([{ data: netflix(), error: null }, { data: [], error: null }], calls);
+  assert.deepEqual(await dismissExpected('e1', { stop: true }, { client }), { changed: false, next: null });
+  assert.equal(calls.length, 2, 'no insert, no delete');
+
+  // The read already shows it resolved (a stale sheet): no writes at all.
+  calls = [];
+  client = fakeClient([{ data: netflix({ status: 'matched', matched_tx_id: 't9' }), error: null }], calls);
+  assert.deepEqual(await dismissExpected('e1', {}, { client }), { changed: false, next: null });
+  assert.equal(calls.length, 1);
 });
 
 test('REGRESSION: null-key roll-forward dup-gates — a concurrent device already minted the next cycle', async () => {
@@ -359,12 +584,14 @@ test('REGRESSION: null-key roll-forward dup-gates — a concurrent device alread
   const twin = { ...row, id: 'e9', due_date: '2026-09-01' };
   const calls = [];
   const client = fakeClient(
-    [{ data: row, error: null }, { error: null }, { data: [twin], error: null }],
+    [{ data: row, error: null }, { data: [twin], error: null }, { data: [{ id: 'e1' }], error: null }],
     calls
   );
   const { next } = await dismissExpected('e1', {}, { client });
   assert.equal(next, null, 'duplicate detected — no second pending row');
   assert.equal(calls.length, 3, 'no insert issued');
+  assert.equal(calls.some(c => c.op === 'insert'), false);
+  assert.equal(calls[2].payload.status, 'dismissed');
 });
 
 test("matchExpectedManually marks the row and rolls forward; 'once' never rolls", async () => {
@@ -380,10 +607,11 @@ test("matchExpectedManually marks the row and rolls forward; 'once' never rolls"
     status: 'pending',
   };
   const calls = [];
-  const client = fakeClient([{ data: row, error: null }, { error: null }], calls);
+  const client = fakeClient([{ data: row, error: null }, { data: [{ id: 'e1' }], error: null }], calls);
   const { next } = await matchExpectedManually('e1', 't5', { client });
   assert.equal(calls[1].payload.status, 'matched');
   assert.equal(calls[1].payload.matched_tx_id, 't5');
+  assert.deepEqual(calls[1].filters, [['eq', 'id', 'e1'], ['eq', 'status', 'pending']]);
   assert.equal(next, null); // once → rollForwardDate null → no insert
 });
 

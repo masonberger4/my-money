@@ -6,7 +6,9 @@ import {
   isDuplicateCategoryName,
   isUserCategory,
   MECHANISM_CATEGORIES,
+  rankByList,
 } from '../src/categoryList.js';
+import { readFileSync } from 'node:fs';
 import { TRANSFER_CATEGORY, RETURN_CATEGORY, UNCATEGORIZED } from '../src/categoryMap.js';
 
 // This module exists to fix Mason's bug: Categories, Budget and Transactions
@@ -72,4 +74,85 @@ test('duplicate guard is case-insensitive and also blocks the mechanism names', 
   // An empty name isn't a duplicate — it's just not addable (the caller's
   // canAdd checks emptiness), and reporting "already exists" would be a lie.
   assert.equal(isDuplicateCategoryName('   ', ['Pets']), false);
+});
+
+// --- 2026-10 audit: uniqueness covers DISPLAY names too ----------------------
+// The guard checked only raw registry names: a new "Dining" beside Food-renamed-
+// "Dining" passed, and the one list then rendered ['Dining','Dining'] with
+// spending, budgets and envelopes split across two raw keys. Renames had no
+// guard at all.
+test('an existing category\'s display alias blocks an add', () => {
+  assert.equal(isDuplicateCategoryName('dining', ['Food'], { aliases: { Food: 'Dining' } }), true);
+  assert.equal(isDuplicateCategoryName('Dining', ['Food'], { aliases: { Food: '' } }), false, 'a cleared alias takes nothing');
+  assert.equal(isDuplicateCategoryName('Dining', ['Food'], { aliases: { Gone: 'Dining' } }), false,
+    'a retired category\'s leftover alias shows nowhere, so it blocks nothing');
+  assert.equal(isDuplicateCategoryName('Dining', [], { aliases: { Old: 'Dining' }, inUse: ['Old'] }), true,
+    'but an alias of a name rows still carry is on screen');
+});
+
+test('a case variant of a row-only name blocks; the exact name re-registers', () => {
+  assert.equal(isDuplicateCategoryName('dining', [], { inUse: ['Dining'] }), true);
+  assert.equal(isDuplicateCategoryName('Dining', [], { inUse: ['Dining'] }), false,
+    'the exact name re-adds the same raw key — the retire-and-re-add path');
+  assert.equal(isDuplicateCategoryName(' Dining ', [], { inUse: ['Dining'] }), false);
+});
+
+test('a rename may keep or re-case its own name, never another category\'s raw or display name', () => {
+  assert.equal(isDuplicateCategoryName('food', ['Food', 'Pets'], { self: 'Food' }), false);
+  assert.equal(isDuplicateCategoryName('Meals', ['Food'], { aliases: { Food: 'Meals' }, self: 'Food' }), false,
+    'its own current alias is not a collision');
+  assert.equal(isDuplicateCategoryName('Dining', ['Food', 'Eats'], { aliases: { Eats: 'Dining' }, self: 'Food' }), true);
+  assert.equal(isDuplicateCategoryName('groceries', ['Food', 'Groceries'], { self: 'Food' }), true);
+  assert.equal(isDuplicateCategoryName('Uncategorized', ['Food'], { self: 'Food' }), true, 'never a mechanism name');
+});
+
+test('the add sheet and saveName both run the full guard', () => {
+  const dash = readFileSync(new URL('../src/components/Dashboard.jsx', import.meta.url), 'utf8');
+  assert.match(dash, /isDuplicateCategoryName\(newName,customCatNames,\{aliases:customNames,inUse:userCats\}\)/);
+  const save = dash.slice(dash.indexOf('async function saveName(cat,alias){'), dash.indexOf('async function addCustomCat('));
+  assert.match(save, /isDuplicateCategoryName\(alias,\[\.\.\.customCatNames,\.\.\.userCats\],\{aliases:customNames,self:cat\}\)/);
+  assert.ok(save.indexOf('window.alert(') < save.indexOf('updateCategoryAlias('), 'a refused rename never writes');
+});
+
+// --- rankByList: the Plan tab's row order ----------------------------------
+
+test('REGRESSION: a Plan row keeps its place when it gets its first dollar', () => {
+  // The Plan list ranked rows by the WALK's order — rows with an assignment,
+  // setting or spending first, sorted by RAW label, then the empty top-up
+  // rows. Assigning to Coffee moved it from the tail to the top, so the next
+  // tap hit a different envelope; the alias (dining → Restaurants) sat out of
+  // display order, and Uncategorized landed mid-list.
+  const getName = (c) => (c === 'dining' ? 'Restaurants' : c);
+  const userCats = userCategoryList({ registry: ['Pets', 'dining', 'Coffee', 'Groceries', 'Auto'], getName });
+  assert.deepEqual(userCats, ['Auto', 'Coffee', 'Groceries', 'Pets', 'dining'], 'display-name order');
+  const envRowsFor = (walk) => [...walk, ...missingCategories(userCats, new Set(walk))];
+  const before = envRowsFor(['Groceries', UNCATEGORIZED, 'dining']);
+  const after = envRowsFor(['Coffee', 'Groceries', UNCATEGORIZED, 'dining']);
+  assert.notDeepEqual(before.indexOf('Coffee'), after.indexOf('Coffee'), 'walk order moves Coffee — the bug');
+  const want = ['Auto', 'Coffee', 'Groceries', 'Pets', 'dining', UNCATEGORIZED];
+  assert.deepEqual(rankByList(before, userCats), want);
+  assert.deepEqual(rankByList(after, userCats), want, 'assigning Coffee moves nothing');
+});
+
+test('rankByList: names off the list keep their incoming order after every listed one; nothing dropped', () => {
+  assert.deepEqual(
+    rankByList([TRANSFER_CATEGORY, 'B', UNCATEGORIZED, 'A'], ['A', 'B']),
+    ['A', 'B', TRANSFER_CATEGORY, UNCATEGORIZED],
+  );
+  assert.deepEqual(rankByList(['B', 'A'], ['A', 'A', 'B']), ['A', 'B'], 'a duplicate in the list ranks at its first spot');
+  assert.deepEqual(rankByList(['X', 'B'], ['A', 'A', 'B']), ['B', 'X'], 'unlisted always after listed');
+  assert.deepEqual(rankByList([], ['A']), []);
+  assert.deepEqual(rankByList(null, null), []);
+  assert.deepEqual(rankByList(['B', 'A'], null), ['B', 'A'], 'no list → incoming order');
+});
+
+test('the Plan tab ranks its envelopes by userCats, not by envRows\' walk order', () => {
+  const dash = readFileSync(new URL('../src/components/Dashboard.jsx', import.meta.url), 'utf8');
+  const start = dash.indexOf('const envRowByCat=');
+  const block = dash.slice(start, dash.indexOf('const envGroups=', start) + 200);
+  assert.ok(start > 0, 'found the Plan ordering block');
+  assert.match(block, /const envOrder=rankByList\(envRows\.map\(r=>r\.category\),userCats\);/);
+  assert.match(block, /const envPos=new Map\(envOrder\.map\(/);
+  assert.match(block, /groupCategories\(envOrder,/);
+  assert.doesNotMatch(block, /envRows\.map\(\(r,i\)/, 'positions no longer come from the walk order');
 });

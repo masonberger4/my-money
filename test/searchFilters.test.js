@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import {
   parseAmount,
   sanitizeDateInput,
@@ -7,6 +8,8 @@ import {
   amountOrClause,
   searchIsActive,
   DATE_YEAR_FLOOR,
+  EDIT_YEAR_FLOOR,
+  dateCommit,
 } from '../src/searchFilters.js';
 
 test('parseAmount: dollars/commas/spaces stripped, sign dropped (abs matching)', () => {
@@ -39,6 +42,50 @@ test('sanitizeDateInput: complete sane dates pass, mid-typing years are dropped'
   assert.equal(sanitizeDateInput(undefined), null);
   assert.equal(sanitizeDateInput(`${DATE_YEAR_FLOOR}-01-01`), `${DATE_YEAR_FLOOR}-01-01`);
   assert.equal(sanitizeDateInput(`${DATE_YEAR_FLOOR - 1}-12-31`), null);
+});
+
+// 2026-10 audit: Chrome's year segment keeps taking digits, so one extra
+// keystroke yields "20261-09-15" — which the old hand-rolled
+// `raw.slice(0,4)>="1900"` guards at the date EDIT inputs passed, moving a
+// transaction out of every month view.
+test('sanitizeDateInput: 5- and 6-digit years fail the full-shape check', () => {
+  assert.equal(sanitizeDateInput('20261-09-15'), null);
+  assert.equal(sanitizeDateInput('202612-09-15'), null);
+  assert.equal(sanitizeDateInput('20261-09-15', EDIT_YEAR_FLOOR), null);
+});
+
+test('sanitizeDateInput: the floor is a parameter; record edits keep the 1900 floor', () => {
+  assert.equal(EDIT_YEAR_FLOOR, 1900);
+  assert.equal(sanitizeDateInput('1955-03-01'), null, 'the search floor stays DATE_YEAR_FLOOR');
+  assert.equal(sanitizeDateInput('1955-03-01', EDIT_YEAR_FLOOR), '1955-03-01');
+  assert.equal(sanitizeDateInput('1899-12-31', EDIT_YEAR_FLOOR), null);
+  assert.equal(sanitizeDateInput('2101-01-01', EDIT_YEAR_FLOOR), null, 'the 2100 ceiling still holds');
+});
+
+test('dateCommit: empty clears, garbage REVERTS (never deletes), a valid change saves', () => {
+  // The placed-in-service regression: typing "25" in the year segment blurs
+  // as "0025-05-01" and used to SAVE null, deleting the stored date.
+  assert.deepEqual(dateCommit('0025-05-01', '2024-05-01'), { action: 'revert', value: '2024-05-01' });
+  assert.deepEqual(dateCommit('20261-05-01', '2024-05-01'), { action: 'revert', value: '2024-05-01' });
+  assert.deepEqual(dateCommit('0025-05-01', null), { action: 'revert', value: null });
+  assert.deepEqual(dateCommit('', '2024-05-01'), { action: 'clear', value: null });
+  assert.deepEqual(dateCommit('', null), { action: 'noop', value: null }, 'nothing stored, nothing to clear');
+  assert.deepEqual(dateCommit(null, ''), { action: 'noop', value: null });
+  assert.deepEqual(dateCommit('2024-05-01', '2024-05-01'), { action: 'noop', value: '2024-05-01' });
+  assert.deepEqual(dateCommit('2025-01-02', '2024-05-01'), { action: 'save', value: '2025-01-02' });
+  assert.deepEqual(dateCommit('2025-01-02', null), { action: 'save', value: '2025-01-02' });
+  assert.deepEqual(dateCommit('1960-07-01', null), { action: 'save', value: '1960-07-01' }, 'an old in-service date is a real date');
+});
+
+test('Dashboard date EDIT inputs go through dateCommit / sanitizeDateInput, never a 4-char prefix compare', () => {
+  const src = readFileSync(new URL('../src/components/Dashboard.jsx', import.meta.url), 'utf8');
+  assert.doesNotMatch(src, /slice\(0,4\)>=["']1900["']/, 'no hand-rolled year guard may creep back');
+  assert.match(src, /dateCommit\(ev\.target\.value,selTx\.transaction_date\)/);
+  assert.match(src, /dateCommit\(ev\.target\.value,selTx\.placed_in_service\)/);
+  assert.match(src, /dateCommit\(ev\.target\.value,a\.next_payment_due_date\)/);
+  const mile = src.slice(src.indexOf('async function handleAddMileage('), src.indexOf('async function handleDeleteMileage('));
+  assert.match(mile, /sanitizeDateInput\(mileForm\.on_date/, 'a mid-typed drive date must not be savable');
+  assert.match(mile, /savedOutsideYear\(/, 'a drive saved outside the viewed year is announced');
 });
 
 test('buildSearchFilters: null when nothing active (the "filters on?" test)', () => {
