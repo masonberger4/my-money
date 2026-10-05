@@ -1,8 +1,11 @@
-import { lazy, Suspense, useState } from 'react';
+import { useState } from 'react';
+import lazyWithReload from '../lazyWithReload.js';
+import { LazyModal } from './ErrorBoundary.jsx';
 
 // Lazy for the same reason Dashboard lazies it — a static import here would
-// pull the modal back into the main bundle and defeat the split.
-const SimpleFinConnect = lazy(() => import('./SimpleFinConnect.jsx'));
+// pull the modal back into the main bundle and defeat the split. Same stale-
+// chunk handling too: one reload, then LazyModal's scoped card.
+const SimpleFinConnect = lazyWithReload(() => import('./SimpleFinConnect.jsx'));
 
 // The "add a bank" button, and the owner of the connect modal it opens.
 //
@@ -24,14 +27,14 @@ export default function AddAccount({ label = '+ Add bank', onLinked }) {
         {label}
       </button>
       {open && (
-        <Suspense fallback={null}>
+        <LazyModal label="SimpleFIN modal failed" onClose={() => setOpen(false)}>
           <SimpleFinConnect
             onClose={() => setOpen(false)}
             onConnected={() => {
               if (onLinked) onLinked();
             }}
           />
-        </Suspense>
+        </LazyModal>
       )}
     </>
   );

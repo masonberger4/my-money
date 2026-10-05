@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { getOverview, getSpending, getBiggestMovers, getTransactions, getCashFlow, getAccounts, updateAccount, getAccountTransactions, updateTransaction, getBudgets, setBudget, getRecurringCandidates, searchTransactions, isManualAccount, isSimpleFinAccount, quickAddTargets, ACCOUNT_TYPES, ACCOUNT_SUBTYPES, setCategoryRule, applyCategoryRuleToHistory, listCategoryRules, countCategoryRuleMatches, deleteCategoryRule, getEnvelopes, setAssigned, setCategoryRollover, setTargetKind, fundTargets, moveMoney, getBudgetIncome, setBudgetIncome, getActualIncome, resolveBudgetIncome, invalidateEnvelopeSpending, isEnvelopeSchemaMissing, targetNeed, readyToAssign, envelopePace, updateEnvPace as persistEnvPace, updateRecIgnore, getStartupSettings, monthKey, getEntities, createEntity, updateEntity, getTaxYearTransactions, getMileage, addMileage, deleteMileage, getReceiptTxIds, getDebts, getBalanceSnapshots, getNetWorthSeries, addManualTransaction, createManualAccount, updateManualBalance, getDataCoverage, getFeedCoverageGaps, FEED_GAP_SCAN_CAP, getReconciliation, getRestoreRecord, signOut, autoFillMonth, setTargetOverride, effectiveTarget, getExpectedTransactions, addExpected, dismissExpected, matchExpectedManually, getSavedChats, saveChatToApp, deleteSavedChat, addRegistryEntry, updateRegistryParent, removeRegistryEntry, updateCategoryColor, updateCategoryAlias, setTaxMapEntry, setDeductionMapEntry } from "../dataAdapter.js";
 import { FLOW_LABELS } from "../reconciliation.js";
 import { clampSeries, debtTotalSeries, sparklinePoints } from "../netWorth.js";
@@ -33,11 +33,15 @@ import { createSheetHistory } from "../sheetHistory.js";
 import { donutSlices, donutGeometry } from "../donut.js";
 import { runSync, foregroundSyncDue } from "../sync.js";
 import { refreshTickPlan, pullFollowUp, createSyncHold, feedHealthVerdict } from "../loadPipeline.js";
+import lazyWithReload from "../lazyWithReload.js";
+import { LazyModal } from "./ErrorBoundary.jsx";
 // Lazy: both are modals rendered only on user action, and CsvImport reaches the
 // whole statement-import stack — no reason for either in the initial bundle.
-// A failed chunk load throws during render; App's ErrorBoundary is the net.
-const CsvImport = lazy(() => import("./CsvImport.jsx"));
-const SimpleFinConnect = lazy(() => import("./SimpleFinConnect.jsx"));
+// A failed chunk load (a stale chunk after a deploy) reloads the app ONCE
+// (lazyWithReload); a second failure lands in the modal's own LazyModal
+// boundary, never App's — that one would take the whole Dashboard with it.
+const CsvImport = lazyWithReload(() => import("./CsvImport.jsx"));
+const SimpleFinConnect = lazyWithReload(() => import("./SimpleFinConnect.jsx"));
 import ReceiptSection from "./ReceiptSection.jsx";
 import { getSetting, setSetting } from "../db.js";
 import { ASSISTANT_MODELS, EFFORT_LEVELS, DEFAULT_MODEL, DEFAULT_EFFORT, estimateCostRange, formatCents } from "../assistantModels.js";
@@ -227,7 +231,9 @@ const OK_MONEY="#1D9E75",OVER_MONEY="#D85A30";
 // credit limit) on a Debt card. Uncontrolled: commits the parsed number on
 // blur (Enter just blurs), empty clears to null, and the field echoes back
 // what was actually saved. `id` keys the remount so state can't bleed
-// between accounts.
+// between accounts. `width` is px at the inline 12px; it is applied in em so
+// the field widens with ui.css's 16px coarse-pointer input rule instead of
+// clipping its value on a phone ("24.99" did, at 56px).
 function DebtNum({id,value,onSave,placeholder,prefix,suffix,width=74}) {
   return (
     <span style={{display:"inline-flex",alignItems:"center",gap:3,fontSize:12,color:"var(--muted)"}}>
@@ -241,7 +247,7 @@ function DebtNum({id,value,onSave,placeholder,prefix,suffix,width=74}) {
           e.target.value=v==null?"":String(v); // show what was actually saved
           if(v!==(value??null))onSave(v);
         }}
-        style={{width,padding:"5px 7px",borderRadius:8,border:"1px solid var(--border)",background:"var(--bg)",
+        style={{width:`${width/12}em`,padding:"5px 7px",borderRadius:8,border:"1px solid var(--border)",background:"var(--bg)",
           color:"var(--text)",fontSize:12,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",outline:"none",textAlign:"right"}}/>
       {suffix}
     </span>
@@ -281,7 +287,7 @@ function AddDebtForm({busy,surf,onSave,onClose}) {
           owed $
           <input value={bal} inputMode="decimal" placeholder="0"
             onChange={e=>setBal(numericish(e.target.value,{negative:false}))}
-            style={{width:80,padding:"6px 8px",borderRadius:8,border:"1px solid var(--border)",background:"var(--card)",
+            style={{width:"6.67em"/* 80px at 12px; em widens it under the coarse-pointer 16px rule */,padding:"6px 8px",borderRadius:8,border:"1px solid var(--border)",background:"var(--card)",
               color:"var(--text)",fontSize:12,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",outline:"none",textAlign:"right"}}/>
         </span>
       </div>
@@ -5880,6 +5886,10 @@ export default function Dashboard({ refreshTick = 0 }) {
             {(()=>{
               const fSt={padding:"6px 8px",borderRadius:8,border:"1px solid var(--border)",background:"var(--bg)",
                 color:"var(--text)",fontSize:12,fontFamily:"inherit",outline:"none"};
+              // Field widths are em (= the old px at fSt's 12px), so they widen
+              // with ui.css's 16px coarse-pointer rule instead of clipping "± $ min".
+              // A date's picker icon doesn't scale, so it gets max(126px,8.75em):
+              // 126px on desktop as before, 140px at 16px.
               const setBoth=(k,v)=>{setFilterDraft(f=>({...f,[k]:v}));setSearchFilters(f=>({...f,[k]:v}));};
               const commitDate=(k,v)=>setSearchFilters(f=>f[k]===v?f:{...f,[k]:v});
               const anyActive=!!buildSearchFilters(searchFilters);
@@ -5887,16 +5897,16 @@ export default function Dashboard({ refreshTick = 0 }) {
                 <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center",marginBottom:12}}>
                   <input inputMode="decimal" value={filterDraft.amtMin} placeholder="± $ min"
                     title="Smallest transaction size — matches money in or out"
-                    onChange={e=>setBoth("amtMin",e.target.value)} style={{...fSt,width:70}}/>
+                    onChange={e=>setBoth("amtMin",e.target.value)} style={{...fSt,width:"5.83em"}}/>
                   <input inputMode="decimal" value={filterDraft.amtMax} placeholder="± $ max"
                     title="Largest transaction size — matches money in or out"
-                    onChange={e=>setBoth("amtMax",e.target.value)} style={{...fSt,width:70}}/>
+                    onChange={e=>setBoth("amtMax",e.target.value)} style={{...fSt,width:"5.83em"}}/>
                   <input type="date" value={filterDraft.dateFrom} title="From date"
                     onChange={e=>setFilterDraft(f=>({...f,dateFrom:e.target.value}))}
-                    onBlur={e=>commitDate("dateFrom",e.target.value)} style={{...fSt,width:126}}/>
+                    onBlur={e=>commitDate("dateFrom",e.target.value)} style={{...fSt,width:"max(126px,8.75em)"}}/>
                   <input type="date" value={filterDraft.dateTo} title="To date"
                     onChange={e=>setFilterDraft(f=>({...f,dateTo:e.target.value}))}
-                    onBlur={e=>commitDate("dateTo",e.target.value)} style={{...fSt,width:126}}/>
+                    onBlur={e=>commitDate("dateTo",e.target.value)} style={{...fSt,width:"max(126px,8.75em)"}}/>
                   {anyActive&&(
                     <button className="ibtn" style={{fontSize:11}}
                       onClick={()=>{setFilterDraft(EMPTY_SEARCH_FILTERS);setSearchFilters(EMPTY_SEARCH_FILTERS);}}>
@@ -6999,7 +7009,7 @@ export default function Dashboard({ refreshTick = 0 }) {
                   extra $
                   <input value={debtExtra} inputMode="decimal" placeholder="0"
                     onChange={e=>setDebtExtra(numericish(e.target.value,{negative:false}))}
-                    style={{width:64,padding:"5px 7px",borderRadius:8,border:"1px solid var(--border)",background:"var(--bg)",
+                    style={{width:"5.33em"/* 64px at 12px; em widens it under the coarse-pointer 16px rule */,padding:"5px 7px",borderRadius:8,border:"1px solid var(--border)",background:"var(--bg)",
                       color:"var(--text)",fontSize:12,fontFamily:"var(--font-num)",fontVariantNumeric:"tabular-nums",outline:"none",textAlign:"right"}}/>
                   /mo
                 </span>
@@ -7194,7 +7204,7 @@ export default function Dashboard({ refreshTick = 0 }) {
               <input value={chatInput} onChange={e=>setChatInput(e.target.value)} enterKeyHint="send"
                 onKeyDown={e=>{if(e.key==="Enter")sendChat();}}
                 placeholder="Ask about your spending…" disabled={chatBusy}
-                style={{flex:1,padding:"10px 12px",borderRadius:10,border:"1px solid var(--border)",background:"var(--bg)",
+                style={{flex:1,minWidth:0,padding:"10px 12px",borderRadius:10,border:"1px solid var(--border)",background:"var(--bg)",
                   color:"var(--text)",fontSize:13,fontFamily:"inherit",outline:"none"}}/>
               <button onClick={()=>sendChat()} disabled={chatBusy||!chatInput.trim()}
                 style={{padding:"0 16px",borderRadius:10,border:"none",background:"var(--accent)",color:"var(--accent-text)",fontFamily:"inherit",
@@ -8496,18 +8506,18 @@ export default function Dashboard({ refreshTick = 0 }) {
 
       {/* CSV import (standalone) */}
       {importing&&(
-        <Suspense fallback={null}>
+        <LazyModal label="import modal failed" onClose={()=>setImporting(false)}>
           <CsvImport
             accounts={accounts}
             onClose={()=>setImporting(false)}
             onImported={()=>reloadViewed()}
           />
-        </Suspense>
+        </LazyModal>
       )}
 
       {/* SimpleFIN connect */}
       {connectingSfin&&(
-        <Suspense fallback={null}>
+        <LazyModal label="SimpleFIN modal failed" onClose={()=>setConnectingSfin(false)}>
           <SimpleFinConnect
             onClose={()=>setConnectingSfin(false)}
             onConnected={()=>{
@@ -8518,7 +8528,7 @@ export default function Dashboard({ refreshTick = 0 }) {
               reloadViewed();
             }}
           />
-        </Suspense>
+        </LazyModal>
       )}
 
       {/* Manual transaction quick-add */}

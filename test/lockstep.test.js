@@ -72,7 +72,9 @@ test('networkFirstShell only caches an ok response', () => {
   const sw = read('public/sw.js');
   assert.match(
     sw,
-    /if \(fresh\.ok\) cache\.put\('\/', fresh\.clone\(\)\)/,
+    // Either shape guards the write: the statement form, or (since v8) the
+    // ternary that keeps the put's promise so waitUntil covers it.
+    /if \(fresh\.ok\) cache\.put\('\/', fresh\.clone\(\)\)|fresh\.ok \? cache\.put\('\/', fresh\.clone\(\)\) : null/,
     'networkFirstShell must guard cache.put on fresh.ok, or an error page becomes the offline shell'
   );
 });
